@@ -14,7 +14,9 @@
 #    under the License.
 
 import functools
+import math
 import re
+from six.moves.urllib import parse
 import time
 
 from keystoneauth1 import exceptions as ks_exc
@@ -85,6 +87,15 @@ def safe_connect(f):
     return wrapper
 
 
+def _convert_mb_to_ceil_gb(mb_value):
+    gb_int = 0
+    if mb_value:
+        gb_float = mb_value / 1024.0
+        # ensure we reserve/allocate enough space by rounding up to nearest GB
+        gb_int = int(math.ceil(gb_float))
+    return gb_int
+
+
 def _compute_node_to_inventory_dict(compute_node):
     """Given a supplied `objects.ComputeNode` object, return a dict, keyed
     by resource class, of various inventory information.
@@ -114,9 +125,12 @@ def _compute_node_to_inventory_dict(compute_node):
             'allocation_ratio': compute_node.ram_allocation_ratio,
         }
     if compute_node.local_gb > 0:
+        # TODO(johngarbutt) We should either move to reserved_host_disk_gb
+        # or start tracking DISK_MB.
+        reserved_disk_gb = _convert_mb_to_ceil_gb(CONF.reserved_host_disk_mb)
         result[DISK_GB] = {
             'total': compute_node.local_gb,
-            'reserved': CONF.reserved_host_disk_mb * 1024,
+            'reserved': reserved_disk_gb,
             'min_unit': 1,
             'max_unit': compute_node.local_gb,
             'step_size': 1,
@@ -134,9 +148,11 @@ def _instance_to_allocations_dict(instance):
     # NOTE(danms): Boot-from-volume instances consume no local disk
     is_bfv = compute_utils.is_volume_backed_instance(instance._context,
                                                      instance)
+    # TODO(johngarbutt) we have to round up swap MB to the next GB.
+    # It would be better to claim disk in MB, but that is hard now.
+    swap_in_gb = _convert_mb_to_ceil_gb(instance.flavor.swap)
     disk = ((0 if is_bfv else instance.flavor.root_gb) +
-            instance.flavor.swap +
-            instance.flavor.ephemeral_gb)
+            swap_in_gb + instance.flavor.ephemeral_gb)
     alloc_dict = {
         MEMORY_MB: instance.flavor.memory_mb,
         VCPU: instance.flavor.vcpus,
@@ -214,6 +230,43 @@ class SchedulerReportClient(object):
         return self._client.delete(
             url,
             endpoint_filter=self.ks_filter, raise_exc=False)
+
+    # TODO(sbauza): Change that poor interface into passing a rich versioned
+    # object that would provide the ResourceProvider requirements.
+    @safe_connect
+    def get_filtered_resource_providers(self, filters):
+        """Returns a list of ResourceProviders matching the requirements
+        expressed by the filters argument, which can include a dict named
+        'resources' where amounts are keyed by resource class names.
+
+        eg. filters = {'resources': {'VCPU': 1}}
+        """
+        resources = filters.pop("resources", None)
+        if resources:
+            resource_query = ",".join(sorted("%s:%s" % (rc, amount)
+                                      for (rc, amount) in resources.items()))
+            filters['resources'] = resource_query
+        resp = self.get("/resource_providers?%s" % parse.urlencode(filters),
+                        version='1.4')
+        if resp.status_code == 200:
+            data = resp.json()
+            raw_rps = data.get('resource_providers', [])
+            rps = [objects.ResourceProvider(uuid=rp['uuid'],
+                                            name=rp['name'],
+                                            generation=rp['generation'],
+                                            ) for rp in raw_rps]
+            return objects.ResourceProviderList(objects=rps)
+        else:
+            msg = _LE("Failed to retrieve filtered list of resource providers "
+                      "from placement API for filters %(filters)s. "
+                      "Got %(status_code)d: %(err_text)s.")
+            args = {
+                'filters': filters,
+                'status_code': resp.status_code,
+                'err_text': resp.text,
+            }
+            LOG.error(msg, args)
+            return None
 
     @safe_connect
     def _get_provider_aggregates(self, rp_uuid):
@@ -298,7 +351,7 @@ class SchedulerReportClient(object):
             return objects.ResourceProvider(
                     uuid=uuid,
                     name=name,
-                    generation=1,
+                    generation=0,
             )
         elif resp.status_code == 409:
             # Another thread concurrently created a resource provider with the

@@ -13,6 +13,7 @@
 from keystoneauth1 import exceptions as ks_exc
 import mock
 import six
+from six.moves.urllib import parse
 
 import nova.conf
 from nova import context
@@ -283,6 +284,49 @@ class TestProviderOperations(SchedulerReportClientTestCase):
                 mock.sentinel.name,
         )
 
+    def test_get_filtered_resource_providers(self):
+        uuid = uuids.compute_node
+        resp_mock = mock.Mock(status_code=200)
+        json_data = {
+            'resource_providers': [
+                {'uuid': uuid,
+                 'name': uuid,
+                 'generation': 42}
+            ],
+        }
+        filters = {'resources': {'VCPU': 1, 'MEMORY_MB': 1024}}
+        resp_mock.json.return_value = json_data
+        self.ks_sess_mock.get.return_value = resp_mock
+
+        result = self.client.get_filtered_resource_providers(filters)
+
+        expected_provider = objects.ResourceProvider(
+                uuid=uuid,
+                name=uuid,
+                generation=42,
+        )
+        expected_url = '/resource_providers?%s' % parse.urlencode(
+            {'resources': 'MEMORY_MB:1024,VCPU:1'})
+        self.ks_sess_mock.get.assert_called_once_with(
+            expected_url, endpoint_filter=mock.ANY, raise_exc=False,
+            headers={'OpenStack-API-Version': 'placement 1.4'})
+        self.assertTrue(obj_base.obj_equal_prims(expected_provider,
+                                                 result[0]))
+
+    def test_get_filtered_resource_providers_not_found(self):
+        # Ensure _get_resource_provider() just returns None when the placement
+        # API doesn't find a resource provider matching a UUID
+        resp_mock = mock.Mock(status_code=404)
+        self.ks_sess_mock.get.return_value = resp_mock
+
+        result = self.client.get_filtered_resource_providers({'foo': 'bar'})
+
+        expected_url = '/resource_providers?foo=bar'
+        self.ks_sess_mock.get.assert_called_once_with(
+            expected_url, endpoint_filter=mock.ANY, raise_exc=False,
+            headers={'OpenStack-API-Version': 'placement 1.4'})
+        self.assertIsNone(result)
+
     def test_get_resource_provider_found(self):
         # Ensure _get_resource_provider() returns a ResourceProvider object if
         # it finds a resource provider record from the placement API
@@ -363,7 +407,7 @@ class TestProviderOperations(SchedulerReportClientTestCase):
         expected_provider = objects.ResourceProvider(
             uuid=uuid,
             name=name,
-            generation=1,
+            generation=0,
         )
         expected_url = '/resource_providers'
         self.ks_sess_mock.post.assert_called_once_with(
@@ -512,7 +556,7 @@ class TestComputeNodeToInventoryDict(test.NoDBTestCase):
                                            disk_allocation_ratio=1.0)
 
         self.flags(reserved_host_memory_mb=1000)
-        self.flags(reserved_host_disk_mb=2000)
+        self.flags(reserved_host_disk_mb=200)
 
         result = report._compute_node_to_inventory_dict(compute_node)
 
@@ -535,7 +579,7 @@ class TestComputeNodeToInventoryDict(test.NoDBTestCase):
             },
             'DISK_GB': {
                 'total': compute_node.local_gb,
-                'reserved': CONF.reserved_host_disk_mb * 1024,
+                'reserved': 1,  # this is ceil(1000/1024)
                 'min_unit': 1,
                 'max_unit': compute_node.local_gb,
                 'step_size': 1,
@@ -1062,7 +1106,7 @@ class TestAllocations(SchedulerReportClientTestCase):
         inst = objects.Instance(
             uuid=uuids.inst,
             flavor=objects.Flavor(root_gb=10,
-                                  swap=1,
+                                  swap=1023,
                                   ephemeral_gb=100,
                                   memory_mb=1024,
                                   vcpus=2))

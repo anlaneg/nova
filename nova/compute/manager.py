@@ -1130,6 +1130,12 @@ class ComputeManager(manager.Manager):
             # if the configuration is wrong.
             whitelist.Whitelist(CONF.pci.passthrough_whitelist)
 
+        # NOTE(sbauza): We want the compute node to hard fail if it can't be
+        # able to provide its resources to the placement API, or it would not
+        # be able to be eligible as a destination.
+        if CONF.placement.os_region_name is None:
+            raise exception.PlacementNotConfigured()
+
         self.driver.init_host(host=self.host)
         context = nova.context.get_admin_context()
         instances = objects.InstanceList.get_by_host(
@@ -6823,9 +6829,15 @@ class ComputeManager(manager.Manager):
                              {'event': event.key, 'error': six.text_type(e)},
                              instance=instance)
             elif event.name == 'network-vif-deleted':
-                self._process_instance_vif_deleted_event(context,
-                                                         instance,
-                                                         event.tag)
+                try:
+                    self._process_instance_vif_deleted_event(context,
+                                                             instance,
+                                                             event.tag)
+                except exception.NotFound as e:
+                    LOG.info(_LI('Failed to process external instance event '
+                                 '%(event)s due to: %(error)s'),
+                             {'event': event.key, 'error': six.text_type(e)},
+                             instance=instance)
             else:
                 self._process_instance_event(instance, event)
 

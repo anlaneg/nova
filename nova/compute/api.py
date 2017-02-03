@@ -2298,23 +2298,9 @@ class API(base.Base):
                             context, instance_uuid,
                             expected_attrs=expected_attrs)
                 else:
-                    # If BuildRequest is not found but inst_map.cell_mapping
-                    # does not point at a cell then cell migration has not
-                    # happened yet. This will be a failure case later.
-                    # TODO(alaski): Make this a failure case after we put in
-                    # a block that requires migrating to cellsv2.
-                    instance = objects.Instance.get_by_uuid(
-                        context, instance_uuid, expected_attrs=expected_attrs)
+                    raise exception.InstanceNotFound(instance_id=instance_uuid)
         else:
-            # This should not happen once a deployment has migrated to cellsv2.
-            # If it happens after that point we handle it gracefully for now
-            # but this will become an exception in the future.
-            # TODO(alaski): Once devstack is setting up cellsv2 by default add
-            # a warning log message that this will become an exception in the
-            # future. The warning message will be conditional upon the
-            # migration having happened, which means a db lookup to check that.
-            instance = objects.Instance.get_by_uuid(
-                context, instance_uuid, expected_attrs=expected_attrs)
+            raise exception.InstanceNotFound(instance_id=instance_uuid)
 
         return instance
 
@@ -2456,10 +2442,21 @@ class API(base.Base):
         # instance lists should be proxied to project Searchlight, or a similar
         # alternative.
         if limit is None or limit > 0:
-            cell_instances = self._get_instances_by_filters_all_cells(
-                    context, filters,
-                    limit=limit, marker=marker, expected_attrs=expected_attrs,
-                    sort_keys=sort_keys, sort_dirs=sort_dirs)
+            if not CONF.cells.enable:
+                cell_instances = self._get_instances_by_filters_all_cells(
+                        context, filters,
+                        limit=limit, marker=marker,
+                        expected_attrs=expected_attrs, sort_keys=sort_keys,
+                        sort_dirs=sort_dirs)
+            else:
+                # NOTE(melwitt): If we're on cells v1, we need to read
+                # instances from the top-level database because reading from
+                # cells results in changed behavior, because of the syncing.
+                # We can remove this path once we stop supporting cells v1.
+                cell_instances = self._get_instances_by_filters(
+                    context, filters, limit=limit, marker=marker,
+                    expected_attrs=expected_attrs, sort_keys=sort_keys,
+                    sort_dirs=sort_dirs)
         else:
             LOG.debug('Limit excludes any results from real cells')
             cell_instances = objects.InstanceList(objects=[])

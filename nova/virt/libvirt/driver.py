@@ -870,9 +870,9 @@ class LibvirtDriver(driver.ComputeDriver):
                 state = dom_info.state
                 new_domid = dom_info.id
             except exception.InstanceNotFound:
-                LOG.info(_LI("During wait destroy, instance disappeared."),
-                         instance=instance)
-                raise loopingcall.LoopingCallDone()
+                LOG.debug("During wait destroy, instance disappeared.",
+                          instance=instance)
+                state = power_state.SHUTDOWN
 
             if state == power_state.SHUTDOWN:
                 LOG.info(_LI("Instance destroyed successfully."),
@@ -913,7 +913,8 @@ class LibvirtDriver(driver.ComputeDriver):
         try:
             guest = self._host.get_guest(instance)
             try:
-                guest.delete_configuration()
+                support_uefi = self._has_uefi_support()
+                guest.delete_configuration(support_uefi)
             except libvirt.libvirtError as e:
                 with excutils.save_and_reraise_exception():
                     errcode = e.get_error_code()
@@ -1251,7 +1252,8 @@ class LibvirtDriver(driver.ComputeDriver):
             #             If any part of this block fails, the domain is
             #             re-defined regardless.
             if guest.has_persistent_configuration():
-                guest.delete_configuration()
+                support_uefi = self._has_uefi_support()
+                guest.delete_configuration(support_uefi)
 
             # Start copy with VIR_DOMAIN_REBASE_REUSE_EXT flag to
             # allow writing to existing external volume file
@@ -1771,7 +1773,8 @@ class LibvirtDriver(driver.ComputeDriver):
             #             If any part of this block fails, the domain is
             #             re-defined regardless.
             if guest.has_persistent_configuration():
-                guest.delete_configuration()
+                support_uefi = self._has_uefi_support()
+                guest.delete_configuration(support_uefi)
 
             # NOTE (rmk): Establish a temporary mirror of our root disk and
             #             issue an abort once we have a complete copy.
@@ -2944,7 +2947,14 @@ class LibvirtDriver(driver.ComputeDriver):
         console_file = self._get_console_log_path(instance)
         LOG.debug('Ensure instance console log exists: %s', console_file,
                   instance=instance)
-        libvirt_utils.file_open(console_file, 'a').close()
+        try:
+            libvirt_utils.file_open(console_file, 'a').close()
+        # NOTE(sfinucan): We can safely ignore permission issues here and
+        # assume that it is libvirt that has taken ownership of this file.
+        except IOError as ex:
+            if ex.errno != errno.EPERM:
+                raise
+            LOG.debug('Console file already exists: %s.', console_file)
 
     @staticmethod
     def _get_disk_config_image_type():
