@@ -1612,6 +1612,8 @@ def load_compute_driver(virtapi, compute_driver=None):
 
     LOG.info(_LI("Loading compute driver '%s'"), compute_driver)
     try:
+        #载入driver,并创建实例
+        #第一个参数是要加载的类命名空间，第二个参数是构造实例的参数
         driver = importutils.import_object(
             'nova.virt.%s' % compute_driver,
             virtapi)

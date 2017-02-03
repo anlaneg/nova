@@ -1783,13 +1783,16 @@ def instance_create(context, values):
 
     instance_ref = models.Instance()
     if not values.get('uuid'):
+        #生成uuid
         values['uuid'] = uuidutils.generate_uuid()
     instance_ref['info_cache'] = models.InstanceInfoCache()
     info_cache = values.pop('info_cache', None)
     if info_cache is not None:
+        #更新instance-info-cache表
         instance_ref['info_cache'].update(info_cache)
     security_groups = values.pop('security_groups', [])
     instance_ref['extra'] = models.InstanceExtra()
+    #更新instance-extra表
     instance_ref['extra'].update(
         {'numa_topology': None,
          'pci_requests': None,

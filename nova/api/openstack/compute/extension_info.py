@@ -307,24 +307,30 @@ class ExtensionInfo(extensions.V21APIExtensionBase):
         return []
 
 
+#负责保存api对应的扩展信息
 class LoadedExtensionInfo(object):
     """Keep track of all loaded API extensions."""
 
     def __init__(self):
+        #保存扩展
         self.extensions = {}
 
     def register_extension(self, ext):
+        #必须要有is-valid函数
         if not self._check_extension(ext):
             return False
 
+        #取它的别名
         alias = ext.alias
 
+        #排除已存在
         if alias in self.extensions:
             raise exception.NovaException("Found duplicate extension: %s"
                                           % alias)
         self.extensions[alias] = ext
         return True
 
+    #如果extension有is-valid函数，则返回True
     def _check_extension(self, extension):
         """Checks for required methods in extension objects."""
         try:
@@ -335,5 +341,6 @@ class LoadedExtensionInfo(object):
 
         return True
 
+    #返回注册的扩展信息
     def get_extensions(self):
         return self.extensions

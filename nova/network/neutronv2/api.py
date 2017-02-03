@@ -353,6 +353,7 @@ class API(base_api.NetworkAPI):
 
         return nets
 
+    #为虚拟机创建port
     def _create_port_minimal(self, port_client, instance, network_id,
                              fixed_ip=None, security_group_ids=None):
         """Attempts to create a port for the instance on the given network.
@@ -371,6 +372,7 @@ class API(base_api.NetworkAPI):
         """
         port_req_body = {'port': {}}
         try:
+            #如果指明了ip地址，则填充ip地址
             if fixed_ip:
                 port_req_body['port']['fixed_ips'] = [
                     {'ip_address': str(fixed_ip)}]
@@ -380,11 +382,13 @@ class API(base_api.NetworkAPI):
             if security_group_ids:
                 port_req_body['port']['security_groups'] = security_group_ids
 
+            #向neutron要求创建port
             port_response = port_client.create_port(port_req_body)
 
             port = port_response['port']
             port_id = port['id']
             try:
+                #确认port绑定成功
                 _ensure_no_port_binding_failure(port)
             except exception.PortBindingFailed:
                 with excutils.save_and_reraise_exception():
@@ -2371,6 +2375,7 @@ class API(base_api.NetworkAPI):
                             if old.request_id == new.request_id}
         return {}
 
+    #更新port的绑定情况
     def _update_port_binding_for_instance(self, context, instance, host,
                                           migration=None):
         if not self._has_port_binding_extension(context, refresh_cache=True):
@@ -2378,6 +2383,7 @@ class API(base_api.NetworkAPI):
         neutron = get_client(context, admin=True)
         search_opts = {'device_id': instance.uuid,
                        'tenant_id': instance.project_id}
+        #首先要求neutron列出指定条件下的所有port
         data = neutron.list_ports(**search_opts)
         pci_mapping = None
         port_updates = []
@@ -2388,10 +2394,12 @@ class API(base_api.NetworkAPI):
 
             # If the host hasn't changed, like in the case of resizing to the
             # same host, there is nothing to do.
+            #这个port没有绑定到此host上，则使其绑定
             if p.get(BINDING_HOST_ID) != host:
                 updates[BINDING_HOST_ID] = host
                 # NOTE: Before updating the port binding make sure we
                 # remove the pre-migration status from the binding profile
+                #防迁移
                 if binding_profile.get(MIGRATING_ATTR):
                     del binding_profile[MIGRATING_ATTR]
                     updates[BINDING_PROFILE] = binding_profile
@@ -2427,6 +2435,8 @@ class API(base_api.NetworkAPI):
                          {"port": p['id'], "attributes": updates},
                          instance=instance)
                 try:
+                    #上面我们改了一下port的信息，这里我们要求neutron更新我们更改
+                    #的信息
                     neutron.update_port(port_id, {'port': updates})
                 except Exception:
                     with excutils.save_and_reraise_exception():

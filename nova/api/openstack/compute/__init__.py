@@ -30,6 +30,7 @@ class APIRouterV21(nova.api.openstack.APIRouterV21):
         self._loaded_extension_info = extension_info.LoadedExtensionInfo()
         super(APIRouterV21, self).__init__()
 
+    #注册扩展信息(底层类将此函数实现为空）
     def _register_extension(self, ext):
         return self.loaded_extension_info.register_extension(ext.obj)
 

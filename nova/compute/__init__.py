@@ -33,7 +33,8 @@ def _get_compute_api_class_name():
     cell_type = nova.cells.opts.get_cell_type()
     return CELL_TYPE_TO_CLS_NAME[cell_type]
 
-
+#通过此函数创建instance的操作api,接入instances的处理
+#通过配置的cell_type,我们使用不同的api,默认使用nova.compute.api.API
 def API(*args, **kwargs):
     class_name = _get_compute_api_class_name()
     return importutils.import_object(class_name, *args, **kwargs)

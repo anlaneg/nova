@@ -147,9 +147,13 @@ class ServersController(wsgi.Controller):
 
         self.extension_info = kwargs.pop('extension_info')
         super(ServersController, self).__init__(**kwargs)
+        #创建compute对应的api,此对象将用来处理创建请求（在这一层我们主要是
+        #实现api的转换，实现扩展的调用，检查配置的权限）
         self.compute_api = compute.API()
 
         # Look for implementation of extension point of server creation
+        #装载nova.api.v21.extensions.server.create命名空间下的扩展，它们将被加
+        #载及实例化至self.extension_info
         self.create_extension_manager = \
           stevedore.enabled.EnabledExtensionManager(
               namespace=self.EXTENSION_CREATE_NAMESPACE,
@@ -522,10 +526,13 @@ class ServersController(wsgi.Controller):
         """Creates a new server for a given user."""
 
         context = req.environ['nova.context']
+        #取出server的配置
         server_dict = body['server']
         password = self._get_server_admin_password(server_dict)
+        #server的名称
         name = common.normalize_name(server_dict['name'])
 
+        #2.19版本中引入了description字段
         if api_version_request.is_supported(req, min_version='2.19'):
             if 'description' in server_dict:
                 # This is allowed to be None
@@ -546,6 +553,7 @@ class ServersController(wsgi.Controller):
         # When the extensions are ported this will also result
         # in some convenience function from this class being
         # moved to the extension
+        #如果我们加载了创建时的扩展，我们在这里调用这些扩展的server_create方法
         if list(self.create_extension_manager):
             self.create_extension_manager.map(self._create_extension_point,
                                               server_dict, create_kwargs, body)
@@ -617,7 +625,7 @@ class ServersController(wsgi.Controller):
         try:
             inst_type = flavors.get_flavor_by_flavor_id(
                     flavor_id, ctxt=context, read_deleted="no")
-
+            #调用compute_api创建instances
             (instances, resv_id) = self.compute_api.create(context,
                             inst_type,
                             image_uuid,

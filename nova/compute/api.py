@@ -195,7 +195,8 @@ def _diff_dict(orig, new):
             result[key] = ['+', value]
     return result
 
-
+#默认的compute_api入口，我们通过此api可以创建instances
+#从servers.py中，我们默认没有传入任何参数
 @profiler.trace_cls("compute_api")
 class API(base.Base):
     """API for interacting with the compute manager."""
@@ -1467,7 +1468,9 @@ class API(base.Base):
         """Build the beginning of a new instance."""
 
         instance.launch_index = index
+        #将vm_state状态置为building状态
         instance.vm_state = vm_states.BUILDING
+        #将作务状态置为scheduling
         instance.task_state = task_states.SCHEDULING
         info_cache = objects.InstanceInfoCache()
         info_cache.instance_uuid = instance.uuid
@@ -1536,6 +1539,7 @@ class API(base.Base):
                                            num_instances, shutdown_terminate)
 
         if create_instance:
+            #在数据库内创建
             instance.create()
 
         return instance
@@ -1559,6 +1563,7 @@ class API(base.Base):
                         "is specified.")
                 raise exception.InvalidFixedIpAndMaxCountRequest(reason=msg)
 
+    #创建instances入口
     @hooks.add_hook("create_instance")
     def create(self, context, instance_type,
                image_href, kernel_id=None, ramdisk_id=None,

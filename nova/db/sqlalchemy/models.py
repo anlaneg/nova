@@ -261,8 +261,11 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
     key_name = Column(String(255))
     key_data = Column(MediumText())
 
+    #电源状态
     power_state = Column(Integer)
+    #虚拟机状态
     vm_state = Column(String(255))
+    #作务状态
     task_state = Column(String(255))
 
     memory_mb = Column(Integer)

@@ -348,8 +348,10 @@ class ComputeTaskAPI(object):
             kw.update({'block_device_mapping': bdm_p,
                        'legacy_bdm': legacy_bdm})
 
+        #发送rpc消息，调用build_instances
         cctxt = self.client.prepare(version=version)
         cctxt.cast(context, 'build_instances', **kw)
+        #这个消息一传给中介，则本函数返回。
 
     def schedule_and_build_instances(self, context, build_requests,
                                       request_specs,

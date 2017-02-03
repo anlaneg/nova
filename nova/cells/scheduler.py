@@ -93,12 +93,14 @@ class CellsScheduler(base.Base):
             self.compute_api.security_group_api.populate_security_groups(
                 security_groups))
         for i, instance_uuid in enumerate(instance_uuids):
+            #创建实例
             instance = objects.Instance(context=ctxt)
             instance.update(instance_values)
             instance.uuid = instance_uuid
             instance.flavor = instance_type
             instance.old_flavor = None
             instance.new_flavor = None
+            #写入数据库，并构造相应对象
             instance = self.compute_api.create_db_entry_for_new_instance(
                     ctxt,
                     instance_type,
@@ -112,6 +114,7 @@ class CellsScheduler(base.Base):
                     ctxt, instance, instance_type, block_device_mapping))
             self.compute_api._create_block_device_mapping(block_device_mapping)
 
+            #记录创建的每个实例
             instances.append(instance)
             self.msg_runner.instance_update_at_top(ctxt, instance)
         return instances
@@ -153,6 +156,7 @@ class CellsScheduler(base.Base):
         target_cells = [cell.obj for cell in weighted_cells]
         return target_cells
 
+    #构造多个instance,仅写入数据库
     def _build_instances(self, message, target_cells, instance_uuids,
             build_inst_kwargs):
         """Attempt to build instance(s) or send msg to child cell."""
@@ -173,13 +177,16 @@ class CellsScheduler(base.Base):
                 if target_cell.is_me:
                     # Need to create instance DB entries as the conductor
                     # expects that the instance(s) already exists.
+                    # 创建实例
                     instances = self._create_instances_here(ctxt,
                             instance_uuids, instance_properties, instance_type,
                             image, security_groups, block_device_mapping)
                     build_inst_kwargs['instances'] = instances
                     # Need to record the create action in the db as the
                     # conductor expects it to already exist.
+                    #记录创建动作日志
                     self._create_action_here(ctxt, instance_uuids)
+                    #采用进行task_api通知
                     self.compute_task_api.build_instances(ctxt,
                             **build_inst_kwargs)
                     return
@@ -193,7 +200,8 @@ class CellsScheduler(base.Base):
         # the parent cell could retry, if we had a parent.
         LOG.error(_LE("Couldn't communicate with any cells"))
         raise exception.NoCellsAvailable()
-
+    
+    #调度，选中cell，并写入数据库
     def build_instances(self, message, build_inst_kwargs):
         image = build_inst_kwargs['image']
         instance_uuids = [inst['uuid'] for inst in
@@ -208,6 +216,7 @@ class CellsScheduler(base.Base):
                                   'host_sched_kwargs': build_inst_kwargs,
                                   'request_spec': request_spec})
 
+        #pick a cell,然后 invoke self._build_instances
         self._schedule_build_to_cells(message, instance_uuids,
                 filter_properties, self._build_instances, build_inst_kwargs)
 

@@ -494,6 +494,7 @@ class ComputeTaskManager(base.Base):
                 inst_mapping.save()
         return inst_mapping
 
+    #conductor收到build_instances消息
     def build_instances(self, context, instances, image, filter_properties,
             admin_password, injected_files, requested_networks,
             security_groups, block_device_mapping=None, legacy_bdm=True):

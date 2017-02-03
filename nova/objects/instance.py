@@ -474,6 +474,7 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         return cls._from_db_object(context, cls(), db_inst,
                                    expected_attrs)
 
+    #将instance信息存入数据库
     @base.remotable
     def create(self):
         if self.obj_attr_is_set('id'):

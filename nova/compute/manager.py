@@ -538,6 +538,7 @@ class ComputeManager(manager.Manager):
         # NOTE(russellb) Load the driver last.  It may call back into the
         # compute manager via the virtapi, so we want it to be fully
         # initialized before that happens.
+        #装载virtapi对应的driver，self.virtapi为ComputeVirtAPI
         self.driver = driver.load_compute_driver(self.virtapi, compute_driver)
         self.use_legacy_block_device_info = \
                             self.driver.need_legacy_block_device_info
@@ -1384,6 +1385,7 @@ class ComputeManager(manager.Manager):
         bind_host_id = self.driver.network_binding_host_id(context, instance)
         for attempt in range(1, attempts + 1):
             try:
+                #申请网络资源
                 nwinfo = self.network_api.allocate_for_instance(
                         context, instance, vpn=is_vpn,
                         requested_networks=requested_networks,
@@ -1421,6 +1423,7 @@ class ComputeManager(manager.Manager):
             requested_networks, security_groups):
 
         # If we're here from a reschedule the network may already be allocated.
+        #网络已申请情况
         if strutils.bool_from_string(
                 instance.system_metadata.get('network_allocated', 'False')):
             # NOTE(alex_xu): The network_allocated is True means the network
@@ -1431,6 +1434,7 @@ class ComputeManager(manager.Manager):
                 context, instance, instance.host)
             return self.network_api.get_instance_nw_info(context, instance)
 
+        #网络资源未申请情况
         if not self.is_neutron_security_groups:
             security_groups = []
 
@@ -1450,12 +1454,14 @@ class ComputeManager(manager.Manager):
         # NOTE(comstud): Since we're allocating networks asynchronously,
         # this task state has little meaning, as we won't be in this
         # state for very long.
+        #变更状态为building,任务状态为networking状态
         instance.vm_state = vm_states.BUILDING
         instance.task_state = task_states.NETWORKING
         instance.save(expected_task_state=[None])
         self._update_resource_tracker(context, instance)
 
         is_vpn = pipelib.is_vpn_image(instance.image_ref)
+        #申请网络资源
         return network_model.NetworkInfoAsyncWrapper(
                 self._allocate_network_async, context, instance,
                 requested_networks, macs, security_groups, is_vpn,
@@ -1593,6 +1599,7 @@ class ComputeManager(manager.Manager):
 
     def _update_instance_after_spawn(self, context, instance):
         instance.power_state = self._get_power_state(context, instance)
+        #修改状态
         instance.vm_state = vm_states.ACTIVE
         instance.task_state = None
         instance.launched_at = timeutils.utcnow()
@@ -1686,6 +1693,7 @@ class ComputeManager(manager.Manager):
 
         return block_device_info
 
+    #compute收到build_and_run_instance消息进行处理
     @wrap_exception()
     @reverts_task_state
     @wrap_instance_fault
@@ -1702,6 +1710,7 @@ class ComputeManager(manager.Manager):
             # for a while and we want to make sure that nothing else tries
             # to do anything with this instance while we wait.
             with self._build_semaphore:
+                #调用本函数完成build_and_run
                 self._do_build_and_run_instance(*args, **kwargs)
 
         # NOTE(danms): We spawn here to return the RPC worker thread back to
@@ -1743,6 +1752,7 @@ class ComputeManager(manager.Manager):
 
         try:
             LOG.debug('Starting instance...', instance=instance)
+            #vm状态改为building,task_state改为空。
             instance.vm_state = vm_states.BUILDING
             instance.task_state = None
             instance.save(expected_task_state=
@@ -1768,6 +1778,7 @@ class ComputeManager(manager.Manager):
 
         try:
             with timeutils.StopWatch() as timer:
+                #在定时器的保护下做此动作
                 self._build_and_run_instance(context, instance, image,
                         decoded_files, admin_password, requested_networks,
                         security_groups, block_device_mapping, node, limits,
@@ -1903,9 +1914,11 @@ class ComputeManager(manager.Manager):
                 self._validate_instance_group_policy(context, instance,
                         filter_properties)
                 image_meta = objects.ImageMeta.from_dict(image)
+                #构造资源
                 with self._build_resources(context, instance,
                         requested_networks, security_groups, image_meta,
                         block_device_mapping) as resources:
+                    #变更vm_state状态为building,变更task_state状态为spawning
                     instance.vm_state = vm_states.BUILDING
                     instance.task_state = task_states.SPAWNING
                     # NOTE(JoshNang) This also saves the changes to the
@@ -1918,6 +1931,7 @@ class ComputeManager(manager.Manager):
                     LOG.debug('Start spawning the instance on the hypervisor.',
                               instance=instance)
                     with timeutils.StopWatch() as timer:
+                        #孵化instances
                         self.driver.spawn(context, instance, image_meta,
                                           injected_files, admin_password,
                                           network_info=network_info,
@@ -2058,6 +2072,7 @@ class ComputeManager(manager.Manager):
         try:
             LOG.debug('Start building networks asynchronously for instance.',
                       instance=instance)
+            #创建网络资源
             network_info = self._build_networks_for_instance(context, instance,
                     requested_networks, security_groups)
             resources['network_info'] = network_info

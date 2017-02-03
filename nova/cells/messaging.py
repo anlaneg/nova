@@ -404,6 +404,7 @@ class _TargetedMessage(_BaseMessage):
 
         if next_hop.is_me:
             # Final destination.
+            #本地处理此消息，将创建对应db，并向task-api发送消息
             response = self._process_locally()
             return self._send_response(response)
 
@@ -640,6 +641,7 @@ class _TargetedMessageMethods(_BaseMessageMethods):
     def __init__(self, *args, **kwargs):
         super(_TargetedMessageMethods, self).__init__(*args, **kwargs)
 
+    #将传递给scheduler来构造instances
     def build_instances(self, message, build_inst_kwargs):
         """Parent cell told us to schedule new instance creation."""
         self.msg_runner.scheduler.build_instances(message, build_inst_kwargs)
@@ -1229,7 +1231,7 @@ _CELL_MESSAGE_TYPE_TO_METHODS_CLS = {'targeted': _TargetedMessageMethods,
 # Below are the public interfaces into this module.
 #
 
-
+#处理消息入口
 class MessageRunner(object):
     """This class is the main interface into creating messages and
     processing them.
@@ -1410,6 +1412,7 @@ class MessageRunner(object):
                     method_kwargs, 'up', cell, fanout=True)
             message.process()
 
+    #将由cell来创建instances
     def build_instances(self, ctxt, target_cell, build_inst_kwargs):
         """Called by the cell scheduler to tell a child cell to build
         instance(s).

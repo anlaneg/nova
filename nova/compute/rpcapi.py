@@ -1064,6 +1064,7 @@ class ComputeAPI(object):
         cctxt.cast(ctxt, 'external_instance_event', instances=instances,
                    events=events)
 
+    #向compute发送build_and_run_instance消息
     def build_and_run_instance(self, ctxt, instance, host, image, request_spec,
             filter_properties, admin_password=None, injected_files=None,
             requested_networks=None, security_groups=None,

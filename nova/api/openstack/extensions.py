@@ -185,6 +185,7 @@ class ExtensionManager(object):
             controller_exts.extend(get_ext_method())
         return controller_exts
 
+    #如果extension有is-valid函数，就返回true,否则返回false
     def _check_extension(self, extension):
         """Checks for required methods in extension objects."""
         try:
@@ -263,6 +264,8 @@ class ResourceExtension(object):
         self.member_name = member_name
 
 
+#当stevedore模块通过setup.cfg加载插件后，针对每个插件，会调用其构造
+#函数，此类型，规定了所有扩展的构造方法。
 @six.add_metaclass(abc.ABCMeta)
 class V21APIExtensionBase(object):
     """Abstract base class for all v2.1 API extensions.
@@ -313,6 +316,7 @@ class V21APIExtensionBase(object):
         return "<Extension: name=%s, alias=%s, version=%s>" % (
             self.name, self.alias, self.version)
 
+    #约定必须有'name','alias','version'三个字段
     def is_valid(self):
         """Validate required fields for extensions.
 

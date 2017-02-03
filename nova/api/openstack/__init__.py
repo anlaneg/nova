@@ -225,6 +225,7 @@ class APIRouterV21(base_wsgi.Router):
         def _check_load_extension(ext):
             return self._register_extension(ext)
 
+        #加载setup.cfg中的'nova.api.v21.extensions'下扩展
         self.api_extension_manager = stevedore.enabled.EnabledExtensionManager(
             namespace=self.api_extension_namespace(),
             check_func=_check_load_extension,
@@ -241,6 +242,8 @@ class APIRouterV21(base_wsgi.Router):
             # NOTE(cyeoh): Stevedore raises an exception if there are
             # no plugins detected. I wonder if this is a bug.
             self._register_resources_check_inherits(mapper)
+            #对已加载的所有扩展，逐个调用self._register_controllers
+            #这个处理不好看，如果check_inherits有返回的话，我们已不必需要api_extension_manager了
             self.api_extension_manager.map(self._register_controllers)
 
         LOG.info(_LI("Loaded extensions: %s"),
@@ -252,7 +255,9 @@ class APIRouterV21(base_wsgi.Router):
             self._register_resources(ext, mapper)
 
     def _register_resources_check_inherits(self, mapper):
+        #有继承的扩展
         ext_has_inherits = []
+        #没有继承的扩展
         ext_no_inherits = []
 
         for ext in self.api_extension_manager:
@@ -263,9 +268,11 @@ class APIRouterV21(base_wsgi.Router):
             else:
                 ext_no_inherits.append(ext)
 
+        #先处理没有继承的扩展
         self._register_resources_list(ext_no_inherits, mapper)
         self._register_resources_list(ext_has_inherits, mapper)
 
+    #下面这两个函数由上层类实现
     @property
     def loaded_extension_info(self):
         raise NotImplementedError()
@@ -287,6 +294,7 @@ class APIRouterV21(base_wsgi.Router):
             LOG.debug('Extended resource: %s', resource.collection)
 
             inherits = None
+            #如果资源有继承且没有contoller，则当前资源的controller采用被继承者的contoller
             if resource.inherits:
                 inherits = self.resources.get(resource.inherits)
                 if not resource.controller:

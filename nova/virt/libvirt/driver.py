@@ -330,6 +330,7 @@ PERF_EVENTS_CPU_FLAG_MAPPING = {'cmt': 'cmt',
                                }
 
 
+#libvirt对应的driver
 class LibvirtDriver(driver.ComputeDriver):
     capabilities = {
         "has_imagecache": True,
@@ -4968,6 +4969,7 @@ class LibvirtDriver(driver.ComputeDriver):
         :returns guest.Guest: Guest just created
         """
         if xml:
+            #创建虚拟机
             guest = libvirt_guest.Guest.create(xml, self._host)
             if post_xml_callback is not None:
                 post_xml_callback()

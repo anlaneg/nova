@@ -165,6 +165,7 @@ class ComputeCellsAPI(compute_api.API):
         # Avoid casts/calls directly to compute
         self.compute_rpcapi = ComputeRPCAPIRedirect(self.cells_rpcapi)
         # Redirect conductor build_instances to cells
+        #重新构造新的compute_task_api
         self.compute_task_api = ConductorTaskRPCAPIRedirect(self.cells_rpcapi)
         self._cell_type = 'api'
 

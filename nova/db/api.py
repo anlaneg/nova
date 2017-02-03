@@ -709,7 +709,7 @@ def virtual_interface_get_all(context):
 
 ####################
 
-
+#在数据库中创建instance
 def instance_create(context, values):
     """Create an instance from the values dictionary."""
     return IMPL.instance_create(context, values)
