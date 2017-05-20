@@ -62,10 +62,12 @@ class FileTransfer(xfer_base.TransferBase):
 
     desc_required_keys = ['id', 'mountpoint']
 
+    #取各段配置
     def _get_options(self):
         fs_dict = {}
         for fs in CONF.image_file_url.filesystems:
             group_name = 'image_file_url:' + fs
+            #取配置文件中的名称为group_name的section
             conf_group = CONF[group_name]
             if conf_group.id is None:
                 msg = _('The group %(group_name)s must be configured with '
@@ -75,6 +77,7 @@ class FileTransfer(xfer_base.TransferBase):
             fs_dict[CONF[group_name].id] = CONF[group_name]
         return fs_dict
 
+    #检查各段是否配置了id,mountpoint字段
     def _verify_config(self):
         for fs_key in self.filesystems:
             for r in self.desc_required_keys:
@@ -109,9 +112,11 @@ class FileTransfer(xfer_base.TransferBase):
                      {'glance_mount': glance_mount, 'path': path})
             raise exception.ImageDownloadModuleMetaDataError(
                 module=str(self), reason=msg)
+        #将path中的glance_mount修改为nova_mount,且仅变更一次
         new_path = path.replace(glance_mount, nova_mount, 1)
         return new_path
 
+    #提供下载函数
     def download(self, context, url_parts, dst_file, metadata, **kwargs):
         self.filesystems = self._get_options()
         if not self.filesystems:
@@ -120,6 +125,7 @@ class FileTransfer(xfer_base.TransferBase):
             glance_mountpoint = '/'
         else:
             self._verify_config()
+            #依据传入的元数据，url获知对应的文件系统描述符
             fs_descriptor = self._file_system_lookup(metadata, url_parts)
             if fs_descriptor is None:
                 msg = (_('No matching ID for the URL %s was found.') %
@@ -129,6 +135,7 @@ class FileTransfer(xfer_base.TransferBase):
             nova_mountpoint = fs_descriptor['mountpoint']
             glance_mountpoint = metadata['mountpoint']
 
+        #将glance_mountpoint变更为nova_mountpoint,定位源位置
         source_file = self._normalize_destination(nova_mountpoint,
                                                   glance_mountpoint,
                                                   url_parts.path)
@@ -137,9 +144,11 @@ class FileTransfer(xfer_base.TransferBase):
                  {'source_file': source_file, 'module_str': str(self)})
 
 
+#创建可执行下载动作的handler
 def get_download_handler(**kwargs):
     return FileTransfer()
 
 
+#返回此download可支持的模式
 def get_schemes():
     return ['file', 'filesystem']

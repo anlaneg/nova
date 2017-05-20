@@ -206,7 +206,7 @@ def get_disk_backing_file(path, basename=True, format=None):
 
     return backing_file
 
-
+#实现image的copy
 def copy_image(src, dest, host=None, receive=False,
                on_execute=None, on_completion=None,
                compression=True):
@@ -228,13 +228,14 @@ def copy_image(src, dest, host=None, receive=False,
         # rather recreated efficiently.  In addition, since
         # coreutils 8.11, holes can be read efficiently too.
         # we add '-r' argument because ploop disks are directories
+        #实现本地copy
         execute('cp', '-r', src, dest)
     else:
         if receive:
             src = "%s:%s" % (utils.safe_ip_format(host), src)
         else:
             dest = "%s:%s" % (utils.safe_ip_format(host), dest)
-
+        #实现对远程文件的copy（封装了ssh或者rsync)
         remote_filesystem_driver = remotefs.RemoteFilesystem()
         remote_filesystem_driver.copy_file(src, dest,
             on_execute=on_execute, on_completion=on_completion,

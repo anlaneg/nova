@@ -267,6 +267,7 @@ class GlanceImageService(object):
 
         return image
 
+    #按模式查找能处理此模式的handler
     def _get_transfer_module(self, scheme):
         try:
             return self._download_handlers[scheme]
@@ -288,6 +289,7 @@ class GlanceImageService(object):
                 xfer_mod = self._get_transfer_module(o.scheme)
                 if xfer_mod:
                     try:
+                        #调用download方法进行下载
                         xfer_mod.download(context, o, dst_path, loc_meta)
                         LOG.info(_LI("Successfully transferred "
                                      "using %s"), o.scheme)
@@ -441,6 +443,7 @@ class GlanceImageServiceV2(object):
                 continue
 
             try:
+                #按载入的module创建下载用handler
                 self._download_handlers[scheme] = mod.get_download_handler()
             except Exception as ex:
                 LOG.error(_LE('When loading the module %(module_str)s the '

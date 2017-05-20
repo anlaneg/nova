@@ -74,10 +74,14 @@ def unmount_share(mount_path, export_path):
                           export_path)
 
 
+#顶层类，向下操作create_file,remove_file等操作框架（目前支持SshDriver,RsyncDriver)
+#向上封装，使用户不需要感知
 class RemoteFilesystem(object):
     """Represents actions that can be taken on a remote host's filesystem."""
 
     def __init__(self):
+        #此配置默认是ssh,也可以配置为rsync,以ssh为例，要载入的类即为
+        #remotefs.SshDriver
         transport = CONF.libvirt.remote_filesystem_transport
         cls_name = '.'.join([__name__, transport.capitalize()])
         cls_name += 'Driver'
@@ -114,7 +118,7 @@ class RemoteFilesystem(object):
                               on_completion=on_completion,
                               compression=compression)
 
-
+#Driver的基类
 @six.add_metaclass(abc.ABCMeta)
 class RemoteFilesystemDriver(object):
     @abc.abstractmethod
@@ -195,6 +199,7 @@ class SshDriver(RemoteFilesystemDriver):
         utils.ssh_execute(host, 'rm', '-rf', dst,
                           on_execute=on_execute, on_completion=on_completion)
 
+    #采用scp实现copy
     def copy_file(self, src, dst, on_execute, on_completion, compression):
         # As far as ploop disks are in fact directories we add '-r' argument
         utils.execute('scp', '-r', src, dst,

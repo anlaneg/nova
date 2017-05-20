@@ -484,7 +484,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
                 if decision is False:
                     break
 
-
+#computer节点的Manager
 class ComputeManager(manager.Manager):
     """Manages the running instances from creation to destruction."""
 

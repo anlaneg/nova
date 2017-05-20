@@ -15,7 +15,7 @@
 
 from nova import exception
 
-
+#为支持image下载而提供了插件机制，要求实现此机制的插件继承自此类（即需要提供download方法）
 class TransferBase(object):
 
     def download(self, context, url_parts, dst_path, metadata, **kwargs):

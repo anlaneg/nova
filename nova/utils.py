@@ -286,7 +286,7 @@ class RootwrapDaemonHelper(RootwrapProcessHelper):
                     if delay_on_retry:
                         time.sleep(random.randint(20, 200) / 100.0)
 
-
+#执行shell命令
 def execute(*cmd, **kwargs):
     """Convenience wrapper around oslo's execute() method."""
     if 'run_as_root' in kwargs and kwargs.get('run_as_root'):
@@ -297,7 +297,7 @@ def execute(*cmd, **kwargs):
             return RootwrapProcessHelper().execute(*cmd, **kwargs)
     return processutils.execute(*cmd, **kwargs)
 
-
+#连接到dest上，并执行cmd,执行时传入kwargs
 def ssh_execute(dest, *cmd, **kwargs):
     """Convenience wrapper to execute ssh command."""
     ssh_cmd = ['ssh', '-o', 'BatchMode=yes']

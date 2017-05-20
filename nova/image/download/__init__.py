@@ -21,11 +21,15 @@ from nova.i18n import _LE
 
 LOG = logging.getLogger(__name__)
 
-
+#加载传输模块
 def load_transfer_modules():
 
     module_dictionary = {}
 
+    #见nova的setup.cfg文件,此名称对应的是nova.image.download.file
+    #nova.image.download.modules =
+    #file = nova.image.download.file
+    #下面的代码载入的即是file文件
     ex = stevedore.extension.ExtensionManager('nova.image.download.modules')
     for module_name in ex.names():
         mgr = stevedore.driver.DriverManager(
@@ -33,7 +37,9 @@ def load_transfer_modules():
             name=module_name,
             invoke_on_load=False)
 
+        #调用get_schemes函数，file文件内返回的是return ['file', 'filesystem']
         schemes_list = mgr.driver.get_schemes()
+        #检查是否被重复加载
         for scheme in schemes_list:
             if scheme in module_dictionary:
                 LOG.error(_LE('%(scheme)s is registered as a module twice. '

@@ -19,7 +19,7 @@
 # on this module automatically, pointing to the newest/latest version of
 # the object.
 
-
+#将object中的所有对象载入
 def register_all():
     # NOTE(danms): You must make sure your object gets imported in this
     # function in order for it to be registered by services that may

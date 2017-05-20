@@ -113,7 +113,9 @@ class Service(service.Service):
         self.topic = topic
         self.manager_class_name = manager
         self.servicegroup_api = servicegroup.API()
+        #载入对应的manager_class,并构造manager_class对应的对象
         manager_class = importutils.import_class(self.manager_class_name)
+        #当前的manager对象，见SERVICE_MANAGERS
         self.manager = manager_class(host=self.host, *args, **kwargs)
         self.rpcserver = None
         self.report_interval = report_interval
@@ -223,6 +225,7 @@ class Service(service.Service):
             binary = os.path.basename(sys.argv[0])
         if not topic:
             topic = binary.rpartition('nova-')[2]
+        #如果manager没有指定，则采用binary在manager数组中获取
         if not manager:
             manager = SERVICE_MANAGERS.get(binary)
         if report_interval is None:

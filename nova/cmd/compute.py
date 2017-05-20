@@ -38,12 +38,13 @@ CONF = nova.conf.CONF
 LOG = logging.getLogger('nova.compute')
 
 
+#nova compute入口
 def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, 'nova')
     priv_context.init(root_helper=shlex.split(utils.get_root_helper()))
     utils.monkey_patch()
-    objects.register_all()
+    objects.register_all() #载入object目录下所有对象
     # Ensure os-vif objects are registered and plugins loaded
     os_vif.initialize()
 
@@ -52,6 +53,7 @@ def main():
     cmd_common.block_db_access('nova-compute')
     objects_base.NovaObject.indirection_api = conductor_rpcapi.ConductorAPI()
 
+    #创建并加载nova-compute对应的Manager
     server = service.Service.create(binary='nova-compute',
                                     topic=CONF.compute_topic)
     service.serve(server)
