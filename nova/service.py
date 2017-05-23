@@ -112,13 +112,14 @@ class Service(service.Service):
         self.binary = binary
         self.topic = topic
         self.manager_class_name = manager
+        #服务组api,提供成员加入及成员up查询两个功能
         self.servicegroup_api = servicegroup.API()
         #载入对应的manager_class,并构造manager_class对应的对象
         manager_class = importutils.import_class(self.manager_class_name)
         #当前的manager对象，见SERVICE_MANAGERS
         self.manager = manager_class(host=self.host, *args, **kwargs)
         self.rpcserver = None
-        self.report_interval = report_interval
+        self.report_interval = report_interval #report间隔，可用于查询是否up
         self.periodic_enable = periodic_enable
         self.periodic_fuzzy_delay = periodic_fuzzy_delay
         self.periodic_interval_max = periodic_interval_max
@@ -146,6 +147,7 @@ class Service(service.Service):
         self.manager.init_host()
         self.model_disconnected = False
         ctxt = context.get_admin_context()
+        #见objects下的Service.py文件
         self.service_ref = objects.Service.get_by_host_and_binary(
             ctxt, self.host, self.binary)
         if self.service_ref:
@@ -186,6 +188,7 @@ class Service(service.Service):
         LOG.debug("Join ServiceGroup membership for this service %s",
                   self.topic)
         # Add service to the ServiceGroup membership group.
+        # 添加自身到servicegroup
         self.servicegroup_api.join(self.host, self.topic, self)
 
         if self.periodic_enable:

@@ -1123,7 +1123,7 @@ def is_none_string(val):
 
     return val.lower() == 'none'
 
-
+#检查网络是否为neutron
 def is_neutron():
     global _IS_NEUTRON
 

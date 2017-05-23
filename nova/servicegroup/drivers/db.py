@@ -50,6 +50,7 @@ class DbDriver(base.Driver):
                                  ' ServiceGroup driver'))
         report_interval = service.report_interval
         if report_interval:
+            #使用service.tg添加timer
             service.tg.add_timer(report_interval, self._report_state,
                                  api.INITIAL_REPORTING_DELAY, service)
 

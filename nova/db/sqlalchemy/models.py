@@ -72,7 +72,7 @@ class NovaBase(models.TimestampMixin,
         session.expunge(copy)
         return copy
 
-
+#各主机上都有哪些服务在运行
 class Service(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents a running service on a host."""
 
@@ -85,17 +85,17 @@ class Service(BASE, NovaBase, models.SoftDeleteMixin):
         )
 
     id = Column(Integer, primary_key=True)
-    host = Column(String(255))  # , ForeignKey('hosts.id'))
-    binary = Column(String(255))
-    topic = Column(String(255))
-    report_count = Column(Integer, nullable=False, default=0)
-    disabled = Column(Boolean, default=False)
-    disabled_reason = Column(String(255))
-    last_seen_up = Column(DateTime, nullable=True)
-    forced_down = Column(Boolean, default=False)
-    version = Column(Integer, default=0)
+    host = Column(String(255))  # , ForeignKey('hosts.id')) #存储主机名
+    binary = Column(String(255))                            #存储例如nova-compute
+    topic = Column(String(255))                             #存储例如compute
+    report_count = Column(Integer, nullable=False, default=0)#上报次数
+    disabled = Column(Boolean, default=False)#是否被禁用
+    disabled_reason = Column(String(255)) #禁用原因
+    last_seen_up = Column(DateTime, nullable=True) #上次上报的时间
+    forced_down = Column(Boolean, default=False) #强制down的时间
+    version = Column(Integer, default=0) #版本号
 
-    instance = orm.relationship(
+    instance = orm.relationship( 
         "Instance",
         backref='services',
         primaryjoin='and_(Service.host == Instance.host,'
@@ -104,7 +104,7 @@ class Service(BASE, NovaBase, models.SoftDeleteMixin):
         foreign_keys=host,
     )
 
-
+#描述计算节点上的资源占用情况
 class ComputeNode(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents a running compute service on a host."""
 
@@ -252,25 +252,25 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
     user_id = Column(String(255))
     project_id = Column(String(255))
 
-    image_ref = Column(String(255))
+    image_ref = Column(String(255)) #采用那个image
     kernel_id = Column(String(255))
     ramdisk_id = Column(String(255))
     hostname = Column(String(255))
 
     launch_index = Column(Integer)
-    key_name = Column(String(255))
-    key_data = Column(MediumText())
+    key_name = Column(String(255)) #分配的key名称
+    key_data = Column(MediumText()) #分配的key-data(用于登录）
 
     #电源状态
     power_state = Column(Integer)
     #虚拟机状态
     vm_state = Column(String(255))
-    #作务状态
+    #任务状态
     task_state = Column(String(255))
 
-    memory_mb = Column(Integer)
-    vcpus = Column(Integer)
-    root_gb = Column(Integer)
+    memory_mb = Column(Integer) #内存大小配置
+    vcpus = Column(Integer)     #虚拟cpu配置
+    root_gb = Column(Integer)   #根磁盘大小(gb是单位）
     ephemeral_gb = Column(Integer)
     ephemeral_key_uuid = Column(String(36))
 
@@ -314,7 +314,7 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
     vm_mode = Column(String(255))
     uuid = Column(String(36), nullable=False)
 
-    root_device_name = Column(String(255))
+    root_device_name = Column(String(255)) #根设备名称，例如/dev/vda
     default_ephemeral_device = Column(String(255))
     default_swap_device = Column(String(255))
     config_drive = Column(String(255))

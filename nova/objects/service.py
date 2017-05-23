@@ -443,8 +443,10 @@ class ServiceList(base.ObjectListBase, base.NovaObject):
 
     @base.remotable_classmethod
     def get_all(cls, context, disabled=None, set_zones=False):
+        #获取所有service
         db_services = db.service_get_all(context, disabled=disabled)
         if set_zones:
+            #如果需要填充az，则查询并填充
             db_services = availability_zones.set_availability_zones(
                 context, db_services)
         return base.obj_make_list(context, cls(context), objects.Service,

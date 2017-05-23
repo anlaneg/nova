@@ -538,7 +538,8 @@ class ComputeManager(manager.Manager):
         # NOTE(russellb) Load the driver last.  It may call back into the
         # compute manager via the virtapi, so we want it to be fully
         # initialized before that happens.
-        #装载virtapi对应的driver，self.virtapi为ComputeVirtAPI
+        #装载virtapi对应的driver，self.virtapi为ComputeVirtAPI（为参数）
+        #默认情况下，我们一般会采用nova.virt.libvirt.LibvirtDriver
         self.driver = driver.load_compute_driver(self.virtapi, compute_driver)
         self.use_legacy_block_device_info = \
                             self.driver.need_legacy_block_device_info

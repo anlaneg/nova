@@ -886,6 +886,7 @@ class API(base.Base):
             # consider this an invalid request
             msg = _('Invalid image metadata. Error: %s') % six.text_type(e)
             raise exception.InvalidRequest(msg)
+        #nova约赖获取
         numa_topology = hardware.numa_get_constraints(
                 instance_type, image_meta)
 
@@ -1177,6 +1178,7 @@ class API(base.Base):
         self._check_auto_disk_config(image=boot_meta,
                                      auto_disk_config=auto_disk_config)
 
+        #选项校验
         base_options, max_net_count, key_pair, security_groups = \
                 self._validate_and_build_base_options(
                     context, instance_type, boot_meta, image_href, image_id,
@@ -1548,6 +1550,7 @@ class API(base.Base):
                                                      requested_networks):
         """Check whether multiple instances are created from port id(s)."""
         for requested_net in requested_networks:
+            #创建多个实例时，不能指定port_id
             if requested_net.port_id:
                 msg = _("Unable to launch multiple instances with"
                         " a single configured port ID. Please launch your"
@@ -1558,6 +1561,7 @@ class API(base.Base):
         """Check whether multiple instances are created with specified ip."""
 
         for requested_net in requested_networks:
+            #创建多个实例时，不能指定ip地址
             if requested_net.network_id and requested_net.address:
                 msg = _("max_count cannot be greater than 1 if an fixed_ip "
                         "is specified.")
@@ -1587,6 +1591,7 @@ class API(base.Base):
             self._check_multiple_instances_with_specified_ip(
                 requested_networks)
             if utils.is_neutron():
+                #如果采用neutron网络，检查是否指定了port_id
                 self._check_multiple_instances_with_neutron_ports(
                     requested_networks)
 
@@ -1601,6 +1606,7 @@ class API(base.Base):
         filter_properties = scheduler_utils.build_filter_properties(
                 scheduler_hints, forced_host, forced_node, instance_type)
 
+        #创建
         return self._create_instance(
                        context, instance_type,
                        image_href, kernel_id, ramdisk_id,

@@ -486,11 +486,13 @@ def service_get_minimum_version(context, binaries):
     return dict(min_versions)
 
 
+#返回所有合乎要求的service
 @pick_context_manager_reader
 def service_get_all(context, disabled=None):
     query = model_query(context, models.Service)
 
     if disabled is not None:
+        #是否过滤掉disabled的service
         query = query.filter_by(disabled=disabled)
 
     return query.all()
@@ -544,6 +546,7 @@ def service_get_by_host_and_binary(context, host, binary):
                     first()
 
     if not result:
+        #无记录时，报错
         raise exception.HostBinaryNotFound(host=host, binary=binary)
 
     return result

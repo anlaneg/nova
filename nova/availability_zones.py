@@ -71,7 +71,7 @@ def _build_metadata_by_host(aggregates, hosts=None):
 def set_availability_zones(context, services):
     # Makes sure services isn't a sqlalchemy object
     services = [dict(service) for service in services]
-    hosts = set([service['host'] for service in services])
+    hosts = set([service['host'] for service in services]) #这个service分布在哪些主机
     aggregates = objects.AggregateList.get_by_metadata_key(context,
             'availability_zone', hosts=hosts)
     metadata = _build_metadata_by_host(aggregates, hosts=hosts)
@@ -79,6 +79,7 @@ def set_availability_zones(context, services):
     for service in services:
         az = CONF.internal_service_availability_zone
         if service['topic'] == "compute":
+            #此节点为compute服务时进入
             if metadata.get(service['host']):
                 az = u','.join(list(metadata[service['host']]))
             else:

@@ -11,7 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+#接口类，定义接口规范
 class Driver(object):
     """Base class for all ServiceGroup drivers."""
 

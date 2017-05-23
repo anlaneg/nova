@@ -1604,6 +1604,7 @@ def load_compute_driver(virtapi, compute_driver=None):
     :returns: a ComputeDriver instance
     """
     if not compute_driver:
+        #一般情况下，我们采用的是libvirt.LibvirtDriver
         compute_driver = CONF.compute_driver
 
     if not compute_driver:

@@ -30,9 +30,11 @@ def is_neutron():
 
     This logic exists as a separate config option
     """
+    #是否采用neutron提供network功能
     return CONF.use_neutron
 
 
+#按配置载入不同的network api
 def API():
     if is_neutron():
         network_api_class = NEUTRON_NET_API

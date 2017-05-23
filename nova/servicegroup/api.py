@@ -24,6 +24,7 @@ from nova.i18n import _LW
 
 LOG = logging.getLogger(__name__)
 
+#目前提供了两个选项来支持servicegroup,默认是db
 _driver_name_class_mapping = {
     'db': 'nova.servicegroup.drivers.db.DbDriver',
     'mc': 'nova.servicegroup.drivers.mc.MemcachedDriver'
@@ -46,6 +47,7 @@ class API(object):
         # Make sure report interval is less than service down time
         report_interval = CONF.report_interval
         if CONF.service_down_time <= report_interval:
+            #将down_time设置为2.5倍的report间隔
             new_service_down_time = int(report_interval * 2.5)
             LOG.warning(_LW("Report interval must be less than service down "
                             "time. Current config: <service_down_time: "
@@ -57,10 +59,12 @@ class API(object):
                          'new_service_down_time': new_service_down_time})
             CONF.set_override('service_down_time', new_service_down_time)
 
+        #按配置载入servicegroup_driver
         driver_class = _driver_name_class_mapping[CONF.servicegroup_driver]
         self._driver = importutils.import_object(driver_class,
                                                  *args, **kwargs)
 
+    #提供加入服务组功能
     def join(self, member, group, service=None):
         """Add a new member to a service group.
 
@@ -70,6 +74,7 @@ class API(object):
         """
         return self._driver.join(member, group, service)
 
+    #对外提供查询服务是否up的功能
     def service_is_up(self, member):
         """Check if the given member is up."""
         # NOTE(johngarbutt) no logging in this method,

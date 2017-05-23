@@ -678,6 +678,7 @@ class LibvirtDriver(driver.ComputeDriver):
             uri = CONF.libvirt.connection_uri or 'parallels:///system'
         else:
             uri = CONF.libvirt.connection_uri or 'qemu:///system'
+        #kvm类型时，走此
         return uri
 
     @staticmethod
