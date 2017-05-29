@@ -330,13 +330,14 @@ def model_query(context, model,
 
     return query
 
-
+#日志类型变换
 def convert_objects_related_datetimes(values, *datetime_keys):
     if not datetime_keys:
         datetime_keys = ('created_at', 'deleted_at', 'updated_at')
 
     for key in datetime_keys:
         if key in values and values[key]:
+            #如果是字符串类型，将其解析并变更为日期类型
             if isinstance(values[key], six.string_types):
                 try:
                     values[key] = timeutils.parse_strtime(values[key])
@@ -1727,7 +1728,7 @@ def virtual_interface_get_all(context):
 
 ###################
 
-
+#将metadata_dict中的每项，组织成meta_class数组对象返回
 def _metadata_refs(metadata_dict, meta_class):
     metadata_refs = []
     if metadata_dict:
@@ -1743,21 +1744,23 @@ def _validate_unique_server_name(context, name):
     if not CONF.osapi_compute_unique_server_name_scope:
         return
 
+    #变更为小写，查询Instance表中与lowername相同的项
     lowername = name.lower()
     base_query = model_query(context, models.Instance, read_deleted='no').\
             filter(func.lower(models.Instance.hostname) == lowername)
 
+    # 如果范围是project，则过滤project_id
     if CONF.osapi_compute_unique_server_name_scope == 'project':
         instance_with_same_name = base_query.\
                         filter_by(project_id=context.project_id).\
                         count()
-
+    # 如果是全局的，则不过滤
     elif CONF.osapi_compute_unique_server_name_scope == 'global':
         instance_with_same_name = base_query.count()
 
     else:
         return
-
+    #数量大于1，则报错
     if instance_with_same_name > 0:
         raise exception.InstanceExists(name=lowername)
 
@@ -1771,6 +1774,7 @@ def _handle_objects_related_type_conversions(values):
     # the database engine
     for key in ('access_ip_v4', 'access_ip_v6'):
         if key in values and values[key] is not None:
+            #变换为字符串类型
             values[key] = str(values[key])
 
     datetime_keys = ('created_at', 'deleted_at', 'updated_at',
@@ -1798,11 +1802,14 @@ def instance_create(context, values):
     security_group_ensure_default(context)
 
     values = values.copy()
+    #将metadata变换为InstanceMetadata类型的数组
     values['metadata'] = _metadata_refs(
             values.get('metadata'), models.InstanceMetadata)
 
+    #将system_metadata变换为InstanceSystemMetadata类型的数组
     values['system_metadata'] = _metadata_refs(
             values.get('system_metadata'), models.InstanceSystemMetadata)
+    #对几处数据类型进行变换
     _handle_objects_related_type_conversions(values)
 
     instance_ref = models.Instance()
@@ -1814,15 +1821,16 @@ def instance_create(context, values):
     if info_cache is not None:
         #更新instance-info-cache表
         instance_ref['info_cache'].update(info_cache)
+    #更新instance-extra表
     security_groups = values.pop('security_groups', [])
     instance_ref['extra'] = models.InstanceExtra()
-    #更新instance-extra表
     instance_ref['extra'].update(
         {'numa_topology': None,
          'pci_requests': None,
          'vcpu_model': None,
          })
     instance_ref['extra'].update(values.pop('extra', {}))
+    # 更新instances表
     instance_ref.update(values)
 
     def _get_sec_group_models(security_groups):
@@ -1837,8 +1845,10 @@ def instance_create(context, values):
                 context, security_groups))
         return models
 
+    #检查instance唯一名称
     if 'hostname' in values:
         _validate_unique_server_name(context, values['hostname'])
+    
     instance_ref.security_groups = _get_sec_group_models(security_groups)
     context.session.add(instance_ref)
 

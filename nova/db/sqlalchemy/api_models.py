@@ -179,17 +179,17 @@ class Flavors(API_BASE):
         schema.UniqueConstraint("name", name="uniq_flavors0name"))
 
     id = Column(Integer, primary_key=True)
-    name = Column(String(255), nullable=False)
-    memory_mb = Column(Integer, nullable=False)
-    vcpus = Column(Integer, nullable=False)
-    root_gb = Column(Integer)
+    name = Column(String(255), nullable=False) #名称
+    memory_mb = Column(Integer, nullable=False) #内存
+    vcpus = Column(Integer, nullable=False) #虚拟cpu
+    root_gb = Column(Integer) #根盘大小
     ephemeral_gb = Column(Integer)
     flavorid = Column(String(255), nullable=False)
     swap = Column(Integer, nullable=False, default=0)
     rxtx_factor = Column(Float, default=1)
     vcpu_weight = Column(Integer)
     disabled = Column(Boolean, default=False)
-    is_public = Column(Boolean, default=True)
+    is_public = Column(Boolean, default=True) #是否共享
 
 
 class FlavorExtraSpecs(API_BASE):
@@ -203,10 +203,10 @@ class FlavorExtraSpecs(API_BASE):
     )
 
     id = Column(Integer, primary_key=True)
-    key = Column(String(255), nullable=False)
-    value = Column(String(255))
-    flavor_id = Column(Integer, ForeignKey('flavors.id'), nullable=False)
-    flavor = orm.relationship(Flavors, backref='extra_specs',
+    key = Column(String(255), nullable=False) #flavor额外配置key
+    value = Column(String(255)) #value
+    flavor_id = Column(Integer, ForeignKey('flavors.id'), nullable=False) #从属于那个flavor_id
+    flavor = orm.relationship(Flavors, backref='extra_specs', #反推Flavors
                               foreign_keys=flavor_id,
                               primaryjoin=(
                                   'FlavorExtraSpecs.flavor_id == Flavors.id'))

@@ -308,6 +308,7 @@ class Flavor(base.NovaPersistentObject, base.NovaObject,
     @require_context
     def _flavor_get_from_db(context, id):
         """Returns a dict describing specific flavor."""
+        #构造了一个查询，这里用id过滤对flavor的查询
         result = Flavor._flavor_get_query_from_db(context).\
                         filter_by(id=id).\
                         first()
@@ -477,6 +478,7 @@ class Flavor(base.NovaPersistentObject, base.NovaObject,
     @base.remotable
     def create(self):
         if self.obj_attr_is_set('id'):
+            #创建时不能有'id'
             raise exception.ObjectActionError(action='create',
                                               reason='already created')
 
