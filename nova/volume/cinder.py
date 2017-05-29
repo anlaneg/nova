@@ -88,11 +88,21 @@ def cinderclient(context):
     if version == '1':
         raise exception.UnsupportedCinderAPIVersion(version=version)
 
+    if version == '2':
+        LOG.warning("The support for the Cinder API v2 is deprecated, please "
+                    "upgrade to Cinder API v3.")
+
+    if version == '3':
+        # TODO(ildikov): Add microversion support for picking up the new
+        # attach/detach API that was added in 3.27.
+        version = '3.0'
+
     return cinder_client.Client(version,
                                 session=_SESSION,
                                 auth=auth,
                                 endpoint_override=endpoint_override,
                                 connect_retries=CONF.cinder.http_retries,
+                                global_request_id=context.global_id,
                                 **service_parameters)
 
 
@@ -190,8 +200,21 @@ def translate_volume_exception(method):
             res = method(self, ctx, volume_id, *args, **kwargs)
         except (keystone_exception.NotFound, cinder_exception.NotFound):
             _reraise(exception.VolumeNotFound(volume_id=volume_id))
-        except cinder_exception.OverLimit:
-            _reraise(exception.OverQuota(overs='volumes'))
+        except cinder_exception.OverLimit as e:
+            _reraise(exception.OverQuota(message=e.message))
+        return res
+    return translate_cinder_exception(wrapper)
+
+
+def translate_attachment_exception(method):
+    """Transforms the exception for the attachment but keeps its traceback intact.
+    """
+    def wrapper(self, ctx, attachment_id, *args, **kwargs):
+        try:
+            res = method(self, ctx, attachment_id, *args, **kwargs)
+        except (keystone_exception.NotFound, cinder_exception.NotFound):
+            _reraise(exception.VolumeAttachmentNotFound(
+                attachment_id=attachment_id))
         return res
     return translate_cinder_exception(wrapper)
 
@@ -254,19 +277,6 @@ class API(object):
                                               "status": volume['status']}
             raise exception.InvalidVolume(reason=msg)
 
-    def check_attach(self, context, volume, instance=None):
-        # TODO(vish): abstract status checking?
-        if volume['status'] != "available":
-            msg = _("volume '%(vol)s' status must be 'available'. Currently "
-                    "in '%(status)s'") % {'vol': volume['id'],
-                                          'status': volume['status']}
-            raise exception.InvalidVolume(reason=msg)
-        if volume['attach_status'] == "attached":
-            msg = _("volume %s already attached") % volume['id']
-            raise exception.InvalidVolume(reason=msg)
-
-        self.check_availability_zone(context, volume, instance)
-
     def check_availability_zone(self, context, volume, instance=None):
         """Ensure that the availability zone is the same."""
 
@@ -278,7 +288,7 @@ class API(object):
                 msg = _("Instance %(instance)s and volume %(vol)s are not in "
                         "the same availability_zone. Instance is in "
                         "%(ins_zone)s. Volume is in %(vol_zone)s") % {
-                            "instance": instance['id'],
+                            "instance": instance.uuid,
                             "vol": volume['id'],
                             'ins_zone': instance_az,
                             'vol_zone': volume['availability_zone']}
@@ -327,10 +337,6 @@ class API(object):
     def detach(self, context, volume_id, instance_uuid=None,
                attachment_id=None):
         client = cinderclient(context)
-        if client.version == '1':
-            client.volumes.detach(volume_id)
-            return
-
         if attachment_id is None:
             volume = self.get(context, volume_id)
             if volume['multiattach']:
@@ -488,3 +494,16 @@ class API(object):
             {'status': status,
              'progress': '90%'}
         )
+
+    @translate_attachment_exception
+    def attachment_delete(self, context, attachment_id):
+        try:
+            cinderclient(
+                context).attachments.delete(attachment_id)
+        except cinder_exception.ClientException as ex:
+            with excutils.save_and_reraise_exception():
+                LOG.error(('Delete attachment failed for attachment '
+                           '%(id)s. Error: %(msg)s Code: %(code)s'),
+                          {'id': attachment_id,
+                           'msg': six.text_type(ex),
+                           'code': getattr(ex, 'code', None)})

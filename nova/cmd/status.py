@@ -17,17 +17,18 @@ CLI interface for nova status commands.
 """
 
 from __future__ import print_function
+
+# enum comes from the enum34 package if python < 3.4, else it's stdlib
+import enum
 import functools
 import sys
 import textwrap
 import traceback
 
-# enum comes from the enum34 package if python < 3.4, else it's stdlib
-import enum
 from keystoneauth1 import exceptions as ks_exc
 from keystoneauth1 import loading as keystone
-from keystoneauth1 import session
 from oslo_config import cfg
+import pkg_resources
 import prettytable
 from sqlalchemy import func as sqlfunc
 from sqlalchemy import MetaData, Table, select
@@ -180,10 +181,13 @@ class UpgradeCommands(object):
 
         """
         ks_filter = {'service_type': 'placement',
-                     'region_name': CONF.placement.os_region_name}
+                     'region_name': CONF.placement.os_region_name,
+                     'interface': CONF.placement.os_interface}
         auth = keystone.load_auth_from_conf_options(
             CONF, 'placement')
-        client = session.Session(auth=auth)
+        client = keystone.load_session_from_conf_options(
+            CONF, 'placement', auth=auth)
+
         return client.get(path, endpoint_filter=ks_filter).json()
 
     def _check_placement(self):
@@ -197,11 +201,11 @@ class UpgradeCommands(object):
         """
         try:
             versions = self._placement_get("/")
-            max_version = float(versions["versions"][0]["max_version"])
-            # The required version is a bit tricky but we know that we at least
-            # need 1.0 for Newton computes. This minimum might change in the
-            # future.
-            needs_version = 1.0
+            max_version = pkg_resources.parse_version(
+                versions["versions"][0]["max_version"])
+            # NOTE(rpodolyaka): 1.4 is needed in Pike and further as
+            # FilterScheduler will no longer fall back to not using placement
+            needs_version = pkg_resources.parse_version("1.4")
             if max_version < needs_version:
                 msg = (_('Placement API version %(needed)s needed, '
                          'you have %(current)s.') %
@@ -268,6 +272,13 @@ class UpgradeCommands(object):
         This check relies on the placement service running because if it's not
         then there won't be any resource providers for the filter scheduler to
         use during instance build and move requests.
+
+        Note that in Ocata, the filter scheduler will only use placement if
+        the minimum nova-compute service version in the deployment is >= 16
+        which signals when nova-compute will fail to start if placement is not
+        configured on the compute. Otherwise the scheduler will fallback
+        to pulling compute nodes from the database directly as it has always
+        done. That fallback will be removed in Pike.
         """
 
         # Get the total count of resource providers from the API DB that can
@@ -279,8 +290,8 @@ class UpgradeCommands(object):
         ctxt = nova_context.get_admin_context()
         num_computes = 0
         for cell_mapping in cell_mappings:
-            with nova_context.target_cell(ctxt, cell_mapping):
-                num_computes += self._count_compute_nodes(ctxt)
+            with nova_context.target_cell(ctxt, cell_mapping) as cctxt:
+                num_computes += self._count_compute_nodes(cctxt)
         else:
             # There are no cell mappings, cells v2 was maybe not deployed in
             # Newton, but placement might have been, so let's check the single
@@ -290,9 +301,11 @@ class UpgradeCommands(object):
         if num_rps == 0:
 
             if num_computes != 0:
-                # This is a failure because there are compute nodes in the
+                # This is a warning because there are compute nodes in the
                 # database but nothing is reporting resource providers to the
-                # placement service.
+                # placement service. This will not result in scheduling
+                # failures in Ocata because of the fallback that is in place
+                # but we signal it as a warning since there is work to do.
                 msg = (_('There are no compute resource providers in the '
                          'Placement service but there are %(num_computes)s '
                          'compute nodes in the deployment. This means no '
@@ -301,7 +314,7 @@ class UpgradeCommands(object):
                          '%(placement_docs_link)s for more details.') %
                        {'num_computes': num_computes,
                         'placement_docs_link': PLACEMENT_DOCS_LINK})
-                return UpgradeCheckResult(UpgradeCheckCode.FAILURE, msg)
+                return UpgradeCheckResult(UpgradeCheckCode.WARNING, msg)
 
             # There are no resource providers and no compute nodes so we
             # assume this is a fresh install and move on. We should return a
@@ -317,6 +330,11 @@ class UpgradeCommands(object):
         elif num_rps < num_computes:
             # There are fewer resource providers than compute nodes, so return
             # a warning explaining that the deployment might be underutilized.
+            # Technically this is not going to result in scheduling failures in
+            # Ocata because of the fallback that is in place if there are older
+            # compute nodes still, but it is probably OK to leave the wording
+            # on this as-is to prepare for when the fallback is removed in
+            # Pike.
             msg = (_('There are %(num_resource_providers)s compute resource '
                      'providers and %(num_compute_nodes)s compute nodes in '
                      'the deployment. Ideally the number of compute resource '
@@ -438,7 +456,7 @@ def main():
     try:
         fn, fn_args, fn_kwargs = cmd_common.get_action_fn()
         ret = fn(*fn_args, **fn_kwargs)
-        return(ret)
+        return ret
     except Exception:
         print(_('Error:\n%s') % traceback.format_exc())
         # This is 255 so it's not confused with the upgrade check exit codes.

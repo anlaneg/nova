@@ -76,8 +76,6 @@ Possible values:
    multiple schedulers
 ** 'chance_scheduler', which simply picks a host at random
 ** 'fake_scheduler', which is used for testing
-** A custom scheduler driver. In this case, you will be responsible for
-   creating and maintaining the entry point in your 'setup.cfg' file
 """),
     cfg.IntOpt("periodic_task_interval",
         default=60,
@@ -135,12 +133,11 @@ This value controls how often (in seconds) the scheduler should attempt
 to discover new hosts that have been added to cells. If negative (the
 default), no automatic discovery will occur.
 
-Small deployments may want this periodic task enabled, as surveying the
-cells for new hosts is likely to be lightweight enough to not cause undue
-burdon to the scheduler. However, larger clouds (and those that are not
-adding hosts regularly) will likely want to disable this automatic
-behavior and instead use the `nova-manage cell_v2 discover_hosts` command
-when hosts have been added to a cell.
+Deployments where compute nodes come and go frequently may want this
+enabled, where others may prefer to manually discover hosts when one
+is added to avoid any overhead from constantly checking. If enabled,
+every time this runs, we will select any unmapped hosts out of each
+cell database on every run.
 """),
 ]
 
@@ -192,9 +189,9 @@ Possible values:
 * An integer, where the integer corresponds to the max number of instances
   that can be actively performing IO on any given host.
 """),
-    # TODO(sfinucan): Add 'min' parameter
     cfg.IntOpt("max_instances_per_host",
         default=50,
+        min=1,
         deprecated_group="DEFAULT",
         help="""
 Maximum number of instances that be active on a host.
@@ -232,6 +229,11 @@ usage data to query the database on each request instead.
 
 This option is only used by the FilterScheduler and its subclasses; if you use
 a different scheduler, this option has no effect.
+
+NOTE: In a multi-cell (v2) setup where the cell MQ is separated from the
+top-level, computes cannot directly communicate with the scheduler. Thus,
+this option cannot be enabled in that scenario. See also the
+[workarounds]/disable_group_policy_check_upcall option.
 """),
     cfg.MultiStrOpt("available_filters",
         default=["nova.scheduler.filters.all_filters"],
@@ -405,7 +407,7 @@ stack vs spread.
 
 This option is only used by the FilterScheduler and its subclasses; if you use
 a different scheduler, this option has no effect. Also note that this setting
-only affects scheduling if the 'ram' weigher is enabled.
+only affects scheduling if the 'disk' weigher is enabled.
 
 Possible values:
 
@@ -586,8 +588,11 @@ Configuration options for enabling Trusted Platform Module.
 """)
 
 trusted_opts = [
-    cfg.StrOpt("attestation_server",
-            help="""
+    cfg.HostAddressOpt("attestation_server",
+                       deprecated_for_removal=True,
+                       deprecated_reason="Incomplete filter",
+                       deprecated_since="Pike",
+                       help="""
 The host to use as the attestation server.
 
 Cloud computing pools can involve thousands of compute nodes located at
@@ -615,6 +620,9 @@ Related options:
 * attestation_insecure_ssl
 """),
     cfg.StrOpt("attestation_server_ca_file",
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
             help="""
 The absolute path to the certificate to use for authentication when connecting
 to the attestation server. See the `attestation_server` help text for more
@@ -640,6 +648,9 @@ Related options:
 """),
     cfg.PortOpt("attestation_port",
             default=8443,
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
             help="""
 The port to use when connecting to the attestation server. See the
 `attestation_server` help text for more information about host verification.
@@ -659,6 +670,9 @@ Related options:
 """),
     cfg.StrOpt("attestation_api_url",
             default="/OpenAttestationWebServices/V1.0",
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
             help="""
 The URL on the attestation server to use. See the `attestation_server` help
 text for more information about host verification.
@@ -685,6 +699,9 @@ Related options:
 """),
     cfg.StrOpt("attestation_auth_blob",
             secret=True,
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
             help="""
 Attestation servers require a specific blob that is used to authenticate. The
 content and format of the blob are determined by the particular attestation
@@ -710,9 +727,12 @@ Related options:
 * attestation_auth_timeout
 * attestation_insecure_ssl
 """),
-    # TODO(stephenfin): Add min parameter
     cfg.IntOpt("attestation_auth_timeout",
             default=60,
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
+            min=0,
             help="""
 This value controls how long a successful attestation is cached. Once this
 period has elapsed, a new attestation request will be made. See the
@@ -739,6 +759,9 @@ Related options:
 """),
     cfg.BoolOpt("attestation_insecure_ssl",
             default=False,
+            deprecated_for_removal=True,
+            deprecated_reason="Incomplete filter",
+            deprecated_since="Pike",
             help="""
 When set to True, the SSL certificate verification is skipped for the
 attestation service. See the `attestation_server` help text for more

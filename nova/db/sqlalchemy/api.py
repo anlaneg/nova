@@ -475,12 +475,24 @@ def service_get(context, service_id):
     return result
 
 
+@pick_context_manager_reader
+def service_get_by_uuid(context, service_uuid):
+    query = model_query(context, models.Service).filter_by(uuid=service_uuid)
+
+    result = query.first()
+    if not result:
+        raise exception.ServiceNotFound(service_id=service_uuid)
+
+    return result
+
+
 @pick_context_manager_reader_allow_async
 def service_get_minimum_version(context, binaries):
     min_versions = context.session.query(
         models.Service.binary,
         func.min(models.Service.version)).\
                          filter(models.Service.binary.in_(binaries)).\
+                         filter(models.Service.deleted == 0).\
                          filter(models.Service.forced_down == false()).\
                          group_by(models.Service.binary)
     return dict(min_versions)
@@ -627,6 +639,8 @@ def _compute_node_select(context, filters=None, limit=None, marker=None):
     if "hypervisor_hostname" in filters:
         hyp_hostname = filters["hypervisor_hostname"]
         select = select.where(cn_tbl.c.hypervisor_hostname == hyp_hostname)
+    if "mapped" in filters:
+        select = select.where(cn_tbl.c.mapped < filters['mapped'])
     if marker is not None:
         try:
             compute_node_get(context, marker)
@@ -705,6 +719,12 @@ def compute_node_get_all(context):
 
 
 @pick_context_manager_reader
+def compute_node_get_all_mapped_less_than(context, mapped_less_than):
+    return _compute_node_fetchall(context,
+                                  {'mapped': mapped_less_than})
+
+
+@pick_context_manager_reader
 def compute_node_get_all_by_pagination(context, limit=None, marker=None):
     return _compute_node_fetchall(context, limit=limit, marker=marker)
 
@@ -776,7 +796,8 @@ def compute_node_statistics(context):
                 inner_sel.c.service_id == services_tbl.c.id
             ),
             services_tbl.c.disabled == false(),
-            services_tbl.c.binary == 'nova-compute'
+            services_tbl.c.binary == 'nova-compute',
+            services_tbl.c.deleted == 0
         )
     )
 
@@ -1890,6 +1911,11 @@ def instance_destroy(context, instance_uuid, constraint=None):
         resource_id=instance_uuid).delete()
     context.session.query(models.ConsoleAuthToken).filter_by(
         instance_uuid=instance_uuid).delete()
+    # NOTE(cfriesen): We intentionally do not soft-delete entries in the
+    # instance_actions or instance_actions_events tables because they
+    # can be used by operators to find out what actions were performed on a
+    # deleted instance.  Both of these tables are special-cased in
+    # _archive_deleted_rows_for_table().
 
     return instance_ref
 
@@ -2147,7 +2173,7 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
 
     # Make a copy of the filters dictionary to use going forward, as we'll
     # be modifying it and we shouldn't affect the caller's use of it.
-    filters = filters.copy()
+    filters = copy.deepcopy(filters)
 
     if 'changes-since' in filters:
         changes_since = timeutils.normalize_time(filters['changes-since'])
@@ -2245,7 +2271,6 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
     if query_prefix is None:
         return []
     query_prefix = _regex_instance_filter(query_prefix, filters)
-    query_prefix = _tag_instance_filter(context, query_prefix, filters)
 
     # paginate query
     if marker is not None:
@@ -2264,65 +2289,6 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
         raise exception.InvalidSortKey()
 
     return _instances_fill_metadata(context, query_prefix.all(), manual_joins)
-
-
-def _tag_instance_filter(context, query, filters):
-    """Applies tag filtering to an Instance query.
-
-    Returns the updated query.  This method alters filters to remove
-    keys that are tags.  This filters on resources by tags - this
-    method assumes that the caller will take care of access control
-
-    :param context: request context object
-    :param query: query to apply filters to
-    :param filters: dictionary of filters
-    """
-    if filters.get('filter') is None:
-        return query
-
-    model = models.Instance
-    model_metadata = models.InstanceMetadata
-    model_uuid = model_metadata.instance_uuid
-
-    or_query = None
-
-    def _to_list(val):
-        if isinstance(val, dict):
-            val = val.values()
-        if not isinstance(val, (tuple, list, set)):
-            val = (val,)
-        return val
-
-    for filter_block in filters['filter']:
-        if not isinstance(filter_block, dict):
-            continue
-
-        filter_name = filter_block.get('name')
-        if filter_name is None:
-            continue
-
-        tag_name = filter_name[4:]
-        tag_val = _to_list(filter_block.get('value'))
-
-        if filter_name.startswith('tag-'):
-            if tag_name not in ['key', 'value']:
-                msg = _("Invalid field name: %s") % tag_name
-                raise exception.InvalidParameterValue(err=msg)
-            subq = getattr(model_metadata, tag_name).in_(tag_val)
-            or_query = subq if or_query is None else or_(or_query, subq)
-
-        elif filter_name.startswith('tag:'):
-            subq = model_query(context, model_metadata, (model_uuid,)).\
-                filter_by(key=tag_name).\
-                filter(model_metadata.value.in_(tag_val))
-            query = query.filter(model.uuid.in_(subq))
-
-    if or_query is not None:
-        subq = model_query(context, model_metadata, (model_uuid,)).\
-                filter(or_query)
-        query = query.filter(model.uuid.in_(subq))
-
-    return query
 
 
 def _db_connection_type(db_connection):
@@ -2586,9 +2552,10 @@ def _instance_get_all_query(context, project_only=False, joins=None):
 
 @pick_context_manager_reader_allow_async
 def instance_get_all_by_host(context, host, columns_to_join=None):
+    query = _instance_get_all_query(context, joins=columns_to_join)
     return _instances_fill_metadata(context,
-      _instance_get_all_query(context).filter_by(host=host).all(),
-                              manual_joins=columns_to_join)
+                                    query.filter_by(host=host).all(),
+                                    manual_joins=columns_to_join)
 
 
 def _instance_get_all_uuids_by_host(context, host):
@@ -4067,7 +4034,7 @@ def reservation_expire(context):
             reservation.usage.reserved -= reservation.delta
             context.session.add(reservation.usage)
 
-    reservation_query.soft_delete(synchronize_session=False)
+    return reservation_query.soft_delete(synchronize_session=False)
 
 
 ###################
@@ -6576,20 +6543,19 @@ def archive_deleted_rows(max_rows=None):
 
 
 @pick_context_manager_writer
-def aggregate_uuids_online_data_migration(context, max_count):
-    from nova.objects import aggregate
+def service_uuids_online_data_migration(context, max_count):
+    from nova.objects import service
 
     count_all = 0
     count_hit = 0
 
-    results = model_query(context, models.Aggregate).filter_by(
+    db_services = model_query(context, models.Service).filter_by(
         uuid=None).limit(max_count)
-    for db_agg in results:
+    for db_service in db_services:
         count_all += 1
-        agg = aggregate.Aggregate._from_db_object(context,
-                                                  aggregate.Aggregate(),
-                                                  db_agg)
-        if 'uuid' in agg:
+        service_obj = service.Service._from_db_object(
+            context, service.Service(), db_service)
+        if 'uuid' in service_obj:
             count_hit += 1
     return count_all, count_hit
 

@@ -28,7 +28,6 @@ import six
 
 import nova.conf
 from nova.i18n import _, _LE, _LI
-from nova import utils
 from nova.virt import event as virtevent
 
 CONF = nova.conf.CONF
@@ -128,6 +127,8 @@ class ComputeDriver(object):
         "supports_migrate_to_same_host": False,
         "supports_attach_interface": False,
         "supports_device_tagging": False,
+        "supports_tagged_attach_interface": False,
+        "supports_tagged_attach_volume": False,
     }
 
     def __init__(self, virtapi):
@@ -203,7 +204,8 @@ class ComputeDriver(object):
         :returns: Dict of estimated overhead values.
         """
         return {'memory_mb': 0,
-                'disk_gb': 0}
+                'disk_gb': 0,
+                'vcpus': 0}
 
     def list_instances(self):
         """Return the names of all the instances known to the virtualization
@@ -356,7 +358,7 @@ class ComputeDriver(object):
         :param context: security context
         :param instance: nova.objects.instance.Instance
 
-        :returns an instance of console.type.ConsoleVNC
+        :returns: an instance of console.type.ConsoleVNC
         """
         raise NotImplementedError()
 
@@ -366,7 +368,7 @@ class ComputeDriver(object):
         :param context: security context
         :param instance: nova.objects.instance.Instance
 
-        :returns an instance of console.type.ConsoleSpice
+        :returns: an instance of console.type.ConsoleSpice
         """
         raise NotImplementedError()
 
@@ -376,7 +378,7 @@ class ComputeDriver(object):
         :param context: security context
         :param instance: nova.objects.instance.Instance
 
-        :returns an instance of console.type.ConsoleRDP
+        :returns: an instance of console.type.ConsoleRDP
         """
         raise NotImplementedError()
 
@@ -386,7 +388,7 @@ class ComputeDriver(object):
         :param context: security context
         :param instance: nova.objects.instance.Instance
 
-        :returns an instance of console.type.ConsoleSerial
+        :returns: an instance of console.type.ConsoleSerial
         """
         raise NotImplementedError()
 
@@ -774,6 +776,12 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    def get_inventory(self, nodename):
+        """Return a dict, keyed by resource class, of inventory information for
+        the supplied node.
+        """
+        raise NotImplementedError()
+
     def get_available_resource(self, nodename):
         """Retrieve resource information.
 
@@ -1114,7 +1122,7 @@ class ComputeDriver(object):
             ""startup", "shutdown" and "reboot".
 
         :return: The result of the power action
-        :rtype: : str
+        :rtype: str
         """
 
         raise NotImplementedError()
@@ -1618,9 +1626,15 @@ def load_compute_driver(virtapi, compute_driver=None):
         driver = importutils.import_object(
             'nova.virt.%s' % compute_driver,
             virtapi)
-        return utils.check_isinstance(driver, ComputeDriver)
+        if isinstance(driver, ComputeDriver):
+            return driver
+        raise ValueError()
     except ImportError:
         LOG.exception(_LE("Unable to load the virtualization driver"))
+        sys.exit(1)
+    except ValueError:
+        LOG.exception("Compute driver '%s' from 'nova.virt' is not of type"
+                      "'%s'", compute_driver, str(ComputeDriver))
         sys.exit(1)
 
 

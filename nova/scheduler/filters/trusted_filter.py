@@ -29,7 +29,7 @@ are in the ``nova.conf`` file in a separate ``trust`` section.  For example,
 the config file will look something like:
 
     [DEFAULT]
-    verbose=True
+    debug=True
     ...
     [trust]
     server=attester.mynetwork.com
@@ -44,6 +44,7 @@ the Open Attestation project at:
 """
 
 from oslo_log import log as logging
+from oslo_log import versionutils
 from oslo_serialization import jsonutils
 from oslo_utils import timeutils
 import requests
@@ -154,14 +155,6 @@ class ComputeAttestationCache(object):
             host = compute.hypervisor_hostname
             self._init_cache_entry(host)
 
-        # TODO(sfinucan): Remove this warning when the named config options
-        # gains a 'min' parameter.
-        if CONF.trusted_computing.attestation_auth_timeout < 0:
-            LOG.warning(_LW('Future versions of nova will restrict the '
-                '"trusted_computing.attestation_auth_timeout" config option '
-                'to values >=0. Update your configuration file to mitigate '
-                'future upgrade issues.'))
-
     def _cache_valid(self, host):
         cachevalid = False
         if host in self.compute_nodes:
@@ -239,12 +232,10 @@ class TrustedFilter(filters.BaseHostFilter):
 
     def __init__(self):
         self.compute_attestation = ComputeAttestation()
-        LOG.warning(_LW('The TrustedFilter is considered experimental '
-                        'by the OpenStack project because it receives much '
-                        'less testing than the rest of Nova. This may change '
-                        'in the future, but current deployers should be aware '
-                        'that the use of it in production right now may be '
-                        'risky.'))
+        msg = _LW('The TrustedFilter is deprecated as it has been marked '
+                  'experimental for some time with no tests. It will be '
+                  'removed in the 17.0.0 Queens release.')
+        versionutils.report_deprecated_feature(LOG, msg)
 
     # The hosts the instances are running on doesn't change within a request
     run_filter_once_per_request = True

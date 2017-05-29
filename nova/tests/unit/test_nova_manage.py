@@ -15,6 +15,7 @@
 
 import sys
 
+import ddt
 import fixtures
 import mock
 from oslo_db import exception as db_exc
@@ -552,7 +553,7 @@ Archiving.....stopped
             mock_target_cell.assert_called_once_with(ctxt, 'map')
 
             db_sync_calls = [
-                    mock.call(4, context=ctxt),
+                    mock.call(4, context=cell_ctxt),
                     mock.call(4)
             ]
             mock_db_sync.assert_has_calls(db_sync_calls)
@@ -809,6 +810,7 @@ class CellCommandsTestCase(test.NoDBTestCase):
         mock_db_cell_create.assert_called_once_with(ctxt, exp_values)
 
 
+@ddt.ddt
 class CellV2CommandsTestCase(test.NoDBTestCase):
     USES_DB_SELF = True
 
@@ -1138,6 +1140,29 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
         self.assertEqual('fake://netloc/nova_cell0',
                          cell_mapping.database_connection)
 
+    @ddt.data('mysql+pymysql://nova:abcd0123:AB@controller/nova',
+              'mysql+pymysql://nova:abcd0123?AB@controller/nova',
+              'mysql+pymysql://nova:abcd0123@AB@controller/nova',
+              'mysql+pymysql://nova:abcd0123/AB@controller/nova',
+              'mysql+pymysql://test:abcd0123%AB@controller/nova')
+    def test_map_cell0_default_database_special_characters(self,
+                                                           decoded_connection):
+        """Tests that a URL with special characters, like in the credentials,
+        is handled properly.
+        """
+        self.flags(connection=decoded_connection, group='database')
+        ctxt = context.RequestContext()
+        self.commands.map_cell0()
+        cell_mapping = objects.CellMapping.get_by_uuid(
+            ctxt, objects.CellMapping.CELL0_UUID)
+        self.assertEqual('cell0', cell_mapping.name)
+        self.assertEqual('none:///', cell_mapping.transport_url)
+        self.assertEqual(
+            decoded_connection + '_cell0',
+            cell_mapping.database_connection)
+        # Delete the cell mapping for the next iteration.
+        cell_mapping.destroy()
+
     def _test_migrate_simple_command(self, cell0_sync_fail=False):
         ctxt = context.RequestContext()
         CONF.set_default('connection',
@@ -1268,6 +1293,8 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
                                            transport_url='fake:///mq')
         cell_mapping.create()
 
+        mock_target_cell.return_value.__enter__.return_value = ctxt
+
         self.commands.discover_hosts(cell_uuid=cell_mapping.uuid)
 
         # Check that the host mappings were created
@@ -1343,10 +1370,12 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
 
         compute_nodes = self._return_compute_nodes(ctxt, num=2)
         # Create the first compute node in cell1's db
-        with context.target_cell(ctxt, cell_mapping1):
+        with context.target_cell(ctxt, cell_mapping1) as cctxt:
+            compute_nodes[0]._context = cctxt
             compute_nodes[0].create()
         # Create the first compute node in cell2's db
-        with context.target_cell(ctxt, cell_mapping2):
+        with context.target_cell(ctxt, cell_mapping2) as cctxt:
+            compute_nodes[1]._context = cctxt
             compute_nodes[1].create()
 
         self.commands.discover_hosts(verbose=True)
@@ -1360,6 +1389,19 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
             self.assertEqual('host%s' % i, host_mapping.host)
 
         mock_cell_mapping_get_by_uuid.assert_not_called()
+
+    @mock.patch('nova.objects.host_mapping.discover_hosts')
+    def test_discover_hosts_strict(self, mock_discover_hosts):
+        # Check for exit code 0 if unmapped hosts found
+        mock_discover_hosts.return_value = ['fake']
+        self.assertEqual(self.commands.discover_hosts(strict=True), 0)
+
+        # Check for exit code 1 if no unmapped hosts are found
+        mock_discover_hosts.return_value = []
+        self.assertEqual(self.commands.discover_hosts(strict=True), 1)
+
+        # Check the return when strict=False
+        self.assertIsNone(self.commands.discover_hosts())
 
     def test_validate_transport_url_in_conf(self):
         from_conf = 'fake://user:pass@host:port/'
@@ -1532,6 +1574,54 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
         output = self.output.getvalue().strip()
         self.assertEqual('', output)
 
+    def test_update_cell_not_found(self):
+        self.assertEqual(1, self.commands.update_cell(
+            uuidsentinel.cell1, 'foo', 'fake://new', 'fake:///new'))
+        self.assertIn('not found', self.output.getvalue())
+
+    def test_update_cell_failed(self):
+        ctxt = context.get_admin_context()
+        objects.CellMapping(context=ctxt, uuid=uuidsentinel.cell1,
+                            name='cell1',
+                            transport_url='fake://mq',
+                            database_connection='fake:///db').create()
+        with mock.patch('nova.objects.CellMapping.save') as mock_save:
+            mock_save.side_effect = Exception
+            self.assertEqual(2, self.commands.update_cell(
+                uuidsentinel.cell1, 'foo', 'fake://new', 'fake:///new'))
+        self.assertIn('Unable to update', self.output.getvalue())
+
+    def test_update_cell_success(self):
+        ctxt = context.get_admin_context()
+        objects.CellMapping(context=ctxt, uuid=uuidsentinel.cell1,
+                            name='cell1',
+                            transport_url='fake://mq',
+                            database_connection='fake:///db').create()
+        self.assertEqual(0, self.commands.update_cell(
+            uuidsentinel.cell1, 'foo', 'fake://new', 'fake:///new'))
+        cm = objects.CellMapping.get_by_uuid(ctxt, uuidsentinel.cell1)
+        self.assertEqual('foo', cm.name)
+        self.assertEqual('fake://new', cm.transport_url)
+        self.assertEqual('fake:///new', cm.database_connection)
+        output = self.output.getvalue().strip()
+        self.assertEqual('', output)
+
+    def test_update_cell_success_defaults(self):
+        ctxt = context.get_admin_context()
+        objects.CellMapping(context=ctxt, uuid=uuidsentinel.cell1,
+                            name='cell1',
+                            transport_url='fake://mq',
+                            database_connection='fake:///db').create()
+        self.assertEqual(0, self.commands.update_cell(uuidsentinel.cell1))
+        cm = objects.CellMapping.get_by_uuid(ctxt, uuidsentinel.cell1)
+        self.assertEqual('cell1', cm.name)
+        expected_transport_url = CONF.transport_url or 'fake://mq'
+        self.assertEqual(expected_transport_url, cm.transport_url)
+        expected_db_connection = CONF.database.connection or 'fake:///db'
+        self.assertEqual(expected_db_connection, cm.database_connection)
+        output = self.output.getvalue().strip()
+        self.assertEqual('', output)
+
 
 class TestNovaManageMain(test.NoDBTestCase):
     """Tests the nova-manage:main() setup code."""
@@ -1546,9 +1636,20 @@ class TestNovaManageMain(test.NoDBTestCase):
     def test_error_traceback(self, mock_conf, mock_parse_args):
         with mock.patch.object(manage.cmd_common, 'get_action_fn',
                                side_effect=test.TestingException('oops')):
+            mock_conf.post_mortem = False
             self.assertEqual(1, manage.main())
             # assert the traceback is dumped to stdout
             output = self.output.getvalue()
             self.assertIn('An error has occurred', output)
             self.assertIn('Traceback', output)
             self.assertIn('oops', output)
+
+    @mock.patch('pdb.post_mortem')
+    @mock.patch.object(manage.config, 'parse_args')
+    @mock.patch.object(manage, 'CONF')
+    def test_error_post_mortem(self, mock_conf, mock_parse_args, mock_pm):
+        with mock.patch.object(manage.cmd_common, 'get_action_fn',
+                               side_effect=test.TestingException('oops')):
+            mock_conf.post_mortem = True
+            self.assertEqual(1, manage.main())
+            self.assertTrue(mock_pm.called)

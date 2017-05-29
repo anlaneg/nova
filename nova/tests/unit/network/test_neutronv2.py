@@ -76,7 +76,7 @@ class MyComparator(mox.Comparator):
     def _com_dict(self, lhs, rhs):
         if len(lhs) != len(rhs):
             return False
-        for key, value in six.iteritems(lhs):
+        for key, value in lhs.items():
             if key not in rhs:
                 return False
             rhs_value = rhs[key]
@@ -711,7 +711,8 @@ class TestNeutronv2Base(test.TestCase):
                 if network is None:
                     continue
 
-                port_req_body_create = {'port': {}}
+                port_req_body_create = {'port': {'device_id':
+                                                 self.instance.uuid}}
                 request.address = fixed_ips.get(request.network_id)
                 if request.address:
                     port_req_body_create['port']['fixed_ips'] = [
@@ -3138,6 +3139,98 @@ class TestNeutronv2(TestNeutronv2Base):
         self.assertEqual(0, len(networks))
 
     @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_get_port_vnic_info_multi_segment(self, mock_get_client):
+        api = neutronapi.API()
+        self.mox.ResetAll()
+        test_port = {
+            'port': {'id': 'my_port_id1',
+                      'network_id': 'net-id',
+                      'binding:vnic_type': model.VNIC_TYPE_DIRECT,
+                     },
+            }
+        test_net = {'network': {'segments':
+                                    [{'provider:physical_network': 'phynet10',
+                                      'provider:segmentation_id': 1000,
+                                      'provider:network_type': 'vlan'},
+                                     {'provider:physical_network': None,
+                                      'provider:segmentation_id': 153,
+                                      'provider:network_type': 'vxlan'}]}}
+        test_ext_list = {'extensions':
+                            [{'name': 'Multi Provider Network',
+                             'alias': 'multi-segments'}]}
+
+        mock_client = mock_get_client()
+        mock_client.show_port.return_value = test_port
+        mock_client.list_extensions.return_value = test_ext_list
+        mock_client.show_network.return_value = test_net
+        vnic_type, phynet_name = api._get_port_vnic_info(
+            self.context, mock_client, test_port['port']['id'])
+
+        mock_client.show_network.assert_called_once_with(
+            test_port['port']['network_id'],
+            fields='segments')
+        self.assertEqual('phynet10', phynet_name)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_get_port_vnic_info_vlan_with_multi_segment_ext(self,
+                                                            mock_get_client):
+        api = neutronapi.API()
+        self.mox.ResetAll()
+        test_port = {
+            'port': {'id': 'my_port_id1',
+                      'network_id': 'net-id',
+                      'binding:vnic_type': model.VNIC_TYPE_DIRECT,
+                     },
+            }
+        test_net = {'network': {'provider:physical_network': 'phynet10',
+                                'provider:segmentation_id': 1000,
+                                'provider:network_type': 'vlan'}}
+        test_ext_list = {'extensions':
+                            [{'name': 'Multi Provider Network',
+                             'alias': 'multi-segments'}]}
+
+        mock_client = mock_get_client()
+        mock_client.show_port.return_value = test_port
+        mock_client.list_extensions.return_value = test_ext_list
+        mock_client.show_network.return_value = test_net
+        vnic_type, phynet_name = api._get_port_vnic_info(
+            self.context, mock_client, test_port['port']['id'])
+
+        mock_client.show_network.assert_called_with(
+            test_port['port']['network_id'],
+            fields='provider:physical_network')
+        self.assertEqual('phynet10', phynet_name)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_get_port_vnic_info_multi_segment_no_phynet(self, mock_get_client):
+        api = neutronapi.API()
+        self.mox.ResetAll()
+        test_port = {
+            'port': {'id': 'my_port_id1',
+                      'network_id': 'net-id',
+                      'binding:vnic_type': model.VNIC_TYPE_DIRECT,
+                     },
+            }
+        test_net = {'network': {'segments':
+                                    [{'provider:physical_network': None,
+                                      'provider:segmentation_id': 1000,
+                                      'provider:network_type': 'vlan'},
+                                     {'provider:physical_network': None,
+                                      'provider:segmentation_id': 153,
+                                      'provider:network_type': 'vlan'}]}}
+        test_ext_list = {'extensions':
+                            [{'name': 'Multi Provider Network',
+                             'alias': 'multi-segments'}]}
+
+        mock_client = mock_get_client()
+        mock_client.show_port.return_value = test_port
+        mock_client.list_extensions.return_value = test_ext_list
+        mock_client.show_network.return_value = test_net
+        self.assertRaises(exception.NovaException,
+                          api._get_port_vnic_info,
+                          self.context, mock_client, test_port['port']['id'])
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.MagicMock())
     def test_get_port_vnic_info_1(self, mock_get_client):
         api = neutronapi.API()
         self.mox.ResetAll()
@@ -3860,6 +3953,7 @@ class TestNeutronv2WithMock(test.TestCase):
                              'pci_vendor_info': 'old_pci_vendor_info'}},
                         {'id': 'fake-port-2',
                          neutronapi.BINDING_HOST_ID: instance.host}]}
+        migration = {'status': 'confirmed'}
         list_ports_mock = mock.Mock(return_value=fake_ports)
         get_client_mock.return_value.list_ports = list_ports_mock
 
@@ -3867,7 +3961,7 @@ class TestNeutronv2WithMock(test.TestCase):
         get_client_mock.return_value.update_port = update_port_mock
 
         self.api._update_port_binding_for_instance(self.context, instance,
-                                                   instance.host)
+                                                   instance.host, migration)
         # Assert that update_port is called with the binding:profile
         # corresponding to the PCI device specified.
         update_port_mock.assert_called_once_with(
@@ -3914,6 +4008,7 @@ class TestNeutronv2WithMock(test.TestCase):
                             {'pci_slot': '0000:0a:00.1',
                              'physical_network': 'old_phys_net',
                              'pci_vendor_info': 'old_pci_vendor_info'}}]}
+        migration = {'status': 'confirmed'}
         list_ports_mock = mock.Mock(return_value=fake_ports)
         get_client_mock.return_value.list_ports = list_ports_mock
 
@@ -3922,7 +4017,55 @@ class TestNeutronv2WithMock(test.TestCase):
                           self.api._update_port_binding_for_instance,
                           self.context,
                           instance,
-                          instance.host)
+                          instance.host,
+                          migration)
+
+    @mock.patch.object(pci_whitelist.Whitelist, 'get_devspec')
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_update_port_bindings_for_instance_with_pci_no_migration(self,
+                                            get_client_mock,
+                                            get_pci_device_devspec_mock):
+        self.api._has_port_binding_extension = mock.Mock(return_value=True)
+
+        devspec = mock.Mock()
+        devspec.get_tags.return_value = {'physical_network': 'physnet1'}
+        get_pci_device_devspec_mock.return_value = devspec
+
+        instance = fake_instance.fake_instance_obj(self.context)
+        instance.migration_context = objects.MigrationContext()
+        instance.migration_context.old_pci_devices = objects.PciDeviceList(
+            objects=[objects.PciDevice(vendor_id='1377',
+                                       product_id='0047',
+                                       address='0000:0a:00.1',
+                                       compute_node_id=1,
+                                       request_id='1234567890')])
+        instance.migration_context.new_pci_devices = objects.PciDeviceList(
+            objects=[objects.PciDevice(vendor_id='1377',
+                                       product_id='0047',
+                                       address='0000:0b:00.1',
+                                       compute_node_id=2,
+                                       request_id='1234567890')])
+        instance.pci_devices = instance.migration_context.old_pci_devices
+
+        fake_ports = {'ports': [
+                        {'id': 'fake-port-1',
+                         'binding:vnic_type': 'direct',
+                         neutronapi.BINDING_HOST_ID: instance.host,
+                         neutronapi.BINDING_PROFILE:
+                            {'pci_slot': '0000:0a:00.1',
+                             'physical_network': 'phys_net',
+                             'pci_vendor_info': 'pci_vendor_info'}}]}
+        list_ports_mock = mock.Mock(return_value=fake_ports)
+        get_client_mock.return_value.list_ports = list_ports_mock
+
+        update_port_mock = mock.Mock()
+        get_client_mock.return_value.update_port = update_port_mock
+
+        # Try to update the port binding with no migration object.
+        self.api._update_port_binding_for_instance(self.context, instance,
+                                                   instance.host)
+        # No ports should be updated if the port's pci binding did not change.
+        update_port_mock.assert_not_called()
 
     def test_get_pci_mapping_for_migration(self):
         instance = fake_instance.fake_instance_obj(self.context)
@@ -5269,7 +5412,7 @@ class TestAllocateForInstance(test.NoDBTestCase):
         mock_client.create_port.assert_called_once_with(
             {'port': {
                 'network_id': uuids.net, 'tenant_id': uuids.tenant_id,
-                'admin_state_up': True}})
+                'admin_state_up': True, 'device_id': self.instance.uuid}})
 
     def test_create_ports_for_instance_with_security_groups(self):
         api = neutronapi.API()
@@ -5286,7 +5429,8 @@ class TestAllocateForInstance(test.NoDBTestCase):
         mock_client.create_port.assert_called_once_with(
             {'port': {
                 'network_id': uuids.net, 'tenant_id': uuids.tenant_id,
-                'admin_state_up': True, 'security_groups': security_groups}})
+                'admin_state_up': True, 'security_groups': security_groups,
+                'device_id': self.instance.uuid}})
 
     def test_create_ports_for_instance_with_cleanup_after_pc_failure(self):
         api = neutronapi.API()

@@ -47,7 +47,8 @@ class ServiceController(wsgi.Controller):
 
         _services = [
            s
-           for s in self.host_api.service_get_all(context, set_zones=True)
+           for s in self.host_api.service_get_all(context, set_zones=True,
+                                                  all_cells=True)
            if s['binary'] not in api_services
         ]
 
@@ -70,13 +71,15 @@ class ServiceController(wsgi.Controller):
         active = 'enabled'
         if svc['disabled']:
             active = 'disabled'
+        updated_time = self.servicegroup_api.get_updated_time(svc)
+
         service_detail = {'binary': svc['binary'],
                           'host': svc['host'],
                           'id': svc['id'],
                           'zone': svc['availability_zone'],
                           'status': active,
                           'state': state,
-                          'updated_at': svc['updated_at'],
+                          'updated_at': updated_time,
                           'disabled_reason': svc['disabled_reason']}
 
         for field in additional_fields:
@@ -150,7 +153,8 @@ class ServiceController(wsgi.Controller):
         """Do the actual PUT/update"""
         try:
             self.host_api.service_update(context, host, binary, payload)
-        except exception.HostBinaryNotFound as exc:
+        except (exception.HostBinaryNotFound,
+                exception.HostMappingNotFound) as exc:
             raise webob.exc.HTTPNotFound(explanation=exc.format_message())
 
     def _perform_action(self, req, id, body, actions):
@@ -193,6 +197,9 @@ class ServiceController(wsgi.Controller):
         except exception.ServiceNotFound:
             explanation = _("Service %s not found.") % id
             raise webob.exc.HTTPNotFound(explanation=explanation)
+        except exception.ServiceNotUnique:
+            explanation = _("Service id %s refers to multiple services.") % id
+            raise webob.exc.HTTPBadRequest(explanation=explanation)
 
     @extensions.expected_errors(())
     def index(self, req):

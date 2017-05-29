@@ -14,6 +14,7 @@
 
 from oslo_utils import fixture as utils_fixture
 
+from nova.tests import fixtures
 from nova.tests.functional.notification_sample_tests \
     import notification_sample_base
 from nova.tests.unit.api.openstack.compute import test_services
@@ -29,19 +30,24 @@ class TestServiceUpdateNotificationSample(
         self.stub_out("nova.db.service_update",
                       test_services.fake_service_update)
         self.useFixture(utils_fixture.TimeFixture(test_services.fake_utcnow()))
+        self.useFixture(fixtures.SingleCellSimple())
+        self.service_uuid = test_services.fake_service_get_by_host_binary(
+            None, 'host1', 'nova-compute')['uuid']
 
     def test_service_enable(self):
         body = {'host': 'host1',
                 'binary': 'nova-compute'}
         self.admin_api.api_put('os-services/enable', body)
-        self._verify_notification('service-update')
+        self._verify_notification('service-update',
+                                  replacements={'uuid': self.service_uuid})
 
     def test_service_disabled(self):
         body = {'host': 'host1',
                 'binary': 'nova-compute'}
         self.admin_api.api_put('os-services/disable', body)
         self._verify_notification('service-update',
-                                  replacements={'disabled': True})
+                                  replacements={'disabled': True,
+                                                'uuid': self.service_uuid})
 
     def test_service_disabled_log_reason(self):
         body = {'host': 'host1',
@@ -50,15 +56,16 @@ class TestServiceUpdateNotificationSample(
         self.admin_api.api_put('os-services/disable-log-reason', body)
         self._verify_notification('service-update',
                                   replacements={'disabled': True,
-                                                'disabled_reason': 'test2'})
+                                                'disabled_reason': 'test2',
+                                                'uuid': self.service_uuid})
 
     def test_service_force_down(self):
         body = {'host': 'host1',
                 'binary': 'nova-compute',
                 'forced_down': True}
-        self.admin_api.microversion = '2.12'
         self.admin_api.api_put('os-services/force-down', body)
         self._verify_notification('service-update',
                                   replacements={'forced_down': True,
                                                 'disabled': True,
-                                                'disabled_reason': 'test2'})
+                                                'disabled_reason': 'test2',
+                                                'uuid': self.service_uuid})

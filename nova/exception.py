@@ -86,16 +86,20 @@ class NovaException(Exception):
                 message = self.msg_fmt % kwargs
 
             except Exception:
-                # kwargs doesn't match a variable in the message
-                # log the issue and the kwargs
-                LOG.exception(_LE('Exception in string format operation'))
-                for name, value in kwargs.items():
-                    LOG.error("%s: %s" % (name, value))  # noqa
-
+                # NOTE(melwitt): This is done in a separate method so it can be
+                # monkey-patched during testing to make it a hard failure.
+                self._log_exception()
                 message = self.msg_fmt
 
         self.message = message
         super(NovaException, self).__init__(message)
+
+    def _log_exception(self):
+        # kwargs doesn't match a variable in the message
+        # log the issue and the kwargs
+        LOG.exception(_LE('Exception in string format operation'))
+        for name, value in self.kwargs.items():
+            LOG.error("%s: %s" % (name, value))  # noqa
 
     def format_message(self):
         # NOTE(mrodden): use the first argument to the python Exception object
@@ -352,10 +356,6 @@ class InvalidAggregateActionUpdateMeta(InvalidAggregateAction):
                 "%(aggregate_id)s. Reason: %(reason)s.")
 
 
-class InvalidGroup(Invalid):
-    msg_fmt = _("Group not valid. Reason: %(reason)s")
-
-
 class InvalidSortKey(Invalid):
     msg_fmt = _("Sort key supplied was not valid.")
 
@@ -433,6 +433,10 @@ class InvalidFixedIpAndMaxCountRequest(Invalid):
 
 class ServiceUnavailable(Invalid):
     msg_fmt = _("Service is unavailable at this time.")
+
+
+class ServiceNotUnique(Invalid):
+    msg_fmt = _("More than one possible service found.")
 
 
 class ComputeResourcesUnavailable(ServiceUnavailable):
@@ -569,6 +573,10 @@ class AgentBuildNotFound(NotFound):
 class AgentBuildExists(NovaException):
     msg_fmt = _("Agent-build with hypervisor %(hypervisor)s os %(os)s "
                 "architecture %(architecture)s exists.")
+
+
+class VolumeAttachmentNotFound(NotFound):
+    msg_fmt = _("Volume attachment %(attachment_id)s could not be found.")
 
 
 class VolumeNotFound(NotFound):
@@ -962,11 +970,6 @@ class ComputeHostNotFound(HostNotFound):
     msg_fmt = _("Compute host %(host)s could not be found.")
 
 
-class ComputeHostNotCreated(HostNotFound):
-    msg_fmt = _("Compute host %(name)s needs to be created first"
-                " before updating.")
-
-
 class HostBinaryNotFound(NotFound):
     msg_fmt = _("Could not find binary %(binary)s on host %(host)s.")
 
@@ -1065,10 +1068,6 @@ class SecurityGroupCannotBeApplied(Invalid):
                 " in order to apply security groups.")
 
 
-class SecurityGroupRuleExists(Invalid):
-    msg_fmt = _("Rule already exists in group: %(rule)s")
-
-
 class NoUniqueMatch(NovaException):
     msg_fmt = _("No Unique Match Found.")
     code = 409
@@ -1101,10 +1100,6 @@ class InvalidMigrationState(Invalid):
 class ConsoleLogOutputException(NovaException):
     msg_fmt = _("Console log output could not be retrieved for instance "
                 "%(instance_id)s. Reason: %(reason)s")
-
-
-class ConsolePoolNotFound(NotFound):
-    msg_fmt = _("Console pool %(pool_id)s could not be found.")
 
 
 class ConsolePoolExists(NovaException):
@@ -1236,10 +1231,6 @@ class ClassNotFound(NotFound):
 
 class InstanceTagNotFound(NotFound):
     msg_fmt = _("Instance %(instance_id)s has no tag '%(tag)s'")
-
-
-class RotationRequiredForBackup(NovaException):
-    msg_fmt = _("Rotation param is required for backup image_type")
 
 
 class KeyPairExists(NovaException):
@@ -1449,20 +1440,8 @@ class InstanceInfoCacheNotFound(NotFound):
                 "found.")
 
 
-class InvalidAssociation(NotFound):
-    msg_fmt = _("Invalid association.")
-
-
 class MarkerNotFound(NotFound):
     msg_fmt = _("Marker %(marker)s could not be found.")
-
-
-class InvalidInstanceIDMalformed(Invalid):
-    msg_fmt = _("Invalid id: %(instance_id)s (expecting \"i-...\")")
-
-
-class InvalidVolumeIDMalformed(Invalid):
-    msg_fmt = _("Invalid id: %(volume_id)s (expecting \"i-...\")")
 
 
 class CouldNotFetchImage(NovaException):
@@ -1619,10 +1598,6 @@ class ObjectActionError(NovaException):
     msg_fmt = _('Object action %(action)s failed because: %(reason)s')
 
 
-class CoreAPIMissing(NovaException):
-    msg_fmt = _("Core API extensions are missing: %(missing_apis)s")
-
-
 class AgentError(NovaException):
     msg_fmt = _('Error during following call to agent: %(method)s')
 
@@ -1653,10 +1628,6 @@ class InstanceGroupSaveException(NovaException):
     msg_fmt = _("%(field)s should not be part of the updates.")
 
 
-class PluginRetriesExceeded(NovaException):
-    msg_fmt = _("Number of retries to plugin (%(num_retries)d) exceeded.")
-
-
 class ImageDownloadModuleError(NovaException):
     msg_fmt = _("There was an error with the download module %(module)s. "
                 "%(reason)s")
@@ -1675,22 +1646,12 @@ class ImageDownloadModuleConfigurationError(ImageDownloadModuleError):
     msg_fmt = _("The module %(module)s is misconfigured: %(reason)s.")
 
 
-class SignatureVerificationError(NovaException):
-    msg_fmt = _("Signature verification for the image "
-                "failed: %(reason)s.")
-
-
 class ResourceMonitorError(NovaException):
     msg_fmt = _("Error when creating resource monitor: %(monitor)s")
 
 
 class PciDeviceWrongAddressFormat(NovaException):
     msg_fmt = _("The PCI address %(address)s has an incorrect format.")
-
-
-class PciDeviceInvalidAddressField(NovaException):
-    msg_fmt = _("Invalid PCI Whitelist: "
-                "The PCI address %(address)s has an invalid %(field)s.")
 
 
 class PciDeviceInvalidDeviceName(NovaException):
@@ -1751,11 +1712,6 @@ class PciRequestAliasNotDefined(NovaException):
     msg_fmt = _("PCI alias %(alias)s is not defined")
 
 
-class MissingParameter(NovaException):
-    msg_fmt = _("Not enough parameters: %(reason)s")
-    code = 400
-
-
 class PciConfigInvalidWhitelist(Invalid):
     msg_fmt = _("Invalid PCI devices Whitelist config %(reason)s")
 
@@ -1790,6 +1746,10 @@ class VolumesNotRemoved(Invalid):
     msg_fmt = _("Failed to remove volume(s): (%(reason)s)")
 
 
+class VolumeRebaseFailed(NovaException):
+    msg_fmt = _("Volume rebase failed: %(reason)s")
+
+
 class InvalidVideoMode(Invalid):
     msg_fmt = _("Provided video model (%(model)s) is not supported.")
 
@@ -1806,12 +1766,6 @@ class RequestedVRamTooHigh(NovaException):
 
 class InvalidWatchdogAction(Invalid):
     msg_fmt = _("Provided watchdog action (%(action)s) is not supported.")
-
-
-class NoLiveMigrationForConfigDriveInLibVirt(NovaException):
-    msg_fmt = _("Live migration of instances with config drives is not "
-                "supported in libvirt unless libvirt instance path and "
-                "drive data is shared across compute nodes.")
 
 
 class LiveMigrationWithOldNovaNotSupported(NovaException):
@@ -2017,14 +1971,6 @@ class MemoryPagesUnsupported(Invalid):
     msg_fmt = _("Host does not support guests with custom memory page sizes")
 
 
-class EnumFieldInvalid(Invalid):
-    msg_fmt = _('%(typename)s in %(fieldname)s is not an instance of Enum')
-
-
-class EnumFieldUnset(Invalid):
-    msg_fmt = _('%(fieldname)s missing field type')
-
-
 class InvalidImageFormat(Invalid):
     msg_fmt = _("Invalid image format '%(format)s'")
 
@@ -2067,6 +2013,11 @@ class LibguestfsCannotReadKernel(Invalid):
     msg_fmt = _("Libguestfs does not have permission to read host kernel.")
 
 
+class MaxDBRetriesExceeded(NovaException):
+    msg_fmt = _("Max retries of DB transaction exceeded attempting to "
+                "perform %(action)s.")
+
+
 class RealtimePolicyNotSupported(Invalid):
     msg_fmt = _("Realtime policy not supported by hypervisor")
 
@@ -2088,7 +2039,7 @@ class BuildRequestNotFound(NotFound):
 
 class AttachInterfaceNotSupported(Invalid):
     msg_fmt = _("Attaching interfaces is not supported for "
-                "instance %(instance)s.")
+                "instance %(instance_uuid)s.")
 
 
 class InvalidReservedMemoryPagesOption(Invalid):
@@ -2112,6 +2063,10 @@ class ResourceProviderInUse(NovaException):
 
 class InventoryWithResourceClassNotFound(NotFound):
     msg_fmt = _("No inventory of class %(resource_class)s found.")
+
+
+class InvalidResourceClass(Invalid):
+    msg_fmt = _("Resource class '%(resource_class)s' invalid.")
 
 
 class ResourceClassExists(NovaException):
@@ -2183,3 +2138,34 @@ class PlacementNotConfigured(NovaException):
     msg_fmt = _("This compute is not configured to talk to the placement "
                 "service. Configure the [placement] section of nova.conf "
                 "and restart the service.")
+
+
+class InvalidEmulatorThreadsPolicy(Invalid):
+    msg_fmt = _("CPU emulator threads option requested is invalid, "
+                "given: '%(requested)s', available: '%(available)s'.")
+
+
+class BadRequirementEmulatorThreadsPolicy(Invalid):
+    msg_fmt = _("An isolated CPU emulator threads option requires a dedicated "
+                "CPU policy option.")
+
+
+class PowerVMAPIFailed(NovaException):
+    msg_fmt = _("PowerVM API failed to complete for instance=%(inst_name)s.  "
+                "%(reason)s")
+
+
+class TraitNotFound(NotFound):
+    msg_fmt = _("No such trait %(name)s.")
+
+
+class TraitExists(NovaException):
+    msg_fmt = _("The Trait %(name)s already exists")
+
+
+class TraitCannotDeleteStandard(Invalid):
+    msg_fmt = _("Cannot delete standard trait %(name)s.")
+
+
+class TraitInUse(Invalid):
+    msg_fmt = _("The trait %(name)s is in use by a resource provider.")

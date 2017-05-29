@@ -68,6 +68,9 @@ deployments and there is a migration path.
 Cells V2
 ========
 
+* `Newton Summit Video - Nova Cells V2: What's Going On? <https://www.openstack.org/videos/austin-2016/nova-cells-v2-whats-going-on>`_
+* `Pike Summit Video - Scaling Nova: How CellsV2 Affects Your Deployment <https://www.openstack.org/videos/boston-2017/scaling-nova-how-cellsv2-affects-your-deployment>`_
+
 Manifesto
 ~~~~~~~~~
 
@@ -331,3 +334,269 @@ References
 ~~~~~~~~~~
 
 * `man pages for the cells v2 commands <http://docs.openstack.org/developer/nova/man/nova-manage.html#nova-cells-v2>`_
+
+Step-By-Step for Common Use Cases
+=================================
+
+The following are step-by-step examples for common use cases setting
+up Cells V2. This is intended as a quick reference that puts together
+everything explained in `Setup of Cells V2`_. It is assumed that you have
+followed all other install steps for Nova and are setting up Cells V2
+specifically at this point.
+
+Fresh Install
+~~~~~~~~~~~~~
+
+You are installing Nova for the first time and have no compute hosts in the
+database yet. This will set up a single cell Nova deployment.
+
+1. Reminder: You should have already created and synced the Nova API database
+   by creating a database, configuring its connection in the
+   ``[api_database]/connection`` setting in the Nova configuration file, and
+   running ``nova-manage api_db sync``.
+
+2. Create a database for cell0. If you are going to pass the database
+   connection url on the command line in step 3, you can name the cell0
+   database whatever you want. If you are not going to pass the database url on
+   the command line in step 3, you need to name the cell0 database based on the
+   name of your existing Nova database: <Nova database name>_cell0. For
+   example, if your Nova database is named ``nova``, then your cell0 database
+   should be named ``nova_cell0``.
+
+3. Run the ``map_cell0`` command to create and map cell0::
+
+     nova-manage cell_v2 map_cell0 \
+       --database_connection <database connection url>
+
+   The database connection url is generated based on the
+   ``[database]/connection`` setting in the Nova configuration file if not
+   specified on the command line.
+
+4. Run ``nova-manage db sync`` to populate the cell0 database with a schema.
+   The ``db sync`` command reads the database connection for cell0 that was
+   created in step 3.
+
+5. Run the ``create_cell`` command to create the single cell which will contain
+   your compute hosts::
+
+     nova-manage cell_v2 create_cell --name <name> \
+       --transport-url <transport url for message queue> \
+       --database_connection <database connection url>
+
+   The transport url is taken from the ``[DEFAULT]/transport_url`` setting in
+   the Nova configuration file if not specified on the command line. The
+   database url is taken from the ``[database]/connection`` setting in the Nova
+   configuration file if not specified on the command line.
+
+6. Configure and start your compute hosts. Before step 7, make sure you have
+   compute hosts in the database by running
+   ``nova service-list --binary nova-compute``.
+
+7. Run the ``discover_hosts`` command to map compute hosts to the single cell::
+
+     nova-manage cell_v2 discover_hosts
+
+   The command will search for compute hosts in the database of the cell you
+   created in step 5 and map them to the cell. You can also configure a
+   periodic task to have Nova discover new hosts automatically by setting
+   the ``[scheduler]/discover_hosts_in_cells_interval`` to a time interval in
+   seconds. The periodic task is run by the nova-scheduler service, so you must
+   be sure to configure it on all of your nova-scheduler hosts.
+
+.. note:: Remember: In the future, whenever you add new compute hosts, you
+          will need to run the ``discover_hosts`` command after starting them
+          to map them to the cell if you did not configure the automatic host
+          discovery in step 7.
+
+Upgrade (minimal)
+~~~~~~~~~~~~~~~~~
+
+You are upgrading an existing Nova install and have compute hosts in the
+database. This will set up a single cell Nova deployment.
+
+1. If you haven't already created a cell0 database in a prior release,
+   create a database for cell0 with a name based on the name of your Nova
+   database: <Nova database name>_cell0. If your Nova database is named
+   ``nova``, then your cell0 database should be named ``nova_cell0``.
+
+.. warning:: In Newton, the ``simple_cell_setup`` command expects the name of
+             the cell0 database to be based on the name of the Nova API
+             database: <Nova API database name>_cell0 and the database
+             connection url is taken from the ``[api_database]/connection``
+             setting in the Nova configuration file.
+
+2. Run the ``simple_cell_setup`` command to create and map cell0, create and
+   map the single cell, and map existing compute hosts and instances to the
+   single cell::
+
+     nova-manage cell_v2 simple_cell_setup \
+       --transport-url <transport url for message queue>
+
+   The transport url is taken from the ``[DEFAULT]/transport_url`` setting in
+   the Nova configuration file if not specified on the command line. The
+   database connection url will be generated based on the
+   ``[database]/connection`` setting in the Nova configuration file.
+
+.. note:: Remember: In the future, whenever you add new compute hosts, you
+          will need to run the ``discover_hosts`` command after starting them
+          to map them to the cell. You can also configure a periodic task to
+          have Nova discover new hosts automatically by setting the
+          ``[scheduler]/discover_hosts_in_cells_interval`` to a time interval
+          in seconds. The periodic task is run by the nova-scheduler service,
+          so you must be sure to configure it on all of your nova-scheduler
+          hosts.
+
+Upgrade with Cells V1
+~~~~~~~~~~~~~~~~~~~~~
+
+You are upgrading an existing Nova install that has Cells V1 enabled and have
+compute hosts in your databases. This will set up a multiple cell Nova
+deployment. At this time, it is recommended to keep Cells V1 enabled during and
+after the upgrade as multiple Cells V2 cell support is not fully finished and
+may not work properly in all scenarios. These upgrade steps will help ensure a
+simple cutover from Cells V1 to Cells V2 in the future.
+
+1. If you haven't already created a cell0 database in a prior release,
+   create a database for cell0. If you are going to pass the database
+   connection url on the command line in step 2, you can name the cell0
+   database whatever you want. If you are not going to pass the database url on
+   the command line in step 2, you need to name the cell0 database based on the
+   name of your existing Nova database: <Nova database name>_cell0. For
+   example, if your Nova database is named ``nova``, then your cell0 database
+   should be named ``nova_cell0``.
+
+2. Run the ``map_cell0`` command to create and map cell0::
+
+     nova-manage cell_v2 map_cell0 \
+       --database_connection <database connection url>
+
+   The database connection url is generated based on the
+   ``[database]/connection`` setting in the Nova configuration file if not
+   specified on the command line.
+
+3. Run ``nova-manage db sync`` to populate the cell0 database with a schema.
+   The ``db sync`` command reads the database connection for cell0 that was
+   created in step 2.
+
+4. Run the ``create_cell`` command to create cells which will contain your
+   compute hosts::
+
+     nova-manage cell_v2 create_cell --name <cell name> \
+       --transport-url <transport url for message queue> \
+       --database_connection <database connection url>
+
+   You will need to repeat this step for each cell in your deployment. Your
+   existing cell database will be re-used -- this simply informs the top-level
+   API database about your existing cell databases.
+
+   It is a good idea to specify a name for the new cell you create so you can
+   easily look up cell uuids with the ``list_cells`` command later if needed.
+
+   The transport url is taken from the ``[DEFAULT]/transport_url`` setting in
+   the Nova configuration file if not specified on the command line. The
+   database url is taken from the ``[database]/connection`` setting in the Nova
+   configuration file if not specified on the command line. If you are not
+   going to specify ``--database_connection`` and ``--transport-url`` on the
+   command line, be sure to specify your existing cell Nova configuration
+   file::
+
+     nova-manage --config-file <cell nova.conf> cell_v2 create_cell \
+       --name <cell name>
+
+5. Run the ``discover_hosts`` command to map compute hosts to cells::
+
+     nova-manage cell_v2 discover_hosts --cell_uuid <cell uuid>
+
+   You will need to repeat this step for each cell in your deployment unless
+   you omit the ``--cell_uuid`` option. If the cell uuid is not specified on
+   the command line, ``discover_hosts`` will search for compute hosts in each
+   cell database and map them to the corresponding cell. You can use the
+   ``list_cells`` command to look up cell uuids if you are going to specify
+   ``--cell_uuid``.
+
+   You can also configure a periodic task to have Nova discover new hosts
+   automatically by setting the
+   ``[scheduler]/discover_hosts_in_cells_interval`` to a time interval in
+   seconds. The periodic task is run by the nova-scheduler service, so you must
+   be sure to configure it on all of your nova-scheduler hosts.
+
+6. Run the ``map_instances`` command to map instances to cells::
+
+     nova-manage cell_v2 map_instances --cell_uuid <cell uuid> \
+       --max-count <max count>
+
+   You will need to repeat this step for each cell in your deployment. You can
+   use the ``list_cells`` command to look up cell uuids.
+
+   The ``--max-count`` option can be specified if you would like to limit the
+   number of instances to map in a single run. If ``--max-count`` is not
+   specified, all instances will be mapped. Repeated runs of the command will
+   start from where the last run finished so it is not necessary to increase
+   ``--max-count`` to finish. An exit code of 0 indicates that all instances
+   have been mapped. An exit code of 1 indicates that there are remaining
+   instances that need to be mapped.
+
+.. note:: Remember: In the future, whenever you add new compute hosts, you
+          will need to run the ``discover_hosts`` command after starting them
+          to map them to a cell if you did not configure the automatic host
+          discovery in step 5.
+
+Adding a new cell to an existing deployment
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To expand your deployment with a new cell, first follow the usual steps for
+standing up a new Cells V1 cell. After that is finished, follow step 4 in
+`Upgrade with Cells V1`_ to create a new Cells V2 cell for it. If you have
+added new compute hosts for the new cell, you will also need to run the
+``discover_hosts`` command after starting them to map them to the new cell if
+you did not configure the automatic host discovery as described in step 5 in
+`Upgrade with Cells V1`_.
+
+References
+~~~~~~~~~~
+
+* `man pages for the cells v2 commands <http://docs.openstack.org/developer/nova/man/nova-manage.html#nova-cells-v2>`_
+
+FAQs
+====
+
+#. How do I find out which hosts are bound to which cell?
+
+   There are a couple of ways to do this.
+
+   1. Run ``nova-manage --config-file <cell config> host list``. This will
+      only lists hosts in the provided cell nova.conf. Note, however, that
+      this command is deprecated as of the 16.0.0 Pike release.
+
+   2. Run ``nova-manage cell_v2 discover_hosts --verbose``. This does not
+      produce a report but if you are trying to determine if a host is in a
+      cell you can run this and it will report any hosts that are not yet
+      mapped to a cell and map them. This command is idempotent.
+
+   In the future, we may add a flag to the ``nova-manage cell_v2 list_cells``
+   command or add another command to list hosts in a specific cell (or all
+   cells).
+
+#. I updated the database_connection and/or transport_url in a cell using the
+   ``nova-manage cell_v2 update_cell`` command but the API is still trying to
+   use the old settings.
+
+   The cell mappings are cached in the nova-api service worker so you will need
+   to restart the worker process to rebuild the cache. Note that there is
+   another global cache tied to request contexts, which is used in the
+   nova-conductor and nova-scheduler services, so you might need to do the same
+   if you are having the same issue in those services. As of the 16.0.0 Pike
+   release there is no timer on the cache or hook to refresh the cache using a
+   SIGHUP to the service.
+
+#. I have upgraded from Newton to Ocata and I can list instances but I get a
+   404 NotFound error when I try to get details on a specific instance.
+
+   Instances need to be mapped to cells so the API knows which cell an instance
+   lives in. When upgrading, the ``nova-manage cell_v2 simple_cell_setup``
+   command will automatically map the instances to the single cell which is
+   backed by the existing nova database. If you have already upgraded
+   and did not use the ``simple_cell_setup`` command, you can run the
+   ``nova-manage cell_v2 map_instances --cell_uuid <cell_uuid>`` command to
+   map all instances in the given cell. See the :ref:`man-page-cells-v2` man
+   page for details on command usage.

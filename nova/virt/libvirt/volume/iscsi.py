@@ -37,7 +37,7 @@ class LibvirtISCSIVolumeDriver(libvirt_volume.LibvirtBaseVolumeDriver):
         self.connector = connector.InitiatorConnector.factory(
             'ISCSI', utils.get_root_helper(),
             use_multipath=CONF.libvirt.volume_use_multipath,
-            device_scan_attempts=CONF.libvirt.num_iscsi_scan_tries,
+            device_scan_attempts=CONF.libvirt.num_volume_scan_tries,
             transport=self._get_transport())
 
     def _get_transport(self):
@@ -57,7 +57,7 @@ class LibvirtISCSIVolumeDriver(libvirt_volume.LibvirtBaseVolumeDriver):
         conf.driver_io = "native"
         return conf
 
-    def connect_volume(self, connection_info, disk_info):
+    def connect_volume(self, connection_info, disk_info, instance):
         """Attach the volume to instance_name."""
 
         LOG.debug("Calling os-brick to attach iSCSI Volume")
@@ -66,7 +66,7 @@ class LibvirtISCSIVolumeDriver(libvirt_volume.LibvirtBaseVolumeDriver):
 
         connection_info['data']['device_path'] = device_info['path']
 
-    def disconnect_volume(self, connection_info, disk_dev):
+    def disconnect_volume(self, connection_info, disk_dev, instance):
         """Detach the volume from instance_name."""
 
         LOG.debug("calling os-brick to detach iSCSI Volume")
@@ -78,4 +78,4 @@ class LibvirtISCSIVolumeDriver(libvirt_volume.LibvirtBaseVolumeDriver):
         LOG.debug("Disconnected iSCSI Volume %s", disk_dev)
 
         super(LibvirtISCSIVolumeDriver,
-              self).disconnect_volume(connection_info, disk_dev)
+              self).disconnect_volume(connection_info, disk_dev, instance)

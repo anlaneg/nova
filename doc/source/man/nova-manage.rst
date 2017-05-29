@@ -21,7 +21,7 @@ SYNOPSIS
 DESCRIPTION
 ===========
 
-nova-manage controls cloud computing instances by managing shell selection, vpn connections, and floating IP address configuration. More information about OpenStack Nova is at http://nova.openstack.org.
+nova-manage controls cloud computing instances by managing shell selection, vpn connections, and floating IP address configuration. More information about OpenStack Nova is at https://docs.openstack.org/developer/nova.
 
 OPTIONS
 =======
@@ -75,6 +75,8 @@ Nova API Database
 ``nova-manage api_db sync``
 
     Sync the api cells database up to the most recent version. This is the standard way to create the db as well.
+
+.. _man-page-cells-v2:
 
 Nova Cells v2
 ~~~~~~~~~~~~~
@@ -141,14 +143,17 @@ Nova Cells v2
     transport url or database connection was missing, and 2 if a cell is
     already using that transport url and database connection combination.
 
-``nova-manage cell_v2 discover_hosts [--cell_uuid <cell_uuid>] [--verbose]``
+``nova-manage cell_v2 discover_hosts [--cell_uuid <cell_uuid>] [--verbose] [--strict]``
 
     Searches cells, or a single cell, and maps found hosts. This command will
     check the database for each cell (or a single one if passed in) and map
     any hosts which are not currently mapped. If a host is already mapped
     nothing will be done. You need to re-run this command each time you add
     more compute hosts to a cell (otherwise the scheduler will never place
-    instances there).
+    instances there and the API will not list the new hosts). If the strict
+    option is provided the command will only be considered successful if an
+    unmapped host is discovered (exit code 0). Any other case is considered a
+    failure (exit code 1).
 
 ``nova-manage cell_v2 list_cells [--verbose]``
 
@@ -163,8 +168,27 @@ Nova Cells v2
     found, 2 if host mappings were found for the cell (cell not empty), and
     3 if there are instances mapped to the cell (cell not empty).
 
+``nova-manage cell_v2 update_cell --cell_uuid <cell_uuid> [--name <cell_name>] [--transport-url <transport_url>] [--database_connection <database_connection>]``
+
+    Updates the properties of a cell by the given uuid. If a
+    database_connection is not specified, it will attempt to use the one
+    defined by ``[database]/connection`` in the configuration file.  If a
+    transport_url is not specified, it will attempt to use the one defined
+    by ``[DEFAULT]/transport_url`` in the configuration file. If the cell
+    is not found by uuid, this command will return an exit code of 1. If
+    the properties cannot be set, this will return 2. Otherwise, the exit
+    code will be 0.
+
+    NOTE: Updating the transport_url or database_connection fields on
+    a running system will NOT result in all nodes immediately using the
+    new values. Use caution when changing these values.
+
 Nova Logs
 ~~~~~~~~~
+
+.. deprecated:: 16.0.0
+
+    This will be removed in 17.0.0 (Queens)
 
 ``nova-manage logs errors``
 
@@ -176,6 +200,10 @@ Nova Logs
 
 Nova Shell
 ~~~~~~~~~~
+
+.. deprecated:: 16.0.0
+
+    This will be removed in 17.0.0 (Queens)
 
 ``nova-manage shell bpython``
 
@@ -197,8 +225,29 @@ Nova Shell
 
     Runs the named script from the specified path with flags set.
 
+.. _nova-manage-quota:
+
+Nova Quota
+~~~~~~~~~~
+
+``nova-manage quota refresh``
+
+    Refresh the quota usage for a project or user.
+
 Nova Project
 ~~~~~~~~~~~~
+
+.. deprecated:: 16.0.0
+
+    Much of this information is available over the API, with the exception of
+    the ``quota_usage_refresh`` command. Operators should use the `API`_ for
+    all other operations.
+
+    This command group will be removed in 17.0.0 (Queens). Users of the
+    ``quota_usage_refresh`` subcommand should instead use :ref:`nova-manage
+    quota refresh <nova-manage-quota>`
+
+.. _API: https://developer.openstack.org/api-ref/compute/#quota-sets-os-quota-sets
 
 ``nova-manage project quota <project_id> [--user <user_id>] [--key <key>] [--value <value>]``
 
@@ -211,10 +260,16 @@ Nova Project
     usage record matches the actual used.  If a key is not specified
     then all quota usages relevant to the project/user are refreshed.
 
+    .. seealso::
+
+        The :ref:`nova-manage quota refresh <nova-manage-quota>` command
+        performs the same actions and is not deprecated. That command should be
+        used instead.
+
 SEE ALSO
 ========
 
-* `OpenStack Nova <http://nova.openstack.org>`__
+* `OpenStack Nova <https://docs.openstack.org/developer/nova>`__
 
 BUGS
 ====

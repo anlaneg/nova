@@ -21,7 +21,8 @@ SYNOPSIS
 DESCRIPTION
 ===========
 
-nova-api is a server daemon that serves the nova EC2 and OpenStack APIs in separate greenthreads
+nova-api is a server daemon that serves the metadata and compute APIs in
+separate greenthreads
 
 OPTIONS
 =======
@@ -40,7 +41,8 @@ FILES
 SEE ALSO
 ========
 
-* `OpenStack Nova <http://nova.openstack.org>`__
+* `OpenStack Nova <https://docs.openstack.org/developer/nova>`__
+* `Using WSGI with Nova <https://docs.openstack.org/devloper/nova/wsgi.html>`__
 
 BUGS
 ====

@@ -60,7 +60,7 @@ def catch_notimplementederror(f):
         except NotImplementedError:
             frame = traceback.extract_tb(sys.exc_info()[2])[-1]
             LOG.error("%(driver)s does not implement %(method)s "
-                      "required for test %(test)s" %
+                      "required for test %(test)s",
                       {'driver': type(self.connection),
                        'method': frame[2], 'test': f.__name__})
 
@@ -125,9 +125,9 @@ class _FakeDriverBackendTestCase(object):
         def fake_make_drive(_self, _path):
             pass
 
-        def fake_get_instance_disk_info(_self, instance, xml=None,
-                                        block_device_info=None):
-            return '[]'
+        def fake_get_instance_disk_info_from_config(
+                _self, guest_config, block_device_info):
+            return []
 
         def fake_delete_instance_files(_self, _instance):
             pass
@@ -151,8 +151,8 @@ class _FakeDriverBackendTestCase(object):
         import nova.virt.libvirt.driver
 
         self.stubs.Set(nova.virt.libvirt.driver.LibvirtDriver,
-                       '_get_instance_disk_info',
-                       fake_get_instance_disk_info)
+                       '_get_instance_disk_info_from_config',
+                       fake_get_instance_disk_info_from_config)
 
         self.stubs.Set(nova.virt.libvirt.driver.disk_api,
                        'extend', fake_extend)
@@ -205,7 +205,7 @@ class VirtDriverLoaderTestCase(_FakeDriverBackendTestCase, test.TestCase):
         }
 
     def test_load_new_drivers(self):
-        for cls, driver in six.iteritems(self.new_drivers):
+        for cls, driver in self.new_drivers.items():
             self.flags(compute_driver=cls)
             # NOTE(sdague) the try block is to make it easier to debug a
             # failure by knowing which driver broke
@@ -469,7 +469,9 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         self.assertEqual(storage_ip, result['ip'])
 
     @catch_notimplementederror
-    def test_attach_detach_volume(self):
+    @mock.patch.object(libvirt.driver.LibvirtDriver, '_build_device_metadata',
+                       return_value=objects.InstanceDeviceMetadata())
+    def test_attach_detach_volume(self, _):
         instance_ref, network_info = self._get_running_instance()
         connection_info = {
             "driver_volume_type": "fake",
@@ -484,7 +486,9 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
                                           '/dev/sda'))
 
     @catch_notimplementederror
-    def test_swap_volume(self):
+    @mock.patch.object(libvirt.driver.LibvirtDriver, '_build_device_metadata',
+                       return_value=objects.InstanceDeviceMetadata())
+    def test_swap_volume(self, _):
         instance_ref, network_info = self._get_running_instance()
         self.assertIsNone(
             self.connection.attach_volume(None, {'driver_volume_type': 'fake',
@@ -500,7 +504,9 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
                                         '/dev/sda', 2))
 
     @catch_notimplementederror
-    def test_attach_detach_different_power_states(self):
+    @mock.patch.object(libvirt.driver.LibvirtDriver, '_build_device_metadata',
+                       return_value=objects.InstanceDeviceMetadata())
+    def test_attach_detach_different_power_states(self, _):
         instance_ref, network_info = self._get_running_instance()
         connection_info = {
             "driver_volume_type": "fake",

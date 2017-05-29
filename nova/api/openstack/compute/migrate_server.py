@@ -27,11 +27,9 @@ from nova.api import validation
 from nova import compute
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LE
 from nova.policies import migrate_server as ms_policies
 
 LOG = logging.getLogger(__name__)
-ALIAS = "os-migrate-server"
 
 
 class MigrateServerController(wsgi.Controller):
@@ -114,9 +112,9 @@ class MigrateServerController(wsgi.Controller):
                 exception.LiveMigrationWithOldNovaNotSupported) as ex:
             if async:
                 with excutils.save_and_reraise_exception():
-                    LOG.error(_LE("Unexpected exception received from "
-                                  "conductor during pre-live-migration checks "
-                                  "'%(ex)s'"), {'ex': ex})
+                    LOG.error("Unexpected exception received from "
+                              "conductor during pre-live-migration checks "
+                              "'%(ex)s'", {'ex': ex})
             else:
                 raise exc.HTTPBadRequest(explanation=ex.format_message())
         except exception.InstanceIsLocked as e:
@@ -132,19 +130,3 @@ class MigrateServerController(wsgi.Controller):
             message = _("Can't force to a non-provided destination")
             raise exc.HTTPBadRequest(explanation=message)
         return force
-
-
-class MigrateServer(extensions.V21APIExtensionBase):
-    """Enable migrate and live-migrate server actions."""
-
-    name = "MigrateServer"
-    alias = ALIAS
-    version = 1
-
-    def get_controller_extensions(self):
-        controller = MigrateServerController()
-        extension = extensions.ControllerExtension(self, 'servers', controller)
-        return [extension]
-
-    def get_resources(self):
-        return []

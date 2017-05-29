@@ -445,21 +445,26 @@ user documentation.
 2.40
 ----
 
-  Optional parameters 'limit' and 'marker' were added to the GET
-  /os-simple-tenant-usage and GET os-simple-tenant-usage/{tenant_id}
-  requests. The aggregate usage data no longer reflects all instances for a
-  tenant, but rather just the paginated instances ordered by instance id ASC.
-  API consumers will need to stitch the aggregate data back up (add the totals)
-  if a tenant's instances span several pages.
+  Optional query parameters ``limit`` and ``marker`` were added to the
+  ``os-simple-tenant-usage`` endpoints for pagination. If a limit isn’t
+  provided, the configurable ``max_limit`` will be used which currently
+  defaults to 1000.
 
-    GET /os-simple-tenant-usage?limit={limit}&marker={instance_uuid}
-    GET /os-simple-tenant-usage/{tenant_id}?limit={limit}&marker={instance_uuid}
+  ::
 
-  Older versions of the `os-simple-tenant-usage` endpoints will not accept
+      GET /os-simple-tenant-usage?limit={limit}&marker={instance_uuid}
+      GET /os-simple-tenant-usage/{tenant_id}?limit={limit}&marker={instance_uuid}
+
+  A tenant’s usage statistics may span multiple pages when the number of
+  instances exceeds limit, and API consumers will need to stitch together
+  the aggregate results if they still want totals for all instances in a
+  specific time window, grouped by tenant.
+
+  Older versions of the ``os-simple-tenant-usage`` endpoints will not accept
   these new paging query parameters, but they will start to silently limit by
-  `CONF.api.max_limit` to encourage the adoption of this new microversion,
-  and circumvent the existing possibility DoS-like usage requests on systems
-  with thousands of instances.
+  ``max_limit`` to encourage the adoption of this new microversion, and
+  circumvent the existing possibility of DoS-like usage requests when there
+  are thousands of instances.
 
 2.41
 ----
@@ -469,11 +474,74 @@ user documentation.
   an aggregate. The `os-aggregates` API resource endpoint remains an
   administrator-only API.
 
-2.42
-----
+2.42 (Maximum in Ocata)
+-----------------------
 
   In the context of device tagging at server create time, a bug has caused the
   tag attribute to no longer be accepted for networks starting with version
   2.37 and for block_device_mapping_v2 starting with version 2.33. Microversion
   2.42 restores the tag parameter to both networks and block_device_mapping_v2,
   allowing networks and block devices to be tagged again.
+
+2.43
+----
+
+  The ``os-hosts`` API is deprecated as of the 2.43 microversion. Requests
+  made with microversion >= 2.43 will result in a 404 error. To list and show
+  host details, use the ``os-hypervisors`` API. To enable or disable a
+  service, use the ``os-services`` API. There is no replacement for the
+  `shutdown`, `startup`, `reboot`, or `maintenance_mode` actions as those are
+  system-level operations which should be outside of the control of the
+  compute service.
+
+2.44
+----
+
+  The following APIs which are considered as proxies of Neutron networking API,
+  are deprecated and will result in a 404 error response in new Microversion::
+
+    POST /servers/{server_uuid}/action
+    {
+        "addFixedIp": {...}
+    }
+
+    POST /servers/{server_uuid}/action
+    {
+        "removeFixedIp": {...}
+    }
+
+    POST /servers/{server_uuid}/action
+    {
+        "addFloatingIp": {...}
+    }
+
+    POST /servers/{server_uuid}/action
+    {
+        "removeFloatingIp": {...}
+    }
+
+  Those server actions can be replaced by calling the Neutron API directly.
+
+  The nova-network specific API to query the server's interfaces is
+  deprecated::
+
+    GET /servers/{server_uuid}/os-virtual-interfaces
+
+  To query attached neutron interfaces for a specific server, the API
+  `GET /servers/{server_uuid}/os-interface` can be used.
+
+2.45
+----
+
+  The ``createImage`` and ``createBackup`` server action APIs no longer return
+  a ``Location`` header in the response for the snapshot image, they now return
+  a json dict in the response body with an ``image_id`` key and uuid value.
+
+2.46
+----
+
+  The request_id created for every inbound request is now returned in
+  ``X-OpenStack-Request-ID`` in addition to ``X-Compute-Request-ID``
+  to be consistent with the rest of OpenStack. This is a signaling
+  only microversion, as these header settings happen well before
+  microversion processing.

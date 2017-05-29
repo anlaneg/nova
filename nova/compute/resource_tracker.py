@@ -34,11 +34,13 @@ from nova import exception
 from nova.i18n import _, _LI, _LW
 from nova import objects
 from nova.objects import base as obj_base
+from nova.objects import fields
 from nova.objects import migration as migration_obj
 from nova.pci import manager as pci_manager
 from nova.pci import request as pci_request
 from nova import rpc
 from nova.scheduler import client as scheduler_client
+from nova.scheduler.client import report
 from nova import utils
 from nova.virt import hardware
 
@@ -77,6 +79,51 @@ def _is_trackable_migration(migration):
                                         'evacuation')
 
 
+def _normalize_inventory_from_cn_obj(inv_data, cn):
+    """Helper function that injects various information from a compute node
+    object into the inventory dict returned from the virt driver's
+    get_inventory() method. This function allows us to marry information like
+    *_allocation_ratio and reserved memory amounts that are in the
+    compute_nodes DB table and that the virt driver doesn't know about with the
+    information the virt driver *does* know about.
+
+    Note that if the supplied inv_data contains allocation_ratio, reserved or
+    other fields, we DO NOT override the value with that of the compute node.
+    This is to ensure that the virt driver is the single source of truth
+    regarding inventory information. For instance, the Ironic virt driver will
+    always return a very specific inventory with allocation_ratios pinned to
+    1.0.
+
+    :param inv_data: Dict, keyed by resource class, of inventory information
+                     returned from virt driver's get_inventory() method
+    :param compute_node: `objects.ComputeNode` describing the compute node
+    """
+    if fields.ResourceClass.VCPU in inv_data:
+        cpu_inv = inv_data[fields.ResourceClass.VCPU]
+        if 'allocation_ratio' not in cpu_inv:
+            cpu_inv['allocation_ratio'] = cn.cpu_allocation_ratio
+        if 'reserved' not in cpu_inv:
+            cpu_inv['reserved'] = CONF.reserved_host_cpus
+
+    if fields.ResourceClass.MEMORY_MB in inv_data:
+        mem_inv = inv_data[fields.ResourceClass.MEMORY_MB]
+        if 'allocation_ratio' not in mem_inv:
+            mem_inv['allocation_ratio'] = cn.ram_allocation_ratio
+        if 'reserved' not in mem_inv:
+            mem_inv['reserved'] = CONF.reserved_host_memory_mb
+
+    if fields.ResourceClass.DISK_GB in inv_data:
+        disk_inv = inv_data[fields.ResourceClass.DISK_GB]
+        if 'allocation_ratio' not in disk_inv:
+            disk_inv['allocation_ratio'] = cn.disk_allocation_ratio
+        if 'reserved' not in disk_inv:
+            # TODO(johngarbutt) We should either move to reserved_host_disk_gb
+            # or start tracking DISK_MB.
+            reserved_mb = CONF.reserved_host_disk_mb
+            reserved_gb = report.convert_mb_to_ceil_gb(reserved_mb)
+            disk_inv['reserved'] = reserved_gb
+
+
 class ResourceTracker(object):
     """Compute helper class for keeping track of resource usage as instances
     are built and destroyed.
@@ -95,6 +142,7 @@ class ResourceTracker(object):
         self.monitors = monitor_handler.monitors
         self.old_resources = collections.defaultdict(objects.ComputeNode)
         self.scheduler_client = scheduler_client.SchedulerClient()
+        self.reportclient = self.scheduler_client.reportclient
         self.ram_allocation_ratio = CONF.ram_allocation_ratio
         self.cpu_allocation_ratio = CONF.cpu_allocation_ratio
         self.disk_allocation_ratio = CONF.disk_allocation_ratio
@@ -148,6 +196,9 @@ class ResourceTracker(object):
         LOG.debug("Disk overhead for %(flavor)d GB instance; %(overhead)d "
                   "GB", {'flavor': instance.flavor.root_gb,
                          'overhead': overhead.get('disk_gb', 0)})
+        LOG.debug("CPU overhead for %(flavor)d vCPUs instance; %(overhead)d "
+                  "vCPU(s)", {'flavor': instance.flavor.vcpus,
+                              'overhead': overhead.get('vcpus', 0)})
 
         cn = self.compute_nodes[nodename]
         pci_requests = objects.InstancePCIRequests.get_by_instance_uuid(
@@ -238,6 +289,9 @@ class ResourceTracker(object):
         LOG.debug("Disk overhead for %(flavor)d GB instance; %(overhead)d "
                   "GB", {'flavor': instance.flavor.root_gb,
                          'overhead': overhead.get('disk_gb', 0)})
+        LOG.debug("CPU overhead for %(flavor)d vCPUs instance; %(overhead)d "
+                  "vCPU(s)", {'flavor': instance.flavor.vcpus,
+                              'overhead': overhead.get('vcpus', 0)})
 
         cn = self.compute_nodes[nodename]
 
@@ -364,10 +418,23 @@ class ResourceTracker(object):
 
         self._update(context.elevated(), self.compute_nodes[nodename])
 
+    def _drop_pci_devices(self, instance, nodename, prefix):
+        if self.pci_tracker:
+            # free old/new allocated pci devices
+            pci_devices = self._get_migration_context_resource(
+                'pci_devices', instance, prefix=prefix)
+            if pci_devices:
+                for pci_device in pci_devices:
+                    self.pci_tracker.free_device(pci_device, instance)
+
+                dev_pools_obj = self.pci_tracker.stats.to_device_pools_obj()
+                self.compute_nodes[nodename].pci_device_pools = dev_pools_obj
+
     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
     def drop_move_claim(self, context, instance, nodename,
                         instance_type=None, prefix='new_'):
-        """Remove usage for an incoming/outgoing migration."""
+        # Remove usage for an incoming/outgoing migration on the destination
+        # node.
         if instance['uuid'] in self.tracked_migrations:
             migration = self.tracked_migrations.pop(instance['uuid'])
 
@@ -381,17 +448,22 @@ class ResourceTracker(object):
                     'numa_topology', instance, prefix=prefix)
                 usage = self._get_usage_dict(
                         instance_type, numa_topology=numa_topology)
-                if self.pci_tracker:
-                    # free old/new allocated pci devices
-                    pci_devices = self._get_migration_context_resource(
-                        'pci_devices', instance, prefix=prefix)
-                    if pci_devices:
-                        for pci_device in pci_devices:
-                            self.pci_tracker.free_device(pci_device, instance)
+                self._drop_pci_devices(instance, nodename, prefix)
                 self._update_usage(usage, nodename, sign=-1)
 
                 ctxt = context.elevated()
                 self._update(ctxt, self.compute_nodes[nodename])
+        # Remove usage for an instance that is not tracked in migrations (such
+        # as on the source node after a migration).
+        # NOTE(lbeliveau): On resize on the same node, the instance is
+        # included in both tracked_migrations and tracked_instances.
+        elif (instance['uuid'] in self.tracked_instances):
+            self.tracked_instances.pop(instance['uuid'])
+            self._drop_pci_devices(instance, nodename, prefix)
+            # TODO(lbeliveau): Validate if numa needs the same treatment.
+
+            ctxt = context.elevated()
+            self._update(ctxt, self.compute_nodes[nodename])
 
     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
     def update_usage(self, context, instance, nodename):
@@ -435,7 +507,7 @@ class ResourceTracker(object):
             cn = self.compute_nodes[nodename]
             self._copy_resources(cn, resources)
             self._setup_pci_tracker(context, cn, resources)
-            self.scheduler_client.update_resource_stats(cn)
+            self._update(context, cn)
             return
 
         # now try to get the compute node record from the
@@ -445,7 +517,7 @@ class ResourceTracker(object):
             self.compute_nodes[nodename] = cn
             self._copy_resources(cn, resources)
             self._setup_pci_tracker(context, cn, resources)
-            self.scheduler_client.update_resource_stats(cn)
+            self._update(context, cn)
             return
 
         # there was no local copy and none in the database
@@ -461,7 +533,7 @@ class ResourceTracker(object):
                  {'host': self.host, 'node': nodename})
 
         self._setup_pci_tracker(context, cn, resources)
-        self.scheduler_client.update_resource_stats(cn)
+        self._update(context, cn)
 
     def _setup_pci_tracker(self, context, compute_node, resources):
         if not self.pci_tracker:
@@ -499,6 +571,9 @@ class ResourceTracker(object):
         for monitor in self.monitors:
             try:
                 monitor.populate_metrics(metrics)
+            except NotImplementedError:
+                LOG.debug("The compute driver doesn't support host "
+                          "metrics for  %(mon)s", {'mon': monitor})
             except Exception as exc:
                 LOG.warning(_LW("Cannot get the metrics from %(mon)s; "
                                 "error: %(exc)s"),
@@ -723,24 +798,41 @@ class ResourceTracker(object):
         """Update partial stats locally and populate them to Scheduler."""
         if not self._resource_change(compute_node):
             return
+        nodename = compute_node.hypervisor_hostname
+        compute_node.save()
         # Persist the stats to the Scheduler
-        self.scheduler_client.update_resource_stats(compute_node)
+        try:
+            inv_data = self.driver.get_inventory(nodename)
+            _normalize_inventory_from_cn_obj(inv_data, compute_node)
+            self.scheduler_client.set_inventory_for_provider(
+                compute_node.uuid,
+                compute_node.hypervisor_hostname,
+                inv_data,
+            )
+        except NotImplementedError:
+            # Eventually all virt drivers will return an inventory dict in the
+            # format that the placement API expects and we'll be able to remove
+            # this code branch
+            self.scheduler_client.update_compute_node(compute_node)
+
         if self.pci_tracker:
             self.pci_tracker.save(context)
 
     def _update_usage(self, usage, nodename, sign=1):
         mem_usage = usage['memory_mb']
         disk_usage = usage.get('root_gb', 0)
+        vcpus_usage = usage.get('vcpus', 0)
 
         overhead = self.driver.estimate_instance_overhead(usage)
         mem_usage += overhead['memory_mb']
         disk_usage += overhead.get('disk_gb', 0)
+        vcpus_usage += overhead.get('vcpus', 0)
 
         cn = self.compute_nodes[nodename]
         cn.memory_mb_used += sign * mem_usage
         cn.local_gb_used += sign * disk_usage
         cn.local_gb_used += sign * usage.get('ephemeral_gb', 0)
-        cn.vcpus_used += sign * usage.get('vcpus', 0)
+        cn.vcpus_used += sign * vcpus_usage
 
         # free ram and disk may be negative, depending on policy:
         cn.free_ram_mb = cn.memory_mb - cn.memory_mb_used
@@ -917,8 +1009,7 @@ class ResourceTracker(object):
                 self.pci_tracker.update_pci_for_instance(context,
                                                          instance,
                                                          sign=sign)
-            self.scheduler_client.reportclient.update_instance_allocation(
-                cn, instance, sign)
+            self.reportclient.update_instance_allocation(cn, instance, sign)
             # new instance, update compute node resource usage:
             self._update_usage(self._get_usage_dict(instance), nodename,
                                sign=sign)
@@ -942,7 +1033,7 @@ class ResourceTracker(object):
         # set some initial values, reserve room for host/hypervisor:
         cn.local_gb_used = CONF.reserved_host_disk_mb / 1024
         cn.memory_mb_used = CONF.reserved_host_memory_mb
-        cn.vcpus_used = 0
+        cn.vcpus_used = CONF.reserved_host_cpus
         cn.free_ram_mb = (cn.memory_mb - cn.memory_mb_used)
         cn.free_disk_gb = (cn.local_gb - cn.local_gb_used)
         cn.current_workload = 0
@@ -952,10 +1043,27 @@ class ResourceTracker(object):
             if instance.vm_state not in vm_states.ALLOW_RESOURCE_REMOVAL:
                 self._update_usage_from_instance(context, instance, nodename)
 
-        self.scheduler_client.reportclient.remove_deleted_instances(
-                cn, self.tracked_instances.values())
+        # Remove allocations for instances that have been removed.
+        self._remove_deleted_instances_allocations(context, cn)
+
         cn.free_ram_mb = max(0, cn.free_ram_mb)
         cn.free_disk_gb = max(0, cn.free_disk_gb)
+
+    def _remove_deleted_instances_allocations(self, context, cn):
+        tracked_keys = set(self.tracked_instances.keys())
+        allocations = self.reportclient.get_allocations_for_resource_provider(
+                cn.uuid) or {}
+        allocations_to_delete = set(allocations.keys()) - tracked_keys
+        for instance_uuid in allocations_to_delete:
+            # Allocations related to instances being scheduled should not be
+            # deleted if we already wrote the allocation previously.
+            instance = objects.Instance.get_by_uuid(context, instance_uuid,
+                                                    expected_attrs=[])
+            if not instance.host:
+                continue
+            LOG.warning('Deleting stale allocation for instance %s',
+                        instance_uuid)
+            self.reportclient.delete_allocation_for_instance(instance_uuid)
 
     def _find_orphaned_instances(self):
         """Given the set of instances and migrations already account for

@@ -20,18 +20,21 @@ Allows overriding of flags for use of fakes, and some black magic for
 inline callbacks.
 
 """
-import contextlib
 
-import datetime
-import eventlet
+import eventlet  # noqa
 eventlet.monkey_patch(os=False)
 
+import abc
+import contextlib
 import copy
+import datetime
 import inspect
-import mock
 import os
+import pprint
+import sys
 
 import fixtures
+import mock
 from oslo_cache import core as cache
 from oslo_concurrency import lockutils
 from oslo_config import cfg
@@ -47,6 +50,7 @@ import testtools
 
 from nova import context
 from nova import db
+from nova import exception
 from nova.network import manager as network_manager
 from nova.network.security_group import openstack_driver
 from nova import objects
@@ -167,6 +171,26 @@ def _patch_mock_to_raise_for_invalid_assert_calls():
 _patch_mock_to_raise_for_invalid_assert_calls()
 
 
+class NovaExceptionReraiseFormatError(object):
+    real_log_exception = exception.NovaException._log_exception
+
+    @classmethod
+    def patch(cls):
+        exception.NovaException._log_exception = cls._wrap_log_exception
+
+    @staticmethod
+    def _wrap_log_exception(self):
+        exc_info = sys.exc_info()
+        NovaExceptionReraiseFormatError.real_log_exception(self)
+        six.reraise(*exc_info)
+
+
+# NOTE(melwitt) This needs to be done at import time in order to also catch
+# NovaException format errors that are in mock decorators. In these cases, the
+# errors will be raised during test listing, before tests actually run.
+NovaExceptionReraiseFormatError.patch()
+
+
 class TestCase(testtools.TestCase):
     """Test case base class for all unit tests.
 
@@ -199,7 +223,8 @@ class TestCase(testtools.TestCase):
 
         self.useFixture(nova_fixtures.OutputStreamCapture())
 
-        self.useFixture(nova_fixtures.StandardLogging())
+        self.stdlog = nova_fixtures.StandardLogging()
+        self.useFixture(self.stdlog)
 
         # NOTE(sdague): because of the way we were using the lock
         # wrapper we ended up with a lot of tests that started
@@ -222,6 +247,12 @@ class TestCase(testtools.TestCase):
         self.useFixture(conf_fixture.ConfFixture(CONF))
         self.useFixture(nova_fixtures.RPCFixture('nova.test'))
 
+        # we cannot set this in the ConfFixture as oslo only registers the
+        # notification opts at the first instantiation of a Notifier that
+        # happens only in the RPCFixture
+        CONF.set_default('driver', ['test'],
+                         group='oslo_messaging_notifications')
+
         # NOTE(danms): Make sure to reset us back to non-remote objects
         # for each test to avoid interactions. Also, backup the object
         # registry.
@@ -233,6 +264,7 @@ class TestCase(testtools.TestCase):
         # NOTE(danms): Reset the cached list of cells
         from nova.compute import api
         api.CELLS = []
+        context.CELL_CACHE = {}
 
         self.cell_mappings = {}
         self.host_mappings = {}
@@ -341,24 +373,27 @@ class TestCase(testtools.TestCase):
         """Override flag variables for a test."""
         group = kw.pop('group', None)
         for k, v in kw.items():
-            CONF.set_override(k, v, group, enforce_type=True)
+            CONF.set_override(k, v, group)
 
     def start_service(self, name, host=None, **kwargs):
-        svc = self.useFixture(
-            nova_fixtures.ServiceFixture(name, host, **kwargs))
-
         if name == 'compute' and self.USES_DB:
+            # NOTE(danms): We need to create the HostMapping first, because
+            # otherwise we'll fail to update the scheduler while running
+            # the compute node startup routines below.
             ctxt = context.get_context()
             cell = self.cell_mappings[kwargs.pop('cell', CELL1_NAME)]
             hm = objects.HostMapping(context=ctxt,
-                                     host=svc.service.host,
+                                     host=host or name,
                                      cell_mapping=cell)
             hm.create()
             self.host_mappings[hm.host] = hm
 
+        svc = self.useFixture(
+            nova_fixtures.ServiceFixture(name, host, **kwargs))
+
         return svc.service
 
-    def assertJsonEqual(self, expected, observed):
+    def assertJsonEqual(self, expected, observed, message=''):
         """Asserts that 2 complex data structures are json equivalent.
 
         We use data structures which serialize down to json throughout
@@ -388,37 +423,49 @@ class TestCase(testtools.TestCase):
                 return sorted(items)
             return x
 
-        def inner(expected, observed):
+        def inner(expected, observed, path='root'):
             if isinstance(expected, dict) and isinstance(observed, dict):
-                self.assertEqual(len(expected), len(observed))
+                self.assertEqual(
+                    len(expected), len(observed),
+                    'path: %s. Dict lengths are not equal' % path)
                 expected_keys = sorted(expected)
                 observed_keys = sorted(observed)
-                self.assertEqual(expected_keys, observed_keys)
-
+                self.assertEqual(
+                    expected_keys, observed_keys,
+                    'path: %s. Dict keys are not equal' % path)
                 for key in list(six.iterkeys(expected)):
-                    inner(expected[key], observed[key])
+                    inner(expected[key], observed[key], path + '.%s' % key)
             elif (isinstance(expected, (list, tuple, set)) and
                       isinstance(observed, (list, tuple, set))):
-                self.assertEqual(len(expected), len(observed))
+                self.assertEqual(
+                    len(expected), len(observed),
+                    'path: %s. List lengths are not equal' % path)
 
                 expected_values_iter = iter(sorted(expected, key=sort_key))
                 observed_values_iter = iter(sorted(observed, key=sort_key))
 
                 for i in range(len(expected)):
                     inner(next(expected_values_iter),
-                          next(observed_values_iter))
+                          next(observed_values_iter), path + '[%s]' % i)
             else:
-                self.assertEqual(expected, observed)
+                self.assertEqual(expected, observed, 'path: %s' % path)
 
         try:
             inner(expected, observed)
         except testtools.matchers.MismatchError as e:
-            inner_mismatch = e.mismatch
-            # inverting the observed / expected because testtools
-            # error messages assume expected is second. Possibly makes
-            # reading the error messages less confusing.
-            raise testtools.matchers.MismatchError(observed, expected,
-                                          inner_mismatch, verbose=True)
+            difference = e.mismatch.describe()
+            if message:
+                message = 'message: %s\n' % message
+            msg = "\nexpected:\n%s\nactual:\n%s\ndifference:\n%s\n%s" % (
+                pprint.pformat(expected),
+                pprint.pformat(observed),
+                difference,
+                message)
+            error = AssertionError(msg)
+            error.expected = expected
+            error.observed = observed
+            error.difference = difference
+            raise error
 
     def assertPublicAPISignatures(self, baseinst, inst):
         def get_public_apis(inst):
@@ -468,6 +515,91 @@ class APICoverage(object):
         self.assertThat(
             test_methods,
             testtools.matchers.ContainsAll(api_methods))
+
+
+@six.add_metaclass(abc.ABCMeta)
+class SubclassSignatureTestCase(testtools.TestCase):
+    """Ensure all overriden methods of all subclasses of the class
+    under test exactly match the signature of the base class.
+
+    A subclass of SubclassSignatureTestCase should define a method
+    _get_base_class which:
+
+    * Returns a base class whose subclasses will all be checked
+    * Ensures that all subclasses to be tested have been imported
+
+    SubclassSignatureTestCase defines a single test, test_signatures,
+    which does a recursive, depth-first check of all subclasses, ensuring
+    that their method signatures are identical to those of the base class.
+    """
+    @abc.abstractmethod
+    def _get_base_class(self):
+        raise NotImplementedError()
+
+    def setUp(self):
+        self.base = self._get_base_class()
+
+        super(SubclassSignatureTestCase, self).setUp()
+
+    @staticmethod
+    def _get_argspecs(cls):
+        """Return a dict of method_name->argspec for every method of cls."""
+        argspecs = {}
+
+        # getmembers returns all members, including members inherited from
+        # the base class. It's redundant for us to test these, but as
+        # they'll always pass it's not worth the complexity to filter them out.
+        for (name, method) in inspect.getmembers(cls, inspect.ismethod):
+            # Subclass __init__ methods can usually be legitimately different
+            if name == '__init__':
+                continue
+
+            while hasattr(method, '__wrapped__'):
+                # This is a wrapped function. The signature we're going to
+                # see here is that of the wrapper, which is almost certainly
+                # going to involve varargs and kwargs, and therefore is
+                # unlikely to be what we want. If the wrapper manupulates the
+                # arguments taken by the wrapped function, the wrapped function
+                # isn't what we want either. In that case we're just stumped:
+                # if it ever comes up, add more knobs here to work round it (or
+                # stop using a dynamic language).
+                #
+                # Here we assume the wrapper doesn't manipulate the arguments
+                # to the wrapped function and inspect the wrapped function
+                # instead.
+                method = getattr(method, '__wrapped__')
+
+            argspecs[name] = inspect.getargspec(method)
+
+        return argspecs
+
+    @staticmethod
+    def _clsname(cls):
+        """Return the fully qualified name of cls."""
+        return "%s.%s" % (cls.__module__, cls.__name__)
+
+    def _test_signatures_recurse(self, base, base_argspecs):
+        for sub in base.__subclasses__():
+            sub_argspecs = self._get_argspecs(sub)
+
+            # Check that each subclass method matches the signature of the
+            # base class
+            for (method, sub_argspec) in sub_argspecs.items():
+                # Methods which don't override methods in the base class
+                # are good.
+                if method in base_argspecs:
+                    self.assertEqual(base_argspecs[method], sub_argspec,
+                                     'Signature of %(sub)s.%(method)s '
+                                     'differs from superclass %(base)s' %
+                                     {'base': self._clsname(base),
+                                      'sub': self._clsname(sub),
+                                      'method': method})
+
+            # Recursively check this subclass
+            self._test_signatures_recurse(sub, sub_argspecs)
+
+    def test_signatures(self):
+        self._test_signatures_recurse(self.base, self._get_argspecs(self.base))
 
 
 class TimeOverride(fixtures.Fixture):

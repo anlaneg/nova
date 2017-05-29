@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-#
 # nova documentation build configuration file, created by
 # sphinx-quickstart on Sat May  1 15:17:47 2010.
 #
@@ -124,8 +122,6 @@ man_pages = [
     ('man/nova-api', 'nova-api', u'Cloud controller fabric',
      [u'OpenStack'], 1),
     ('man/nova-cells', 'nova-cells', u'Cloud controller fabric',
-     [u'OpenStack'], 1),
-    ('man/nova-cert', 'nova-cert', u'Cloud controller fabric',
      [u'OpenStack'], 1),
     ('man/nova-compute', 'nova-compute', u'Cloud controller fabric',
      [u'OpenStack'], 1),

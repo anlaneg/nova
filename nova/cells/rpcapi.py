@@ -29,7 +29,6 @@ from oslo_serialization import jsonutils
 
 import nova.conf
 from nova import exception
-from nova.i18n import _LE
 from nova import objects
 from nova.objects import base as objects_base
 from nova import profiler
@@ -116,8 +115,8 @@ class CellsAPI(object):
         * 1.36 - Added 'delete_type' parameter to terminate_instance()
         * 1.37 - Add get_keypair_at_top to fetch keypair from api cell
 
-        ... Liberty, Mitaka and Newton support message version 1.37.  So, any
-        changes to existing methods in 1.x after that point should be
+        ... Liberty, Mitaka, Newton, and Ocata support message version 1.37.
+        So, any changes to existing methods in 1.x after that point should be
         done such that they can handle the version_cap being set to
         1.37.
     '''
@@ -131,6 +130,7 @@ class CellsAPI(object):
         'liberty': '1.37',
         'mitaka': '1.37',
         'newton': '1.37',
+        'ocata': '1.37',
     }
 
     def __init__(self):
@@ -327,8 +327,7 @@ class CellsAPI(object):
         return cctxt.call(ctxt, 'proxy_rpc_to_manager',
                           topic=topic,
                           rpc_message=rpc_message,
-                          call=call,
-                          timeout=timeout)
+                          call=call)
 
     def task_log_get_all(self, ctxt, task_name, period_beginning,
                          period_ending, host=None, state=None):
@@ -419,7 +418,7 @@ class CellsAPI(object):
             cctxt.cast(ctxt, 'bdm_update_or_create_at_top',
                        bdm=bdm, create=create)
         except Exception:
-            LOG.exception(_LE("Failed to notify cells of BDM update/create."))
+            LOG.exception("Failed to notify cells of BDM update/create.")
 
     def bdm_destroy_at_top(self, ctxt, instance_uuid, device_name=None,
                            volume_id=None):
@@ -433,7 +432,7 @@ class CellsAPI(object):
                        device_name=device_name,
                        volume_id=volume_id)
         except Exception:
-            LOG.exception(_LE("Failed to notify cells of BDM destroy."))
+            LOG.exception("Failed to notify cells of BDM destroy.")
 
     def get_migrations(self, ctxt, filters):
         """Get all migrations applying the filters."""

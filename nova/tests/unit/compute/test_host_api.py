@@ -16,8 +16,10 @@
 
 import copy
 
+import fixtures
 import mock
 from oslo_serialization import jsonutils
+import testtools
 
 from nova.api.openstack.compute import services
 from nova.cells import utils as cells_utils
@@ -27,11 +29,12 @@ from nova import context
 from nova import exception
 from nova import objects
 from nova import test
+from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_notifier
 from nova.tests.unit.objects import test_objects
 from nova.tests.unit.objects import test_service
-import testtools
+from nova.tests import uuidsentinel as uuids
 
 
 class ComputeHostAPITestCase(test.TestCase):
@@ -44,6 +47,7 @@ class ComputeHostAPITestCase(test.TestCase):
         self.addCleanup(fake_notifier.reset)
         self.req = fakes.HTTPRequest.blank('')
         self.controller = services.ServiceController()
+        self.useFixture(nova_fixtures.SingleCellSimple())
 
     def _compare_obj(self, obj, db_obj):
         test_objects.compare_obj(self, obj, db_obj,
@@ -170,6 +174,17 @@ class ComputeHostAPITestCase(test.TestCase):
             self.assertEqual('fake_mode', msg.payload['mode'])
 
         _do_test()
+
+    def test_service_get_all_cells(self):
+        cells = objects.CellMappingList.get_all(self.ctxt)
+        for cell in cells:
+            with context.target_cell(self.ctxt, cell) as cctxt:
+                objects.Service(context=cctxt,
+                                binary='nova-compute',
+                                host='host-%s' % cell.uuid).create()
+        services = self.host_api.service_get_all(self.ctxt, all_cells=True)
+        self.assertEqual(sorted(['host-%s' % cell.uuid for cell in cells]),
+                         sorted([svc.host for svc in services]))
 
     def test_service_get_all_no_zones(self):
         services = [dict(test_service.fake_service,
@@ -300,17 +315,95 @@ class ComputeHostAPITestCase(test.TestCase):
 
         _do_test()
 
-    def test_service_delete(self):
-        with test.nested(
-            mock.patch.object(objects.Service, 'get_by_id',
-                              return_value=objects.Service()),
-            mock.patch.object(objects.Service, 'destroy')
-        ) as (
-            get_by_id, destroy
-        ):
-            self.host_api.service_delete(self.ctxt, 1)
-            get_by_id.assert_called_once_with(self.ctxt, 1)
-            destroy.assert_called_once_with()
+    @mock.patch.object(objects.CellMappingList, 'get_all',
+                       return_value=objects.CellMappingList(objects=[
+                           objects.CellMapping(
+                               uuid=uuids.cell1_uuid,
+                               transport_url='mq://fake1',
+                               database_connection='db://fake1'),
+                           objects.CellMapping(
+                               uuid=uuids.cell2_uuid,
+                               transport_url='mq://fake2',
+                               database_connection='db://fake2'),
+                           objects.CellMapping(
+                               uuid=uuids.cell3_uuid,
+                               transport_url='mq://fake3',
+                               database_connection='db://fake3')]))
+    @mock.patch.object(objects.Service, 'get_by_uuid',
+                       side_effect=[
+                           exception.ServiceNotFound(
+                               service_id=uuids.service_uuid),
+                           objects.Service(uuid=uuids.service_uuid)])
+    def test_service_get_by_id_using_uuid(self, service_get_by_uuid,
+                                          cell_mappings_get_all):
+        """Tests that we can lookup a service in the HostAPI using a uuid.
+        There are two calls to objects.Service.get_by_uuid and the first
+        raises ServiceNotFound so that we ensure we keep looping over the
+        cells. We'll find the service in the second cell and break the loop
+        so that we don't needlessly check in the third cell.
+        """
+
+        def _fake_set_target_cell(ctxt, cell_mapping):
+            if cell_mapping:
+                # These aren't really what would be set for values but let's
+                # keep this simple so we can assert something is set when a
+                # mapping is provided.
+                ctxt.db_connection = cell_mapping.database_connection
+                ctxt.mq_connection = cell_mapping.transport_url
+
+        # We have to override the SingleCellSimple fixture.
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.context.set_target_cell', _fake_set_target_cell))
+        ctxt = context.get_admin_context()
+        self.assertIsNone(ctxt.db_connection)
+        self.host_api.service_get_by_id(ctxt, uuids.service_uuid)
+        # We should have broken the loop over the cells and set the target cell
+        # on the context.
+        service_get_by_uuid.assert_has_calls(
+            [mock.call(ctxt, uuids.service_uuid)] * 2)
+        self.assertEqual('db://fake2', ctxt.db_connection)
+
+    @mock.patch('nova.context.set_target_cell')
+    @mock.patch('nova.compute.api.load_cells')
+    @mock.patch('nova.objects.Service.get_by_id')
+    def test_service_delete(self, get_by_id, load_cells, set_target):
+        compute_api.CELLS = [
+            objects.CellMapping(),
+            objects.CellMapping(),
+            objects.CellMapping(),
+        ]
+
+        service = mock.MagicMock()
+        get_by_id.side_effect = [exception.ServiceNotFound(service_id=1),
+                                 service,
+                                 exception.ServiceNotFound(service_id=1)]
+        self.host_api.service_delete(self.ctxt, 1)
+        get_by_id.assert_has_calls([mock.call(self.ctxt, 1),
+                                    mock.call(self.ctxt, 1),
+                                    mock.call(self.ctxt, 1)])
+        service.destroy.assert_called_once_with()
+        set_target.assert_called_once_with(self.ctxt, compute_api.CELLS[1])
+
+    @mock.patch('nova.context.set_target_cell')
+    @mock.patch('nova.compute.api.load_cells')
+    @mock.patch('nova.objects.Service.get_by_id')
+    def test_service_delete_ambiguous(self, get_by_id, load_cells, set_target):
+        compute_api.CELLS = [
+            objects.CellMapping(),
+            objects.CellMapping(),
+            objects.CellMapping(),
+        ]
+
+        service1 = mock.MagicMock()
+        service2 = mock.MagicMock()
+        get_by_id.side_effect = [exception.ServiceNotFound(service_id=1),
+                                 service1,
+                                 service2]
+        self.assertRaises(exception.ServiceNotUnique,
+                          self.host_api.service_delete, self.ctxt, 1)
+        self.assertFalse(service1.destroy.called)
+        self.assertFalse(service2.destroy.called)
+        self.assertFalse(set_target.called)
 
     def test_service_delete_compute_in_aggregate(self):
         compute = self.host_api.db.service_create(self.ctxt,
@@ -335,6 +428,14 @@ class ComputeHostAPICellsTestCase(ComputeHostAPITestCase):
         self.flags(enable=True, group='cells')
         self.flags(cell_type='api', group='cells')
         super(ComputeHostAPICellsTestCase, self).setUp()
+
+    @testtools.skip('cellsv1 does not use this')
+    def test_service_get_all_cells(self):
+        pass
+
+    @testtools.skip('cellsv1 does not use this')
+    def test_service_delete_ambiguous(self):
+        pass
 
     def test_service_get_all_no_zones(self):
         services = [

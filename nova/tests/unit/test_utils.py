@@ -38,6 +38,7 @@ import nova
 from nova import context
 from nova import exception
 from nova.objects import base as obj_base
+from nova.objects import instance as instance_obj
 from nova import test
 from nova.tests.unit.objects import test_objects
 from nova.tests.unit import utils as test_utils
@@ -169,25 +170,6 @@ class GenericUtilsTestCase(test.NoDBTestCase):
                 self.assertEqual(fake_execute.uid, 2)
             self.assertEqual(fake_execute.uid, os.getuid())
 
-    def test_xhtml_escape(self):
-        self.assertEqual('&quot;foo&quot;', utils.xhtml_escape('"foo"'))
-        self.assertEqual('&apos;foo&apos;', utils.xhtml_escape("'foo'"))
-        self.assertEqual('&amp;', utils.xhtml_escape('&'))
-        self.assertEqual('&gt;', utils.xhtml_escape('>'))
-        self.assertEqual('&lt;', utils.xhtml_escape('<'))
-        self.assertEqual('&lt;foo&gt;', utils.xhtml_escape('<foo>'))
-
-    def test_is_valid_ipv6_cidr(self):
-        self.assertTrue(utils.is_valid_ipv6_cidr("2600::/64"))
-        self.assertTrue(utils.is_valid_ipv6_cidr(
-                "abcd:ef01:2345:6789:abcd:ef01:192.168.254.254/48"))
-        self.assertTrue(utils.is_valid_ipv6_cidr(
-                "0000:0000:0000:0000:0000:0000:0000:0001/32"))
-        self.assertTrue(utils.is_valid_ipv6_cidr(
-                "0000:0000:0000:0000:0000:0000:0000:0001"))
-        self.assertFalse(utils.is_valid_ipv6_cidr("foo"))
-        self.assertFalse(utils.is_valid_ipv6_cidr("127.0.0.1"))
-
     def test_get_shortened_ipv6(self):
         self.assertEqual("abcd:ef01:2345:6789:abcd:ef01:c0a8:fefe",
                          utils.get_shortened_ipv6(
@@ -243,26 +225,19 @@ class GenericUtilsTestCase(test.NoDBTestCase):
         self.assertEqual(
             value, utils.get_hash_str(base_unicode))
 
+    def test_get_obj_repr_unicode(self):
+        instance = instance_obj.Instance()
+        instance.display_name = u'\u00CD\u00F1st\u00E1\u00F1c\u00E9'
+        # should be a bytes string if python2 before conversion
+        self.assertIs(str, type(repr(instance)))
+        self.assertIs(six.text_type,
+                      type(utils.get_obj_repr_unicode(instance)))
+
     def test_use_rootwrap(self):
         self.flags(disable_rootwrap=False, group='workarounds')
         self.flags(rootwrap_config='foo')
         cmd = utils.get_root_helper()
         self.assertEqual('sudo nova-rootwrap foo', cmd)
-
-    @mock.patch('nova.utils.RootwrapProcessHelper')
-    def test_get_root_helper_proc(self, mock_proc_helper):
-        self.flags(use_rootwrap_daemon=False)
-        self.flags(rootwrap_config="/path/to/conf")
-        utils._get_rootwrap_helper()
-        mock_proc_helper.assert_called_once_with()
-
-    @mock.patch('nova.utils.RootwrapDaemonHelper')
-    def test_get_root_helper_daemon(self, mock_daemon_helper):
-        conf_path = '/path/to/conf'
-        self.flags(use_rootwrap_daemon=True)
-        self.flags(rootwrap_config=conf_path)
-        utils._get_rootwrap_helper()
-        mock_daemon_helper.assert_called_once_with(conf_path)
 
     def test_use_sudo(self):
         self.flags(disable_rootwrap=True, group='workarounds')
@@ -1054,7 +1029,7 @@ class GetSystemMetadataFromImageTestCase(test.NoDBTestCase):
         sys_meta = utils.get_system_metadata_from_image(image)
 
         # Verify that we inherit all the image properties
-        for key, expected in six.iteritems(image["properties"]):
+        for key, expected in image["properties"].items():
             sys_key = "%s%s" % (utils.SM_IMAGE_PROP_PREFIX, key)
             self.assertEqual(sys_meta[sys_key], expected)
 
@@ -1068,7 +1043,7 @@ class GetSystemMetadataFromImageTestCase(test.NoDBTestCase):
         sys_meta = utils.get_system_metadata_from_image(image)
 
         # Verify that we inherit all the image properties
-        for key, expected in six.iteritems(image["properties"]):
+        for key, expected in image["properties"].items():
             sys_key = "%s%s" % (utils.SM_IMAGE_PROP_PREFIX, key)
 
             if key in utils.SM_SKIP_KEYS:
@@ -1131,7 +1106,7 @@ class GetImageFromSystemMetadataTestCase(test.NoDBTestCase):
         # Verify that we inherit the rest of metadata as properties
         self.assertIn("properties", image)
 
-        for key, value in six.iteritems(image["properties"]):
+        for key in image["properties"]:
             sys_key = "%s%s" % (utils.SM_IMAGE_PROP_PREFIX, key)
             self.assertEqual(image["properties"][key], sys_meta[sys_key])
 

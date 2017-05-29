@@ -16,6 +16,7 @@
 
 import contextlib
 import copy
+import functools
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -24,6 +25,7 @@ from oslo_utils import excutils
 from oslo_utils import versionutils
 import six
 
+from nova import availability_zones
 from nova.compute import instance_actions
 from nova.compute import rpcapi as compute_rpcapi
 from nova.compute import task_states
@@ -51,6 +53,35 @@ from nova import utils
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+
+
+def targets_cell(fn):
+    """Wrap a method and automatically target the instance's cell.
+
+    This decorates a method with signature func(self, context, instance, ...)
+    and automatically targets the context with the instance's cell
+    mapping. It does this by looking up the InstanceMapping.
+    """
+    @functools.wraps(fn)
+    def wrapper(self, context, *args, **kwargs):
+        instance = kwargs.get('instance') or args[0]
+        try:
+            im = objects.InstanceMapping.get_by_instance_uuid(
+                context, instance.uuid)
+        except exception.InstanceMappingNotFound:
+            LOG.error(_LE('InstanceMapping not found, unable to target cell'),
+                      instance=instance)
+            im = None
+        else:
+            LOG.debug('Targeting cell %(cell)s for conductor method %(meth)s',
+                      {'cell': im.cell_mapping.identity,
+                       'meth': fn.__name__})
+            # NOTE(danms): Target our context to the cell for the rest of
+            # this request, so that none of the subsequent code needs to
+            # care about it.
+            nova_context.set_target_cell(context, im.cell_mapping)
+        return fn(self, context, *args, **kwargs)
+    return wrapper
 
 
 class ConductorManager(manager.Manager):
@@ -174,7 +205,7 @@ def obj_target_cell(obj, cell):
     """Run with object's context set to a specific cell"""
     with try_target_cell(obj._context, cell) as target:
         with obj.obj_alternate_context(target):
-            yield
+            yield target
 
 
 @profiler.trace_cls("rpc")
@@ -221,6 +252,7 @@ class ComputeTaskManager(base.Base):
         exception.MigrationPreCheckClientException,
         exception.LiveMigrationWithOldNovaNotSupported,
         exception.UnsupportedPolicyException)
+    @targets_cell
     @wrap_instance_event(prefix='conductor')
     def migrate_server(self, context, instance, scheduler_hint, live, rebuild,
             flavor, block_migration, disk_over_commit, reservations=None,
@@ -495,6 +527,9 @@ class ComputeTaskManager(base.Base):
         return inst_mapping
 
     #conductor收到build_instances消息
+    # NOTE(danms): This is never cell-targeted because it is only used for
+    # cellsv1 (which does not target cells directly) and n-cpu reschedules
+    # (which go to the cell conductor and thus are always cell-specific).
     def build_instances(self, context, instances, image, filter_properties,
             admin_password, injected_files, requested_networks,
             security_groups, block_device_mapping=None, legacy_bdm=True):
@@ -542,8 +577,13 @@ class ComputeTaskManager(base.Base):
             return
 
         for (instance, host) in six.moves.zip(instances, hosts):
+            instance.availability_zone = (
+                availability_zones.get_host_availability_zone(context,
+                                                              host['host']))
             try:
-                instance.refresh()
+                # NOTE(danms): This saves the az change above, refreshes our
+                # instance, and tells us if it has been deleted underneath us
+                instance.save()
             except (exception.InstanceNotFound,
                     exception.InstanceInfoCacheNotFound):
                 LOG.debug('Instance deleted during build', instance=instance)
@@ -598,6 +638,7 @@ class ComputeTaskManager(base.Base):
         hosts = self.scheduler_client.select_destinations(context, spec_obj)
         return hosts
 
+    @targets_cell
     def unshelve_instance(self, context, instance, request_spec=None):
         sys_meta = instance.system_metadata
 
@@ -664,6 +705,9 @@ class ComputeTaskManager(base.Base):
                     scheduler_utils.populate_filter_properties(
                             filter_properties, host_state)
                     (host, node) = (host_state['host'], host_state['nodename'])
+                    instance.availability_zone = (
+                        availability_zones.get_host_availability_zone(
+                            context, host))
                     self.compute_rpcapi.unshelve_instance(
                             context, instance, host, image=image,
                             filter_properties=filter_properties, node=node)
@@ -687,6 +731,7 @@ class ComputeTaskManager(base.Base):
             instance.save()
             return
 
+    @targets_cell
     def rebuild_instance(self, context, instance, orig_image_ref, image_ref,
                          injected_files, new_pass, orig_sys_metadata,
                          bdms, recreate, on_shared_storage,
@@ -755,6 +800,10 @@ class ComputeTaskManager(base.Base):
             compute_utils.notify_about_instance_usage(
                 self.notifier, context, instance, "rebuild.scheduled")
 
+            instance.availability_zone = (
+                availability_zones.get_host_availability_zone(
+                    context, host))
+
             self.compute_rpcapi.rebuild_instance(context,
                     instance=instance,
                     new_pass=new_pass,
@@ -782,7 +831,7 @@ class ComputeTaskManager(base.Base):
                 size = instance_type.get('ephemeral_gb', 0)
         return size
 
-    def _create_block_device_mapping(self, instance_type, instance_uuid,
+    def _create_block_device_mapping(self, cell, instance_type, instance_uuid,
                                      block_device_mapping):
         """Create the BlockDeviceMapping objects in the db.
 
@@ -795,7 +844,8 @@ class ComputeTaskManager(base.Base):
         for bdm in instance_block_device_mapping:
             bdm.volume_size = self._volume_size(instance_type, bdm)
             bdm.instance_uuid = instance_uuid
-            bdm.update_or_create()
+            with obj_target_cell(bdm, cell):
+                bdm.update_or_create()
         return instance_block_device_mapping
 
     def _bury_in_cell0(self, context, request_spec, exc,
@@ -834,12 +884,16 @@ class ComputeTaskManager(base.Base):
         updates = {'vm_state': vm_states.ERROR, 'task_state': None}
         legacy_spec = request_spec.to_legacy_request_spec_dict()
         for instance in instances_by_uuid.values():
-            with obj_target_cell(instance, cell0):
+            with obj_target_cell(instance, cell0) as cctxt:
                 instance.create()
+                # Use the context targeted to cell0 here since the instance is
+                # now in cell0.
                 self._set_vm_state_and_notify(
-                    context, instance.uuid, 'build_instances', updates,
+                    cctxt, instance.uuid, 'build_instances', updates,
                     exc, legacy_spec)
                 try:
+                    # We don't need the cell0-targeted context here because the
+                    # instance mapping is in the API DB.
                     inst_mapping = \
                         objects.InstanceMapping.get_by_instance_uuid(
                             context, instance.uuid)
@@ -876,9 +930,10 @@ class ComputeTaskManager(base.Base):
         for (build_request, request_spec, host) in six.moves.zip(
                 build_requests, request_specs, hosts):
             filter_props = request_spec.to_legacy_filter_properties_dict()
+            instance = build_request.get_new_instance(context)
+            scheduler_utils.populate_retry(filter_props, instance.uuid)
             scheduler_utils.populate_filter_properties(filter_props,
                                                        host)
-            instance = build_request.get_new_instance(context)
 
             # Convert host from the scheduler into a cell record
             if host['host'] not in host_mapping_cache:
@@ -911,6 +966,9 @@ class ComputeTaskManager(base.Base):
                           'was already deleted.', instance=instance)
                 continue
             else:
+                instance.availability_zone = (
+                    availability_zones.get_host_availability_zone(
+                        context, host['host']))
                 with obj_target_cell(instance, cell):
                     instance.create()
 
@@ -919,13 +977,12 @@ class ComputeTaskManager(base.Base):
             notifications.send_update_with_states(context, instance, None,
                     vm_states.BUILDING, None, None, service="conductor")
 
-            objects.InstanceAction.action_start(
-                context, instance.uuid, instance_actions.CREATE,
-                want_result=False)
-
-            with obj_target_cell(instance, cell):
+            with obj_target_cell(instance, cell) as cctxt:
+                objects.InstanceAction.action_start(
+                    cctxt, instance.uuid, instance_actions.CREATE,
+                    want_result=False)
                 instance_bdms = self._create_block_device_mapping(
-                    instance.flavor, instance.uuid, block_device_mapping)
+                    cell, instance.flavor, instance.uuid, block_device_mapping)
 
             # Update mapping for instance. Normally this check is guarded by
             # a try/except but if we're here we know that a newer nova-api
@@ -948,9 +1005,9 @@ class ComputeTaskManager(base.Base):
             legacy_secgroups = [s.identifier
                                 for s in request_spec.security_groups]
 
-            with obj_target_cell(instance, cell):
+            with obj_target_cell(instance, cell) as cctxt:
                 self.compute_rpcapi.build_and_run_instance(
-                    context, instance=instance, image=image,
+                    cctxt, instance=instance, image=image,
                     request_spec=request_spec,
                     filter_properties=filter_props,
                     admin_password=admin_password,
@@ -985,19 +1042,21 @@ class ComputeTaskManager(base.Base):
             # This indicates an instance deletion request has been
             # processed, and the build should halt here. Clean up the
             # bdm and instance record.
-            with obj_target_cell(instance, cell):
-                try:
-                    instance.destroy()
-                except exception.InstanceNotFound:
-                    pass
-                except exception.ObjectActionError:
-                    # NOTE(melwitt): Instance became scheduled during
-                    # the destroy, "host changed". Refresh and re-destroy.
+            with obj_target_cell(instance, cell) as cctxt:
+                with compute_utils.notify_about_instance_delete(
+                        self.notifier, cctxt, instance):
                     try:
-                        instance.refresh()
                         instance.destroy()
                     except exception.InstanceNotFound:
                         pass
+                    except exception.ObjectActionError:
+                        # NOTE(melwitt): Instance became scheduled during
+                        # the destroy, "host changed". Refresh and re-destroy.
+                        try:
+                            instance.refresh()
+                            instance.destroy()
+                        except exception.InstanceNotFound:
+                            pass
             for bdm in instance_bdms:
                 with obj_target_cell(bdm, cell):
                     try:

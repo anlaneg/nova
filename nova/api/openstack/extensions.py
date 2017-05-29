@@ -26,8 +26,6 @@ import webob.exc
 from nova.api.openstack import wsgi
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LE
-from nova.i18n import _LW
 
 LOG = logging.getLogger(__name__)
 
@@ -191,7 +189,7 @@ class ExtensionManager(object):
         try:
             extension.is_valid()
         except AttributeError:
-            LOG.exception(_LE("Exception loading extension"))
+            LOG.exception("Exception loading extension")
             return False
 
         return True
@@ -226,9 +224,9 @@ class ExtensionManager(object):
             try:
                 self.load_extension(ext_factory)
             except Exception as exc:
-                LOG.warning(_LW('Failed to load extension %(ext_factory)s: '
-                                '%(exc)s'),
-                            {'ext_factory': ext_factory, 'exc': exc})
+                LOG.warning(
+                    'Failed to load extension %(ext_factory)s: %(exc)s',
+                    {'ext_factory': ext_factory, 'exc': exc})
 
 
 class ControllerExtension(object):
@@ -367,7 +365,7 @@ def expected_errors(errors):
                     # generate new token and do another attempt.
                     raise
 
-                LOG.exception(_LE("Unexpected exception in API method"))
+                LOG.exception("Unexpected exception in API method")
                 msg = _('Unexpected API Error. Please report this at '
                     'http://bugs.launchpad.net/nova/ and attach the Nova '
                     'API log if possible.\n%s') % type(exc)

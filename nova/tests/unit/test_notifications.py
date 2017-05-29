@@ -16,6 +16,7 @@
 """Tests for common notifications."""
 
 import copy
+import datetime
 
 import mock
 from oslo_context import context as o_context
@@ -491,6 +492,20 @@ class NotificationsTestCase(test.TestCase):
         self.assertEqual(40, info['ephemeral_gb'])
         self.assertEqual(60, info['disk_gb'])
 
+    def test_payload_has_timestamp_fields(self):
+        time = datetime.datetime(2017, 2, 2, 16, 45, 0)
+        # do not define deleted_at to test that missing value is handled
+        # properly
+        self.instance.terminated_at = time
+        self.instance.launched_at = time
+
+        info = notifications.info_from_instance(self.context, self.instance,
+                                                self.net_info, None)
+
+        self.assertEqual('2017-02-02T16:45:00.000000', info['terminated_at'])
+        self.assertEqual('2017-02-02T16:45:00.000000', info['launched_at'])
+        self.assertEqual('', info['deleted_at'])
+
     def test_send_access_ip_update(self):
         notifications.send_update(self.context, self.instance, self.instance)
         self.assertEqual(1, len(fake_notifier.NOTIFICATIONS))
@@ -519,6 +534,16 @@ class NotificationsTestCase(test.TestCase):
 
             self.assertEqual(payload["old_display_name"], old_display_name)
             self.assertEqual(payload["display_name"], new_display_name)
+
+    def test_send_versioned_tags_update(self):
+        objects.TagList.create(self.context,
+                               self.instance.uuid, ['tag1', 'tag2'])
+        notifications.send_update(self.context, self.instance, self.instance)
+        self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+
+        self.assertEqual(['tag1', 'tag2'],
+                         fake_notifier.VERSIONED_NOTIFICATIONS[0]
+                         ['payload']['nova_object.data']['tags'])
 
     def test_send_no_state_change(self):
         called = [False]

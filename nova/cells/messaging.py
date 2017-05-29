@@ -52,7 +52,7 @@ from nova.consoleauth import rpcapi as consoleauth_rpcapi
 from nova import context
 from nova.db import base
 from nova import exception
-from nova.i18n import _, _LE, _LI, _LW
+from nova.i18n import _
 from nova import objects
 from nova.objects import base as objects_base
 from nova import rpc
@@ -190,7 +190,7 @@ class _BaseMessage(object):
         except Exception:
             resp_value = sys.exc_info()
             failure = True
-            LOG.exception(_LE("Error processing message locally"))
+            LOG.exception("Error processing message locally")
         return Response(self.ctxt, self.routing_path, resp_value, failure)
 
     def _setup_response_queue(self):
@@ -399,7 +399,7 @@ class _TargetedMessage(_BaseMessage):
             next_hop = self._get_next_hop()
         except Exception:
             exc_info = sys.exc_info()
-            LOG.exception(_LE("Error locating next hop for message"))
+            LOG.exception("Error locating next hop for message")
             return self._send_response_from_exception(exc_info)
 
         if next_hop.is_me:
@@ -426,7 +426,7 @@ class _TargetedMessage(_BaseMessage):
             next_hop.send_message(self)
         except Exception:
             exc_info = sys.exc_info()
-            err_str = _LE("Failed to send message to cell: %(next_hop)s")
+            err_str = "Failed to send message to cell: %(next_hop)s"
             LOG.exception(err_str, {'next_hop': next_hop})
             self._cleanup_response_queue()
             return self._send_response_from_exception(exc_info)
@@ -504,7 +504,7 @@ class _BroadcastMessage(_BaseMessage):
             next_hops = self._get_next_hops()
         except Exception:
             exc_info = sys.exc_info()
-            LOG.exception(_LE("Error locating next hops for message"))
+            LOG.exception("Error locating next hops for message")
             return self._send_response_from_exception(exc_info)
 
         # Short circuit if we don't need to respond
@@ -523,7 +523,7 @@ class _BroadcastMessage(_BaseMessage):
             # Error just trying to send to cells.  Send a single response
             # with the failure.
             exc_info = sys.exc_info()
-            LOG.exception(_LE("Error sending message to next hops."))
+            LOG.exception("Error sending message to next hops.")
             self._cleanup_response_queue()
             return self._send_response_from_exception(exc_info)
 
@@ -540,8 +540,7 @@ class _BroadcastMessage(_BaseMessage):
             # Error waiting for responses, most likely a timeout.
             # Send a single response back with the failure.
             exc_info = sys.exc_info()
-            LOG.exception(_LE("Error waiting for responses from"
-                              " neighbor cells"))
+            LOG.exception("Error waiting for responses from neighbor cells")
             return self._send_response_from_exception(exc_info)
 
         if local_response:
@@ -1010,8 +1009,10 @@ class _BroadcastMessageMethods(_BaseMessageMethods):
         instance.obj_reset_changes(items_to_remove)
         instance.cell_name = _reverse_path(message.routing_path)
 
+        # instance.display_name could be unicode
+        instance_repr = utils.get_obj_repr_unicode(instance)
         LOG.debug("Got update for instance: %(instance)s",
-                  {'instance': instance}, instance_uuid=instance.uuid)
+                  {'instance': instance_repr}, instance_uuid=instance.uuid)
 
         expected_vm_state = self._get_expected_vm_state(instance)
         expected_task_state = self._get_expected_task_state(instance)
@@ -1100,8 +1101,8 @@ class _BroadcastMessageMethods(_BaseMessageMethods):
                        **kwargs):
         projid_str = project_id is None and "<all>" or project_id
         since_str = updated_since is None and "<all>" or updated_since
-        LOG.info(_LI("Forcing a sync of instances, project_id="
-                     "%(projid_str)s, updated_since=%(since_str)s"),
+        LOG.info("Forcing a sync of instances, project_id="
+                 "%(projid_str)s, updated_since=%(since_str)s",
                  {'projid_str': projid_str, 'since_str': since_str})
         if updated_since is not None:
             updated_since = timeutils.parse_isotime(updated_since)
@@ -1180,7 +1181,7 @@ class _BroadcastMessageMethods(_BaseMessageMethods):
             if vol_id and instance_bdm['volume_id'] == vol_id:
                 break
         else:
-            LOG.warning(_LW("No match when trying to update BDM: %(bdm)s"),
+            LOG.warning("No match when trying to update BDM: %(bdm)s",
                         dict(bdm=bdm))
             return
         LOG.debug('Calling db.block_device_mapping_update from API cell with '
@@ -1675,7 +1676,7 @@ class MessageRunner(object):
         """Call instance_<method> in correct cell for instance."""
         cell_name = instance.cell_name
         if not cell_name:
-            LOG.warning(_LW("No cell_name for %(method)s() from API"),
+            LOG.warning("No cell_name for %(method)s() from API",
                         dict(method=method), instance=instance)
             return
         method_kwargs = {'instance': instance}
@@ -1692,7 +1693,7 @@ class MessageRunner(object):
         """Update an instance object in its cell."""
         cell_name = instance.cell_name
         if not cell_name:
-            LOG.warning(_LW("No cell_name for instance update from API"),
+            LOG.warning("No cell_name for instance update from API",
                         instance=instance)
             return
         method_kwargs = {'instance': instance,
@@ -1880,7 +1881,7 @@ def serialize_remote_exception(failure_info, log_failure=True):
     tb = traceback.format_exception(*failure_info)
     failure = failure_info[1]
     if log_failure:
-        LOG.error(_LE("Returning exception %s to caller"),
+        LOG.error("Returning exception %s to caller",
                   six.text_type(failure))
         LOG.error(tb)
 

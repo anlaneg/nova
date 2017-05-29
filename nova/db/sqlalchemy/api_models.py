@@ -243,6 +243,7 @@ class BuildRequest(API_BASE):
     project_id = Column(String(255), nullable=False)
     instance = Column(MediumText())
     block_device_mappings = Column(MediumText())
+    tags = Column(Text())
     # TODO(alaski): Drop these from the db in Ocata
     # columns_to_drop = ['request_spec_id', 'user_id', 'display_name',
     #         'instance_metadata', 'progress', 'vm_state', 'task_state',
@@ -299,7 +300,6 @@ class ResourceProvider(API_BASE):
     uuid = Column(String(36), nullable=False)
     name = Column(Unicode(200), nullable=True)
     generation = Column(Integer, default=0)
-    can_host = Column(Integer, default=0)
 
 
 class Inventory(API_BASE):
@@ -553,3 +553,32 @@ class Reservation(API_BASE):
         "QuotaUsage",
         foreign_keys=usage_id,
         primaryjoin='Reservation.usage_id == QuotaUsage.id')
+
+
+class Trait(API_BASE):
+    """Represents a trait."""
+
+    __tablename__ = "traits"
+    __table_args__ = (
+        schema.UniqueConstraint('name', name='uniq_traits0name'),
+    )
+
+    id = Column(Integer, primary_key=True, nullable=False, autoincrement=True)
+    name = Column(Unicode(255), nullable=False)
+
+
+class ResourceProviderTrait(API_BASE):
+    """Represents the relationship between traits and resource provider"""
+
+    __tablename__ = "resource_provider_traits"
+    __table_args__ = (
+        Index('resource_provider_traits_resource_provider_trait_idx',
+              'resource_provider_id', 'trait_id'),
+    )
+
+    trait_id = Column(Integer, ForeignKey('traits.id'), primary_key=True,
+                      nullable=False)
+    resource_provider_id = Column(Integer,
+                                  ForeignKey('resource_providers.id'),
+                                  primary_key=True,
+                                  nullable=False)

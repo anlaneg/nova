@@ -23,6 +23,12 @@ from oslo_config import types
 
 from nova.conf import paths
 
+compute_group = cfg.OptGroup(
+    'compute',
+    title='Compute Manager Options',
+    help="""
+A collection of options specific to the nova-compute service.
+""")
 compute_opts = [
     cfg.StrOpt('compute_driver',
         help="""
@@ -43,7 +49,8 @@ Possible values:
 Allow destination machine to match source for resize. Useful when
 testing in single-host environments. By default it is not allowed
 to resize to the same host. Setting this option to true will add
-the same host to the destination options.
+the same host to the destination options. Also set to true
+if you allow the ServerGroupAffinityFilter and need to resize.
 """),
     cfg.StrOpt('default_schedule_zone',
         help="""
@@ -222,7 +229,6 @@ Related options:
 * ``flat_inject``: This must be set to ``True`` to ensure nova embeds network
   configuration information in the metadata provided through the config drive.
 """),
-    # TODO(sfinucan): This should be a BooleanOpt
     cfg.StrOpt('preallocate_images',
         default='none',
         choices=('none', 'space'),
@@ -394,10 +400,23 @@ Possible values:
 * Any positive integer representing amount of memory in MB to reserve
   for the host.
 """),
+    cfg.IntOpt('reserved_host_cpus',
+        default=0,
+        min=0,
+        help="""
+Number of physical CPUs to reserve for the host. The host resources usage is
+reported back to the scheduler continuously from nova-compute running on the
+compute node. To prevent the host CPU from being considered as available,
+this option is used to reserve random pCPU(s) for the host.
+
+Possible values:
+
+* Any positive integer representing number of physical CPUs to reserve
+  for the host.
+"""),
 ]
 
 allocation_ratio_opts = [
-    # TODO(sfinucan): Add min parameter
     cfg.FloatOpt('cpu_allocation_ratio',
         default=0.0,
         min=0.0,
@@ -415,13 +434,15 @@ configuration value if no per-aggregate setting is found.
 
 NOTE: This can be set per-compute, or if set to 0.0, the value
 set on the scheduler node(s) or compute node(s) will be used
-and defaulted to 16.0'.
+and defaulted to 16.0.
+
+NOTE: As of the 16.0.0 Pike release, this configuration option is ignored
+for the ironic.IronicDriver compute driver and is hardcoded to 1.0.
 
 Possible values:
 
 * Any valid positive integer or float value
 """),
-    # TODO(sfinucan): Add min parameter
     cfg.FloatOpt('ram_allocation_ratio',
         default=0.0,
         min=0.0,
@@ -442,11 +463,13 @@ NOTE: This can be set per-compute, or if set to 0.0, the value
 set on the scheduler node(s) or compute node(s) will be used and
 defaulted to 1.5.
 
+NOTE: As of the 16.0.0 Pike release, this configuration option is ignored
+for the ironic.IronicDriver compute driver and is hardcoded to 1.0.
+
 Possible values:
 
 * Any valid positive integer or float value
 """),
-    # TODO(sfinucan): Add min parameter
     cfg.FloatOpt('disk_allocation_ratio',
         default=0.0,
         min=0.0,
@@ -469,7 +492,10 @@ instances.
 
 NOTE: This can be set per-compute, or if set to 0.0, the value
 set on the scheduler node(s) or compute node(s) will be used and
-defaulted to 1.0'.
+defaulted to 1.0.
+
+NOTE: As of the 16.0.0 Pike release, this configuration option is ignored
+for the ironic.IronicDriver compute driver and is hardcoded to 1.0.
 
 Possible values:
 
@@ -480,7 +506,7 @@ Possible values:
 compute_manager_opts = [
     cfg.StrOpt('console_host',
         default=socket.gethostname(),
-        sample_default="socket.gethostname()",
+        sample_default="<current_hostname>",
         help="""
 Console proxy host to be used to connect to instances on this host. It is the
 publicly visible name for the console host.
@@ -615,6 +641,27 @@ Possible values:
 
 * Any positive integer representing greenthreads count.
 """)
+]
+
+compute_group_opts = [
+    cfg.IntOpt('consecutive_build_service_disable_threshold',
+        default=10,
+        help="""
+Number of consecutive failed builds that result in disabling a compute service.
+
+This option will cause nova-compute to set itself to a disabled state
+if a certain number of consecutive build failures occur. This will
+prevent the scheduler from continuing to send builds to a compute node that is
+consistently failing. Note that all failures qualify and count towards this
+score, including reschedules that may have been due to racy scheduler behavior.
+Since the failures must be consecutive, it is unlikely that occasional expected
+reschedules will actually disable a compute node.
+
+Possible values:
+
+* Any positive integer representing a build failure count.
+* Zero to never auto-disable.
+"""),
 ]
 
 interval_opts = [
@@ -804,8 +851,7 @@ Possible values:
 
 Related options:
 
-* ``block_device_allocate_retries'' in compute_manager_opts
-      group.
+* ``block_device_allocate_retries`` in compute_manager_opts group.
 """),
     cfg.IntOpt('scheduler_instance_sync_interval',
         default=120,
@@ -959,7 +1005,7 @@ Possible values:
 
 Related options:
 
-* running_deleted_instance_poll
+* running_deleted_instance_poll_interval
 * running_deleted_instance_timeout
 """),
     cfg.IntOpt("running_deleted_instance_poll_interval",
@@ -1120,7 +1166,10 @@ ALL_OPTS = (compute_opts +
 
 def register_opts(conf):
     conf.register_opts(ALL_OPTS)
+    conf.register_group(compute_group)
+    conf.register_opts(compute_group_opts, group=compute_group)
 
 
 def list_opts():
-    return {'DEFAULT': ALL_OPTS}
+    return {'DEFAULT': ALL_OPTS,
+            'compute': compute_opts}

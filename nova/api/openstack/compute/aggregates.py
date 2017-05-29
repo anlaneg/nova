@@ -30,8 +30,6 @@ from nova import exception
 from nova.i18n import _
 from nova.policies import aggregates as aggr_policies
 
-ALIAS = "os-aggregates"
-
 
 def _get_context(req):
     return req.environ['nova.context']
@@ -150,6 +148,7 @@ class AggregateController(wsgi.Controller):
         try:
             aggregate = self.api.add_host_to_aggregate(context, id, host)
         except (exception.AggregateNotFound,
+                exception.HostMappingNotFound,
                 exception.ComputeHostNotFound) as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
         except (exception.AggregateHostExists,
@@ -172,7 +171,7 @@ class AggregateController(wsgi.Controller):
         try:
             aggregate = self.api.remove_host_from_aggregate(context, id, host)
         except (exception.AggregateNotFound, exception.AggregateHostNotFound,
-                exception.ComputeHostNotFound):
+                exception.HostMappingNotFound, exception.ComputeHostNotFound):
             msg = _('Cannot remove host %(host)s in aggregate %(id)s') % {
                         'host': host, 'id': id}
             raise exc.HTTPNotFound(explanation=msg)
@@ -223,21 +222,3 @@ class AggregateController(wsgi.Controller):
                     or key in aggregate.obj_extra_fields) and
                     (show_uuid or key != 'uuid')):
                 yield key, getattr(aggregate, key)
-
-
-class Aggregates(extensions.V21APIExtensionBase):
-    """Admin-only aggregate administration."""
-
-    name = "Aggregates"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        resources = [extensions.ResourceExtension(
-                                            ALIAS,
-                                            AggregateController(),
-                                            member_actions={'action': 'POST'})]
-        return resources
-
-    def get_controller_extensions(self):
-        return []

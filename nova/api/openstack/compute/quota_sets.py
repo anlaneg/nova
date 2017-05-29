@@ -24,6 +24,7 @@ from nova.api.openstack.api_version_request \
     import MIN_WITHOUT_PROXY_API_SUPPORT_VERSION
 from nova.api.openstack.compute.schemas import quota_sets
 from nova.api.openstack import extensions
+from nova.api.openstack import identity
 from nova.api.openstack import wsgi
 from nova.api import validation
 import nova.conf
@@ -35,7 +36,6 @@ from nova import quota
 
 
 CONF = nova.conf.CONF
-ALIAS = "os-quota-sets"
 QUOTAS = quota.QUOTAS
 
 FILTERED_QUOTAS = ["fixed_ips", "floating_ips", "networks",
@@ -86,17 +86,20 @@ class QuotaSetsController(wsgi.Controller):
             return {k: v['limit'] for k, v in values.items()}
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
-    @extensions.expected_errors(())
+    @extensions.expected_errors(400)
     def show(self, req, id):
         return self._show(req, id, [])
 
     @wsgi.Controller.api_version(MIN_WITHOUT_PROXY_API_SUPPORT_VERSION)  # noqa
+    @extensions.expected_errors(400)
     def show(self, req, id):
         return self._show(req, id, FILTERED_QUOTAS)
 
     def _show(self, req, id, filtered_quotas):
         context = req.environ['nova.context']
         context.can(qs_policies.POLICY_ROOT % 'show', {'project_id': id})
+        identity.verify_project_id(context, id)
+
         params = urlparse.parse_qs(req.environ.get('QUERY_STRING', ''))
         user_id = params.get('user_id', [None])[0]
         return self._format_quota_set(id,
@@ -104,18 +107,20 @@ class QuotaSetsController(wsgi.Controller):
             filtered_quotas=filtered_quotas)
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
-    @extensions.expected_errors(())
+    @extensions.expected_errors(400)
     def detail(self, req, id):
         return self._detail(req, id, [])
 
     @wsgi.Controller.api_version(MIN_WITHOUT_PROXY_API_SUPPORT_VERSION)  # noqa
-    @extensions.expected_errors(())
+    @extensions.expected_errors(400)
     def detail(self, req, id):
         return self._detail(req, id, FILTERED_QUOTAS)
 
     def _detail(self, req, id, filtered_quotas):
         context = req.environ['nova.context']
         context.can(qs_policies.POLICY_ROOT % 'detail', {'project_id': id})
+        identity.verify_project_id(context, id)
+
         user_id = req.GET.get('user_id', None)
         return self._format_quota_set(
             id,
@@ -137,6 +142,8 @@ class QuotaSetsController(wsgi.Controller):
     def _update(self, req, id, body, filtered_quotas):
         context = req.environ['nova.context']
         context.can(qs_policies.POLICY_ROOT % 'update', {'project_id': id})
+        identity.verify_project_id(context, id)
+
         project_id = id
         params = urlparse.parse_qs(req.environ.get('QUERY_STRING', ''))
         user_id = params.get('user_id', [None])[0]
@@ -191,18 +198,20 @@ class QuotaSetsController(wsgi.Controller):
             filtered_quotas=filtered_quotas)
 
     @wsgi.Controller.api_version("2.0", MAX_PROXY_API_SUPPORT_VERSION)
-    @extensions.expected_errors(())
+    @extensions.expected_errors(400)
     def defaults(self, req, id):
         return self._defaults(req, id, [])
 
     @wsgi.Controller.api_version(MIN_WITHOUT_PROXY_API_SUPPORT_VERSION)  # noqa
-    @extensions.expected_errors(())
+    @extensions.expected_errors(400)
     def defaults(self, req, id):
         return self._defaults(req, id, FILTERED_QUOTAS)
 
     def _defaults(self, req, id, filtered_quotas):
         context = req.environ['nova.context']
         context.can(qs_policies.POLICY_ROOT % 'defaults', {'project_id': id})
+        identity.verify_project_id(context, id)
+
         values = QUOTAS.get_defaults(context)
         return self._format_quota_set(id, values,
             filtered_quotas=filtered_quotas)
@@ -222,25 +231,3 @@ class QuotaSetsController(wsgi.Controller):
                                                    id, user_id)
         else:
             QUOTAS.destroy_all_by_project(context, id)
-
-
-class QuotaSets(extensions.V21APIExtensionBase):
-    """Quotas management support."""
-
-    name = "Quotas"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        resources = []
-
-        res = extensions.ResourceExtension(ALIAS,
-                                            QuotaSetsController(),
-                                            member_actions={'defaults': 'GET',
-                                                            'detail': 'GET'})
-        resources.append(res)
-
-        return resources
-
-    def get_controller_extensions(self):
-        return []

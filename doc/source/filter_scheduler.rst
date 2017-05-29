@@ -92,7 +92,8 @@ There are many standard filter classes which may be used
   It passes hosts that can create the specified instance type.
   The extra specifications can have the same operators as
   |ComputeCapabilitiesFilter|. To specify multiple values for the same key
-  use a comma. E.g., "value1,value2"
+  use a comma. E.g., "value1,value2". All hosts are passed if no extra_specs
+  are specified.
 * |ComputeFilter| - passes all hosts that are operational and enabled.
 * |CoreFilter| - filters based on CPU core utilization. It passes hosts with
   sufficient number of CPU cores.
@@ -153,8 +154,14 @@ There are many standard filter classes which may be used
   a set of instances.
 * |RetryFilter| - filters hosts that have been attempted for scheduling.
   Only passes hosts that have not been previously attempted.
-* |TrustedFilter| (EXPERIMENTAL) - filters hosts based on their trust.  Only passes hosts
-  that meet the trust requirements specified in the instance properties.
+* |TrustedFilter| (EXPERIMENTAL) - filters hosts based on their trust.  Only
+  passes hosts that meet the trust requirements specified in the instance
+  properties.
+
+  .. warning:: TrustedFilter is deprecated for removal in the 17.0.0 Queens
+     release. There is no replacement planned for this filter. It has been
+     marked experimental since its inception. It is incomplete and not tested.
+
 * |TypeAffinityFilter| - Only passes hosts that are not already running an
   instance of the requested type.
 * |AggregateTypeAffinityFilter| - limits instance_type by aggregate.
@@ -360,9 +367,9 @@ settings:
    filters shipped with nova.
 
 With these settings, nova will use the ``FilterScheduler`` for the scheduler
-driver.  The standard nova filters and MyFilter are available to the
-FilterScheduler.  The RamFilter, ComputeFilter, and MyFilter are used by
-default when no filters are specified in the request.
+driver. All of the standard nova filters and MyFilter are available to the
+FilterScheduler, but just the RamFilter, ComputeFilter, and MyFilter will be
+used on each request.
 
 Each filter selects hosts in a different way and has different costs. The order
 of ``filter_scheduler.enabled_filters`` affects scheduling performance. The

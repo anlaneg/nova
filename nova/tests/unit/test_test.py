@@ -21,6 +21,7 @@ import oslo_messaging as messaging
 import six
 
 import nova.conf
+from nova import exception
 from nova import rpc
 from nova import test
 from nova.tests import fixtures
@@ -53,7 +54,7 @@ class IsolationTestCase(test.TestCase):
 
 
 class JsonTestCase(test.NoDBTestCase):
-    def test_json_equal(self):
+    def test_compare_dict_string(self):
         expected = {
             "employees": [
                 {"firstName": "Anna", "lastName": "Smith"},
@@ -62,7 +63,7 @@ class JsonTestCase(test.NoDBTestCase):
             ],
             "locations": set(['Boston', 'Mumbai', 'Beijing', 'Perth'])
         }
-        observed = """{
+        actual = """{
     "employees": [
         {
             "lastName": "Doe",
@@ -84,9 +85,9 @@ class JsonTestCase(test.NoDBTestCase):
         "Beijing"
     ]
 }"""
-        self.assertJsonEqual(expected, observed)
+        self.assertJsonEqual(expected, actual)
 
-    def test_json_equal_fail_on_length(self):
+    def test_fail_on_list_length(self):
         expected = {
             'top': {
                 'l1': {
@@ -94,7 +95,7 @@ class JsonTestCase(test.NoDBTestCase):
                 }
             }
         }
-        observed = {
+        actual = {
             'top': {
                 'l1': {
                     'l2': ['c', 'a', 'b', 'd']
@@ -102,21 +103,71 @@ class JsonTestCase(test.NoDBTestCase):
             }
         }
         try:
-            self.assertJsonEqual(expected, observed)
+            self.assertJsonEqual(expected, actual)
         except Exception as e:
             # error reported is going to be a cryptic length failure
             # on the level2 structure.
-            self.assertEqual(e.mismatch.describe(), "3 != 4")
+            self.assertEqual(
+                "3 != 4: path: root.top.l1.l2. List lengths are not equal",
+                e.difference)
             self.assertIn(
-                "Matchee: {'top': {'l1': {'l2': ['c', 'a', 'b', 'd']}}}",
+                "actual:\n{'top': {'l1': {'l2': ['c', 'a', 'b', 'd']}}}",
                 six.text_type(e))
             self.assertIn(
-                "Matcher: {'top': {'l1': {'l2': ['a', 'b', 'c']}}}",
+                "expected:\n{'top': {'l1': {'l2': ['a', 'b', 'c']}}}",
                 six.text_type(e))
         else:
             self.fail("This should have raised a mismatch exception")
 
-    def test_json_equal_fail_on_inner(self):
+    def test_fail_on_dict_length(self):
+        expected = {
+            'top': {
+                'l1': {
+                    'l2': {'a': 1, 'b': 2, 'c': 3}
+                }
+            }
+        }
+        actual = {
+            'top': {
+                'l1': {
+                    'l2': {'a': 1, 'b': 2}
+                }
+            }
+        }
+        try:
+            self.assertJsonEqual(expected, actual)
+        except Exception as e:
+            self.assertEqual(
+                "3 != 2: path: root.top.l1.l2. Dict lengths are not equal",
+                e.difference)
+        else:
+            self.fail("This should have raised a mismatch exception")
+
+    def test_fail_on_dict_keys(self):
+        expected = {
+            'top': {
+                'l1': {
+                    'l2': {'a': 1, 'b': 2, 'c': 3}
+                }
+            }
+        }
+        actual = {
+            'top': {
+                'l1': {
+                    'l2': {'a': 1, 'b': 2, 'd': 3}
+                }
+            }
+        }
+        try:
+            self.assertJsonEqual(expected, actual)
+        except Exception as e:
+            self.assertIn(
+                "path: root.top.l1.l2. Dict keys are not equal",
+                e.difference)
+        else:
+            self.fail("This should have raised a mismatch exception")
+
+    def test_fail_on_list_value(self):
         expected = {
             'top': {
                 'l1': {
@@ -124,7 +175,7 @@ class JsonTestCase(test.NoDBTestCase):
                 }
             }
         }
-        observed = {
+        actual = {
             'top': {
                 'l1': {
                     'l2': ['c', 'a', 'd']
@@ -132,19 +183,51 @@ class JsonTestCase(test.NoDBTestCase):
             }
         }
         try:
-            self.assertJsonEqual(expected, observed)
+            self.assertJsonEqual(expected, actual)
         except Exception as e:
-            # error reported is going to be a cryptic length failure
-            # on the level2 structure.
-            self.assertEqual(e.mismatch.describe(), "'b' != 'c'")
+            self.assertEqual(
+                "'b' != 'c': path: root.top.l1.l2[1]",
+                e.difference)
             self.assertIn(
-                "Matchee: {'top': {'l1': {'l2': ['c', 'a', 'd']}}}",
+                "actual:\n{'top': {'l1': {'l2': ['c', 'a', 'd']}}}",
                 six.text_type(e))
             self.assertIn(
-                "Matcher: {'top': {'l1': {'l2': ['a', 'b', 'c']}}}",
+                "expected:\n{'top': {'l1': {'l2': ['a', 'b', 'c']}}}",
                 six.text_type(e))
         else:
             self.fail("This should have raised a mismatch exception")
+
+    def test_fail_on_dict_value(self):
+        expected = {
+            'top': {
+                'l1': {
+                    'l2': {'a': 1, 'b': 2, 'c': 3}
+                }
+            }
+        }
+        actual = {
+            'top': {
+                'l1': {
+                    'l2': {'a': 1, 'b': 2, 'c': 4}
+                }
+            }
+        }
+        try:
+            self.assertJsonEqual(expected, actual, 'test message')
+        except Exception as e:
+            self.assertEqual(
+                "3 != 4: path: root.top.l1.l2.c", e.difference)
+            self.assertIn("actual:\n{'top': {'l1': {'l2': {", six.text_type(e))
+            self.assertIn(
+                "expected:\n{'top': {'l1': {'l2': {", six.text_type(e))
+            self.assertIn(
+                "message: test message\n", six.text_type(e))
+        else:
+            self.fail("This should have raised a mismatch exception")
+
+    def test_compare_scalars(self):
+        with self.assertRaisesRegex(AssertionError, 'True != False'):
+            self.assertJsonEqual(True, False)
 
 
 class BadLogTestCase(test.NoDBTestCase):
@@ -201,3 +284,20 @@ class ContainKeyValueTestCase(test.NoDBTestCase):
         # Raise KeyError
         self.assertNotEqual(matcher, {1: 2, '3': 4, 5: '6'})
         self.assertNotEqual(matcher, {'bar': 'foo'})
+
+
+class NovaExceptionReraiseFormatErrorTestCase(test.NoDBTestCase):
+    """Test that format errors are reraised in tests."""
+    def test_format_error_in_nova_exception(self):
+        class FakeImageException(exception.NovaException):
+            msg_fmt = 'Image %(image_id)s has wrong type %(type)s.'
+        # wrong kwarg
+        ex = self.assertRaises(KeyError, FakeImageException,
+                               bogus='wrongkwarg')
+        self.assertIn('image_id', six.text_type(ex))
+        # no kwarg
+        ex = self.assertRaises(KeyError, FakeImageException)
+        self.assertIn('image_id', six.text_type(ex))
+        # not enough kwargs
+        ex = self.assertRaises(KeyError, FakeImageException, image_id='image')
+        self.assertIn('type', six.text_type(ex))

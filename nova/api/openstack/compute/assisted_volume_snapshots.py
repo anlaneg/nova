@@ -29,9 +29,6 @@ from nova import exception
 from nova.policies import assisted_volume_snapshots as avs_policies
 
 
-ALIAS = 'os-assisted-volume-snapshots'
-
-
 class AssistedVolumeSnapshotsController(wsgi.Controller):
     """The Assisted volume snapshots API controller for the OpenStack API."""
 
@@ -54,8 +51,16 @@ class AssistedVolumeSnapshotsController(wsgi.Controller):
             return self.compute_api.volume_snapshot_create(context, volume_id,
                                                            create_info)
         except (exception.VolumeBDMNotFound,
+                exception.VolumeBDMIsMultiAttach,
                 exception.InvalidVolume) as error:
             raise exc.HTTPBadRequest(explanation=error.format_message())
+        except (exception.InstanceInvalidState,
+                exception.InstanceNotReady) as e:
+            # TODO(mriedem) InstanceInvalidState and InstanceNotReady would
+            # normally result in a 409 but that would require bumping the
+            # microversion, which we should just do in a single microversion
+            # across all APIs when we fix status code wrinkles.
+            raise exc.HTTPBadRequest(explanation=e.format_message())
 
     @wsgi.response(204)
     @extensions.expected_errors((400, 404))
@@ -81,22 +86,10 @@ class AssistedVolumeSnapshotsController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.NotFound as e:
             return exc.HTTPNotFound(explanation=e.format_message())
-
-
-class AssistedVolumeSnapshots(extensions.V21APIExtensionBase):
-    """Assisted volume snapshots."""
-
-    name = "AssistedVolumeSnapshots"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        res = [extensions.ResourceExtension(ALIAS,
-                                    AssistedVolumeSnapshotsController())]
-        return res
-
-    def get_controller_extensions(self):
-        """It's an abstract function V21APIExtensionBase and the extension
-        will not be loaded without it.
-        """
-        return []
+        except (exception.InstanceInvalidState,
+                exception.InstanceNotReady) as e:
+            # TODO(mriedem) InstanceInvalidState and InstanceNotReady would
+            # normally result in a 409 but that would require bumping the
+            # microversion, which we should just do in a single microversion
+            # across all APIs when we fix status code wrinkles.
+            raise exc.HTTPBadRequest(explanation=e.format_message())
