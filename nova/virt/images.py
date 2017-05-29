@@ -113,6 +113,7 @@ def _convert_image(source, dest, in_format, out_format, run_as_root):
         raise exception.ImageUnacceptable(image_id=source, reason=msg)
 
 
+#下载image到path
 def fetch(context, image_href, path):
     with fileutils.remove_path_on_error(path):
         IMAGE_API.download(context, image_href, dest_path=path)

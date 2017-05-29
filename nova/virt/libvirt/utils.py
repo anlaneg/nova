@@ -453,7 +453,7 @@ def get_fs_info(path):
             'free': free,
             'used': used}
 
-
+#提供image
 def fetch_image(context, target, image_id):
     """Grab image."""
     images.fetch_to_raw(context, image_id, target)
@@ -468,6 +468,7 @@ def fetch_raw_image(context, target, image_id):
     images.fetch(context, image_id, target)
 
 
+#获得实例path,默认情况下CONF.instances_path 与CONF.state_path的值相同
 def get_instance_path(instance, relative=False):
     """Determine the correct path for instance storage.
 
