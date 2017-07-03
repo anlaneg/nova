@@ -433,6 +433,7 @@ class APIRouterV21(nova.api.openstack.APIRouterV21):
                 self.map.create_route(path, method, controller, action)
 
     def _register_extension(self, ext):
+        #注册扩展
         return self.loaded_extension_info.register_extension(ext.obj)
 
     @property

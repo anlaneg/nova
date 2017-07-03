@@ -30,5 +30,6 @@ class Base(object):
     def __init__(self, db_driver=None):
         super(Base, self).__init__()
         if not db_driver:
+            #默认载入nova.db,即从nova.db.__init__.py文件，载入api.py
             db_driver = CONF.db_driver
         self.db = importutils.import_module(db_driver)

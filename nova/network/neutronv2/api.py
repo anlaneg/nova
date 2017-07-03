@@ -124,6 +124,7 @@ def get_client(context, admin=False):
     # neutron admin tenant credentials if it is an admin context.  This is to
     # support some services (metadata API) where an admin context is used
     # without an auth token.
+    # 构造neutronclient
     global _ADMIN_AUTH
     global _SESSION
 
@@ -554,12 +555,14 @@ class API(base_api.NetworkAPI):
                                            neutron_client=neutron)
                     # Make sure the instance has access to the port.
                     if port['tenant_id'] != instance.project_id:
+                        #port所属的租户id必须与instance的project_id相同，否则扔异常
                         raise exception.PortNotUsable(port_id=request.port_id,
                                                       instance=instance.uuid)
 
                     # Make sure the port isn't already attached to another
                     # instance.
                     if port.get('device_id'):
+                        #此port已被使用
                         raise exception.PortInUse(port_id=request.port_id)
 
                     # Make sure that if the user assigned a value to the port's
@@ -841,6 +844,7 @@ class API(base_api.NetworkAPI):
         #
         # Validate ports and networks with neutron
         #
+        # 校验请求的network及port
         ports, ordered_networks = self._validate_requested_port_ids(
             context, instance, neutron, requested_networks)
 
@@ -1772,6 +1776,7 @@ class API(base_api.NetworkAPI):
         try:
             network = client.show_network(network_uuid).get('network') or {}
         except neutron_client_exc.NetworkNotFoundClient:
+            #network找不到时，扔异常
             raise exception.NetworkNotFound(network_id=network_uuid)
         net_obj = objects.Network(context=context,
                                   name=network['name'],
