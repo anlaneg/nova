@@ -4234,6 +4234,7 @@ class API(base.Base):
                 instances_by_host[host].append(instance)
                 hosts_by_instance[instance.uuid].append(host)
 
+        #将事件按类型host进行分类
         for event in events:
             for host in hosts_by_instance[event.instance_uuid]:
                 events_by_host[host].append(event)

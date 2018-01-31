@@ -30,7 +30,7 @@ from nova.policies import server_external_events as see_policies
 LOG = logging.getLogger(__name__)
 ALIAS = 'os-server-external-events'
 
-
+#服务器外部事件controller
 class ServerExternalEventsController(wsgi.Controller):
 
     def __init__(self):
@@ -63,6 +63,7 @@ class ServerExternalEventsController(wsgi.Controller):
             event.status = client_event.pop('status', 'completed')
             event.tag = client_event.pop('tag', None)
 
+            #找出对应具体哪个虚拟机
             instance = instances.get(event.instance_uuid)
             if not instance:
                 try:
