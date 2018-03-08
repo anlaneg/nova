@@ -13,6 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import time
+
 import mock
 from oslo_serialization import jsonutils
 from oslo_utils import units
@@ -201,8 +203,7 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         ops._create_folder_if_missing(ds_name, ds_ref, 'folder')
         mock_mkdir.assert_called_with(ops._session, path, dc)
 
-    @mock.patch.object(vutil, 'continue_retrieval', return_value=None)
-    def test_get_valid_vms_from_retrieve_result(self, _mock_cont):
+    def test_get_valid_vms_from_retrieve_result(self):
         ops = vmops.VMwareVMOps(self._session, mock.Mock(), mock.Mock())
         fake_objects = vmwareapi_fake.FakeRetrieveResult()
         for x in range(0, 3):
@@ -214,9 +215,7 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         vms = ops._get_valid_vms_from_retrieve_result(fake_objects)
         self.assertEqual(3, len(vms))
 
-    @mock.patch.object(vutil, 'continue_retrieval', return_value=None)
-    def test_get_valid_vms_from_retrieve_result_with_invalid(self,
-                                                             _mock_cont):
+    def test_get_valid_vms_from_retrieve_result_with_invalid(self):
         ops = vmops.VMwareVMOps(self._session, mock.Mock(), mock.Mock())
         fake_objects = vmwareapi_fake.FakeRetrieveResult()
         valid_vm = vmwareapi_fake.VirtualMachine()
@@ -299,20 +298,12 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
             'runtime.powerState': 'poweredOn'
         }
 
-        def mock_call_method(module, method, *args, **kwargs):
-            if method == 'continue_retrieval':
-                return
-            return result
-
         with mock.patch.object(self._session, '_call_method',
-                               mock_call_method):
+                               return_value=result):
             info = self._vmops.get_info(self._instance)
             mock_get_vm_ref.assert_called_once_with(self._session,
                 self._instance)
-            expected = hardware.InstanceInfo(state=power_state.RUNNING,
-                                             max_mem_kb=128 * 1024,
-                                             mem_kb=128 * 1024,
-                                             num_cpu=4)
+            expected = hardware.InstanceInfo(state=power_state.RUNNING)
             self.assertEqual(expected, info)
 
     @mock.patch.object(vm_util, 'get_vm_ref', return_value='fake_ref')
@@ -321,13 +312,8 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
             'runtime.powerState': 'poweredOff'
         }
 
-        def mock_call_method(module, method, *args, **kwargs):
-            if method == 'continue_retrieval':
-                return
-            return result
-
         with mock.patch.object(self._session, '_call_method',
-                               mock_call_method):
+                               return_value=result):
             info = self._vmops.get_info(self._instance)
             mock_get_vm_ref.assert_called_once_with(self._session,
                 self._instance)
@@ -361,51 +347,26 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         instance_ds_ref = mock.Mock()
         instance_ds_ref.value = "ds-1"
         _vcvmops = vmops.VMwareVMOps(self._session, None, None)
+        result = vmwareapi_fake.FakeRetrieveResult()
         if ds_ref_exists:
             ds_ref = mock.Mock()
             ds_ref.value = "ds-1"
+            result.add_object(vmwareapi_fake.Datacenter(ds_ref=ds_ref))
         else:
-            ds_ref = None
-        self._continue_retrieval = True
-        self._fake_object1 = vmwareapi_fake.FakeRetrieveResult()
-        self._fake_object2 = vmwareapi_fake.FakeRetrieveResult()
-
-        def fake_call_method(module, method, *args, **kwargs):
-            self._fake_object1.add_object(vmwareapi_fake.Datacenter(
-                ds_ref=ds_ref))
-            if not ds_ref:
-                # Token is set for the fake_object1, so it will continue to
-                # fetch the next object.
-                setattr(self._fake_object1, 'token', 'token-0')
-                if self._continue_retrieval:
-                    if self._continue_retrieval:
-                        self._continue_retrieval = False
-                        self._fake_object2.add_object(
-                            vmwareapi_fake.Datacenter())
-                        return self._fake_object2
-                    return
-            if method == "continue_retrieval":
-                return
-            return self._fake_object1
+            result.add_object(vmwareapi_fake.Datacenter(ds_ref=None))
+            result.add_object(vmwareapi_fake.Datacenter())
 
         with mock.patch.object(self._session, '_call_method',
-                               side_effect=fake_call_method) as fake_call:
+                               return_value=result) as fake_call:
             dc_info = _vcvmops.get_datacenter_ref_and_name(instance_ds_ref)
 
-            if ds_ref:
+            fake_call.assert_called_once_with(
+                vim_util, "get_objects", "Datacenter",
+                ["name", "datastore", "vmFolder"])
+            if ds_ref_exists:
                 self.assertEqual(1, len(ds_util._DS_DC_MAPPING))
-                calls = [mock.call(vim_util, "get_objects", "Datacenter",
-                                   ["name", "datastore", "vmFolder"]),
-                         mock.call(vutil, 'continue_retrieval',
-                                   self._fake_object1)]
-                fake_call.assert_has_calls(calls)
                 self.assertEqual("ha-datacenter", dc_info.name)
             else:
-                calls = [mock.call(vim_util, "get_objects", "Datacenter",
-                                   ["name", "datastore", "vmFolder"]),
-                         mock.call(vutil, 'continue_retrieval',
-                                   self._fake_object2)]
-                fake_call.assert_has_calls(calls)
                 self.assertIsNone(dc_info)
 
     def test_get_datacenter_ref_and_name(self):
@@ -515,6 +476,108 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
                                                vm_ref)
             _volumeops.detach_disk_from_vm.assert_called_once_with(
                 vm_ref, self._instance, mock.ANY, destroy_disk=True)
+
+    @mock.patch.object(time, 'sleep')
+    def _test_clean_shutdown(self, mock_sleep,
+                             timeout, retry_interval,
+                             returns_on, returns_off,
+                             vmware_tools_status,
+                             succeeds):
+        """Test the _clean_shutdown method
+
+        :param timeout: timeout before soft shutdown is considered a fail
+        :param retry_interval: time between rechecking instance power state
+        :param returns_on: how often the instance is reported as poweredOn
+        :param returns_off: how often the instance is reported as poweredOff
+        :param vmware_tools_status: Status of vmware tools
+        :param succeeds: the expected result
+        """
+        instance = self._instance
+        vm_ref = mock.Mock()
+        return_props = []
+        expected_methods = ['get_object_properties_dict']
+        props_on = {'runtime.powerState': 'poweredOn',
+                   'summary.guest.toolsStatus': vmware_tools_status,
+                   'summary.guest.toolsRunningStatus': 'guestToolsRunning'}
+        props_off = {'runtime.powerState': 'poweredOff',
+                    'summary.guest.toolsStatus': vmware_tools_status,
+                    'summary.guest.toolsRunningStatus': 'guestToolsRunning'}
+
+        # initialize expected instance methods and returned properties
+        if vmware_tools_status == "toolsOk":
+            if returns_on > 0:
+                expected_methods.append('ShutdownGuest')
+                for x in range(returns_on + 1):
+                    return_props.append(props_on)
+                for x in range(returns_on):
+                    expected_methods.append('get_object_properties_dict')
+            for x in range(returns_off):
+                return_props.append(props_off)
+                if returns_on > 0:
+                    expected_methods.append('get_object_properties_dict')
+        else:
+            return_props.append(props_off)
+
+        def fake_call_method(module, method, *args, **kwargs):
+            expected_method = expected_methods.pop(0)
+            self.assertEqual(expected_method, method)
+            if expected_method == 'get_object_properties_dict':
+                props = return_props.pop(0)
+                return props
+            elif expected_method == 'ShutdownGuest':
+                return
+
+        with test.nested(
+                mock.patch.object(vm_util, 'get_vm_ref', return_value=vm_ref),
+                mock.patch.object(self._session, '_call_method',
+                                  side_effect=fake_call_method)
+        ) as (mock_get_vm_ref, mock_call_method):
+            result = self._vmops._clean_shutdown(instance, timeout,
+                                                 retry_interval)
+
+        self.assertEqual(succeeds, result)
+        mock_get_vm_ref.assert_called_once_with(self._session,
+                                                self._instance)
+
+    def test_clean_shutdown_first_time(self):
+        self._test_clean_shutdown(timeout=10,
+                                  retry_interval=3,
+                                  returns_on=1,
+                                  returns_off=1,
+                                  vmware_tools_status="toolsOk",
+                                  succeeds=True)
+
+    def test_clean_shutdown_second_time(self):
+        self._test_clean_shutdown(timeout=10,
+                                  retry_interval=3,
+                                  returns_on=2,
+                                  returns_off=1,
+                                  vmware_tools_status="toolsOk",
+                                  succeeds=True)
+
+    def test_clean_shutdown_timeout(self):
+        self._test_clean_shutdown(timeout=10,
+                                  retry_interval=3,
+                                  returns_on=4,
+                                  returns_off=0,
+                                  vmware_tools_status="toolsOk",
+                                  succeeds=False)
+
+    def test_clean_shutdown_already_off(self):
+        self._test_clean_shutdown(timeout=10,
+                                  retry_interval=3,
+                                  returns_on=0,
+                                  returns_off=1,
+                                  vmware_tools_status="toolsOk",
+                                  succeeds=False)
+
+    def test_clean_shutdown_no_vwaretools(self):
+        self._test_clean_shutdown(timeout=10,
+                                  retry_interval=3,
+                                  returns_on=1,
+                                  returns_off=0,
+                                  vmware_tools_status="toolsNotOk",
+                                  succeeds=False)
 
     def _test_finish_migration(self, power_on=True, resize_instance=False):
         with test.nested(

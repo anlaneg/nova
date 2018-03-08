@@ -32,8 +32,6 @@ from oslo_utils import units
 
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LE
-from nova.i18n import _LW
 from nova import utils
 from nova.virt.libvirt import utils as libvirt_utils
 
@@ -68,17 +66,16 @@ class RBDVolumeProxy(object):
                  read_only=False):
         client, ioctx = driver._connect_to_rados(pool)
         try:
-            snap_name = snapshot.encode('utf8') if snapshot else None
-            self.volume = tpool.Proxy(rbd.Image(ioctx, name.encode('utf8'),
-                                      snapshot=snap_name,
-                                      read_only=read_only))
+            self.volume = tpool.Proxy(rbd.Image(ioctx, name,
+                                                snapshot=snapshot,
+                                                read_only=read_only))
         except rbd.ImageNotFound:
             with excutils.save_and_reraise_exception():
                 LOG.debug("rbd image %s does not exist", name)
                 driver._disconnect_from_rados(client, ioctx)
         except rbd.Error:
             with excutils.save_and_reraise_exception():
-                LOG.exception(_LE("error opening rbd image %s"), name)
+                LOG.exception(_("error opening rbd image %s"), name)
                 driver._disconnect_from_rados(client, ioctx)
 
         self.driver = driver
@@ -238,8 +235,8 @@ class RBDDriver(object):
             with RADOSClient(self, dest_pool) as dest_client:
                 try:
                     RbdProxy().clone(src_client.ioctx,
-                                     image.encode('utf-8'),
-                                     snapshot.encode('utf-8'),
+                                     image,
+                                     snapshot,
                                      dest_client.ioctx,
                                      str(dest_name),
                                      features=src_client.features)
@@ -306,13 +303,13 @@ class RBDDriver(object):
             try:
                 RbdProxy().remove(client.ioctx, name)
             except rbd.ImageNotFound:
-                LOG.warning(_LW('image %(volume)s in pool %(pool)s can not be '
-                             'found, failed to remove'),
+                LOG.warning('image %(volume)s in pool %(pool)s can not be '
+                            'found, failed to remove',
                             {'volume': name, 'pool': self.pool})
             except rbd.ImageHasSnapshots:
-                LOG.error(_LE('image %(volume)s in pool %(pool)s has '
-                              'snapshots, failed to remove'),
-                            {'volume': name, 'pool': self.pool})
+                LOG.error('image %(volume)s in pool %(pool)s has '
+                          'snapshots, failed to remove',
+                          {'volume': name, 'pool': self.pool})
 
     def import_image(self, base, name):
         """Import RBD volume from image file.
@@ -342,9 +339,8 @@ class RBDDriver(object):
                 self.remove_snap(volume, libvirt_utils.RESIZE_SNAPSHOT_NAME,
                                  ignore_errors=True)
             except (rbd.ImageBusy, rbd.ImageHasSnapshots):
-                LOG.warning(_LW('rbd remove %(volume)s in pool %(pool)s '
-                             'failed'),
-                         {'volume': volume, 'pool': self.pool})
+                LOG.warning('rbd remove %(volume)s in pool %(pool)s failed',
+                            {'volume': volume, 'pool': self.pool})
             retryctx['retries'] -= 1
             if retryctx['retries'] <= 0:
                 raise loopingcall.LoopingCallDone()
@@ -406,17 +402,16 @@ class RBDDriver(object):
                     if force:
                         vol.unprotect_snap(name)
                     elif not ignore_errors:
-                        LOG.warning(_LW('snapshot(%(name)s) on rbd '
-                                        'image(%(img)s) is protected, '
-                                        'skipping'),
+                        LOG.warning('snapshot(%(name)s) on rbd '
+                                    'image(%(img)s) is protected, skipping',
                                     {'name': name, 'img': volume})
                         return
                 LOG.debug('removing snapshot(%(name)s) on rbd image(%(img)s)',
                           {'name': name, 'img': volume})
                 vol.remove_snap(name)
             elif not ignore_errors:
-                LOG.warning(_LW('no snapshot(%(name)s) found on rbd '
-                                'image(%(img)s)'),
+                LOG.warning('no snapshot(%(name)s) found on rbd '
+                            'image(%(img)s)',
                             {'name': name, 'img': volume})
 
     def rollback_to_snap(self, volume, name):

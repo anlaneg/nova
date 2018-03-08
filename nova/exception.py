@@ -27,13 +27,9 @@ from oslo_log import log as logging
 import webob.exc
 from webob import util as woutil
 
-import nova.conf
 from nova.i18n import _, _LE
 
 LOG = logging.getLogger(__name__)
-
-
-CONF = nova.conf.CONF
 
 
 class ConvertedException(webob.exc.WSGIHTTPException):
@@ -149,6 +145,13 @@ class UnsupportedCinderAPIVersion(NovaException):
     msg_fmt = _('Nova does not support Cinder API version %(version)s')
 
 
+class CinderAPIVersionNotAvailable(NovaException):
+    """Used to indicate that a requested Cinder API version, generally a
+    microversion, is not available.
+    """
+    msg_fmt = _('Cinder API version %(version)s is not available.')
+
+
 class Forbidden(NovaException):
     msg_fmt = _("Forbidden")
     code = 403
@@ -160,10 +163,6 @@ class AdminRequired(Forbidden):
 
 class PolicyNotAuthorized(Forbidden):
     msg_fmt = _("Policy doesn't allow %(action)s to be performed.")
-
-
-class VolumeLimitExceeded(Forbidden):
-    msg_fmt = _("Volume resource quota exceeded")
 
 
 class ImageNotActive(NovaException):
@@ -251,8 +250,32 @@ class VolumeAttachFailed(Invalid):
                 "Reason: %(reason)s")
 
 
-class VolumeUnattached(Invalid):
-    msg_fmt = _("Volume %(volume_id)s is not attached to anything")
+class MultiattachNotSupportedByVirtDriver(NovaException):
+    # This exception indicates the compute hosting the instance does not
+    # support multiattach volumes. This should generally be considered a
+    # 409 HTTPConflict error in the API since we expect all virt drivers to
+    # eventually support multiattach volumes.
+    msg_fmt = _("Volume %(volume_id)s has 'multiattach' set, "
+                "which is not supported for this instance.")
+    code = 409
+
+
+class MultiattachSupportNotYetAvailable(NovaException):
+    # This exception indicates the deployment is not yet new enough to support
+    # multiattach volumes, so a 409 HTTPConflict response is generally used
+    # for handling this in the API.
+    msg_fmt = _("Multiattach volume support is not yet available.")
+    code = 409
+
+
+class MultiattachNotSupportedOldMicroversion(Invalid):
+    msg_fmt = _('Multiattach volumes are only supported starting with '
+                'compute API version 2.60.')
+
+
+class MultiattachToShelvedNotSupported(Invalid):
+    msg_fmt = _("Attaching multiattach volumes is not supported for "
+                "shelved-offloaded instances.")
 
 
 class VolumeNotCreated(NovaException):
@@ -261,9 +284,32 @@ class VolumeNotCreated(NovaException):
                 " attempts. And its status is %(volume_status)s.")
 
 
+class ExtendVolumeNotSupported(Invalid):
+    msg_fmt = _("Volume size extension is not supported by the hypervisor.")
+
+
 class VolumeEncryptionNotSupported(Invalid):
     msg_fmt = _("Volume encryption is not supported for %(volume_type)s "
                 "volume %(volume_id)s")
+
+
+class TaggedAttachmentNotSupported(Invalid):
+    msg_fmt = _("Tagged device attachment is not yet available.")
+
+
+class VolumeTaggedAttachNotSupported(TaggedAttachmentNotSupported):
+    msg_fmt = _("Tagged volume attachment is not supported for this server "
+                "instance.")
+
+
+class VolumeTaggedAttachToShelvedNotSupported(TaggedAttachmentNotSupported):
+    msg_fmt = _("Tagged volume attachment is not supported for "
+                "shelved-offloaded instances.")
+
+
+class NetworkInterfaceTaggedAttachNotSupported(TaggedAttachmentNotSupported):
+    msg_fmt = _("Tagged network interface attachment is not supported for "
+                "this server instance.")
 
 
 class InvalidKeypair(Invalid):
@@ -494,10 +540,6 @@ class DevicePathInUse(Invalid):
     code = 409
 
 
-class DeviceIsBusy(Invalid):
-    msg_fmt = _("The supplied device (%(device)s) is busy.")
-
-
 class InvalidCPUInfo(Invalid):
     msg_fmt = _("Unacceptable CPU info: %(reason)s")
 
@@ -636,6 +678,10 @@ class AutoDiskConfigDisabledByImage(Invalid):
 
 class ImageNotFound(NotFound):
     msg_fmt = _("Image %(image_id)s could not be found.")
+
+
+class ImageDeleteConflict(NovaException):
+    msg_fmt = _("Conflict deleting image. Reason: %(reason)s.")
 
 
 class PreserveEphemeralNotSupported(Invalid):
@@ -954,6 +1000,11 @@ class ServiceNotFound(NotFound):
     msg_fmt = _("Service %(service_id)s could not be found.")
 
 
+class ConfGroupForServiceTypeNotFound(ServiceNotFound):
+    msg_fmt = _("No conf group name could be found for service type "
+                "%(stype)s.")
+
+
 class ServiceBinaryExists(NovaException):
     msg_fmt = _("Service with host %(host)s binary %(binary)s exists.")
 
@@ -1011,6 +1062,10 @@ class ProjectQuotaNotFound(QuotaNotFound):
 
 class QuotaClassNotFound(QuotaNotFound):
     msg_fmt = _("Quota class %(class_name)s could not be found.")
+
+
+class QuotaClassExists(NovaException):
+    msg_fmt = _("Quota class %(class_name)s exists for resource %(resource)s")
 
 
 class QuotaUsageNotFound(QuotaNotFound):
@@ -1274,10 +1329,6 @@ class MigrationPreCheckError(MigrationError):
     msg_fmt = _("Migration pre-check error: %(reason)s")
 
 
-class MigrationPreCheckClientException(MigrationError):
-    msg_fmt = _("Client exception during Migration Pre check: %(reason)s")
-
-
 class MigrationSchedulerRPCError(MigrationError):
     msg_fmt = _("Migration select destinations error: %(reason)s")
 
@@ -1380,11 +1431,11 @@ class OnsetFileLimitExceeded(QuotaError):
 
 
 class OnsetFilePathLimitExceeded(OnsetFileLimitExceeded):
-    msg_fmt = _("Personality file path too long")
+    msg_fmt = _("Personality file path exceeds maximum %(allowed)s")
 
 
 class OnsetFileContentLimitExceeded(OnsetFileLimitExceeded):
-    msg_fmt = _("Personality file content too long")
+    msg_fmt = _("Personality file content exceeds maximum %(allowed)s")
 
 
 class KeypairLimitExceeded(QuotaError):
@@ -1500,12 +1551,6 @@ class InterfaceAttachFailedNoNetwork(InterfaceAttachFailed):
 class InterfaceDetachFailed(Invalid):
     msg_fmt = _("Failed to detach network adapter device from "
                 "%(instance_uuid)s")
-
-
-class InstanceUserDataTooLarge(NovaException):
-    msg_fmt = _("User data too large. User data must be no larger than "
-                "%(maxsize)s bytes once base64 encoded. Your data is "
-                "%(length)d bytes")
 
 
 class InstanceUserDataMalformed(NovaException):
@@ -1628,24 +1673,6 @@ class InstanceGroupSaveException(NovaException):
     msg_fmt = _("%(field)s should not be part of the updates.")
 
 
-class ImageDownloadModuleError(NovaException):
-    msg_fmt = _("There was an error with the download module %(module)s. "
-                "%(reason)s")
-
-
-class ImageDownloadModuleMetaDataError(ImageDownloadModuleError):
-    msg_fmt = _("The metadata for this location will not work with this "
-                "module %(module)s.  %(reason)s.")
-
-
-class ImageDownloadModuleNotImplementedError(ImageDownloadModuleError):
-    msg_fmt = _("The method %(method_name)s is not implemented.")
-
-
-class ImageDownloadModuleConfigurationError(ImageDownloadModuleError):
-    msg_fmt = _("The module %(module)s is misconfigured: %(reason)s.")
-
-
 class ResourceMonitorError(NovaException):
     msg_fmt = _("Error when creating resource monitor: %(monitor)s")
 
@@ -1713,7 +1740,7 @@ class PciRequestAliasNotDefined(NovaException):
 
 
 class PciConfigInvalidWhitelist(Invalid):
-    msg_fmt = _("Invalid PCI devices Whitelist config %(reason)s")
+    msg_fmt = _("Invalid PCI devices Whitelist config: %(reason)s")
 
 
 # Cannot be templated, msg needs to be constructed when raised.
@@ -1764,6 +1791,19 @@ class RequestedVRamTooHigh(NovaException):
                 "than the maximum allowed by flavor %(max_vram)d.")
 
 
+class SecurityProxyNegotiationFailed(NovaException):
+    msg_fmt = _("Failed to negotiate security type with server: %(reason)s")
+
+
+class RFBAuthHandshakeFailed(NovaException):
+    msg_fmt = _("Failed to complete auth handshake: %(reason)s")
+
+
+class RFBAuthNoAvailableScheme(NovaException):
+    msg_fmt = _("No matching auth scheme: allowed types: '%(allowed_types)s', "
+                "desired types: '%(desired_types)s'")
+
+
 class InvalidWatchdogAction(Invalid):
     msg_fmt = _("Provided watchdog action (%(action)s) is not supported.")
 
@@ -1771,6 +1811,12 @@ class InvalidWatchdogAction(Invalid):
 class LiveMigrationWithOldNovaNotSupported(NovaException):
     msg_fmt = _("Live migration with API v2.25 requires all the Mitaka "
                 "upgrade to be complete before it is available.")
+
+
+class SelectionObjectsWithOldRPCVersionNotSupported(NovaException):
+    msg_fmt = _("Requests for Selection objects with alternates are not "
+                "supported in select_destinations() before RPC version 4.5; "
+                "version %(version)s requested.")
 
 
 class LiveMigrationURINotAvailable(NovaException):
@@ -1812,8 +1858,9 @@ class ImageNUMATopologyForbidden(Forbidden):
 
 
 class ImageNUMATopologyAsymmetric(Invalid):
-    msg_fmt = _("Asymmetric NUMA topologies require explicit assignment "
-                "of CPUs and memory to nodes in image or flavor")
+    msg_fmt = _("Instance CPUs and/or memory cannot be evenly distributed "
+                "across instance NUMA nodes. Explicit assignment of CPUs "
+                "and memory to nodes is required")
 
 
 class ImageNUMATopologyCPUOutOfRange(Invalid):
@@ -1884,6 +1931,10 @@ class InvalidVirtualMachineMode(Invalid):
 
 class InvalidToken(Invalid):
     msg_fmt = _("The token '%(token)s' is invalid or has expired")
+
+
+class TokenInUse(Invalid):
+    msg_fmt = _("The generated token is invalid")
 
 
 class InvalidConnectionInfo(Invalid):
@@ -2042,6 +2093,10 @@ class AttachInterfaceNotSupported(Invalid):
                 "instance %(instance_uuid)s.")
 
 
+class InstanceDiagnosticsNotSupported(Invalid):
+    msg_fmt = _("Instance diagnostics are not supported by compute node.")
+
+
 class InvalidReservedMemoryPagesOption(Invalid):
     msg_fmt = _("The format of the option 'reserved_huge_pages' is invalid. "
                 "(found '%(conf)s') Please refer to the nova "
@@ -2057,8 +2112,56 @@ class ResourceClassNotFound(NotFound):
     msg_fmt = _("No such resource class %(resource_class)s.")
 
 
+class CannotDeleteParentResourceProvider(NovaException):
+    msg_fmt = _("Cannot delete resource provider that is a parent of "
+                "another. Delete child providers first.")
+
+
 class ResourceProviderInUse(NovaException):
     msg_fmt = _("Resource provider has allocations.")
+
+
+class ResourceProviderRetrievalFailed(NovaException):
+    msg_fmt = _("Failed to get resource provider with UUID %(uuid)s")
+
+
+class ResourceProviderAggregateRetrievalFailed(NovaException):
+    msg_fmt = _("Failed to get aggregates for resource provider with UUID"
+                " %(uuid)s")
+
+
+class ResourceProviderTraitRetrievalFailed(NovaException):
+    msg_fmt = _("Failed to get traits for resource provider with UUID"
+                " %(uuid)s")
+
+
+class ResourceProviderCreationFailed(NovaException):
+    msg_fmt = _("Failed to create resource provider %(name)s")
+
+
+class ResourceProviderDeletionFailed(NovaException):
+    msg_fmt = _("Failed to delete resource provider %(uuid)s")
+
+
+class ResourceProviderUpdateFailed(NovaException):
+    msg_fmt = _("Failed to update resource provider via URL %(url)s: "
+                "%(error)s")
+
+
+class PlacementAPIConflict(NovaException):
+    """Any 409 error from placement APIs should use (a subclass of) this
+    exception.
+    """
+    msg_fmt = _("A conflict was encountered attempting to invoke the "
+                "placement API at URL %(url)s: %(error)s")
+
+
+class ResourceProviderUpdateConflict(PlacementAPIConflict):
+    """A 409 caused by generation mismatch from attempting to update an
+    existing provider record or its associated data (aggregates, traits, etc.).
+    """
+    msg_fmt = _("A conflict was encountered attempting to update resource "
+                "provider %(uuid)s (generation %(generation)d): %(error)s")
 
 
 class InventoryWithResourceClassNotFound(NotFound):
@@ -2086,12 +2189,18 @@ class ResourceClassCannotUpdateStandard(Invalid):
     msg_fmt = _("Cannot update standard resource class %(resource_class)s.")
 
 
+class InvalidResourceAmount(Invalid):
+    msg_fmt = _("Resource amounts must be integers. Received '%(amount)s'.")
+
+
 class InvalidInventory(Invalid):
     msg_fmt = _("Inventory for '%(resource_class)s' on "
                 "resource provider '%(resource_provider)s' invalid.")
 
 
 class InventoryInUse(InvalidInventory):
+    # NOTE(mriedem): This message cannot change without impacting the
+    # nova.scheduler.client.report._RE_INV_IN_USE regex.
     msg_fmt = _("Inventory for '%(resource_classes)s' on "
                 "resource provider '%(resource_provider)s' in use.")
 
@@ -2156,7 +2265,7 @@ class PowerVMAPIFailed(NovaException):
 
 
 class TraitNotFound(NotFound):
-    msg_fmt = _("No such trait %(name)s.")
+    msg_fmt = _("No such trait(s): %(names)s.")
 
 
 class TraitExists(NovaException):
@@ -2169,3 +2278,20 @@ class TraitCannotDeleteStandard(Invalid):
 
 class TraitInUse(Invalid):
     msg_fmt = _("The trait %(name)s is in use by a resource provider.")
+
+
+class TraitRetrievalFailed(NovaException):
+    msg_fmt = _("Failed to retrieve traits from the placement API: %(error)s")
+
+
+class TraitCreationFailed(NovaException):
+    msg_fmt = _("Failed to create trait %(name)s: %(error)s")
+
+
+class CannotMigrateWithTargetHost(NovaException):
+    msg_fmt = _("Cannot migrate with target host. Retry without a host "
+                "specified.")
+
+
+class CannotMigrateToSameHost(NovaException):
+    msg_fmt = _("Cannot migrate to the host where the server exists.")

@@ -35,6 +35,7 @@ import mock
 from oslo_db.sqlalchemy import test_base
 from oslo_db.sqlalchemy import test_migrations
 from oslo_db.sqlalchemy import utils as db_utils
+from oslo_serialization import jsonutils
 import sqlalchemy
 from sqlalchemy.engine import reflection
 
@@ -43,6 +44,7 @@ from nova.db.sqlalchemy.api_migrations import migrate_repo
 from nova.db.sqlalchemy import api_models
 from nova.db.sqlalchemy import migration as sa_migration
 from nova import test
+from nova.test import uuids
 from nova.tests import fixtures as nova_fixtures
 
 
@@ -166,12 +168,14 @@ class NovaAPIMigrationsWalk(test_migrations.WalkVersionsMixin):
         mitaka_placeholders = list(range(8, 13))
         newton_placeholders = list(range(21, 26))
         ocata_placeholders = list(range(31, 41))
+        pike_placeholders = list(range(45, 50))
         special_cases = [
             30,  # Enforcement migration, no changes to test
         ]
         return (mitaka_placeholders +
                 newton_placeholders +
                 ocata_placeholders +
+                pike_placeholders +
                 special_cases)
 
     def migrate_up(self, version, with_data=False):
@@ -608,6 +612,77 @@ class NovaAPIMigrationsWalk(test_migrations.WalkVersionsMixin):
 
     def _check_042(self, engine, data):
         self.assertColumnExists(engine, 'build_requests', 'tags')
+
+    def _check_043(self, engine, data):
+        for column in ['created_at', 'updated_at', 'id', 'uuid', 'project_id',
+                       'user_id']:
+            self.assertColumnExists(engine, 'consumers', column)
+
+        self.assertIndexExists(engine, 'consumers',
+                               'consumers_project_id_uuid_idx')
+        self.assertIndexExists(engine, 'consumers',
+                               'consumers_project_id_user_id_uuid_idx')
+        self.assertUniqueConstraintExists(engine, 'consumers', ['uuid'])
+
+    def _check_044(self, engine, data):
+        for column in ['created_at', 'updated_at', 'id', 'external_id']:
+            self.assertColumnExists(engine, 'projects', column)
+            self.assertColumnExists(engine, 'users', column)
+
+        self.assertUniqueConstraintExists(engine, 'projects', ['external_id'])
+        self.assertUniqueConstraintExists(engine, 'users', ['external_id'])
+
+        # We needed to drop and recreate columns and indexes on consumers, so
+        # check that worked out properly
+        self.assertColumnExists(engine, 'consumers', 'project_id')
+        self.assertColumnExists(engine, 'consumers', 'user_id')
+        self.assertIndexExists(
+            engine, 'consumers',
+            'consumers_project_id_uuid_idx',
+        )
+        self.assertIndexExists(
+            engine, 'consumers',
+            'consumers_project_id_user_id_uuid_idx',
+        )
+
+    def _check_050(self, engine, data):
+        self.assertColumnExists(engine, 'flavors', 'description')
+
+    def _check_051(self, engine, data):
+        for column in ['root_provider_id', 'parent_provider_id']:
+            self.assertColumnExists(engine, 'resource_providers', column)
+        self.assertIndexExists(engine, 'resource_providers',
+            'resource_providers_root_provider_id_idx')
+        self.assertIndexExists(engine, 'resource_providers',
+            'resource_providers_parent_provider_id_idx')
+
+    def _pre_upgrade_052(self, engine):
+        request_specs = db_utils.get_table(engine, 'request_specs')
+        # The spec value is a serialized json blob.
+        spec = jsonutils.dumps(
+            {"instance_group": {"id": 42,
+                                "members": ["uuid1",
+                                            "uuid2",
+                                            "uuid3"]}})
+        fake_request_spec = {
+            'id': 42, 'spec': spec, 'instance_uuid': uuids.instance}
+        request_specs.insert().execute(fake_request_spec)
+
+    def _check_052(self, engine, data):
+        request_specs = db_utils.get_table(engine, 'request_specs')
+        if engine.name == 'mysql':
+            self.assertIsInstance(request_specs.c.spec.type,
+                                  sqlalchemy.dialects.mysql.MEDIUMTEXT)
+
+        expected_spec = {"instance_group": {"id": 42,
+                                            "members": ["uuid1",
+                                                        "uuid2",
+                                                        "uuid3"]}}
+        from_db_request_spec = request_specs.select(
+            request_specs.c.id == 42).execute().first()
+        self.assertEqual(uuids.instance, from_db_request_spec['instance_uuid'])
+        db_spec = jsonutils.loads(from_db_request_spec['spec'])
+        self.assertDictEqual(expected_spec, db_spec)
 
 
 class TestNovaAPIMigrationsWalkSQLite(NovaAPIMigrationsWalk,

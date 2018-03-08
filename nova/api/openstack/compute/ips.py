@@ -18,12 +18,9 @@ from webob import exc
 import nova
 from nova.api.openstack import common
 from nova.api.openstack.compute.views import addresses as views_addresses
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.i18n import _
 from nova.policies import ips as ips_policies
-
-ALIAS = 'ips'
 
 
 class IPsController(wsgi.Controller):
@@ -38,7 +35,7 @@ class IPsController(wsgi.Controller):
         super(IPsController, self).__init__(**kwargs)
         self._compute_api = nova.compute.API()
 
-    @extensions.expected_errors(404)
+    @wsgi.expected_errors(404)
     def index(self, req, server_id):
         context = req.environ["nova.context"]
         context.can(ips_policies.POLICY_ROOT % 'index')
@@ -46,7 +43,7 @@ class IPsController(wsgi.Controller):
         networks = common.get_networks_for_instance(context, instance)
         return self._view_builder.index(networks)
 
-    @extensions.expected_errors(404)
+    @wsgi.expected_errors(404)
     def show(self, req, server_id, id):
         context = req.environ["nova.context"]
         context.can(ips_policies.POLICY_ROOT % 'show')
@@ -57,23 +54,3 @@ class IPsController(wsgi.Controller):
             raise exc.HTTPNotFound(explanation=msg)
 
         return self._view_builder.show(networks[id], id)
-
-
-class IPs(extensions.V21APIExtensionBase):
-    """Server addresses."""
-
-    name = "Ips"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        parent = {'member_name': 'server',
-                  'collection_name': 'servers'}
-        resources = [
-            extensions.ResourceExtension(
-                ALIAS, IPsController(), parent=parent, member_name='ip')]
-
-        return resources
-
-    def get_controller_extensions(self):
-        return []

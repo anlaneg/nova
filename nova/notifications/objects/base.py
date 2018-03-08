@@ -48,7 +48,12 @@ class EventType(NotificationObject):
     #              NotificationActionField enum
     # Version 1.5: Aggregate related values have been added to
     #              NotificationActionField enum
-    VERSION = '1.5'
+    # Version 1.6: ADD_FIX_IP replaced with INTERFACE_ATTACH in
+    #              NotificationActionField enum
+    # Version 1.7: REMOVE_FIXED_IP replaced with INTERFACE_DETACH in
+    #              NotificationActionField enum
+    # Version 1.8: IMPORT value is added to NotificationActionField enum
+    VERSION = '1.8'
 
     fields = {
         'object': fields.StringField(nullable=False),
@@ -56,10 +61,16 @@ class EventType(NotificationObject):
         'phase': fields.NotificationPhaseField(nullable=True),
     }
 
+    def __init__(self, object, action, phase=None):
+        super(EventType, self).__init__()
+        self.object = object
+        self.action = action
+        self.phase = phase
+
     def to_notification_event_type_field(self):
         """Serialize the object to the wire format."""
         s = '%s.%s' % (self.object, self.action)
-        if self.obj_attr_is_set('phase'):
+        if self.phase:
             s += '.%s' % self.phase
         return s
 
@@ -89,8 +100,8 @@ class NotificationPayloadBase(NotificationObject):
     # Version 1.0: Initial version
     VERSION = '1.0'
 
-    def __init__(self, **kwargs):
-        super(NotificationPayloadBase, self).__init__(**kwargs)
+    def __init__(self):
+        super(NotificationPayloadBase, self).__init__()
         self.populated = not self.SCHEMA
 
     @rpc.if_notifications_enabled
@@ -126,22 +137,33 @@ class NotificationPayloadBase(NotificationObject):
 
         # the schema population will create changed fields but we don't need
         # this information in the notification
-        self.obj_reset_changes(recursive=False)
+        self.obj_reset_changes(recursive=True)
 
 
 @base.NovaObjectRegistry.register_notification
 class NotificationPublisher(NotificationObject):
     # Version 1.0: Initial version
-    VERSION = '1.0'
+    #         2.0: The binary field has been renamed to source
+    #         2.1: The type of the source field changed from string to enum.
+    #              This only needs a minor bump as the enum uses the possible
+    #              values of the previous string field
+    #         2.2: New enum for source fields added
+    VERSION = '2.2'
 
     fields = {
         'host': fields.StringField(nullable=False),
-        'binary': fields.StringField(nullable=False),
+        'source': fields.NotificationSourceField(nullable=False),
     }
+
+    def __init__(self, host, source):
+        super(NotificationPublisher, self).__init__()
+        self.host = host
+        self.source = source
 
     @classmethod
     def from_service_obj(cls, service):
-        return cls(host=service.host, binary=service.binary)
+        source = fields.NotificationSource.get_source_by_binary(service.binary)
+        return cls(host=service.host, source=source)
 
 
 @base.NovaObjectRegistry.register_if(False)
@@ -172,13 +194,13 @@ class NotificationBase(NotificationObject):
         # Note(gibi): notification payload will be a newly populated object
         # therefore every field of it will look changed so this does not carry
         # any extra information so we drop this from the payload.
-        self.payload.obj_reset_changes(recursive=False)
+        self.payload.obj_reset_changes(recursive=True)
 
         self._emit(context,
                    event_type=
                    self.event_type.to_notification_event_type_field(),
                    publisher_id='%s:%s' %
-                                (self.publisher.binary,
+                                (self.publisher.source,
                                  self.publisher.host),
                    payload=self.payload.obj_to_primitive())
 

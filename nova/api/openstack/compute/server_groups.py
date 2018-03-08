@@ -24,9 +24,9 @@ from webob import exc
 from nova.api.openstack import api_version_request
 from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import server_groups as schema
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api import validation
+import nova.conf
 from nova import context as nova_context
 import nova.exception
 from nova.i18n import _
@@ -35,7 +35,7 @@ from nova.policies import server_groups as sg_policies
 
 LOG = logging.getLogger(__name__)
 
-ALIAS = "os-server-groups"
+CONF = nova.conf.CONF
 
 
 def _authorize_context(req, action):
@@ -105,7 +105,7 @@ class ServerGroupController(wsgi.Controller):
             server_group['user_id'] = group.user_id
         return server_group
 
-    @extensions.expected_errors(404)
+    @wsgi.expected_errors(404)
     def show(self, req, id):
         """Return data about the given server group."""
         context = _authorize_context(req, 'show')
@@ -116,7 +116,7 @@ class ServerGroupController(wsgi.Controller):
         return {'server_group': self._format_server_group(context, sg, req)}
 
     @wsgi.response(204)
-    @extensions.expected_errors(404)
+    @wsgi.expected_errors(404)
     def delete(self, req, id):
         """Delete a server group."""
         context = _authorize_context(req, 'delete')
@@ -124,29 +124,13 @@ class ServerGroupController(wsgi.Controller):
             sg = objects.InstanceGroup.get_by_uuid(context, id)
         except nova.exception.InstanceGroupNotFound as e:
             raise webob.exc.HTTPNotFound(explanation=e.format_message())
-
-        quotas = objects.Quotas(context=context)
-        project_id, user_id = objects.quotas.ids_from_server_group(context, sg)
-        try:
-            # We have to add the quota back to the user that created
-            # the server group
-            quotas.reserve(project_id=project_id,
-                           user_id=user_id, server_groups=-1)
-        except Exception:
-            quotas = None
-            LOG.exception("Failed to update usages deallocating server group")
-
         try:
             sg.destroy()
         except nova.exception.InstanceGroupNotFound as e:
-            if quotas:
-                quotas.rollback()
             raise webob.exc.HTTPNotFound(explanation=e.format_message())
 
-        if quotas:
-            quotas.commit()
-
-    @extensions.expected_errors(())
+    @wsgi.expected_errors(())
+    @validation.query_schema(schema.server_groups_query_param)
     def index(self, req):
         """Returns a list of server groups."""
         context = _authorize_context(req, 'index')
@@ -162,17 +146,16 @@ class ServerGroupController(wsgi.Controller):
         return {'server_groups': result}
 
     @wsgi.Controller.api_version("2.1")
-    @extensions.expected_errors((400, 403))
-    @validation.schema(schema.create, "2.1", "2.14")
+    @wsgi.expected_errors((400, 403))
+    @validation.schema(schema.create, "2.0", "2.14")
     @validation.schema(schema.create_v215, "2.15")
     def create(self, req, body):
         """Creates a new server group."""
         context = _authorize_context(req, 'create')
 
-        quotas = objects.Quotas(context=context)
         try:
-            quotas.reserve(project_id=context.project_id,
-                           user_id=context.user_id, server_groups=1)
+            objects.Quotas.check_deltas(context, {'server_groups': 1},
+                                        context.project_id, context.user_id)
         except nova.exception.OverQuota:
             msg = _("Quota exceeded, too many server groups.")
             raise exc.HTTPForbidden(explanation=msg)
@@ -186,24 +169,20 @@ class ServerGroupController(wsgi.Controller):
             sg.policies = vals.get('policies')
             sg.create()
         except ValueError as e:
-            quotas.rollback()
             raise exc.HTTPBadRequest(explanation=e)
 
-        quotas.commit()
+        # NOTE(melwitt): We recheck the quota after creating the object to
+        # prevent users from allocating more resources than their allowed quota
+        # in the event of a race. This is configurable because it can be
+        # expensive if strict quota limits are not required in a deployment.
+        if CONF.quota.recheck_quota:
+            try:
+                objects.Quotas.check_deltas(context, {'server_groups': 0},
+                                            context.project_id,
+                                            context.user_id)
+            except nova.exception.OverQuota:
+                sg.destroy()
+                msg = _("Quota exceeded, too many server groups.")
+                raise exc.HTTPForbidden(explanation=msg)
+
         return {'server_group': self._format_server_group(context, sg, req)}
-
-
-class ServerGroups(extensions.V21APIExtensionBase):
-    """Server group support."""
-    name = "ServerGroups"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        res = extensions.ResourceExtension(
-                 ALIAS, controller=ServerGroupController(),
-                 member_actions={"action": "POST", })
-        return [res]
-
-    def get_controller_extensions(self):
-        return []

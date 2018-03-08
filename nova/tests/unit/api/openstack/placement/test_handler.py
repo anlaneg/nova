@@ -19,6 +19,7 @@ import webob
 
 from nova.api.openstack.placement import handler
 from nova.api.openstack.placement.handlers import root
+from nova.api.openstack.placement import microversion
 from nova import test
 from nova.tests import uuidsentinel
 
@@ -35,6 +36,9 @@ def _environ(path='/moo', method='GET'):
         'SERVER_NAME': 'example.com',
         'SERVER_PORT': '80',
         'wsgi.url_scheme': 'http',
+        # The microversion version value is not used, but it
+        # needs to be set to avoid a KeyError.
+        microversion.MICROVERSION_ENVIRON: microversion.Version(1, 12),
     }
 
 
@@ -101,11 +105,17 @@ class MapperTest(test.NoDBTestCase):
 
     def test_405_headers(self):
         environ = _environ(path='/hello', method='POST')
-        error = self.assertRaises(webob.exc.HTTPMethodNotAllowed,
-                                  handler.dispatch,
-                                  environ, start_response,
-                                  self.mapper)
-        allow_header = error.headers['allow']
+        global headers, status
+        headers = status = None
+
+        def local_start_response(*args, **kwargs):
+            global headers, status
+            status = args[0]
+            headers = {header[0]: header[1] for header in args[1]}
+
+        handler.dispatch(environ, local_start_response, self.mapper)
+        allow_header = headers['allow']
+        self.assertEqual('405 Method Not Allowed', status)
         self.assertEqual('GET', allow_header)
         # PEP 3333 requires that headers be whatever the native str
         # is in that version of Python. Never unicode.

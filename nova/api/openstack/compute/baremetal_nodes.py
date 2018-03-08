@@ -22,7 +22,6 @@ import webob
 from nova.api.openstack.api_version_request \
     import MAX_PROXY_API_SUPPORT_VERSION
 from nova.api.openstack import common
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 import nova.conf
 from nova.i18n import _
@@ -30,8 +29,6 @@ from nova.policies import baremetal_nodes as bn_policies
 
 ironic_client = importutils.try_import('ironicclient.client')
 ironic_exc = importutils.try_import('ironicclient.exc')
-
-ALIAS = "os-baremetal-nodes"
 
 node_fields = ['id', 'cpus', 'local_gb', 'memory_mb', 'pm_address',
                'pm_user', 'service_host', 'terminal_port', 'instance_uuid']
@@ -87,7 +84,7 @@ class BareMetalNodeController(wsgi.Controller):
         return d
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
-    @extensions.expected_errors((404, 501))
+    @wsgi.expected_errors((404, 501))
     def index(self, req):
         context = req.environ['nova.context']
         context.can(bn_policies.BASE_POLICY_NAME)
@@ -108,7 +105,7 @@ class BareMetalNodeController(wsgi.Controller):
         return {'nodes': nodes}
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
-    @extensions.expected_errors((404, 501))
+    @wsgi.expected_errors((404, 501))
     def show(self, req, id):
         context = req.environ['nova.context']
         context.can(bn_policies.BASE_POLICY_NAME)
@@ -134,43 +131,23 @@ class BareMetalNodeController(wsgi.Controller):
         return {'node': node}
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
-    @extensions.expected_errors(400)
+    @wsgi.expected_errors(400)
     def create(self, req, body):
         _no_ironic_proxy("node-create")
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
-    @extensions.expected_errors(400)
+    @wsgi.expected_errors(400)
     def delete(self, req, id):
         _no_ironic_proxy("node-delete")
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.action('add_interface')
-    @extensions.expected_errors(400)
+    @wsgi.expected_errors(400)
     def _add_interface(self, req, id, body):
         _no_ironic_proxy("port-create")
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.action('remove_interface')
-    @extensions.expected_errors(400)
+    @wsgi.expected_errors(400)
     def _remove_interface(self, req, id, body):
         _no_ironic_proxy("port-delete")
-
-
-class BareMetalNodes(extensions.V21APIExtensionBase):
-    """Admin-only bare-metal node administration."""
-
-    name = "BareMetalNodes"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        resource = [extensions.ResourceExtension(ALIAS,
-                BareMetalNodeController(),
-                member_actions={"action": "POST"})]
-        return resource
-
-    def get_controller_extensions(self):
-        """It's an abstract function V21APIExtensionBase and the extension
-        will not be loaded without it.
-        """
-        return []

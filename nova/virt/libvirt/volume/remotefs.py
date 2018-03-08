@@ -20,11 +20,13 @@ import tempfile
 
 from oslo_concurrency import processutils
 from oslo_log import log as logging
+from oslo_utils import fileutils
 from oslo_utils import importutils
 import six
 
 import nova.conf
-from nova.i18n import _LE, _LW
+from nova.i18n import _
+import nova.privsep.fs
 from nova import utils
 
 LOG = logging.getLogger(__name__)
@@ -41,18 +43,13 @@ def mount_share(mount_path, export_path,
     :export_type: remote export type (e.g. cifs, nfs, etc.)
     :options: A list containing mount options
     """
-    utils.execute('mkdir', '-p', mount_path)
-
-    mount_cmd = ['mount', '-t', export_type]
-    if options is not None:
-        mount_cmd.extend(options)
-    mount_cmd.extend([export_path, mount_path])
+    fileutils.ensure_tree(mount_path)
 
     try:
-        utils.execute(*mount_cmd, run_as_root=True)
+        nova.privsep.fs.mount(export_type, export_path, mount_path, options)
     except processutils.ProcessExecutionError as exc:
         if 'Device or resource busy' in six.text_type(exc):
-            LOG.warning(_LW("%s is already mounted"), export_path)
+            LOG.warning("%s is already mounted", export_path)
         else:
             raise
 
@@ -64,14 +61,12 @@ def unmount_share(mount_path, export_path):
     :param export_path: path of the remote export to be unmounted
     """
     try:
-        utils.execute('umount', mount_path, run_as_root=True,
-                      attempts=3, delay_on_retry=True)
+        nova.privsep.fs.umount(mount_path)
     except processutils.ProcessExecutionError as exc:
         if 'target is busy' in six.text_type(exc):
             LOG.debug("The share %s is still in use.", export_path)
         else:
-            LOG.exception(_LE("Couldn't unmount the share %s"),
-                          export_path)
+            LOG.exception(_("Couldn't unmount the share %s"), export_path)
 
 
 #顶层类，向下操作create_file,remove_file等操作框架（目前支持SshDriver,RsyncDriver)

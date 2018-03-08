@@ -21,8 +21,8 @@ from oslo_service import loopingcall
 from oslo_utils import importutils
 
 from nova import exception
-from nova.i18n import _, _LI, _LW
-from nova import utils
+from nova.i18n import _
+import nova.privsep.fs
 from nova.virt.image import model as imgmodel
 
 LOG = logging.getLogger(__name__)
@@ -167,11 +167,10 @@ class Mount(object):
         start_time = time.time()
         device = self._inner_get_dev()
         while not device:
-            LOG.info(_LI('Device allocation failed. Will retry in 2 seconds.'))
+            LOG.info('Device allocation failed. Will retry in 2 seconds.')
             time.sleep(2)
             if time.time() - start_time > MAX_DEVICE_WAIT:
-                LOG.warning(_LW('Device allocation failed after repeated '
-                                'retries.'))
+                LOG.warning('Device allocation failed after repeated retries.')
                 return False
             device = self._inner_get_dev()
         return True
@@ -200,8 +199,7 @@ class Mount(object):
             # Note kpartx can output warnings to stderr and succeed
             # Also it can output failures to stderr and "succeed"
             # So we just go on the existence of the mapped device
-            _out, err = utils.trycmd('kpartx', '-a', self.device,
-                                     run_as_root=True, discard_warnings=True)
+            _out, err = nova.privsep.fs.create_device_maps(self.device)
 
             @loopingcall.RetryDecorator(
                     max_retry_count=MAX_FILE_CHECKS - 1,
@@ -241,7 +239,7 @@ class Mount(object):
             return
         LOG.debug("Unmap dev %s", self.device)
         if self.partition and not self.automapped:
-            utils.execute('kpartx', '-d', self.device, run_as_root=True)
+            nova.privsep.fs.remove_device_maps(self.device)
         self.mapped = False
         self.automapped = False
 
@@ -249,8 +247,8 @@ class Mount(object):
         """Mount the device into the file system."""
         LOG.debug("Mount %(dev)s on %(dir)s",
                   {'dev': self.mapped_device, 'dir': self.mount_dir})
-        _out, err = utils.trycmd('mount', self.mapped_device, self.mount_dir,
-                                 discard_warnings=True, run_as_root=True)
+        out, err = nova.privsep.fs.mount(None, self.mapped_device,
+                                         self.mount_dir)
         if err:
             self.error = _('Failed to mount filesystem: %s') % err
             LOG.debug(self.error)
@@ -265,7 +263,7 @@ class Mount(object):
             return
         self.flush_dev()
         LOG.debug("Umount %s", self.mapped_device)
-        utils.execute('umount', self.mapped_device, run_as_root=True)
+        nova.privsep.fs.umount(self.mapped_device)
         self.mounted = False
 
     def flush_dev(self):

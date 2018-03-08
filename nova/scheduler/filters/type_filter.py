@@ -18,26 +18,6 @@ from nova.scheduler import filters
 from nova.scheduler.filters import utils
 
 
-class TypeAffinityFilter(filters.BaseHostFilter):
-    """TypeAffinityFilter doesn't allow more than one VM type per host.
-
-    Note: this works best with ram_weight_multiplier
-    (spread) set to 1 (default).
-    """
-
-    def host_passes(self, host_state, spec_obj):
-        """Dynamically limits hosts to one instance type
-
-        Return False if host has any instance types other than the requested
-        type. Return True if all instance types match or if host is empty.
-        """
-        instance_type = spec_obj.flavor
-        instance_type_id = instance_type.id
-        other_types_on_host = utils.other_types_on_host(host_state,
-                                                        instance_type_id)
-        return not other_types_on_host
-
-
 class AggregateTypeAffinityFilter(filters.BaseHostFilter):
     """AggregateTypeAffinityFilter limits instance_type by aggregate
 
@@ -47,6 +27,8 @@ class AggregateTypeAffinityFilter(filters.BaseHostFilter):
 
     # Aggregate data does not change within a request
     run_filter_once_per_request = True
+
+    RUN_ON_REBUILD = False
 
     def host_passes(self, host_state, spec_obj):
         instance_type = spec_obj.flavor

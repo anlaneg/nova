@@ -21,9 +21,8 @@ from oslo_log import log as logging
 
 import nova.conf
 from nova import exception
-from nova.i18n import _LE
-from nova.i18n import _LW
 from nova import profiler
+from nova.virt import block_device as driver_block_device
 from nova.virt.libvirt import config as vconfig
 import nova.virt.libvirt.driver
 from nova.virt.libvirt import utils as libvirt_utils
@@ -76,8 +75,8 @@ class LibvirtBaseVolumeDriver(object):
                         new_key = 'disk_' + k
                         setattr(conf, new_key, v)
             else:
-                LOG.warning(_LW('Unknown content in connection_info/'
-                             'qos_specs: %s'), specs)
+                LOG.warning('Unknown content in connection_info/'
+                            'qos_specs: %s', specs)
 
         # Extract access_mode control parameters
         if 'access_mode' in data and data['access_mode']:
@@ -85,8 +84,8 @@ class LibvirtBaseVolumeDriver(object):
             if access_mode in ('ro', 'rw'):
                 conf.readonly = access_mode == 'ro'
             else:
-                LOG.error(_LE('Unknown content in '
-                              'connection_info/access_mode: %s'),
+                LOG.error('Unknown content in '
+                          'connection_info/access_mode: %s',
                           access_mode)
                 raise exception.InvalidVolumeAccessMode(
                     access_mode=access_mode)
@@ -95,15 +94,47 @@ class LibvirtBaseVolumeDriver(object):
         if data.get('discard', False) is True:
             conf.driver_discard = 'unmap'
 
+        if disk_info['bus'] == 'scsi':
+            # The driver is responsible to create the SCSI controller
+            # at index 0.
+            conf.device_addr = vconfig.LibvirtConfigGuestDeviceAddressDrive()
+            conf.device_addr.controller = 0
+            if 'unit' in disk_info:
+                # In order to allow up to 256 disks handled by one
+                # virtio-scsi controller, the device addr should be
+                # specified.
+                conf.device_addr.unit = disk_info['unit']
+
+        if connection_info.get('multiattach', False):
+            # Note that driver_cache should be disabled (none) when using
+            # a shareable disk.
+            conf.shareable = True
+
+        volume_id = driver_block_device.get_volume_id(connection_info)
+        volume_secret = None
+        if volume_id:
+            volume_secret = self.host.find_secret('volume', volume_id)
+        if volume_secret:
+            conf.encryption = vconfig.LibvirtConfigGuestDiskEncryption()
+            secret = vconfig.LibvirtConfigGuestDiskEncryptionSecret()
+            secret.type = 'passphrase'
+            secret.uuid = volume_secret.UUIDString()
+            conf.encryption.format = 'luks'
+            conf.encryption.secret = secret
+
         return conf
 
-    def connect_volume(self, connection_info, disk_info, instance):
+    def connect_volume(self, connection_info, instance):
         """Connect the volume."""
         pass
 
-    def disconnect_volume(self, connection_info, disk_dev, instance):
+    def disconnect_volume(self, connection_info, instance):
         """Disconnect the volume."""
         pass
+
+    def extend_volume(self, connection_info, instance):
+        """Extend the volume."""
+        raise NotImplementedError()
 
 
 class LibvirtVolumeDriver(LibvirtBaseVolumeDriver):

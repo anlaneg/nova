@@ -18,6 +18,7 @@ from oslo_utils import units
 from nova.objects import fields as obj_fields
 from nova import test
 from nova.tests.unit import matchers
+from nova.tests import uuidsentinel as uuids
 from nova.virt.libvirt import config
 
 
@@ -47,7 +48,7 @@ class LibvirtConfigTest(LibvirtConfigBaseTest):
         root = obj.format_dom()
         root.append(obj._text_node("foo", "bar"))
 
-        xml = etree.tostring(root)
+        xml = etree.tostring(root, encoding='unicode')
         self.assertXmlEqual(xml, "<demo><foo>bar</foo></demo>")
 
     def test_config_text_unicode(self):
@@ -55,14 +56,14 @@ class LibvirtConfigTest(LibvirtConfigBaseTest):
         root = obj.format_dom()
         root.append(obj._text_node('foo', u'\xF0\x9F\x92\xA9'))
         self.assertXmlEqual('<demo><foo>&#240;&#159;&#146;&#169;</foo></demo>',
-                            etree.tostring(root))
+                            etree.tostring(root, encoding='unicode'))
 
     def test_config_text_node_name_attr(self):
         obj = config.LibvirtConfigObject(root_name='demo')
         root = obj.format_dom()
         root.append(obj._text_node('foo', 'bar', name='foobar'))
         self.assertXmlEqual('<demo><foo name="foobar">bar</foo></demo>',
-                            etree.tostring(root))
+                            etree.tostring(root, encoding='unicode'))
 
     def test_config_parse(self):
         inxml = "<demo><foo/></demo>"
@@ -790,6 +791,62 @@ class LibvirtConfigGuestDiskTest(LibvirtConfigBaseTest):
         obj.parse_dom(xmldoc)
         self.assertEqual(obj.mirror.ready, "yes")
 
+    def test_config_disk_encryption_format(self):
+        d = config.LibvirtConfigGuestDisk()
+        e = config.LibvirtConfigGuestDiskEncryption()
+        s = config.LibvirtConfigGuestDiskEncryptionSecret()
+
+        d.driver_name = "qemu"
+        d.driver_format = "qcow2"
+        d.driver_cache = "none"
+        d.driver_io = "native"
+        d.source_type = "file"
+        d.source_path = "/tmp/hello.qcow2"
+        d.target_dev = "/dev/hda"
+        d.target_bus = "ide"
+        d.serial = uuids.serial
+        d.boot_order = "1"
+        e.format = "luks"
+        s.type = "passphrase"
+        s.uuid = uuids.secret
+        e.secret = s
+        d.encryption = e
+
+        xml = d.to_xml()
+        expected_xml = """
+            <disk type="file" device="disk">
+              <driver name="qemu" type="qcow2" cache="none" io="native"/>
+              <source file="/tmp/hello.qcow2"/>
+              <target bus="ide" dev="/dev/hda"/>
+              <serial>%s</serial>
+              <boot order="1"/>
+              <encryption format='luks'>
+                <secret type='passphrase' uuid='%s'/>
+              </encryption>
+            </disk>""" % (uuids.serial, uuids.secret)
+        self.assertXmlEqual(expected_xml, xml)
+
+    def test_config_disk_encryption_parse(self):
+        xml = """
+<disk type="file" device="disk">
+  <driver name="qemu" type="qcow2" cache="none" io="native"/>
+  <source file="/tmp/hello.qcow2"/>
+  <target bus="ide" dev="/dev/hda"/>
+  <serial>%s</serial>
+  <boot order="1"/>
+  <encryption format='luks'>
+    <secret type='passphrase' uuid='%s'/>
+  </encryption>
+</disk>""" % (uuids.serial, uuids.secret)
+
+        xmldoc = etree.fromstring(xml)
+        d = config.LibvirtConfigGuestDisk()
+        d.parse_dom(xmldoc)
+
+        self.assertEqual(d.encryption.format, "luks")
+        self.assertEqual(d.encryption.secret.type, "passphrase")
+        self.assertEqual(d.encryption.secret.uuid, uuids.secret)
+
     def test_config_boot_order_parse(self):
         xml = """
             <disk type="file" device="disk">
@@ -1026,6 +1083,73 @@ class LibvirtConfigGuestDiskTest(LibvirtConfigBaseTest):
                                                 obj.device_addr.target,
                                                 obj.device_addr.unit))
         self.assertIsNone(obj.device_addr.format_address())
+
+    def test_config_disk_device_address_drive(self):
+        obj = config.LibvirtConfigGuestDeviceAddressDrive()
+        obj.controller = 1
+        obj.bus = 2
+        obj.target = 3
+        obj.unit = 4
+
+        xml = """
+        <address type="drive" controller="1" bus="2" target="3" unit="4"/>
+        """
+        self.assertXmlEqual(xml, obj.to_xml())
+
+    def test_config_disk_device_address_drive_added(self):
+        obj = config.LibvirtConfigGuestDisk()
+        obj.source_type = "file"
+        obj.source_path = "/tmp/hello"
+        obj.target_dev = "/dev/hda"
+        obj.target_bus = "scsi"
+        obj.device_addr = config.LibvirtConfigGuestDeviceAddressDrive()
+        obj.device_addr.controller = 1
+        obj.device_addr.bus = 2
+        obj.device_addr.target = 3
+        obj.device_addr.unit = 4
+
+        self.assertXmlEqual("""
+        <disk type="file" device="disk">
+          <source file="/tmp/hello"/>
+          <target bus="scsi" dev="/dev/hda"/>
+          <address type="drive" controller="1" bus="2" target="3" unit="4"/>
+        </disk>""", obj.to_xml())
+
+    def test_config_disk_device_address_pci(self):
+        obj = config.LibvirtConfigGuestDeviceAddressPCI()
+        obj.domain = 1
+        obj.bus = 2
+        obj.slot = 3
+        obj.function = 4
+
+        xml = """
+        <address type="pci" domain="1" bus="2" slot="3" function="4"/>
+        """
+        self.assertXmlEqual(xml, obj.to_xml())
+
+    def test_config_disk_device_address_pci_added(self):
+        obj = config.LibvirtConfigGuestDisk()
+        obj.source_type = "network"
+        obj.source_name = "volumes/volume-0"
+        obj.source_protocol = "rbd"
+        obj.source_hosts = ["192.168.1.1"]
+        obj.source_ports = ["1234"]
+        obj.target_dev = "hdb"
+        obj.target_bus = "virtio"
+        obj.device_addr = config.LibvirtConfigGuestDeviceAddressPCI()
+        obj.device_addr.domain = 1
+        obj.device_addr.bus = 2
+        obj.device_addr.slot = 3
+        obj.device_addr.function = 4
+
+        self.assertXmlEqual("""
+        <disk type="network" device="disk">
+          <source protocol="rbd" name="volumes/volume-0">
+            <host name="192.168.1.1" port="1234"/>
+          </source>
+          <target bus="virtio" dev="hdb"/>
+          <address type="pci" domain="1" bus="2" slot="3" function="4"/>
+        </disk>""", obj.to_xml())
 
     def test_config_disk_device_address_type_virtio_mmio(self):
         xml = """
@@ -1340,6 +1464,34 @@ class LibvirtConfigGuestHostdevPCI(LibvirtConfigBaseTest):
         obj.parse_str(xmldoc)
         self.assertEqual(obj.mode, 'subsystem')
         self.assertEqual(obj.type, 'usb')
+
+
+class LibvirtConfigGuestHostdevMDEV(LibvirtConfigBaseTest):
+
+    expected = """
+            <hostdev mode='subsystem' type='mdev' model='vfio-pci'
+             managed='no'>
+                <source>
+                    <address uuid="b38a3f43-4be2-4046-897f-b67c2f5e0140" />
+                </source>
+            </hostdev>
+            """
+
+    def test_config_guest_hostdev_mdev(self):
+        hostdev = config.LibvirtConfigGuestHostdevMDEV()
+        hostdev.uuid = "b38a3f43-4be2-4046-897f-b67c2f5e0140"
+        xml = hostdev.to_xml()
+        self.assertXmlEqual(self.expected, xml)
+
+    def test_parse_guest_hostdev_mdev(self):
+        xmldoc = self.expected
+        obj = config.LibvirtConfigGuestHostdevMDEV()
+        obj.parse_str(xmldoc)
+        self.assertEqual(obj.mode, 'subsystem')
+        self.assertEqual(obj.type, 'mdev')
+        self.assertEqual(obj.managed, 'no')
+        self.assertEqual(obj.model, 'vfio-pci')
+        self.assertEqual(obj.uuid, 'b38a3f43-4be2-4046-897f-b67c2f5e0140')
 
 
 class LibvirtConfigGuestCharDeviceLog(LibvirtConfigBaseTest):
@@ -2100,6 +2252,7 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
             config.LibvirtConfigGuestFeatureACPI(),
             config.LibvirtConfigGuestFeatureAPIC(),
             config.LibvirtConfigGuestFeaturePAE(),
+            config.LibvirtConfigGuestFeatureKvmHidden()
         ]
 
         obj.sysinfo = config.LibvirtConfigGuestSysinfo()
@@ -2158,6 +2311,9 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
                 <acpi/>
                 <apic/>
                 <pae/>
+                <kvm>
+                  <hidden state='on'/>
+                </kvm>
               </features>
               <cputune>
                 <shares>100</shares>
@@ -2722,6 +2878,24 @@ class LibvirtConfigNodeDeviceTest(LibvirtConfigBaseTest):
                          ['rx', 'tx', 'sg', 'tso', 'gso', 'gro', 'rxvlan',
                           'txvlan'])
 
+    def test_config_mdev_device(self):
+        xmlin = """
+        <device>
+          <name>mdev_4b20d080_1b54_4048_85b3_a6a62d165c01</name>
+          <parent>pci_0000_06_00_0</parent>
+          <capability type='mdev'>
+            <type id='nvidia-11'/>
+            <iommuGroup number='12'/>
+          </capability>
+        </device>"""
+
+        obj = config.LibvirtConfigNodeDevice()
+        obj.parse_str(xmlin)
+        self.assertIsInstance(obj.mdev_information,
+                              config.LibvirtConfigNodeDeviceMdevInformation)
+        self.assertEqual("nvidia-11", obj.mdev_information.type)
+        self.assertEqual(12, obj.mdev_information.iommu_group)
+
 
 class LibvirtConfigNodeDevicePciCapTest(LibvirtConfigBaseTest):
 
@@ -2799,6 +2973,45 @@ class LibvirtConfigNodeDevicePciCapTest(LibvirtConfigBaseTest):
         self.assertEqual(obj.fun_capability[1].type, 'phys_function')
         self.assertEqual(obj.fun_capability[1].device_addrs,
                          [(0, 10, 1, 1), ])
+
+    def test_config_device_pci_mdev_capable(self):
+        xmlin = """
+            <capability type="pci">
+              <domain>0</domain>
+              <bus>10</bus>
+              <slot>1</slot>
+              <function>5</function>
+              <product id="0x0FFE">GRID M60-0B</product>
+              <vendor id="0x10DE">Nvidia</vendor>
+              <capability type='mdev_types'>
+                <type id='nvidia-11'>
+                  <name>GRID M60-0B</name>
+                  <deviceAPI>vfio-pci</deviceAPI>
+                  <availableInstances>16</availableInstances>
+                </type>
+              </capability>
+            </capability>"""
+        obj = config.LibvirtConfigNodeDevicePciCap()
+        obj.parse_str(xmlin)
+
+        self.assertEqual(0, obj.domain)
+        self.assertEqual(10, obj.bus)
+        self.assertEqual(1, obj.slot)
+        self.assertEqual(5, obj.function)
+        self.assertEqual("GRID M60-0B", obj.product)
+        self.assertEqual(0x0FFE, obj.product_id)
+        self.assertEqual("Nvidia", obj.vendor)
+        self.assertEqual(0x10DE, obj.vendor_id)
+        self.assertIsNone(obj.numa_node)
+        self.assertIsInstance(
+            obj.mdev_capability[0],
+            config.LibvirtConfigNodeDeviceMdevCapableSubFunctionCap)
+
+        self.assertEqual([{
+            'availableInstances': 16,
+            'deviceAPI': 'vfio-pci',
+            'name': 'GRID M60-0B',
+            'type': 'nvidia-11'}], obj.mdev_capability[0].mdev_types)
 
 
 class LibvirtConfigNodeDevicePciSubFunctionCap(LibvirtConfigBaseTest):
@@ -2899,6 +3112,14 @@ class LibvirtConfigGuestControllerTest(LibvirtConfigBaseTest):
         xml = obj.to_xml()
         self.assertXmlEqual(xml, """
                 <controller type='scsi' index='0' model='virtio-scsi'/>""")
+
+    def test_config_guest_usb_host_controller(self):
+        obj = config.LibvirtConfigGuestUSBHostController()
+        obj.type = 'usb'
+        obj.index = 0
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, "<controller type='usb' index='0'/>")
 
 
 class LibvirtConfigGuestWatchdogTest(LibvirtConfigBaseTest):

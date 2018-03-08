@@ -25,8 +25,8 @@ import six.moves.urllib.parse as urlparse
 import webob
 from webob import exc
 
+from nova.api.openstack import api_version_request
 from nova.compute import task_states
-from nova.compute import utils as compute_utils
 from nova.compute import vm_states
 import nova.conf
 from nova import exception
@@ -323,7 +323,7 @@ def get_networks_for_instance(context, instance):
                                       'mac_address': 'aa:aa:aa:aa:aa:aa'}]},
          ...}
     """
-    nw_info = compute_utils.get_nw_info_for_instance(instance)
+    nw_info = instance.get_network_info()
     return get_networks_for_instance_from_nw_info(nw_info)
 
 
@@ -381,7 +381,7 @@ class ViewBuilder(object):
         otherwise
         """
         project_id = request.environ["nova.context"].project_id
-        if project_id in request.url:
+        if project_id and project_id in request.url:
             return project_id
         return ''
 
@@ -530,3 +530,18 @@ def is_all_tenants(search_opts):
         # The empty string is considered enabling all_tenants
         all_tenants = 'all_tenants' in search_opts
     return all_tenants
+
+
+def supports_multiattach_volume(req):
+    """Check to see if the requested API version is high enough for multiattach
+
+    Microversion 2.60 adds support for booting from a multiattach volume.
+    The actual validation for a multiattach volume is done in the compute
+    API code, this is just checking the version so we can tell the API
+    code if the request version is high enough to even support it.
+
+    :param req: The incoming API request
+    :returns: True if the requested API microversion is high enough for
+        volume multiattach support, False otherwise.
+    """
+    return api_version_request.is_supported(req, '2.60')

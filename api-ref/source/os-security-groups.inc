@@ -35,15 +35,16 @@ Request
 
   - limit: limit_simple
   - offset: offset_simple
+  - all_tenants: all_tenants_sec_grp_query
 
 Response
 --------
 
 .. rest_parameters:: parameters.yaml
 
-  - security_groups: security_groups
+  - security_groups: security_groups_obj
   - description: description
-  - id: id
+  - id: security_group_id_body
   - name: name
   - rules: rules
   - tenant_id: tenant_id_body
@@ -86,7 +87,7 @@ Response
 
   - security_group: security_group
   - description: description
-  - id: id
+  - id: security_group_id_body
   - name: name
   - rules: rules
   - tenant_id: tenant_id_body
@@ -122,7 +123,7 @@ Response
 
   - security_group: security_group
   - description: description
-  - id: id
+  - id: security_group_id_body
   - name: name
   - rules: rules
   - tenant_id: tenant_id_body
@@ -165,7 +166,7 @@ Response
 
   - security_group: security_group
   - description: description
-  - id: id
+  - id: security_group_id_body
   - name: name
   - rules: rules
   - tenant_id: tenant_id_body

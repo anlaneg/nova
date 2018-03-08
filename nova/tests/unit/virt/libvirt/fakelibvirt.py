@@ -52,6 +52,7 @@ VIR_DOMAIN_XML_MIGRATABLE = 8
 VIR_DOMAIN_BLOCK_REBASE_SHALLOW = 1
 VIR_DOMAIN_BLOCK_REBASE_REUSE_EXT = 2
 VIR_DOMAIN_BLOCK_REBASE_COPY = 8
+VIR_DOMAIN_BLOCK_REBASE_COPY_DEV = 32
 
 VIR_DOMAIN_BLOCK_JOB_ABORT_ASYNC = 1
 VIR_DOMAIN_BLOCK_JOB_ABORT_PIVOT = 2
@@ -775,6 +776,9 @@ class Domain(object):
     def migrateSetMaxDowntime(self, downtime):
         pass
 
+    def migrateSetMaxSpeed(self, bandwidth):
+        pass
+
     def attachDevice(self, xml):
         disk_info = _parse_disk_info(etree.fromstring(xml))
         disk_info['_attached'] = True
@@ -805,12 +809,17 @@ class Domain(object):
     def XMLDesc(self, flags):
         disks = ''
         for disk in self._def['devices']['disks']:
+            if disk['type'] == 'file':
+                source_attr = 'file'
+            else:
+                source_attr = 'dev'
+
             disks += '''<disk type='%(type)s' device='%(device)s'>
       <driver name='%(driver_name)s' type='%(driver_type)s'/>
-      <source file='%(source)s'/>
+      <source %(source_attr)s='%(source)s'/>
       <target dev='%(target_dev)s' bus='%(target_bus)s'/>
       <address type='drive' controller='0' bus='0' unit='0'/>
-    </disk>''' % disk
+    </disk>''' % dict(source_attr=source_attr, **disk)
 
         nics = ''
         for nic in self._def['devices']['nics']:
@@ -1053,12 +1062,13 @@ class Connection(object):
                 self.host_info.cpu_cores,
                 self.host_info.cpu_threads]
 
-    def lookupByName(self, name):
-        if name in self._vms:
-            return self._vms[name]
+    def lookupByUUIDString(self, uuid):
+        for vm in self._vms.values():
+            if vm.UUIDString() == uuid:
+                return vm
         raise make_libvirtError(
                 libvirtError,
-                'Domain not found: no domain with matching name "%s"' % name,
+                'Domain not found: no domain with matching uuid "%s"' % uuid,
                 error_code=VIR_ERR_NO_DOMAIN,
                 error_domain=VIR_FROM_QEMU)
 

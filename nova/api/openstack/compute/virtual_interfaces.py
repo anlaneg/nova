@@ -19,15 +19,11 @@ import webob
 
 from nova.api.openstack import api_version_request
 from nova.api.openstack import common
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova import compute
 from nova.i18n import _
 from nova import network
 from nova.policies import virtual_interfaces as vif_policies
-
-
-ALIAS = 'os-virtual-interfaces'
 
 
 def _translate_vif_summary_view(req, vif):
@@ -72,30 +68,8 @@ class ServerVirtualInterfaceController(wsgi.Controller):
         return {'virtual_interfaces': res}
 
     @wsgi.Controller.api_version("2.1", "2.43")
-    @extensions.expected_errors((400, 404))
+    @wsgi.expected_errors((400, 404))
     def index(self, req, server_id):
         """Returns the list of VIFs for a given instance."""
         return self._items(req, server_id,
                            entity_maker=_translate_vif_summary_view)
-
-
-class VirtualInterfaces(extensions.V21APIExtensionBase):
-    """Virtual interface support."""
-
-    name = "VirtualInterfaces"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        resources = []
-
-        res = extensions.ResourceExtension(
-            ALIAS,
-            controller=ServerVirtualInterfaceController(),
-            parent=dict(member_name='server', collection_name='servers'))
-        resources.append(res)
-
-        return resources
-
-    def get_controller_extensions(self):
-        return []

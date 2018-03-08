@@ -35,3 +35,13 @@ class QuotaClassesSampleJsonTests(api_sample_base.ApiSampleTestBaseV21):
                                 {})
         self._verify_response('quota-classes-update-post-resp',
                               {}, response, 200)
+
+
+class QuotaClassesV250SampleJsonTests(QuotaClassesSampleJsonTests):
+    microversion = '2.50'
+    scenarios = [('v2_50', {'api_major_version': 'v2.1'})]
+
+
+class QuotaClassesV257SampleJsonTests(QuotaClassesSampleJsonTests):
+    microversion = '2.57'
+    scenarios = [('v2_57', {'api_major_version': 'v2.1'})]

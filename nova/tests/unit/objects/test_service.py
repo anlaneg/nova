@@ -25,6 +25,7 @@ from nova import objects
 from nova.objects import aggregate
 from nova.objects import service
 from nova import test
+from nova.tests import fixtures
 from nova.tests.unit.objects import test_compute_node
 from nova.tests.unit.objects import test_objects
 from nova.tests import uuidsentinel
@@ -41,7 +42,7 @@ def _fake_service(**kwargs):
         'id': 123,
         'uuid': uuidsentinel.service,
         'host': 'fake-host',
-        'binary': 'nova-fake',
+        'binary': 'nova-compute',
         'topic': 'fake-service-topic',
         'report_count': 1,
         'forced_down': False,
@@ -157,8 +158,9 @@ class _TestServiceObject(object):
         mock_service_create(self.context, {'host': 'fake-host',
                                          'version': fake_service['version']})
 
+    @mock.patch('nova.objects.Service._send_notification')
     @mock.patch.object(db, 'service_update', return_value=fake_service)
-    def test_save(self, mock_service_update):
+    def test_save(self, mock_service_update, mock_notify):
         service_obj = service.Service(context=self.context)
         service_obj.id = 123
         service_obj.host = 'fake-host'
@@ -177,8 +179,9 @@ class _TestServiceObject(object):
         self.assertRaises(ovo_exc.ReadOnlyFieldError, setattr,
                           service_obj, 'id', 124)
 
+    @mock.patch('nova.objects.Service._send_notification')
     @mock.patch.object(db, 'service_destroy')
-    def _test_destroy(self, mock_service_destroy):
+    def _test_destroy(self, mock_service_destroy, mock_notify):
         service_obj = service.Service(context=self.context)
         service_obj.id = 123
         service_obj.destroy()
@@ -384,17 +387,19 @@ class _TestServiceObject(object):
                                                             binaries)
         self.assertEqual(1, minimum)
 
+    @mock.patch('nova.objects.Service._send_notification')
     @mock.patch('nova.db.service_get_minimum_version',
                 return_value={'nova-compute': 2})
-    def test_create_above_minimum(self, mock_get):
+    def test_create_above_minimum(self, mock_get, mock_notify):
         with mock.patch('nova.objects.service.SERVICE_VERSION',
                         new=3):
             objects.Service(context=self.context,
                             binary='nova-compute').create()
 
+    @mock.patch('nova.objects.Service._send_notification')
     @mock.patch('nova.db.service_get_minimum_version',
                 return_value={'nova-compute': 2})
-    def test_create_equal_to_minimum(self, mock_get):
+    def test_create_equal_to_minimum(self, mock_get, mock_notify):
         with mock.patch('nova.objects.service.SERVICE_VERSION',
                         new=2):
             objects.Service(context=self.context,
@@ -465,7 +470,7 @@ class TestServiceVersion(test.TestCase):
         self.assertEqual(
             current, calculated,
             'Changes detected that require a SERVICE_VERSION change. Please '
-            'increment nova.objects.service.SERVICE_VERSION, and make sure it'
+            'increment nova.objects.service.SERVICE_VERSION, and make sure it '
             'is equal to nova.compute.manager.ComputeManager.target.version.')
 
     def test_version_in_init(self):
@@ -484,3 +489,49 @@ class TestServiceVersion(test.TestCase):
         obj = objects.Service()
         obj._from_db_object(self.ctxt, obj, fake_different_service)
         self.assertEqual(fake_version, obj.version)
+
+
+class TestServiceVersionCells(test.TestCase):
+
+    def setUp(self):
+        self.context = context.get_admin_context()
+        super(TestServiceVersionCells, self).setUp()
+
+    def _setup_cells(self):
+        # NOTE(danms): Override the base class's cell setup so we can have two
+        self.cells = fixtures.CellDatabases()
+        self.cells.add_cell_database(uuidsentinel.cell1, default=True)
+        self.cells.add_cell_database(uuidsentinel.cell2)
+        self.useFixture(self.cells)
+
+        cm = objects.CellMapping(context=self.context,
+                                 uuid=uuidsentinel.cell1,
+                                 name='cell1',
+                                 transport_url='fake://nowhere/',
+                                 database_connection=uuidsentinel.cell1)
+        cm.create()
+        cm = objects.CellMapping(context=self.context,
+                                 uuid=uuidsentinel.cell2,
+                                 name='cell2',
+                                 transport_url='fake://nowhere/',
+                                 database_connection=uuidsentinel.cell2)
+        cm.create()
+
+    def _create_services(self, *versions):
+        cells = objects.CellMappingList.get_all(self.context)
+        index = 0
+        for version in versions:
+            service = objects.Service(context=self.context,
+                                      binary='nova-compute')
+            service.version = version
+            cell = cells[index % len(cells)]
+            with context.target_cell(self.context, cell):
+                service.create()
+            index += 1
+
+    @mock.patch('nova.objects.Service._send_notification')
+    @mock.patch('nova.objects.Service._check_minimum_version')
+    def test_version_all_cells(self, mock_check, mock_notify):
+        self._create_services(16, 16, 13, 16)
+        self.assertEqual(13, service.get_minimum_version_all_cells(
+            self.context, ['nova-compute']))

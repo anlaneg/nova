@@ -16,15 +16,11 @@ import webob
 
 from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import remote_consoles
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova import compute
 from nova import exception
 from nova.policies import remote_consoles as rc_policies
-
-
-ALIAS = "os-remote-consoles"
 
 
 class RemoteConsolesController(wsgi.Controller):
@@ -38,7 +34,7 @@ class RemoteConsolesController(wsgi.Controller):
         super(RemoteConsolesController, self).__init__(*args, **kwargs)
 
     @wsgi.Controller.api_version("2.1", "2.5")
-    @extensions.expected_errors((400, 404, 409, 501))
+    @wsgi.expected_errors((400, 404, 409, 501))
     @wsgi.action('os-getVNCConsole')
     @validation.schema(remote_consoles.get_vnc_console)
     def get_vnc_console(self, req, id, body):
@@ -67,7 +63,7 @@ class RemoteConsolesController(wsgi.Controller):
         return {'console': {'type': console_type, 'url': output['url']}}
 
     @wsgi.Controller.api_version("2.1", "2.5")
-    @extensions.expected_errors((400, 404, 409, 501))
+    @wsgi.expected_errors((400, 404, 409, 501))
     @wsgi.action('os-getSPICEConsole')
     @validation.schema(remote_consoles.get_spice_console)
     def get_spice_console(self, req, id, body):
@@ -96,7 +92,7 @@ class RemoteConsolesController(wsgi.Controller):
         return {'console': {'type': console_type, 'url': output['url']}}
 
     @wsgi.Controller.api_version("2.1", "2.5")
-    @extensions.expected_errors((400, 404, 409, 501))
+    @wsgi.expected_errors((400, 404, 409, 501))
     @wsgi.action('os-getRDPConsole')
     @validation.schema(remote_consoles.get_rdp_console)
     def get_rdp_console(self, req, id, body):
@@ -127,7 +123,7 @@ class RemoteConsolesController(wsgi.Controller):
         return {'console': {'type': console_type, 'url': output['url']}}
 
     @wsgi.Controller.api_version("2.1", "2.5")
-    @extensions.expected_errors((400, 404, 409, 501))
+    @wsgi.expected_errors((400, 404, 409, 501))
     @wsgi.action('os-getSerialConsole')
     @validation.schema(remote_consoles.get_serial_console)
     def get_serial_console(self, req, id, body):
@@ -158,7 +154,7 @@ class RemoteConsolesController(wsgi.Controller):
         return {'console': {'type': console_type, 'url': output['url']}}
 
     @wsgi.Controller.api_version("2.6")
-    @extensions.expected_errors((400, 404, 409, 501))
+    @wsgi.expected_errors((400, 404, 409, 501))
     @validation.schema(remote_consoles.create_v26, "2.6", "2.7")
     @validation.schema(remote_consoles.create_v28, "2.8")
     def create(self, req, server_id, body):
@@ -186,22 +182,3 @@ class RemoteConsolesController(wsgi.Controller):
             raise webob.exc.HTTPBadRequest(explanation=e.format_message())
         except NotImplementedError:
             common.raise_feature_not_supported()
-
-
-class RemoteConsoles(extensions.V21APIExtensionBase):
-    """Interactive Console support."""
-    name = "Consoles"
-    alias = ALIAS
-    version = 1
-
-    def get_controller_extensions(self):
-        return []
-
-    def get_resources(self):
-        parent = {'member_name': 'server',
-                  'collection_name': 'servers'}
-        resources = [
-            extensions.ResourceExtension(
-                'remote-consoles', RemoteConsolesController(), parent=parent,
-                member_name='remote-console')]
-        return resources

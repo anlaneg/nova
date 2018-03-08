@@ -24,11 +24,9 @@ from nova.api.openstack.api_version_request \
     import MAX_PROXY_API_SUPPORT_VERSION
 from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import floating_ips
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova import compute
-from nova.compute import utils as compute_utils
 from nova import exception
 from nova.i18n import _
 from nova import network
@@ -113,7 +111,7 @@ class FloatingIPController(wsgi.Controller):
         super(FloatingIPController, self).__init__()
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
-    @extensions.expected_errors((400, 404))
+    @wsgi.expected_errors((400, 404))
     def show(self, req, id):
         """Return data about the given floating IP."""
         context = req.environ['nova.context']
@@ -130,7 +128,7 @@ class FloatingIPController(wsgi.Controller):
         return _translate_floating_ip_view(floating_ip)
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
-    @extensions.expected_errors(())
+    @wsgi.expected_errors(())
     def index(self, req):
         """Return a list of floating IPs allocated to a project."""
         context = req.environ['nova.context']
@@ -141,7 +139,7 @@ class FloatingIPController(wsgi.Controller):
         return _translate_floating_ips_view(floating_ips)
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
-    @extensions.expected_errors((400, 403, 404))
+    @wsgi.expected_errors((400, 403, 404))
     def create(self, req, body=None):
         context = req.environ['nova.context']
         context.can(fi_policies.BASE_POLICY_NAME)
@@ -173,7 +171,7 @@ class FloatingIPController(wsgi.Controller):
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.response(202)
-    @extensions.expected_errors((400, 403, 404, 409))
+    @wsgi.expected_errors((400, 403, 404, 409))
     def delete(self, req, id):
         context = req.environ['nova.context']
         context.can(fi_policies.BASE_POLICY_NAME)
@@ -199,6 +197,8 @@ class FloatingIPController(wsgi.Controller):
         except exception.CannotDisassociateAutoAssignedFloatingIP:
             msg = _('Cannot disassociate auto assigned floating IP')
             raise webob.exc.HTTPForbidden(explanation=msg)
+        except exception.FloatingIpNotFoundForAddress as exc:
+            raise webob.exc.HTTPNotFound(explanation=exc.format_message())
 
 
 class FloatingIPActionController(wsgi.Controller):
@@ -210,7 +210,7 @@ class FloatingIPActionController(wsgi.Controller):
         self.network_api = network.API()
 
     @wsgi.Controller.api_version("2.1", "2.43")
-    @extensions.expected_errors((400, 403, 404))
+    @wsgi.expected_errors((400, 403, 404))
     @wsgi.action('addFloatingIp')
     @validation.schema(floating_ips.add_floating_ip)
     def _add_floating_ip(self, req, id, body):
@@ -222,7 +222,7 @@ class FloatingIPActionController(wsgi.Controller):
 
         instance = common.get_instance(self.compute_api, context, id,
                                        expected_attrs=['flavor'])
-        cached_nwinfo = compute_utils.get_nw_info_for_instance(instance)
+        cached_nwinfo = instance.get_network_info()
         if not cached_nwinfo:
             LOG.warning(
                 'Info cache is %r during associate with no nw_info cache',
@@ -267,6 +267,8 @@ class FloatingIPActionController(wsgi.Controller):
         except exception.FloatingIpAssociated:
             msg = _('floating IP is already associated')
             raise webob.exc.HTTPBadRequest(explanation=msg)
+        except exception.FloatingIpAssociateFailed as e:
+            raise webob.exc.HTTPBadRequest(explanation=e.format_message())
         except exception.NoFloatingIpInterface:
             msg = _('l3driver call to add floating IP failed')
             raise webob.exc.HTTPBadRequest(explanation=msg)
@@ -289,7 +291,7 @@ class FloatingIPActionController(wsgi.Controller):
         return webob.Response(status_int=202)
 
     @wsgi.Controller.api_version("2.1", "2.43")
-    @extensions.expected_errors((400, 403, 404, 409))
+    @wsgi.expected_errors((400, 403, 404, 409))
     @wsgi.action('removeFloatingIp')
     @validation.schema(floating_ips.remove_floating_ip)
     def _remove_floating_ip(self, req, id, body):

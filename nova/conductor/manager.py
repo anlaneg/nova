@@ -21,6 +21,7 @@ import functools
 from oslo_config import cfg
 from oslo_log import log as logging
 import oslo_messaging as messaging
+from oslo_serialization import jsonutils
 from oslo_utils import excutils
 from oslo_utils import versionutils
 import six
@@ -37,7 +38,7 @@ from nova.conductor.tasks import migrate
 from nova import context as nova_context
 from nova.db import base
 from nova import exception
-from nova.i18n import _, _LE, _LI, _LW
+from nova.i18n import _
 from nova import image
 from nova import manager
 from nova import network
@@ -69,7 +70,7 @@ def targets_cell(fn):
             im = objects.InstanceMapping.get_by_instance_uuid(
                 context, instance.uuid)
         except exception.InstanceMappingNotFound:
-            LOG.error(_LE('InstanceMapping not found, unable to target cell'),
+            LOG.error('InstanceMapping not found, unable to target cell',
                       instance=instance)
             im = None
         else:
@@ -218,7 +219,7 @@ class ComputeTaskManager(base.Base):
     may involve coordinating activities on multiple compute nodes.
     """
 
-    target = messaging.Target(namespace='compute_task', version='1.16')
+    target = messaging.Target(namespace='compute_task', version='1.20')
 
     def __init__(self):
         super(ComputeTaskManager, self).__init__()
@@ -227,15 +228,18 @@ class ComputeTaskManager(base.Base):
         self.network_api = network.API()
         self.servicegroup_api = servicegroup.API()
         self.scheduler_client = scheduler_client.SchedulerClient()
+        self.report_client = self.scheduler_client.reportclient
         self.notifier = rpc.get_notifier('compute', CONF.host)
 
     def reset(self):
-        LOG.info(_LI('Reloading compute RPC API'))
+        LOG.info('Reloading compute RPC API')
         compute_rpcapi.LAST_VERSION = None
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
 
     # TODO(tdurakov): remove `live` parameter here on compute task api RPC
     # version bump to 2.x
+    # TODO(danms): remove the `reservations` parameter here on compute task api
+    # RPC version bump to 2.x
     @messaging.expected_exceptions(
         exception.NoValidHost,
         exception.ComputeServiceUnavailable,
@@ -249,14 +253,13 @@ class ComputeTaskManager(base.Base):
         exception.HypervisorUnavailable,
         exception.InstanceInvalidState,
         exception.MigrationPreCheckError,
-        exception.MigrationPreCheckClientException,
         exception.LiveMigrationWithOldNovaNotSupported,
         exception.UnsupportedPolicyException)
     @targets_cell
     @wrap_instance_event(prefix='conductor')
     def migrate_server(self, context, instance, scheduler_hint, live, rebuild,
             flavor, block_migration, disk_over_commit, reservations=None,
-            clean_shutdown=True, request_spec=None):
+            clean_shutdown=True, request_spec=None, host_list=None):
         if instance and not isinstance(instance, nova_object.NovaObject):
             # NOTE(danms): Until v2 of the RPC API, we need to tolerate
             # old-world instance objects here
@@ -279,12 +282,13 @@ class ComputeTaskManager(base.Base):
                                              instance_uuid):
                 self._cold_migrate(context, instance, flavor,
                                    scheduler_hint['filter_properties'],
-                                   reservations, clean_shutdown, request_spec)
+                                   clean_shutdown, request_spec,
+                                   host_list)
         else:
             raise NotImplementedError()
 
     def _cold_migrate(self, context, instance, flavor, filter_properties,
-                      reservations, clean_shutdown, request_spec):
+                      clean_shutdown, request_spec, host_list):
         image = utils.get_image_from_system_metadata(
             instance.system_metadata)
 
@@ -305,11 +309,7 @@ class ComputeTaskManager(base.Base):
             request_spec.flavor = flavor
 
         task = self._build_cold_migrate_task(context, instance, flavor,
-                                             request_spec,
-                                             reservations, clean_shutdown)
-        # TODO(sbauza): Provide directly the RequestSpec object once
-        # _set_vm_state_and_notify() accepts it
-        legacy_spec = request_spec.to_legacy_request_spec_dict()
+                request_spec, clean_shutdown, host_list)
         try:
             task.execute()
         except exception.NoValidHost as ex:
@@ -319,7 +319,7 @@ class ComputeTaskManager(base.Base):
             updates = {'vm_state': vm_state, 'task_state': None}
             self._set_vm_state_and_notify(context, instance.uuid,
                                           'migrate_server',
-                                          updates, ex, legacy_spec)
+                                          updates, ex, request_spec)
 
             # if the flavor IDs match, it's migrate; otherwise resize
             if flavor.id == instance.instance_type_id:
@@ -335,14 +335,14 @@ class ComputeTaskManager(base.Base):
                 updates = {'vm_state': vm_state, 'task_state': None}
                 self._set_vm_state_and_notify(context, instance.uuid,
                                               'migrate_server',
-                                              updates, ex, legacy_spec)
+                                              updates, ex, request_spec)
         except Exception as ex:
             with excutils.save_and_reraise_exception():
                 updates = {'vm_state': instance.vm_state,
                            'task_state': None}
                 self._set_vm_state_and_notify(context, instance.uuid,
                                               'migrate_server',
-                                              updates, ex, legacy_spec)
+                                              updates, ex, request_spec)
         # NOTE(sbauza): Make sure we persist the new flavor in case we had
         # a successful scheduler call if and only if nothing bad happened
         if request_spec.obj_what_changed():
@@ -363,8 +363,7 @@ class ComputeTaskManager(base.Base):
                 self.network_api.deallocate_for_instance(
                     context, instance, requested_networks=requested_networks)
         except Exception:
-            msg = _LE('Failed to deallocate networks')
-            LOG.exception(msg, instance=instance)
+            LOG.exception('Failed to deallocate networks', instance=instance)
             return
 
         instance.system_metadata['network_allocated'] = 'False'
@@ -376,6 +375,7 @@ class ComputeTaskManager(base.Base):
             # exception will be raised by instance.save()
             pass
 
+    @targets_cell
     @wrap_instance_event(prefix='conductor')
     def live_migrate_instance(self, context, instance, scheduler_hint,
                               block_migration, disk_over_commit, request_spec):
@@ -430,7 +430,6 @@ class ComputeTaskManager(base.Base):
                 exception.HypervisorUnavailable,
                 exception.InstanceInvalidState,
                 exception.MigrationPreCheckError,
-                exception.MigrationPreCheckClientException,
                 exception.LiveMigrationWithOldNovaNotSupported,
                 exception.MigrationSchedulerRPCError) as ex:
             with excutils.save_and_reraise_exception():
@@ -439,12 +438,14 @@ class ComputeTaskManager(base.Base):
                 migration.status = 'error'
                 migration.save()
         except Exception as ex:
-            LOG.error(_LE('Migration of instance %(instance_id)s to host'
-                          ' %(dest)s unexpectedly failed.'),
+            LOG.error('Migration of instance %(instance_id)s to host'
+                      ' %(dest)s unexpectedly failed.',
                       {'instance_id': instance.uuid, 'dest': destination},
                       exc_info=True)
+            # Reset the task state to None to indicate completion of
+            # the operation as it is done in case of known exceptions.
             _set_vm_state(context, instance, ex, vm_states.ERROR,
-                          instance.task_state)
+                          task_state=None)
             migration.status = 'error'
             migration.save()
             raise exception.MigrationError(reason=six.text_type(ex))
@@ -460,41 +461,24 @@ class ComputeTaskManager(base.Base):
                                               self.scheduler_client,
                                               request_spec)
 
-    def _build_cold_migrate_task(self, context, instance, flavor,
-                                 request_spec, reservations,
-                                 clean_shutdown):
+    def _build_cold_migrate_task(self, context, instance, flavor, request_spec,
+            clean_shutdown, host_list):
         return migrate.MigrationTask(context, instance, flavor,
                                      request_spec,
-                                     reservations, clean_shutdown,
+                                     clean_shutdown,
                                      self.compute_rpcapi,
-                                     self.scheduler_client)
+                                     self.scheduler_client, host_list)
 
     def _destroy_build_request(self, context, instance):
         # The BuildRequest needs to be stored until the instance is mapped to
         # an instance table. At that point it will never be used again and
         # should be deleted.
-        try:
-            build_request = objects.BuildRequest.get_by_instance_uuid(context,
-                    instance.uuid)
-            # TODO(alaski): Sync API updates of the build_request to the
-            # instance before it is destroyed. Right now only locked_by can
-            # be updated before this is destroyed.
-            build_request.destroy()
-        except exception.BuildRequestNotFound:
-            with excutils.save_and_reraise_exception() as exc_ctxt:
-                service_version = objects.Service.get_minimum_version(
-                    context, 'nova-osapi_compute')
-                if service_version >= 12:
-                    # A BuildRequest was created during the boot process, the
-                    # NotFound exception indicates a delete happened which
-                    # should abort the boot.
-                    pass
-                else:
-                    LOG.debug('BuildRequest not found for instance %(uuid)s, '
-                              'likely due to an older nova-api service '
-                              'running.', {'uuid': instance.uuid})
-                    exc_ctxt.reraise = False
-            return
+        build_request = objects.BuildRequest.get_by_instance_uuid(
+            context, instance.uuid)
+        # TODO(alaski): Sync API updates of the build_request to the
+        # instance before it is destroyed. Right now only locked_by can
+        # be updated before this is destroyed.
+        build_request.destroy()
 
     def _populate_instance_mapping(self, context, instance, host):
         try:
@@ -512,7 +496,7 @@ class ComputeTaskManager(base.Base):
         else:
             try:
                 host_mapping = objects.HostMapping.get_by_host(context,
-                        host['host'])
+                        host.service_host)
             except exception.HostMappingNotFound:
                 # NOTE(alaski): For now this exception means that a
                 # deployment has not migrated to cellsv2 and we should
@@ -532,7 +516,8 @@ class ComputeTaskManager(base.Base):
     # (which go to the cell conductor and thus are always cell-specific).
     def build_instances(self, context, instances, image, filter_properties,
             admin_password, injected_files, requested_networks,
-            security_groups, block_device_mapping=None, legacy_bdm=True):
+            security_groups, block_device_mapping=None, legacy_bdm=True,
+            request_spec=None, host_lists=None):
         # TODO(ndipanov): Remove block_device_mapping and legacy_bdm in version
         #                 2.0 of the RPC API.
         # TODO(danms): Remove this in version 2.0 of the RPC API
@@ -549,37 +534,119 @@ class ComputeTaskManager(base.Base):
             flavor = objects.Flavor.get_by_id(context, flavor['id'])
             filter_properties = dict(filter_properties, instance_type=flavor)
 
-        request_spec = {}
+        # Older computes will not send a request_spec during reschedules, nor
+        # will the API send the request_spec if using cells v1, so we need
+        # to check and build our own if one is not provided.
+        if request_spec is None:
+            request_spec = scheduler_utils.build_request_spec(
+                image, instances)
+        else:
+            # TODO(mriedem): This is annoying but to populate the local
+            # request spec below using the filter_properties, we have to pass
+            # in a primitive version of the request spec. Yes it's inefficient
+            # and we can remove it once the populate_retry and
+            # populate_filter_properties utility methods are converted to
+            # work on a RequestSpec object rather than filter_properties.
+            request_spec = request_spec.to_legacy_request_spec_dict()
+
+        # 'host_lists' will be None in one of two cases: when running cellsv1,
+        # or during a reschedule from a pre-Queens compute. In all other cases,
+        # it will be a list of lists, though the lists may be empty if there
+        # are no more hosts left in a rescheduling situation.
+        is_reschedule = host_lists is not None
         try:
             # check retry policy. Rather ugly use of instances[0]...
             # but if we've exceeded max retries... then we really only
             # have a single instance.
-            request_spec = scheduler_utils.build_request_spec(
-                context, image, instances)
+            # TODO(sbauza): Provide directly the RequestSpec object
+            # when populate_retry() accepts it
             scheduler_utils.populate_retry(
                 filter_properties, instances[0].uuid)
-            hosts = self._schedule_instances(
+            instance_uuids = [instance.uuid for instance in instances]
+            spec_obj = objects.RequestSpec.from_primitives(
                     context, request_spec, filter_properties)
+            LOG.debug("Rescheduling: %s", is_reschedule)
+            if is_reschedule:
+                # Make sure that we have a host, as we may have exhausted all
+                # our alternates
+                if not host_lists[0]:
+                    # We have an empty list of hosts, so this instance has
+                    # failed to build.
+                    msg = ("Exhausted all hosts available for retrying build "
+                           "failures for instance %(instance_uuid)s." %
+                           {"instance_uuid": instances[0].uuid})
+                    raise exception.MaxRetriesExceeded(reason=msg)
+            else:
+                # This is not a reschedule, so we need to call the scheduler to
+                # get appropriate hosts for the request.
+                host_lists = self._schedule_instances(context, spec_obj,
+                        instance_uuids, return_alternates=True)
         except Exception as exc:
+            num_attempts = filter_properties.get(
+                'retry', {}).get('num_attempts', 1)
             updates = {'vm_state': vm_states.ERROR, 'task_state': None}
             for instance in instances:
                 self._set_vm_state_and_notify(
                     context, instance.uuid, 'build_instances', updates,
                     exc, request_spec)
-                try:
-                    # If the BuildRequest stays around then instance show/lists
-                    # will pull from it rather than the errored instance.
-                    self._destroy_build_request(context, instance)
-                except exception.BuildRequestNotFound:
-                    pass
+                # If num_attempts > 1, we're in a reschedule and probably
+                # either hit NoValidHost or MaxRetriesExceeded. Either way,
+                # the build request should already be gone and we probably
+                # can't reach the API DB from the cell conductor.
+                if num_attempts <= 1:
+                    try:
+                        # If the BuildRequest stays around then instance
+                        # show/lists will pull from it rather than the errored
+                        # instance.
+                        self._destroy_build_request(context, instance)
+                    except exception.BuildRequestNotFound:
+                        pass
                 self._cleanup_allocated_networks(
                     context, instance, requested_networks)
             return
 
-        for (instance, host) in six.moves.zip(instances, hosts):
+        elevated = context.elevated()
+        for (instance, host_list) in six.moves.zip(instances, host_lists):
+            host = host_list.pop(0)
+            if is_reschedule:
+                # If this runs in the superconductor, the first instance will
+                # already have its resources claimed in placement. If this is a
+                # retry, though, this is running in the cell conductor, and we
+                # need to claim first to ensure that the alternate host still
+                # has its resources available. Note that there are schedulers
+                # that don't support Placement, so must assume that the host is
+                # still available.
+                host_available = False
+                while host and not host_available:
+                    if host.allocation_request:
+                        alloc_req = jsonutils.loads(host.allocation_request)
+                    else:
+                        alloc_req = None
+                    if alloc_req:
+                        host_available = scheduler_utils.claim_resources(
+                                elevated, self.report_client, spec_obj,
+                                instance.uuid, alloc_req,
+                                host.allocation_request_version)
+                    else:
+                        # Some deployments use different schedulers that do not
+                        # use Placement, so they will not have an
+                        # allocation_request to claim with. For those cases,
+                        # there is no concept of claiming, so just assume that
+                        # the host is valid.
+                        host_available = True
+                    if not host_available:
+                        # Insufficient resources remain on that host, so
+                        # discard it and try the next.
+                        host = host_list.pop(0) if host_list else None
+                if not host_available:
+                    # No more available hosts for retrying the build.
+                    msg = ("Exhausted all hosts available for retrying build "
+                           "failures for instance %(instance_uuid)s." %
+                           {"instance_uuid": instance.uuid})
+                    raise exception.MaxRetriesExceeded(reason=msg)
             instance.availability_zone = (
                 availability_zones.get_host_availability_zone(context,
-                                                              host['host']))
+                        host.service_host))
             try:
                 # NOTE(danms): This saves the az change above, refreshes our
                 # instance, and tells us if it has been deleted underneath us
@@ -591,6 +658,13 @@ class ComputeTaskManager(base.Base):
             local_filter_props = copy.deepcopy(filter_properties)
             scheduler_utils.populate_filter_properties(local_filter_props,
                 host)
+            # Populate the request_spec with the local_filter_props information
+            # like retries and limits. Note that at this point the request_spec
+            # could have come from a compute via reschedule and it would
+            # already have some things set, like scheduler_hints.
+            local_reqspec = objects.RequestSpec.from_primitives(
+                context, request_spec, local_filter_props)
+
             # The block_device_mapping passed from the api doesn't contain
             # instance specific information
             bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
@@ -617,26 +691,28 @@ class ComputeTaskManager(base.Base):
                         inst_mapping.destroy()
                     return
 
+            alts = [(alt.service_host, alt.nodename) for alt in host_list]
+            LOG.debug("Selected host: %s; Selected node: %s; Alternates: %s",
+                    host.service_host, host.nodename, alts, instance=instance)
+
             self.compute_rpcapi.build_and_run_instance(context,
-                    instance=instance, host=host['host'], image=image,
-                    request_spec=request_spec,
+                    instance=instance, host=host.service_host, image=image,
+                    request_spec=local_reqspec,
                     filter_properties=local_filter_props,
                     admin_password=admin_password,
                     injected_files=injected_files,
                     requested_networks=requested_networks,
                     security_groups=security_groups,
-                    block_device_mapping=bdms, node=host['nodename'],
-                    limits=host['limits'])
+                    block_device_mapping=bdms, node=host.nodename,
+                    limits=host.limits, host_list=host_list)
 
-    def _schedule_instances(self, context, request_spec, filter_properties):
-        scheduler_utils.setup_instance_group(context, request_spec,
-                                             filter_properties)
-        # TODO(sbauza): Hydrate here the object until we modify the
-        # scheduler.utils methods to directly use the RequestSpec object
-        spec_obj = objects.RequestSpec.from_primitives(
-            context, request_spec, filter_properties)
-        hosts = self.scheduler_client.select_destinations(context, spec_obj)
-        return hosts
+    def _schedule_instances(self, context, request_spec,
+                            instance_uuids=None, return_alternates=False):
+        scheduler_utils.setup_instance_group(context, request_spec)
+        host_lists = self.scheduler_client.select_destinations(context,
+                request_spec, instance_uuids, return_objects=True,
+                return_alternates=return_alternates)
+        return host_lists
 
     @targets_cell
     def unshelve_instance(self, context, instance, request_spec=None):
@@ -683,15 +759,14 @@ class ComputeTaskManager(base.Base):
                         # old. We need to mock that the old way
                         filter_properties = {}
                         request_spec = scheduler_utils.build_request_spec(
-                            context, image, [instance])
+                            image, [instance])
                     else:
                         # NOTE(sbauza): Force_hosts/nodes needs to be reset
                         # if we want to make sure that the next destination
                         # is not forced to be the original host
                         request_spec.reset_forced_destinations()
                         # TODO(sbauza): Provide directly the RequestSpec object
-                        # when _schedule_instances(),
-                        # populate_filter_properties and populate_retry()
+                        # when populate_filter_properties and populate_retry()
                         # accept it
                         filter_properties = request_spec.\
                             to_legacy_filter_properties_dict()
@@ -699,12 +774,34 @@ class ComputeTaskManager(base.Base):
                             to_legacy_request_spec_dict()
                     scheduler_utils.populate_retry(filter_properties,
                                                    instance.uuid)
-                    hosts = self._schedule_instances(
-                            context, request_spec, filter_properties)
-                    host_state = hosts[0]
+                    request_spec = objects.RequestSpec.from_primitives(
+                        context, request_spec, filter_properties)
+                    # NOTE(cfriesen): Ensure that we restrict the scheduler to
+                    # the cell specified by the instance mapping.
+                    instance_mapping = \
+                        objects.InstanceMapping.get_by_instance_uuid(
+                            context, instance.uuid)
+                    LOG.debug('Requesting cell %(cell)s while unshelving',
+                              {'cell': instance_mapping.cell_mapping.identity},
+                              instance=instance)
+                    if ('requested_destination' in request_spec and
+                            request_spec.requested_destination):
+                        request_spec.requested_destination.cell = (
+                            instance_mapping.cell_mapping)
+                    else:
+                        request_spec.requested_destination = (
+                            objects.Destination(
+                                cell=instance_mapping.cell_mapping))
+
+                    request_spec.ensure_project_id(instance)
+                    host_lists = self._schedule_instances(context,
+                            request_spec, [instance.uuid],
+                            return_alternates=False)
+                    host_list = host_lists[0]
+                    selection = host_list[0]
                     scheduler_utils.populate_filter_properties(
-                            filter_properties, host_state)
-                    (host, node) = (host_state['host'], host_state['nodename'])
+                            filter_properties, selection)
+                    (host, node) = (selection.service_host, selection.nodename)
                     instance.availability_zone = (
                         availability_zones.get_host_availability_zone(
                             context, host))
@@ -715,21 +812,67 @@ class ComputeTaskManager(base.Base):
                     exception.UnsupportedPolicyException):
                 instance.task_state = None
                 instance.save()
-                LOG.warning(_LW("No valid host found for unshelve instance"),
+                LOG.warning("No valid host found for unshelve instance",
                             instance=instance)
                 return
             except Exception:
                 with excutils.save_and_reraise_exception():
                     instance.task_state = None
                     instance.save()
-                    LOG.error(_LE("Unshelve attempted but an error "
-                                  "has occurred"), instance=instance)
+                    LOG.error("Unshelve attempted but an error "
+                              "has occurred", instance=instance)
         else:
-            LOG.error(_LE('Unshelve attempted but vm_state not SHELVED or '
-                          'SHELVED_OFFLOADED'), instance=instance)
+            LOG.error('Unshelve attempted but vm_state not SHELVED or '
+                      'SHELVED_OFFLOADED', instance=instance)
             instance.vm_state = vm_states.ERROR
             instance.save()
             return
+
+    def _allocate_for_evacuate_dest_host(self, context, instance, host,
+                                         request_spec=None):
+        # The user is forcing the destination host and bypassing the
+        # scheduler. We need to copy the source compute node
+        # allocations in Placement to the destination compute node.
+        # Normally select_destinations() in the scheduler would do this
+        # for us, but when forcing the target host we don't call the
+        # scheduler.
+        source_node = None  # This is used for error handling below.
+        try:
+            source_node = objects.ComputeNode.get_by_host_and_nodename(
+                context, instance.host, instance.node)
+            dest_node = (
+                objects.ComputeNode.get_first_node_by_host_for_old_compat(
+                    context, host, use_slave=True))
+        except exception.ComputeHostNotFound as ex:
+            with excutils.save_and_reraise_exception():
+                self._set_vm_state_and_notify(
+                    context, instance.uuid, 'rebuild_server',
+                    {'vm_state': instance.vm_state,
+                     'task_state': None}, ex, request_spec)
+                if source_node:
+                    LOG.warning('Specified host %s for evacuate was not '
+                                'found.', host, instance=instance)
+                else:
+                    LOG.warning('Source host %s and node %s for evacuate was '
+                                'not found.', instance.host, instance.node,
+                                instance=instance)
+
+        # TODO(mriedem): In Queens, call select_destinations() with a
+        # skip_filters=True flag so the scheduler does the work of
+        # claiming resources on the destination in Placement but still
+        # bypass the scheduler filters, which honors the 'force' flag
+        # in the API.
+        try:
+            scheduler_utils.claim_resources_on_destination(
+                context, self.report_client, instance, source_node, dest_node)
+        except exception.NoValidHost as ex:
+            with excutils.save_and_reraise_exception():
+                self._set_vm_state_and_notify(
+                    context, instance.uuid, 'rebuild_server',
+                    {'vm_state': instance.vm_state,
+                     'task_state': None}, ex, request_spec)
+                LOG.warning('Specified host %s for evacuate is '
+                            'invalid.', host, instance=instance)
 
     @targets_cell
     def rebuild_instance(self, context, instance, orig_image_ref, image_ref,
@@ -741,53 +884,6 @@ class ComputeTaskManager(base.Base):
         with compute_utils.EventReporter(context, 'rebuild_server',
                                           instance.uuid):
             node = limits = None
-            if not host:
-                if not request_spec:
-                    # NOTE(sbauza): We were unable to find an original
-                    # RequestSpec object - probably because the instance is old
-                    # We need to mock that the old way
-                    filter_properties = {'ignore_hosts': [instance.host]}
-                    request_spec = scheduler_utils.build_request_spec(
-                            context, image_ref, [instance])
-                else:
-                    # NOTE(sbauza): Augment the RequestSpec object by excluding
-                    # the source host for avoiding the scheduler to pick it
-                    request_spec.ignore_hosts = request_spec.ignore_hosts or []
-                    request_spec.ignore_hosts.append(instance.host)
-                    # NOTE(sbauza): Force_hosts/nodes needs to be reset
-                    # if we want to make sure that the next destination
-                    # is not forced to be the original host
-                    request_spec.reset_forced_destinations()
-                    # TODO(sbauza): Provide directly the RequestSpec object
-                    # when _schedule_instances() and _set_vm_state_and_notify()
-                    # accept it
-                    filter_properties = request_spec.\
-                        to_legacy_filter_properties_dict()
-                    request_spec = request_spec.to_legacy_request_spec_dict()
-                try:
-                    hosts = self._schedule_instances(
-                            context, request_spec, filter_properties)
-                    host_dict = hosts.pop(0)
-                    host, node, limits = (host_dict['host'],
-                                          host_dict['nodename'],
-                                          host_dict['limits'])
-                except exception.NoValidHost as ex:
-                    with excutils.save_and_reraise_exception():
-                        self._set_vm_state_and_notify(context, instance.uuid,
-                                'rebuild_server',
-                                {'vm_state': instance.vm_state,
-                                 'task_state': None}, ex, request_spec)
-                        LOG.warning(_LW("No valid host found for rebuild"),
-                                    instance=instance)
-                except exception.UnsupportedPolicyException as ex:
-                    with excutils.save_and_reraise_exception():
-                        self._set_vm_state_and_notify(context, instance.uuid,
-                                'rebuild_server',
-                                {'vm_state': instance.vm_state,
-                                 'task_state': None}, ex, request_spec)
-                        LOG.warning(_LW("Server with unsupported policy "
-                                        "cannot be rebuilt"),
-                                    instance=instance)
 
             try:
                 migration = objects.Migration.get_by_instance_and_status(
@@ -796,6 +892,80 @@ class ComputeTaskManager(base.Base):
                 LOG.debug("No migration record for the rebuild/evacuate "
                           "request.", instance=instance)
                 migration = None
+
+            # The host variable is passed in two cases:
+            # 1. rebuild - the instance.host is passed to rebuild on the
+            #       same host and bypass the scheduler *unless* a new image
+            #       was specified
+            # 2. evacuate with specified host and force=True - the specified
+            #       host is passed and is meant to bypass the scheduler.
+            # NOTE(mriedem): This could be a lot more straight-forward if we
+            # had separate methods for rebuild and evacuate...
+            if host:
+                # We only create a new allocation on the specified host if
+                # we're doing an evacuate since that is a move operation.
+                if host != instance.host:
+                    # If a destination host is forced for evacuate, create
+                    # allocations against it in Placement.
+                    self._allocate_for_evacuate_dest_host(
+                        context, instance, host, request_spec)
+            else:
+                # At this point, the user is either:
+                #
+                # 1. Doing a rebuild on the same host (not evacuate) and
+                #    specified a new image.
+                # 2. Evacuating and specified a host but are not forcing it.
+                #
+                # In either case, the API passes host=None but sets up the
+                # RequestSpec.requested_destination field for the specified
+                # host.
+                if not request_spec:
+                    # NOTE(sbauza): We were unable to find an original
+                    # RequestSpec object - probably because the instance is old
+                    # We need to mock that the old way
+                    filter_properties = {'ignore_hosts': [instance.host]}
+                    # build_request_spec expects a primitive image dict
+                    image_meta = nova_object.obj_to_primitive(
+                        instance.image_meta)
+                    request_spec = scheduler_utils.build_request_spec(
+                        image_meta, [instance])
+                    request_spec = objects.RequestSpec.from_primitives(
+                        context, request_spec, filter_properties)
+                elif recreate:
+                    # NOTE(sbauza): Augment the RequestSpec object by excluding
+                    # the source host for avoiding the scheduler to pick it
+                    request_spec.ignore_hosts = request_spec.ignore_hosts or []
+                    request_spec.ignore_hosts.append(instance.host)
+                    # NOTE(sbauza): Force_hosts/nodes needs to be reset
+                    # if we want to make sure that the next destination
+                    # is not forced to be the original host
+                    request_spec.reset_forced_destinations()
+                try:
+                    request_spec.ensure_project_id(instance)
+                    host_lists = self._schedule_instances(context,
+                            request_spec, [instance.uuid],
+                            return_alternates=False)
+                    host_list = host_lists[0]
+                    selection = host_list[0]
+                    host, node, limits = (selection.service_host,
+                            selection.nodename, selection.limits)
+                except (exception.NoValidHost,
+                        exception.UnsupportedPolicyException) as ex:
+                    if migration:
+                        migration.status = 'error'
+                        migration.save()
+                    # Rollback the image_ref if a new one was provided (this
+                    # only happens in the rebuild case, not evacuate).
+                    if orig_image_ref and orig_image_ref != image_ref:
+                        instance.image_ref = orig_image_ref
+                        instance.save()
+                    with excutils.save_and_reraise_exception():
+                        self._set_vm_state_and_notify(context, instance.uuid,
+                                'rebuild_server',
+                                {'vm_state': vm_states.ERROR,
+                                 'task_state': None}, ex, request_spec)
+                        LOG.warning('Rebuild failed: %s',
+                                    six.text_type(ex), instance=instance)
 
             compute_utils.notify_about_instance_usage(
                 self.notifier, context, instance, "rebuild.scheduled")
@@ -816,7 +986,8 @@ class ComputeTaskManager(base.Base):
                     on_shared_storage=on_shared_storage,
                     preserve_ephemeral=preserve_ephemeral,
                     migration=migration,
-                    host=host, node=node, limits=limits)
+                    host=host, node=node, limits=limits,
+                    request_spec=request_spec)
 
     # TODO(avolkov): move method to bdm
     @staticmethod
@@ -848,8 +1019,19 @@ class ComputeTaskManager(base.Base):
                 bdm.update_or_create()
         return instance_block_device_mapping
 
+    def _create_tags(self, context, instance_uuid, tags):
+        """Create the Tags objects in the db."""
+        if tags:
+            tag_list = [tag.tag for tag in tags]
+            instance_tags = objects.TagList.create(
+                context, instance_uuid, tag_list)
+            return instance_tags
+        else:
+            return tags
+
     def _bury_in_cell0(self, context, request_spec, exc,
-                       build_requests=None, instances=None):
+                       build_requests=None, instances=None,
+                       block_device_mapping=None):
         """Ensure all provided build_requests and instances end up in cell0.
 
         Cell0 is the fake cell we schedule dead instances to when we can't
@@ -867,9 +1049,9 @@ class ComputeTaskManager(base.Base):
             # Not yet setup for cellsv2. Instances will need to be written
             # to the configured database. This will become a deployment
             # error in Ocata.
-            LOG.error(_LE('No cell mapping found for cell0 while '
-                          'trying to record scheduling failure. '
-                          'Setup is incomplete.'))
+            LOG.error('No cell mapping found for cell0 while '
+                      'trying to record scheduling failure. '
+                      'Setup is incomplete.')
             return
 
         build_requests = build_requests or []
@@ -882,15 +1064,22 @@ class ComputeTaskManager(base.Base):
                 instances_by_uuid[instance.uuid] = instance
 
         updates = {'vm_state': vm_states.ERROR, 'task_state': None}
-        legacy_spec = request_spec.to_legacy_request_spec_dict()
         for instance in instances_by_uuid.values():
             with obj_target_cell(instance, cell0) as cctxt:
                 instance.create()
+
+                # NOTE(mnaser): In order to properly clean-up volumes after
+                #               being buried in cell0, we need to store BDMs.
+                if block_device_mapping:
+                    self._create_block_device_mapping(
+                       cell0, instance.flavor, instance.uuid,
+                       block_device_mapping)
+
                 # Use the context targeted to cell0 here since the instance is
                 # now in cell0.
                 self._set_vm_state_and_notify(
                     cctxt, instance.uuid, 'build_instances', updates,
-                    exc, legacy_spec)
+                    exc, request_spec)
                 try:
                     # We don't need the cell0-targeted context here because the
                     # instance mapping is in the API DB.
@@ -914,43 +1103,49 @@ class ComputeTaskManager(base.Base):
     def schedule_and_build_instances(self, context, build_requests,
                                      request_specs, image,
                                      admin_password, injected_files,
-                                     requested_networks, block_device_mapping):
-        legacy_spec = request_specs[0].to_legacy_request_spec_dict()
+                                     requested_networks, block_device_mapping,
+                                     tags=None):
+        # Add all the UUIDs for the instances
+        instance_uuids = [spec.instance_uuid for spec in request_specs]
         try:
-            hosts = self._schedule_instances(context, legacy_spec,
-                        request_specs[0].to_legacy_filter_properties_dict())
+            host_lists = self._schedule_instances(context, request_specs[0],
+                    instance_uuids, return_alternates=True)
         except Exception as exc:
-            LOG.exception(_LE('Failed to schedule instances'))
+            LOG.exception('Failed to schedule instances')
             self._bury_in_cell0(context, request_specs[0], exc,
-                                build_requests=build_requests)
+                                build_requests=build_requests,
+                                block_device_mapping=block_device_mapping)
             return
 
         host_mapping_cache = {}
+        cell_mapping_cache = {}
+        instances = []
 
-        for (build_request, request_spec, host) in six.moves.zip(
-                build_requests, request_specs, hosts):
-            filter_props = request_spec.to_legacy_filter_properties_dict()
+        for (build_request, request_spec, host_list) in six.moves.zip(
+                build_requests, request_specs, host_lists):
             instance = build_request.get_new_instance(context)
-            scheduler_utils.populate_retry(filter_props, instance.uuid)
-            scheduler_utils.populate_filter_properties(filter_props,
-                                                       host)
-
+            # host_list is a list of one or more Selection objects, the first
+            # of which has been selected and its resources claimed.
+            host = host_list[0]
             # Convert host from the scheduler into a cell record
-            if host['host'] not in host_mapping_cache:
+            if host.service_host not in host_mapping_cache:
                 try:
                     host_mapping = objects.HostMapping.get_by_host(
-                        context, host['host'])
-                    host_mapping_cache[host['host']] = host_mapping
+                        context, host.service_host)
+                    host_mapping_cache[host.service_host] = host_mapping
                 except exception.HostMappingNotFound as exc:
-                    LOG.error(_LE('No host-to-cell mapping found for selected '
-                                  'host %(host)s. Setup is incomplete.'),
-                              {'host': host['host']})
-                    self._bury_in_cell0(context, request_spec, exc,
-                                        build_requests=[build_request],
-                                        instances=[instance])
+                    LOG.error('No host-to-cell mapping found for selected '
+                              'host %(host)s. Setup is incomplete.',
+                              {'host': host.service_host})
+                    self._bury_in_cell0(
+                        context, request_spec, exc,
+                        build_requests=[build_request], instances=[instance],
+                        block_device_mapping=block_device_mapping)
+                    # This is a placeholder in case the quota recheck fails.
+                    instances.append(None)
                     continue
             else:
-                host_mapping = host_mapping_cache[host['host']]
+                host_mapping = host_mapping_cache[host.service_host]
 
             cell = host_mapping.cell_mapping
 
@@ -964,25 +1159,75 @@ class ComputeTaskManager(base.Base):
                 # the build request is gone so we're done for this instance
                 LOG.debug('While scheduling instance, the build request '
                           'was already deleted.', instance=instance)
+                # This is a placeholder in case the quota recheck fails.
+                instances.append(None)
+                rc = self.scheduler_client.reportclient
+                rc.delete_allocation_for_instance(context, instance.uuid)
                 continue
             else:
                 instance.availability_zone = (
                     availability_zones.get_host_availability_zone(
-                        context, host['host']))
+                        context, host.service_host))
                 with obj_target_cell(instance, cell):
                     instance.create()
+                    instances.append(instance)
+                    cell_mapping_cache[instance.uuid] = cell
 
-            # send a state update notification for the initial create to
-            # show it going from non-existent to BUILDING
-            notifications.send_update_with_states(context, instance, None,
-                    vm_states.BUILDING, None, None, service="conductor")
+        # NOTE(melwitt): We recheck the quota after creating the
+        # objects to prevent users from allocating more resources
+        # than their allowed quota in the event of a race. This is
+        # configurable because it can be expensive if strict quota
+        # limits are not required in a deployment.
+        if CONF.quota.recheck_quota:
+            try:
+                compute_utils.check_num_instances_quota(
+                    context, instance.flavor, 0, 0,
+                    orig_num_req=len(build_requests))
+            except exception.TooManyInstances as exc:
+                with excutils.save_and_reraise_exception():
+                    self._cleanup_build_artifacts(context, exc, instances,
+                                                  build_requests,
+                                                  request_specs,
+                                                  cell_mapping_cache)
 
+        zipped = six.moves.zip(build_requests, request_specs, host_lists,
+                              instances)
+        for (build_request, request_spec, host_list, instance) in zipped:
+            if instance is None:
+                # Skip placeholders that were buried in cell0 or had their
+                # build requests deleted by the user before instance create.
+                continue
+            cell = cell_mapping_cache[instance.uuid]
+            # host_list is a list of one or more Selection objects, the first
+            # of which has been selected and its resources claimed.
+            host = host_list.pop(0)
+            alts = [(alt.service_host, alt.nodename) for alt in host_list]
+            LOG.debug("Selected host: %s; Selected node: %s; Alternates: %s",
+                    host.service_host, host.nodename, alts, instance=instance)
+            filter_props = request_spec.to_legacy_filter_properties_dict()
+            scheduler_utils.populate_retry(filter_props, instance.uuid)
+            scheduler_utils.populate_filter_properties(filter_props,
+                                                       host)
+            # TODO(melwitt): Maybe we should set_target_cell on the contexts
+            # once we map to a cell, and remove these separate with statements.
             with obj_target_cell(instance, cell) as cctxt:
+                # send a state update notification for the initial create to
+                # show it going from non-existent to BUILDING
+                # This can lazy-load attributes on instance.
+                notifications.send_update_with_states(cctxt, instance, None,
+                        vm_states.BUILDING, None, None, service="conductor")
                 objects.InstanceAction.action_start(
                     cctxt, instance.uuid, instance_actions.CREATE,
                     want_result=False)
                 instance_bdms = self._create_block_device_mapping(
                     cell, instance.flavor, instance.uuid, block_device_mapping)
+                instance_tags = self._create_tags(cctxt, instance.uuid, tags)
+
+            # TODO(Kevin Zheng): clean this up once instance.create() handles
+            # tags; we do this so the instance.create notification in
+            # build_and_run_instance in nova-compute doesn't lazy-load tags
+            instance.tags = instance_tags if instance_tags \
+                else objects.TagList()
 
             # Update mapping for instance. Normally this check is guarded by
             # a try/except but if we're here we know that a newer nova-api
@@ -993,7 +1238,8 @@ class ComputeTaskManager(base.Base):
             inst_mapping.save()
 
             if not self._delete_build_request(
-                    build_request, instance, cell, instance_bdms):
+                    context, build_request, instance, cell, instance_bdms,
+                    instance_tags):
                 # The build request was deleted before/during scheduling so
                 # the instance is gone and we don't have anything to build for
                 # this one.
@@ -1004,7 +1250,6 @@ class ComputeTaskManager(base.Base):
             # pass the objects.
             legacy_secgroups = [s.identifier
                                 for s in request_spec.security_groups]
-
             with obj_target_cell(instance, cell) as cctxt:
                 self.compute_rpcapi.build_and_run_instance(
                     cctxt, instance=instance, image=image,
@@ -1015,16 +1260,50 @@ class ComputeTaskManager(base.Base):
                     requested_networks=requested_networks,
                     security_groups=legacy_secgroups,
                     block_device_mapping=instance_bdms,
-                    host=host['host'], node=host['nodename'],
-                    limits=host['limits'])
+                    host=host.service_host, node=host.nodename,
+                    limits=host.limits, host_list=host_list)
 
-    def _delete_build_request(self, build_request, instance, cell,
-                              instance_bdms):
+    def _cleanup_build_artifacts(self, context, exc, instances, build_requests,
+                                 request_specs, cell_mapping_cache):
+        for (instance, build_request, request_spec) in six.moves.zip(
+                instances, build_requests, request_specs):
+            # Skip placeholders that were buried in cell0 or had their
+            # build requests deleted by the user before instance create.
+            if instance is None:
+                continue
+            updates = {'vm_state': vm_states.ERROR, 'task_state': None}
+            cell = cell_mapping_cache[instance.uuid]
+            with try_target_cell(context, cell) as cctxt:
+                self._set_vm_state_and_notify(cctxt, instance.uuid,
+                                              'build_instances', updates, exc,
+                                              request_spec)
+
+            # TODO(mnaser): The cell mapping should already be populated by
+            #               this point to avoid setting it below here.
+            inst_mapping = objects.InstanceMapping.get_by_instance_uuid(
+                context, instance.uuid)
+            inst_mapping.cell_mapping = cell
+            inst_mapping.save()
+
+            # Be paranoid about artifacts being deleted underneath us.
+            try:
+                build_request.destroy()
+            except exception.BuildRequestNotFound:
+                pass
+            try:
+                request_spec.destroy()
+            except exception.RequestSpecNotFound:
+                pass
+
+    def _delete_build_request(self, context, build_request, instance, cell,
+                              instance_bdms, instance_tags):
         """Delete a build request after creating the instance in the cell.
 
         This method handles cleaning up the instance in case the build request
         is already deleted by the time we try to delete it.
 
+        :param context: the context of the request being handled
+        :type context: nova.context.RequestContext
         :param build_request: the build request to delete
         :type build_request: nova.objects.BuildRequest
         :param instance: the instance created from the build_request
@@ -1033,6 +1312,8 @@ class ComputeTaskManager(base.Base):
         :type cell: nova.objects.CellMapping
         :param instance_bdms: list of block device mappings for the instance
         :type instance_bdms: nova.objects.BlockDeviceMappingList
+        :param instance_tags: list of tags for the instance
+        :type instance_tags: nova.objects.TagList
         :returns: True if the build request was successfully deleted, False if
             the build request was already deleted and the instance is now gone.
         """
@@ -1041,7 +1322,7 @@ class ComputeTaskManager(base.Base):
         except exception.BuildRequestNotFound:
             # This indicates an instance deletion request has been
             # processed, and the build should halt here. Clean up the
-            # bdm and instance record.
+            # bdm, tags and instance record.
             with obj_target_cell(instance, cell) as cctxt:
                 with compute_utils.notify_about_instance_delete(
                         self.notifier, cctxt, instance):
@@ -1062,6 +1343,12 @@ class ComputeTaskManager(base.Base):
                     try:
                         bdm.destroy()
                     except exception.ObjectActionError:
+                        pass
+            if instance_tags:
+                with try_target_cell(context, cell) as target_ctxt:
+                    try:
+                        objects.TagList.destroy(target_ctxt, instance.uuid)
+                    except exception.InstanceNotFound:
                         pass
             return False
         return True

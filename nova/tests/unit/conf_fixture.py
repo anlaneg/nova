@@ -66,7 +66,7 @@ class ConfFixture(config_fixture.Config):
         self.conf.set_default('sqlite_synchronous', False, group='database')
 
         # key_manager group
-        self.conf.set_default('api_class',
+        self.conf.set_default('backend',
                               'nova.keymgr.conf_key_mgr.ConfKeyManager',
                               group='key_manager')
 
@@ -74,6 +74,11 @@ class ConfFixture(config_fixture.Config):
         self.conf.set_default('api_paste_config',
                               paths.state_path_def('etc/nova/api-paste.ini'),
                               group='wsgi')
+        # The functional tests run wsgi API services using fixtures and
+        # eventlet and we want one connection per request so things don't
+        # leak between requests from separate services in concurrently running
+        # tests.
+        self.conf.set_default('keep_alive', False, group="wsgi")
 
         # placement group
         self.conf.set_default('os_region_name', 'RegionOne',

@@ -27,7 +27,6 @@ from oslo_log import log as logging
 import six
 
 from nova import exception
-from nova.i18n import _LE
 from nova.virt import driver
 from nova.virt.hyperv import eventhandler
 from nova.virt.hyperv import hostops
@@ -99,6 +98,7 @@ class HyperVDriver(driver.ComputeDriver):
         "supports_migrate_to_same_host": False,
         "supports_attach_interface": True,
         "supports_device_tagging": True,
+        "supports_multiattach": False
     }
 
     def __init__(self, virtapi):
@@ -119,15 +119,22 @@ class HyperVDriver(driver.ComputeDriver):
         self._imagecache = imagecache.ImageCache()
 
     def _check_minimum_windows_version(self):
-        if not utilsfactory.get_hostutils().check_min_windows_version(6, 2):
+        hostutils = utilsfactory.get_hostutils()
+        if not hostutils.check_min_windows_version(6, 2):
             # the version is of Windows is older than Windows Server 2012 R2.
             # Log an error, letting users know that this version is not
             # supported any longer.
-            LOG.error(_LE('You are running nova-compute on an unsupported '
-                          'version of Windows (older than Windows / Hyper-V '
-                          'Server 2012). The support for this version of '
-                          'Windows has been removed in Mitaka.'))
+            LOG.error('You are running nova-compute on an unsupported '
+                      'version of Windows (older than Windows / Hyper-V '
+                      'Server 2012). The support for this version of '
+                      'Windows has been removed in Mitaka.')
             raise exception.HypervisorTooOld(version='6.2')
+        elif not hostutils.check_min_windows_version(6, 3):
+            # TODO(claudiub): replace the warning with an exception in Rocky.
+            LOG.warning('You are running nova-compute on Windows / Hyper-V '
+                        'Server 2012. The support for this version of Windows '
+                        'has been deprecated In Queens, and will be removed '
+                        'in Rocky.')
 
     @property
     def need_legacy_block_device_info(self):
@@ -149,7 +156,8 @@ class HyperVDriver(driver.ComputeDriver):
         return self._vmops.estimate_instance_overhead(instance_info)
 
     def spawn(self, context, instance, image_meta, injected_files,
-              admin_password, network_info=None, block_device_info=None):
+              admin_password, allocations, network_info=None,
+              block_device_info=None):
         self._vmops.spawn(context, instance, image_meta, injected_files,
                           admin_password, network_info, block_device_info)
 
@@ -158,7 +166,7 @@ class HyperVDriver(driver.ComputeDriver):
         self._vmops.reboot(instance, network_info, reboot_type)
 
     def destroy(self, context, instance, network_info, block_device_info=None,
-                destroy_disks=True, migrate_data=None):
+                destroy_disks=True):
         self._vmops.destroy(instance, network_info, block_device_info,
                             destroy_disks)
 
@@ -175,7 +183,7 @@ class HyperVDriver(driver.ComputeDriver):
         return self._volumeops.attach_volume(connection_info,
                                              instance.name)
 
-    def detach_volume(self, connection_info, instance, mountpoint,
+    def detach_volume(self, context, connection_info, instance, mountpoint,
                       encryption=None):
         return self._volumeops.detach_volume(connection_info,
                                              instance.name)

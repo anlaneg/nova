@@ -14,6 +14,8 @@
 #    under the License.
 
 
+from oslo_policy import policy
+
 from nova.policies import base
 
 
@@ -22,7 +24,7 @@ POLICY_ROOT = 'os_compute_api:os-flavor-access:%s'
 
 
 flavor_access_policies = [
-    base.create_rule_default(
+    policy.DocumentedRuleDefault(
         POLICY_ROOT % 'add_tenant_access',
         base.RULE_ADMIN_API,
         "Add flavor access to a tenant",
@@ -32,7 +34,7 @@ flavor_access_policies = [
                 'path': '/flavors/{flavor_id}/action (addTenantAccess)'
             }
         ]),
-    base.create_rule_default(
+    policy.DocumentedRuleDefault(
         POLICY_ROOT % 'remove_tenant_access',
         base.RULE_ADMIN_API,
         "Remove flavor access from a tenant",
@@ -42,10 +44,10 @@ flavor_access_policies = [
                 'path': '/flavors/{flavor_id}/action (removeTenantAccess)'
             }
         ]),
-    base.create_rule_default(
+    policy.DocumentedRuleDefault(
         BASE_POLICY_NAME,
         base.RULE_ADMIN_OR_OWNER,
-        """Allow the listing of flavor access information
+        """List flavor access information
 
 Adds the os-flavor-access:is_public key into several flavor APIs.
 
@@ -69,7 +71,24 @@ to a flavor via an os-flavor-access API.
                 'method': 'POST',
                 'path': '/flavors'
             },
-        ]),
+            {
+                'method': 'PUT',
+                'path': '/flavors/{flavor_id}'
+            },
+        ],
+        deprecated_for_removal=True,
+        deprecated_reason=(
+            'Nova API extension concept has been removed in Pike. Those '
+            'extensions have their own policies enforcement. As there is '
+            'no extensions now, "os_compute_api:os-flavor-access" policy '
+            'for POST, PUT, GET /flavors which was added for extensions is '
+            'not needed any more. NOTE: This policy is deprecated only for '
+            'POST /flavors, PUT /flavors, GET /flavors/{flavor_id} & '
+            'GET /flavors/detail. This policy for other API operations is '
+            'still valid and not deprecated'
+
+        ),
+        deprecated_since='17.0.0'),
 ]
 
 

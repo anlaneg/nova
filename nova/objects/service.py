@@ -17,9 +17,9 @@ from oslo_utils import uuidutils
 from oslo_utils import versionutils
 
 from nova import availability_zones
+from nova import context as nova_context
 from nova import db
 from nova import exception
-from nova.i18n import _LW
 from nova.notifications.objects import base as notification
 from nova.notifications.objects import service as service_notification
 from nova import objects
@@ -31,7 +31,7 @@ LOG = logging.getLogger(__name__)
 
 
 # NOTE(danms): This is the global service version counter
-SERVICE_VERSION = 17
+SERVICE_VERSION = 30
 
 
 # NOTE(danms): This is our SERVICE_VERSION history. The idea is that any
@@ -101,6 +101,36 @@ SERVICE_VERSION_HISTORY = (
     # the old check in the API as the old computes fail if the volume is moved
     # to 'attaching' state by reserve.
     {'compute_rpc': '4.13'},
+    # Version 18: Compute RPC version 4.14
+    {'compute_rpc': '4.14'},
+    # Version 19: Compute RPC version 4.15
+    {'compute_rpc': '4.15'},
+    # Version 20: Compute RPC version 4.16
+    {'compute_rpc': '4.16'},
+    # Version 21: Compute RPC version 4.17
+    {'compute_rpc': '4.17'},
+    # Version 22: A marker for the behaviour change of auto-healing code on the
+    # compute host regarding allocations against an instance
+    {'compute_rpc': '4.17'},
+    # Version 23: Compute hosts allow pre-creation of the migration object
+    # for cold migration.
+    {'compute_rpc': '4.18'},
+    # Version 24: Add support for Cinder v3 attach/detach API.
+    {'compute_rpc': '4.18'},
+    # Version 25: Compute hosts allow migration-based allocations
+    # for live migration.
+    {'compute_rpc': '4.18'},
+    # Version 26: Adds a 'host_list' parameter to build_and_run_instance()
+    {'compute_rpc': '4.19'},
+    # Version 27: Compute RPC version 4.20; adds multiattach argument to
+    # reserve_block_device_name().
+    {'compute_rpc': '4.20'},
+    # Version 28: Adds a 'host_list' parameter to prep_resize()
+    {'compute_rpc': '4.21'},
+    # Version 29: Compute RPC version 4.22
+    {'compute_rpc': '4.22'},
+    # Version 30: Compute RPC version 5.0
+    {'compute_rpc': '5.0'},
 )
 
 
@@ -342,6 +372,7 @@ class Service(base.NovaPersistentObject, base.NovaObject,
 
         db_service = db.service_create(self._context, updates)
         self._from_db_object(self._context, self, db_service)
+        self._send_notification(fields.NotificationAction.CREATE)
 
     @base.remotable
     def save(self):
@@ -359,19 +390,23 @@ class Service(base.NovaPersistentObject, base.NovaObject,
         # every other field change. See the comment in save() too.
         if set(updates.keys()).intersection(
                 {'disabled', 'disabled_reason', 'forced_down'}):
-            payload = service_notification.ServiceStatusPayload(self)
-            service_notification.ServiceStatusNotification(
-                publisher=notification.NotificationPublisher.from_service_obj(
-                    self),
-                event_type=notification.EventType(
-                    object='service',
-                    action=fields.NotificationAction.UPDATE),
-                priority=fields.NotificationPriority.INFO,
-                payload=payload).emit(self._context)
+            self._send_notification(fields.NotificationAction.UPDATE)
+
+    def _send_notification(self, action):
+        payload = service_notification.ServiceStatusPayload(self)
+        service_notification.ServiceStatusNotification(
+            publisher=notification.NotificationPublisher.from_service_obj(
+                self),
+            event_type=notification.EventType(
+                object='service',
+                action=action),
+            priority=fields.NotificationPriority.INFO,
+            payload=payload).emit(self._context)
 
     @base.remotable
     def destroy(self):
         db.service_destroy(self._context, self.id)
+        self._send_notification(fields.NotificationAction.DELETE)
 
     @classmethod
     def enable_min_version_cache(cls):
@@ -390,8 +425,8 @@ class Service(base.NovaPersistentObject, base.NovaObject,
     @base.remotable_classmethod
     def get_minimum_version_multi(cls, context, binaries, use_slave=False):
         if not all(binary.startswith('nova-') for binary in binaries):
-            LOG.warning(_LW('get_minimum_version called with likely-incorrect '
-                            'binaries `%s\''), ','.join(binaries))
+            LOG.warning('get_minimum_version called with likely-incorrect '
+                        'binaries `%s\'', ','.join(binaries))
             raise exception.ObjectActionError(action='get_minimum_version',
                                               reason='Invalid binary prefix')
 
@@ -423,6 +458,19 @@ class Service(base.NovaPersistentObject, base.NovaObject,
     def get_minimum_version(cls, context, binary, use_slave=False):
         return cls.get_minimum_version_multi(context, [binary],
                                              use_slave=use_slave)
+
+
+def get_minimum_version_all_cells(context, binaries):
+    """Get the minimum service version, checking all cells"""
+
+    cells = objects.CellMappingList.get_all(context)
+    min_version = None
+    for cell in cells:
+        with nova_context.target_cell(context, cell) as cctxt:
+            version = objects.Service.get_minimum_version_multi(
+                cctxt, binaries)
+        min_version = min(min_version, version) if min_version else version
+    return min_version
 
 
 @base.NovaObjectRegistry.register

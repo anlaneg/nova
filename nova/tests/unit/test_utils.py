@@ -13,16 +13,20 @@
 #    under the License.
 
 import datetime
+import errno
 import hashlib
 import importlib
 import os
 import os.path
-import socket
-import struct
 import tempfile
 
 import eventlet
+from keystoneauth1 import adapter as ks_adapter
+from keystoneauth1 import exceptions as ks_exc
+from keystoneauth1.identity import base as ks_identity
+from keystoneauth1 import session as ks_session
 import mock
+from mox3 import mox
 import netaddr
 from oslo_concurrency import processutils
 from oslo_config import cfg
@@ -147,28 +151,13 @@ class GenericUtilsTestCase(test.NoDBTestCase):
         self.assertTrue([c for c in password
                          if c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'])
 
-    def test_read_file_as_root(self):
-        def fake_execute(*args, **kwargs):
-            if args[1] == 'bad':
-                raise processutils.ProcessExecutionError()
-            return 'fakecontents', None
-
-        self.stub_out('nova.utils.execute', fake_execute)
-        contents = utils.read_file_as_root('good')
-        self.assertEqual(contents, 'fakecontents')
-        self.assertRaises(exception.FileNotFound,
-                          utils.read_file_as_root, 'bad')
-
-    def test_temporary_chown(self):
-        def fake_execute(*args, **kwargs):
-            if args[0] == 'chown':
-                fake_execute.uid = args[1]
-        self.stub_out('nova.utils.execute', fake_execute)
-
+    @mock.patch('nova.privsep.path.chown')
+    def test_temporary_chown(self, mock_chown):
         with tempfile.NamedTemporaryFile() as f:
             with utils.temporary_chown(f.name, owner_uid=2):
-                self.assertEqual(fake_execute.uid, 2)
-            self.assertEqual(fake_execute.uid, os.getuid())
+                mock_chown.assert_called_once_with(f.name, uid=2)
+                mock_chown.reset_mock()
+            mock_chown.assert_called_once_with(f.name, uid=os.getuid())
 
     def test_get_shortened_ipv6(self):
         self.assertEqual("abcd:ef01:2345:6789:abcd:ef01:c0a8:fefe",
@@ -460,58 +449,6 @@ Exit code: -2''')
              mock.call(['a', '1'], None)])
 
 
-class VPNPingTestCase(test.NoDBTestCase):
-    """Unit tests for utils.vpn_ping()."""
-    def setUp(self):
-        super(VPNPingTestCase, self).setUp()
-        self.port = 'fake'
-        self.address = 'fake'
-        self.session_id = 0x1234
-        self.fmt = '!BQxxxxxQxxxx'
-
-    def fake_reply_packet(self, pkt_id=0x40):
-        return struct.pack(self.fmt, pkt_id, 0x0, self.session_id)
-
-    def setup_socket(self, mock_socket, return_value, side_effect=None):
-        socket_obj = mock.MagicMock()
-        if side_effect is not None:
-            socket_obj.recv.side_effect = side_effect
-        else:
-            socket_obj.recv.return_value = return_value
-        mock_socket.return_value = socket_obj
-
-    @mock.patch.object(socket, 'socket')
-    def test_vpn_ping_timeout(self, mock_socket):
-        """Server doesn't reply within timeout."""
-        self.setup_socket(mock_socket, None, socket.timeout)
-        rc = utils.vpn_ping(self.address, self.port,
-                            session_id=self.session_id)
-        self.assertFalse(rc)
-
-    @mock.patch.object(socket, 'socket')
-    def test_vpn_ping_bad_len(self, mock_socket):
-        """Test a short/invalid server reply."""
-        self.setup_socket(mock_socket, 'fake_reply')
-        rc = utils.vpn_ping(self.address, self.port,
-                            session_id=self.session_id)
-        self.assertFalse(rc)
-
-    @mock.patch.object(socket, 'socket')
-    def test_vpn_ping_bad_id(self, mock_socket):
-        """Server sends an unknown packet ID."""
-        self.setup_socket(mock_socket, self.fake_reply_packet(pkt_id=0x41))
-        rc = utils.vpn_ping(self.address, self.port,
-                            session_id=self.session_id)
-        self.assertFalse(rc)
-
-    @mock.patch.object(socket, 'socket')
-    def test_vpn_ping_ok(self, mock_socket):
-        self.setup_socket(mock_socket, self.fake_reply_packet())
-        rc = utils.vpn_ping(self.address, self.port,
-                            session_id=self.session_id)
-        self.assertTrue(rc)
-
-
 class MonkeyPatchTestCase(test.NoDBTestCase):
     """Unit test for utils.monkey_patch()."""
     def setUp(self):
@@ -740,72 +677,6 @@ class AuditPeriodTest(test.NoDBTestCase):
                                            year=2011))
 
 
-class MkfsTestCase(test.NoDBTestCase):
-
-    @mock.patch('nova.utils.execute')
-    def test_mkfs_ext4(self, mock_execute):
-        utils.mkfs('ext4', '/my/block/dev')
-        mock_execute.assert_called_once_with('mkfs', '-t', 'ext4', '-F',
-            '/my/block/dev', run_as_root=False)
-
-    @mock.patch('nova.utils.execute')
-    def test_mkfs_msdos(self, mock_execute):
-        utils.mkfs('msdos', '/my/msdos/block/dev')
-        mock_execute.assert_called_once_with('mkfs', '-t', 'msdos',
-            '/my/msdos/block/dev', run_as_root=False)
-
-    @mock.patch('nova.utils.execute')
-    def test_mkfs_swap(self, mock_execute):
-        utils.mkfs('swap', '/my/swap/block/dev')
-        mock_execute.assert_called_once_with('mkswap', '/my/swap/block/dev',
-            run_as_root=False)
-
-    @mock.patch('nova.utils.execute')
-    def test_mkfs_ext4_withlabel(self, mock_execute):
-        utils.mkfs('ext4', '/my/block/dev', 'ext4-vol')
-        mock_execute.assert_called_once_with('mkfs', '-t', 'ext4', '-F',
-            '-L', 'ext4-vol', '/my/block/dev', run_as_root=False)
-
-    @mock.patch('nova.utils.execute')
-    def test_mkfs_msdos_withlabel(self, mock_execute):
-        utils.mkfs('msdos', '/my/msdos/block/dev', 'msdos-vol')
-        mock_execute.assert_called_once_with('mkfs', '-t', 'msdos',
-            '-n', 'msdos-vol', '/my/msdos/block/dev', run_as_root=False)
-
-    @mock.patch('nova.utils.execute')
-    def test_mkfs_swap_withlabel(self, mock_execute):
-        utils.mkfs('swap', '/my/swap/block/dev', 'swap-vol')
-        mock_execute.assert_called_once_with('mkswap', '-L', 'swap-vol',
-            '/my/swap/block/dev', run_as_root=False)
-
-
-class LastBytesTestCase(test.NoDBTestCase):
-    """Test the last_bytes() utility method."""
-
-    def setUp(self):
-        super(LastBytesTestCase, self).setUp()
-        self.f = six.BytesIO(b'1234567890')
-
-    def test_truncated(self):
-        self.f.seek(0, os.SEEK_SET)
-        out, remaining = utils.last_bytes(self.f, 5)
-        self.assertEqual(out, b'67890')
-        self.assertGreater(remaining, 0)
-
-    def test_read_all(self):
-        self.f.seek(0, os.SEEK_SET)
-        out, remaining = utils.last_bytes(self.f, 1000)
-        self.assertEqual(out, b'1234567890')
-        self.assertFalse(remaining > 0)
-
-    def test_seek_too_far_real_file(self):
-        # StringIO doesn't raise IOError if you see past the start of the file.
-        with tempfile.TemporaryFile() as flo:
-            content = b'1234567890'
-            flo.write(content)
-            self.assertEqual((content, 0), utils.last_bytes(flo, 1000))
-
-
 class MetadataToDictTestCase(test.NoDBTestCase):
     def test_metadata_to_dict(self):
         self.assertEqual(utils.metadata_to_dict(
@@ -929,25 +800,7 @@ class StringLengthTestCase(test.NoDBTestCase):
 
 
 class ValidateIntegerTestCase(test.NoDBTestCase):
-    def test_valid_inputs(self):
-        self.assertEqual(
-            utils.validate_integer(42, "answer"), 42)
-        self.assertEqual(
-            utils.validate_integer("42", "answer"), 42)
-        self.assertEqual(
-            utils.validate_integer(
-                "7", "lucky", min_value=7, max_value=8), 7)
-        self.assertEqual(
-            utils.validate_integer(
-                7, "lucky", min_value=6, max_value=7), 7)
-        self.assertEqual(
-            utils.validate_integer(
-                300, "Spartaaa!!!", min_value=300), 300)
-        self.assertEqual(
-            utils.validate_integer(
-                "300", "Spartaaa!!!", max_value=300), 300)
-
-    def test_invalid_inputs(self):
+    def test_exception_converted(self):
         self.assertRaises(exception.InvalidInput,
                           utils.validate_integer,
                           "im-not-an-int", "not-an-int")
@@ -1403,3 +1256,181 @@ class TestObjectCallHelpers(test.NoDBTestCase):
             test_utils.obj_called_once_with(
                 tester.foo, 3,
                 test_objects.MyObj(foo=3, bar='baz')))
+
+
+class GetKSAAdapterTestCase(test.NoDBTestCase):
+    """Tests for nova.utils.get_endpoint_data()."""
+    def setUp(self):
+        super(GetKSAAdapterTestCase, self).setUp()
+        self.sess = mock.create_autospec(ks_session.Session, instance=True)
+        self.auth = mock.create_autospec(ks_identity.BaseIdentityPlugin,
+                                         instance=True)
+
+        load_sess_p = mock.patch(
+            'keystoneauth1.loading.load_session_from_conf_options')
+        self.addCleanup(load_sess_p.stop)
+        self.load_sess = load_sess_p.start()
+        self.load_sess.return_value = self.sess
+
+        load_adap_p = mock.patch(
+            'keystoneauth1.loading.load_adapter_from_conf_options')
+        self.addCleanup(load_adap_p.stop)
+        self.load_adap = load_adap_p.start()
+
+        load_auth_p = mock.patch(
+            'keystoneauth1.loading.load_auth_from_conf_options')
+        self.addCleanup(load_auth_p.stop)
+        self.load_auth = load_auth_p.start()
+        self.load_auth.return_value = self.auth
+
+    def test_bogus_service_type(self):
+        self.assertRaises(exception.ConfGroupForServiceTypeNotFound,
+                          utils.get_ksa_adapter, 'bogus')
+        self.load_auth.assert_not_called()
+        self.load_sess.assert_not_called()
+        self.load_adap.assert_not_called()
+
+    def test_all_params(self):
+        ret = utils.get_ksa_adapter(
+            'image', ksa_auth='auth', ksa_session='sess',
+            min_version='min', max_version='max')
+        # Returned the result of load_adapter_from_conf_options
+        self.assertEqual(self.load_adap.return_value, ret)
+        # Because we supplied ksa_auth, load_auth* not called
+        self.load_auth.assert_not_called()
+        # Ditto ksa_session/load_session*
+        self.load_sess.assert_not_called()
+        # load_adapter* called with what we passed in (and the right group)
+        self.load_adap.assert_called_once_with(
+            utils.CONF, 'glance', session='sess', auth='auth',
+            min_version='min', max_version='max')
+
+    def test_auth_from_session(self):
+        self.sess.auth = 'auth'
+        ret = utils.get_ksa_adapter('baremetal', ksa_session=self.sess)
+        # Returned the result of load_adapter_from_conf_options
+        self.assertEqual(self.load_adap.return_value, ret)
+        # Because ksa_auth found in ksa_session, load_auth* not called
+        self.load_auth.assert_not_called()
+        # Because we supplied ksa_session, load_session* not called
+        self.load_sess.assert_not_called()
+        # load_adapter* called with the auth from the session
+        self.load_adap.assert_called_once_with(
+            utils.CONF, 'ironic', session=self.sess, auth='auth',
+            min_version=None, max_version=None)
+
+    def test_load_auth_and_session(self):
+        ret = utils.get_ksa_adapter('volumev3')
+        # Returned the result of load_adapter_from_conf_options
+        self.assertEqual(self.load_adap.return_value, ret)
+        # Had to load the auth
+        self.load_auth.assert_called_once_with(utils.CONF, 'cinder')
+        # Had to load the session, passed in the loaded auth
+        self.load_sess.assert_called_once_with(utils.CONF, 'cinder',
+                                               auth=self.auth)
+        # load_adapter* called with the loaded auth & session
+        self.load_adap.assert_called_once_with(
+            utils.CONF, 'cinder', session=self.sess, auth=self.auth,
+            min_version=None, max_version=None)
+
+
+class GetEndpointTestCase(test.NoDBTestCase):
+    def setUp(self):
+        super(GetEndpointTestCase, self).setUp()
+        self.adap = mock.create_autospec(ks_adapter.Adapter, instance=True)
+        self.adap.endpoint_override = None
+        self.adap.service_type = 'stype'
+        self.adap.interface = ['admin', 'public']
+
+    def test_endpoint_override(self):
+        self.adap.endpoint_override = 'foo'
+        self.assertEqual('foo', utils.get_endpoint(self.adap))
+        self.adap.get_endpoint_data.assert_not_called()
+        self.adap.get_endpoint.assert_not_called()
+
+    def test_image_good(self):
+        self.adap.service_type = 'image'
+        self.adap.get_endpoint_data.return_value.catalog_url = 'url'
+        self.assertEqual('url', utils.get_endpoint(self.adap))
+        self.adap.get_endpoint_data.assert_called_once_with()
+        self.adap.get_endpoint.assert_not_called()
+
+    def test_image_bad(self):
+        self.adap.service_type = 'image'
+        self.adap.get_endpoint_data.side_effect = AttributeError
+        self.adap.get_endpoint.return_value = 'url'
+        self.assertEqual('url', utils.get_endpoint(self.adap))
+        self.adap.get_endpoint_data.assert_called_once_with()
+        self.adap.get_endpoint.assert_called_once_with()
+
+    def test_nonimage_good(self):
+        self.adap.get_endpoint.return_value = 'url'
+        self.assertEqual('url', utils.get_endpoint(self.adap))
+        self.adap.get_endpoint_data.assert_not_called()
+        self.adap.get_endpoint.assert_called_once_with()
+
+    def test_nonimage_try_interfaces(self):
+        self.adap.get_endpoint.side_effect = (ks_exc.EndpointNotFound, 'url')
+        self.assertEqual('url', utils.get_endpoint(self.adap))
+        self.adap.get_endpoint_data.assert_not_called()
+        self.assertEqual(2, self.adap.get_endpoint.call_count)
+        self.assertEqual('admin', self.adap.interface)
+
+    def test_nonimage_try_interfaces_fail(self):
+        self.adap.get_endpoint.side_effect = ks_exc.EndpointNotFound
+        self.assertRaises(ks_exc.EndpointNotFound,
+                          utils.get_endpoint, self.adap)
+        self.adap.get_endpoint_data.assert_not_called()
+        self.assertEqual(3, self.adap.get_endpoint.call_count)
+        self.assertEqual('public', self.adap.interface)
+
+    def _behave_supports_direct_io(self, raise_open=False, raise_write=False,
+                                   exc=ValueError()):
+        open_behavior = os.open(os.path.join('.', '.directio.test'),
+                                os.O_CREAT | os.O_WRONLY | os.O_DIRECT)
+        if raise_open:
+            open_behavior.AndRaise(exc)
+        else:
+            open_behavior.AndReturn(3)
+            write_bahavior = os.write(3, mox.IgnoreArg())
+            if raise_write:
+                write_bahavior.AndRaise(exc)
+
+            # ensure unlink(filepath) will actually remove the file by deleting
+            # the remaining link to it in close(fd)
+            os.close(3)
+
+        os.unlink(3)
+
+    def test_supports_direct_io(self):
+        # O_DIRECT is not supported on all Python runtimes, so on platforms
+        # where it's not supported (e.g. Mac), we can still test the code-path
+        # by stubbing out the value.
+        if not hasattr(os, 'O_DIRECT'):
+            # `mock` seems to have trouble stubbing an attr that doesn't
+            # originally exist, so falling back to stubbing out the attribute
+            # directly.
+            os.O_DIRECT = 16384
+            self.addCleanup(delattr, os, 'O_DIRECT')
+
+        einval = OSError()
+        einval.errno = errno.EINVAL
+        self.mox.StubOutWithMock(os, 'open')
+        self.mox.StubOutWithMock(os, 'write')
+        self.mox.StubOutWithMock(os, 'close')
+        self.mox.StubOutWithMock(os, 'unlink')
+        _supports_direct_io = utils.supports_direct_io
+
+        self._behave_supports_direct_io()
+        self._behave_supports_direct_io(raise_write=True)
+        self._behave_supports_direct_io(raise_open=True)
+        self._behave_supports_direct_io(raise_write=True, exc=einval)
+        self._behave_supports_direct_io(raise_open=True, exc=einval)
+
+        self.mox.ReplayAll()
+        self.assertTrue(_supports_direct_io('.'))
+        self.assertRaises(ValueError, _supports_direct_io, '.')
+        self.assertRaises(ValueError, _supports_direct_io, '.')
+        self.assertFalse(_supports_direct_io('.'))
+        self.assertFalse(_supports_direct_io('.'))
+        self.mox.VerifyAll()

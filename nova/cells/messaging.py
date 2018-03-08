@@ -44,6 +44,7 @@ from six.moves import range
 from nova.cells import state as cells_state
 from nova.cells import utils as cells_utils
 from nova import compute
+from nova.compute import instance_actions
 from nova.compute import rpcapi as compute_rpcapi
 from nova.compute import task_states
 from nova.compute import vm_states
@@ -749,7 +750,9 @@ class _TargetedMessageMethods(_BaseMessageMethods):
             cctxt.cast(message.ctxt, method, **kwargs)
 
     def compute_node_get(self, message, compute_id):
-        """Get compute node by ID."""
+        """Get compute node by ID or UUID."""
+        if uuidutils.is_uuid_like(compute_id):
+            return objects.ComputeNode.get_by_uuid(message.ctxt, compute_id)
         return objects.ComputeNode.get_by_id(message.ctxt, compute_id)
 
     def actions_get(self, message, instance_uuid):
@@ -908,6 +911,11 @@ class _TargetedMessageMethods(_BaseMessageMethods):
         instance.refresh()
         instance.task_state = task_states.IMAGE_SNAPSHOT_PENDING
         instance.save(expected_task_state=[None])
+
+        objects.InstanceAction.action_start(
+            message.ctxt, instance.uuid, instance_actions.CREATE_IMAGE,
+            want_result=False)
+
         self.compute_rpcapi.snapshot_instance(message.ctxt,
                                               instance,
                                               image_id)
@@ -918,6 +926,11 @@ class _TargetedMessageMethods(_BaseMessageMethods):
         instance.refresh()
         instance.task_state = task_states.IMAGE_BACKUP
         instance.save(expected_task_state=[None])
+
+        objects.InstanceAction.action_start(
+            message.ctxt, instance.uuid, instance_actions.BACKUP,
+            want_result=False)
+
         self.compute_rpcapi.backup_instance(message.ctxt,
                                             instance,
                                             image_id,
@@ -1590,7 +1603,7 @@ class MessageRunner(object):
         return message.process()
 
     def compute_node_get(self, ctxt, cell_name, compute_id):
-        """Return compute node entry from a specific cell by ID."""
+        """Return compute node entry from a specific cell by ID or UUID."""
         method_kwargs = dict(compute_id=compute_id)
         message = _TargetedMessage(self, ctxt, 'compute_node_get',
                                     method_kwargs, 'down',

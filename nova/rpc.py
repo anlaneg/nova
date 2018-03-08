@@ -230,9 +230,9 @@ def if_notifications_enabled(f):
 
 def create_transport(url):
     exmods = get_allowed_exmods()
-    return messaging.get_transport(CONF,
-                                   url=url,
-                                   allowed_remote_exmods=exmods)
+    return messaging.get_rpc_transport(CONF,
+                                       url=url,
+                                       allowed_remote_exmods=exmods)
 
 
 class LegacyValidatingNotifier(object):
@@ -260,7 +260,6 @@ class LegacyValidatingNotifier(object):
         'aggregate.updatemetadata.start',
         'aggregate.updateprop.end',
         'aggregate.updateprop.start',
-        'api.fault',
         'compute.instance.create.end',
         'compute.instance.create.error',
         'compute.instance.create_ip.end',
@@ -276,6 +275,8 @@ class LegacyValidatingNotifier(object):
         'compute.instance.finish_resize.start',
         'compute.instance.live.migration.abort.start',
         'compute.instance.live.migration.abort.end',
+        'compute.instance.live.migration.force.complete.start',
+        'compute.instance.live.migration.force.complete.end',
         'compute.instance.live_migration.post.dest.end',
         'compute.instance.live_migration.post.dest.start',
         'compute.instance.live_migration._post.end',
@@ -338,6 +339,7 @@ class LegacyValidatingNotifier(object):
         'compute.instance.volume.attach',
         'compute.instance.volume.detach',
         'compute.libvirt.error',
+        'compute.metrics.update',
         'compute_task.build_instances',
         'compute_task.migrate_server',
         'compute_task.rebuild_server',
@@ -366,7 +368,7 @@ class LegacyValidatingNotifier(object):
     ]
 
     message = _('%(event_type)s is not a versioned notification and not '
-                'whitelisted. See ./doc/source/notification.rst')
+                'whitelisted. See ./doc/source/reference/notifications.rst')
 
     def __init__(self, notifier):
         self.notifier = notifier

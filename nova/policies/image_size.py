@@ -13,6 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_policy import policy
+
 from nova.policies import base
 
 
@@ -20,7 +22,7 @@ BASE_POLICY_NAME = 'os_compute_api:image-size'
 
 
 image_size_policies = [
-    base.create_rule_default(
+    policy.DocumentedRuleDefault(
         BASE_POLICY_NAME,
         base.RULE_ADMIN_OR_OWNER,
         """Add 'OS-EXT-IMG-SIZE:size' attribute in the image response.""",
@@ -33,7 +35,15 @@ image_size_policies = [
                 'method': 'GET',
                 'path': '/images/detail'
             }
-        ]),
+        ],
+        deprecated_for_removal=True,
+        deprecated_reason=(
+            'Nova API extension concept has been removed in Pike. Those '
+            'extensions have their own policies enforcement. As there is '
+            'no extensions now, "os_compute_api:image-size" policy '
+            'which was added for extensions is not needed any more'
+        ),
+        deprecated_since='17.0.0'),
 ]
 
 

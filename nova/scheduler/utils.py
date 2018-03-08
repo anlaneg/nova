@@ -16,12 +16,14 @@
 
 import collections
 import functools
+import re
 import sys
 
 from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
 
+from nova.api.openstack.placement import lib as placement_lib
 from nova.compute import flavors
 from nova.compute import utils as compute_utils
 import nova.conf
@@ -29,6 +31,7 @@ from nova import exception
 from nova.i18n import _, _LE, _LW
 from nova import objects
 from nova.objects import base as obj_base
+from nova.objects import fields
 from nova.objects import instance as obj_instance
 from nova import rpc
 
@@ -41,11 +44,159 @@ GroupDetails = collections.namedtuple('GroupDetails', ['hosts', 'policies',
                                                        'members'])
 
 
-def build_request_spec(ctxt, image, instances, instance_type=None):
+class ResourceRequest(object):
+    """Presents a granular resource request via RequestGroup instances."""
+    # extra_specs-specific consts
+    XS_RES_PREFIX = 'resources'
+    XS_TRAIT_PREFIX = 'trait'
+    # Regex patterns for numbered or un-numbered resources/trait keys
+    XS_KEYPAT = re.compile(r"^(%s)([1-9][0-9]*)?:(.*)$" %
+                           '|'.join((XS_RES_PREFIX, XS_TRAIT_PREFIX)))
+
+    def __init__(self):
+        # { ident: RequestGroup }
+        self._rg_by_id = {}
+
+    def get_request_group(self, ident):
+        if ident not in self._rg_by_id:
+            rq_grp = placement_lib.RequestGroup(use_same_provider=bool(ident))
+            self._rg_by_id[ident] = rq_grp
+        return self._rg_by_id[ident]
+
+    def _add_resource(self, groupid, rclass, amount):
+        # Validate the class.
+        if not (rclass.startswith(fields.ResourceClass.CUSTOM_NAMESPACE) or
+                        rclass in fields.ResourceClass.STANDARD):
+            LOG.warning(
+                "Received an invalid ResourceClass '%(key)s' in extra_specs.",
+                {"key": rclass})
+            return
+        # val represents the amount.  Convert to int, or warn and skip.
+        try:
+            amount = int(amount)
+            if amount < 0:
+                raise ValueError()
+        except ValueError:
+            LOG.warning(
+                "Resource amounts must be nonnegative integers. Received "
+                "'%(val)s' for key resources%(groupid)s.",
+                {"groupid": groupid, "val": amount})
+            return
+        self.get_request_group(groupid).resources[rclass] = amount
+
+    def _add_trait(self, groupid, trait_name, trait_type):
+        # Currently the only valid value for a trait entry is 'required'.
+        trait_vals = ('required',)
+        # Ensure the value is supported.
+        if trait_type not in trait_vals:
+            LOG.warning(
+                "Only (%(tvals)s) traits are supported. Received '%(val)s' "
+                "for key trait%(groupid)s.",
+                {"tvals": ', '.join(trait_vals), "groupid": groupid,
+                 "val": trait_type})
+            return
+        self.get_request_group(groupid).required_traits.add(trait_name)
+
+    @classmethod
+    def from_extra_specs(cls, extra_specs):
+        """Processes resources and traits in numbered groupings in extra_specs.
+
+        Examines extra_specs for items of the following forms:
+            "resources:$RESOURCE_CLASS": $AMOUNT
+            "resources$N:$RESOURCE_CLASS": $AMOUNT
+            "trait:$TRAIT_NAME": "required"
+            "trait$N:$TRAIT_NAME": "required"
+
+        :param extra_specs: The flavor extra_specs dict.
+        :return: A ResourceRequest object representing the resources and
+                 required traits in the extra_specs.
+        """
+        ret = cls()
+        for key, val in extra_specs.items():
+            match = cls.XS_KEYPAT.match(key)
+            if not match:
+                continue
+
+            # 'prefix' is 'resources' or 'trait'
+            # 'suffix' is $N or None
+            # 'name' is either the resource class name or the trait name.
+            prefix, suffix, name = match.groups()
+
+            # Process "resources[$N]"
+            if prefix == cls.XS_RES_PREFIX:
+                ret._add_resource(suffix, name, val)
+
+            # Process "trait[$N]"
+            elif prefix == cls.XS_TRAIT_PREFIX:
+                ret._add_trait(suffix, name, val)
+
+        return ret
+
+    def resource_groups(self):
+        for rg in self._rg_by_id.values():
+            yield rg.resources
+
+    def merged_resources(self, flavor_resources=None):
+        """Returns a merge of {resource_class: amount} for all resource groups.
+
+        Amounts of the same resource class from different groups are added
+        together.
+
+        :param flavor_resources: A flat dict of {resource_class: amount}.  If
+                                 specified, the resources therein are folded
+                                 into the return dict, such that any resource
+                                 in flavor_resources is included only if that
+                                 resource class does not exist elsewhere in the
+                                 merged ResourceRequest.
+        :return: A dict of the form {resource_class: amount}
+        """
+        ret = collections.defaultdict(lambda: 0)
+        for resource_dict in self.resource_groups():
+            for resource_class, amount in resource_dict.items():
+                ret[resource_class] += amount
+        if flavor_resources:
+            for resource_class, amount in flavor_resources.items():
+                # If it's in there - even if zero - ignore the one from the
+                # flavor.
+                if resource_class not in ret:
+                    ret[resource_class] = amount
+            # Now strip zeros.  This has to be done after the above - we can't
+            # use strip_zeros :(
+            ret = {rc: amt for rc, amt in ret.items() if amt}
+        return dict(ret)
+
+    def _clean_empties(self):
+        """Get rid of any empty ResourceGroup instances."""
+        for ident, rg in list(self._rg_by_id.items()):
+            if not any((rg.resources, rg.required_traits)):
+                self._rg_by_id.pop(ident)
+
+    def strip_zeros(self):
+        """Remove any resources whose amounts are zero."""
+        for resource_dict in self.resource_groups():
+            for rclass in list(resource_dict):
+                if resource_dict[rclass] == 0:
+                    resource_dict.pop(rclass)
+        self._clean_empties()
+
+
+def build_request_spec(image, instances, instance_type=None):
     """Build a request_spec for the scheduler.
 
     The request_spec assumes that all instances to be scheduled are the same
     type.
+
+    :param image: optional primitive image meta dict
+    :param instances: list of instances; objects will be converted to
+        primitives
+    :param instance_type: optional flavor; objects will be converted to
+        primitives
+    :return: dict with the following keys::
+
+        'image': the image dict passed in or {}
+        'instance_properties': primitive version of the first instance passed
+        'instance_type': primitive version of the instance_type or None
+        'num_instances': the number of instances passed in
     """
     instance = instances[0]
     if instance_type is None:
@@ -79,39 +230,241 @@ def build_request_spec(ctxt, image, instances, instance_type=None):
             'instance_properties': instance,
             'instance_type': instance_type,
             'num_instances': len(instances)}
+    # NOTE(mriedem): obj_to_primitive above does not serialize everything
+    # in an object, like datetime fields, so we need to still call to_primitive
+    # to recursively serialize the items in the request_spec dict.
     return jsonutils.to_primitive(request_spec)
+
+
+def resources_from_flavor(instance, flavor):
+    """Convert a flavor into a set of resources for placement, taking into
+    account boot-from-volume instances.
+
+    This takes an instance and a flavor and returns a dict of
+    resource_class:amount based on the attributes of the flavor, accounting for
+    any overrides that are made in extra_specs.
+    """
+    is_bfv = compute_utils.is_volume_backed_instance(instance._context,
+                                                     instance)
+    swap_in_gb = compute_utils.convert_mb_to_ceil_gb(flavor.swap)
+    disk = ((0 if is_bfv else flavor.root_gb) +
+            swap_in_gb + flavor.ephemeral_gb)
+
+    resources = {
+        fields.ResourceClass.VCPU: flavor.vcpus,
+        fields.ResourceClass.MEMORY_MB: flavor.memory_mb,
+        fields.ResourceClass.DISK_GB: disk,
+    }
+    if "extra_specs" in flavor:
+        # TODO(efried): This method is currently only used from places that
+        # assume the compute node is the only resource provider.  So for now,
+        # we just merge together all the resources specified in the flavor and
+        # pass them along.  This will need to be adjusted when nested and/or
+        # shared RPs are in play.
+        rreq = ResourceRequest.from_extra_specs(flavor.extra_specs)
+        resources = rreq.merged_resources(flavor_resources=resources)
+
+    return resources
+
+
+def merge_resources(original_resources, new_resources, sign=1):
+    """Merge a list of new resources with existing resources.
+
+    Either add the resources (if sign is 1) or subtract (if sign is -1).
+    If the resulting value is 0 do not include the resource in the results.
+    """
+
+    all_keys = set(original_resources.keys()) | set(new_resources.keys())
+    for key in all_keys:
+        value = (original_resources.get(key, 0) +
+                 (sign * new_resources.get(key, 0)))
+        if value:
+            original_resources[key] = value
+        else:
+            original_resources.pop(key, None)
+
+
+def resources_from_request_spec(spec_obj):
+    """Given a RequestSpec object, returns a ResourceRequest of the resources
+    and traits it represents.
+    """
+    spec_resources = {
+        fields.ResourceClass.VCPU: spec_obj.vcpus,
+        fields.ResourceClass.MEMORY_MB: spec_obj.memory_mb,
+    }
+
+    requested_disk_mb = (1024 * (spec_obj.root_gb +
+                                 spec_obj.ephemeral_gb) +
+                         spec_obj.swap)
+    # NOTE(sbauza): Disk request is expressed in MB but we count
+    # resources in GB. Since there could be a remainder of the division
+    # by 1024, we need to ceil the result to the next bigger Gb so we
+    # can be sure there would be enough disk space in the destination
+    # to sustain the request.
+    # FIXME(sbauza): All of that could be using math.ceil() but since
+    # we support both py2 and py3, let's fake it until we only support
+    # py3.
+    requested_disk_gb = requested_disk_mb // 1024
+    if requested_disk_mb % 1024 != 0:
+        # Let's ask for a bit more space since we count in GB
+        requested_disk_gb += 1
+    # NOTE(sbauza): Some flavors provide zero size for disk values, we need
+    # to avoid asking for disk usage.
+    if requested_disk_gb != 0:
+        spec_resources[fields.ResourceClass.DISK_GB] = requested_disk_gb
+
+    # Process extra_specs
+    if "extra_specs" in spec_obj.flavor:
+        res_req = ResourceRequest.from_extra_specs(spec_obj.flavor.extra_specs)
+        # If any of the three standard resources above was explicitly given in
+        # the extra_specs - in any group - we need to replace it, or delete it
+        # if it was given as zero.  We'll do this by grabbing a merged version
+        # of the ResourceRequest resources and removing matching items from the
+        # spec_resources.
+        spec_resources = {rclass: amt for rclass, amt in spec_resources.items()
+                          if rclass not in res_req.merged_resources()}
+        # Now we don't need (or want) any remaining zero entries - remove them.
+        res_req.strip_zeros()
+    else:
+        # Start with an empty one
+        res_req = ResourceRequest()
+
+    # Add the (remaining) items from the spec_resources to the sharing group
+    for rclass, amount in spec_resources.items():
+        res_req.get_request_group(None).resources[rclass] = amount
+
+    return res_req
+
+
+# TODO(mriedem): Remove this when select_destinations() in the scheduler takes
+# some sort of skip_filters flag.
+def claim_resources_on_destination(
+        context, reportclient, instance, source_node, dest_node,
+        source_node_allocations=None):
+    """Copies allocations from source node to dest node in Placement
+
+    Normally the scheduler will allocate resources on a chosen destination
+    node during a move operation like evacuate and live migration. However,
+    because of the ability to force a host and bypass the scheduler, this
+    method can be used to manually copy allocations from the source node to
+    the forced destination node.
+
+    This is only appropriate when the instance flavor on the source node
+    is the same on the destination node, i.e. don't use this for resize.
+
+    :param context: The request context.
+    :param reportclient: An instance of the SchedulerReportClient.
+    :param instance: The instance being moved.
+    :param source_node: source ComputeNode where the instance currently
+                        lives
+    :param dest_node: destination ComputeNode where the instance is being
+                      moved
+    :raises NoValidHost: If the allocation claim on the destination
+                         node fails.
+    """
+    # Get the current allocations for the source node and the instance.
+    if not source_node_allocations:
+        source_node_allocations = (
+            reportclient.get_allocations_for_consumer_by_provider(
+                context, source_node.uuid, instance.uuid))
+    if source_node_allocations:
+        # Generate an allocation request for the destination node.
+        alloc_request = {
+            'allocations': {
+                dest_node.uuid: {'resources': source_node_allocations}
+            }
+        }
+        # The claim_resources method will check for existing allocations
+        # for the instance and effectively "double up" the allocations for
+        # both the source and destination node. That's why when requesting
+        # allocations for resources on the destination node before we move,
+        # we use the existing resource allocations from the source node.
+        if reportclient.claim_resources(
+                context, instance.uuid, alloc_request,
+                instance.project_id, instance.user_id,
+                allocation_request_version='1.12'):
+            LOG.debug('Instance allocations successfully created on '
+                      'destination node %(dest)s: %(alloc_request)s',
+                      {'dest': dest_node.uuid,
+                       'alloc_request': alloc_request},
+                      instance=instance)
+        else:
+            # We have to fail even though the user requested that we force
+            # the host. This is because we need Placement to have an
+            # accurate reflection of what's allocated on all nodes so the
+            # scheduler can make accurate decisions about which nodes have
+            # capacity for building an instance. We also cannot rely on the
+            # resource tracker in the compute service automatically healing
+            # the allocations since that code is going away in Queens.
+            reason = (_('Unable to move instance %(instance_uuid)s to '
+                        'host %(host)s. There is not enough capacity on '
+                        'the host for the instance.') %
+                      {'instance_uuid': instance.uuid,
+                       'host': dest_node.host})
+            raise exception.NoValidHost(reason=reason)
+    else:
+        # This shouldn't happen, but it could be a case where there are
+        # older (Ocata) computes still so the existing allocations are
+        # getting overwritten by the update_available_resource periodic
+        # task in the compute service.
+        # TODO(mriedem): Make this an error when the auto-heal
+        # compatibility code in the resource tracker is removed.
+        LOG.warning('No instance allocations found for source node '
+                    '%(source)s in Placement. Not creating allocations '
+                    'for destination node %(dest)s and assuming the '
+                    'compute service will heal the allocations.',
+                    {'source': source_node.uuid, 'dest': dest_node.uuid},
+                    instance=instance)
 
 
 def set_vm_state_and_notify(context, instance_uuid, service, method, updates,
                             ex, request_spec):
-    """changes VM state and notifies."""
-    LOG.warning(_LW("Failed to %(service)s_%(method)s: %(ex)s"),
+    """Updates the instance, sets the fault and sends an error notification.
+
+    :param context: The request context.
+    :param instance_uuid: The UUID of the instance to update.
+    :param service: The name of the originating service, e.g. 'compute_task'.
+        This becomes part of the publisher_id for the notification payload.
+    :param method: The method that failed, e.g. 'migrate_server'.
+    :param updates: dict of updates for the instance object, typically a
+        vm_state and/or task_state value.
+    :param ex: An exception which occurred during the given method.
+    :param request_spec: Optional request spec.
+    """
+    # e.g. "Failed to compute_task_migrate_server: No valid host was found"
+    LOG.warning("Failed to %(service)s_%(method)s: %(ex)s",
                 {'service': service, 'method': method, 'ex': ex})
+
+    # Convert the request spec to a dict if needed.
+    if request_spec is not None:
+        if isinstance(request_spec, objects.RequestSpec):
+            request_spec = request_spec.to_legacy_request_spec_dict()
+    else:
+        request_spec = {}
 
     vm_state = updates['vm_state']
     properties = request_spec.get('instance_properties', {})
-    # NOTE(vish): We shouldn't get here unless we have a catastrophic
-    #             failure, so just set the instance to its internal state
     notifier = rpc.get_notifier(service)
     state = vm_state.upper()
-    LOG.warning(_LW('Setting instance to %s state.'), state,
+    LOG.warning('Setting instance to %s state.', state,
                 instance_uuid=instance_uuid)
 
     instance = objects.Instance(context=context, uuid=instance_uuid,
                                 **updates)
     instance.obj_reset_changes(['uuid'])
     instance.save()
-    compute_utils.add_instance_fault_from_exc(context,
-            instance, ex, sys.exc_info())
+    compute_utils.add_instance_fault_from_exc(
+        context, instance, ex, sys.exc_info())
 
     payload = dict(request_spec=request_spec,
-                    instance_properties=properties,
-                    instance_id=instance_uuid,
-                    state=vm_state,
-                    method=method,
-                    reason=ex)
+                   instance_properties=properties,
+                   instance_id=instance_uuid,
+                   state=vm_state,
+                   method=method,
+                   reason=ex)
 
     event_type = '%s.%s' % (service, method)
+    # TODO(mriedem): Send a versioned notification.
     notifier.error(context, event_type, payload)
 
 
@@ -129,19 +482,23 @@ def build_filter_properties(scheduler_hints, forced_host,
     return filter_properties
 
 
-def populate_filter_properties(filter_properties, host_state):
+def populate_filter_properties(filter_properties, selection):
     """Add additional information to the filter properties after a node has
     been selected by the scheduling process.
     """
-    if isinstance(host_state, dict):
-        host = host_state['host']
-        nodename = host_state['nodename']
-        limits = host_state['limits']
+    if isinstance(selection, dict):
+        # TODO(edleafe): remove support for dicts
+        host = selection['host']
+        nodename = selection['nodename']
+        limits = selection['limits']
     else:
-        host = host_state.host
-        nodename = host_state.nodename
-        limits = host_state.limits
-
+        host = selection.service_host
+        nodename = selection.nodename
+        # Need to convert SchedulerLimits object to older dict format.
+        if "limits" in selection and selection.limits is not None:
+            limits = selection.limits.to_dict()
+        else:
+            limits = {}
     # Adds a retry entry for the selected compute host and node:
     _add_retry_host(filter_properties, host, nodename)
 
@@ -161,6 +518,7 @@ def populate_retry(filter_properties, instance_uuid):
     if (max_attempts == 1 or len(force_hosts) == 1
                            or len(force_nodes) == 1):
         # re-scheduling is disabled.
+        LOG.debug('Re-scheduling is disabled.')
         return
 
     # retry is enabled, update attempt count:
@@ -333,25 +691,23 @@ def _get_group_details(context, instance_uuid, user_group_hosts=None):
                             policies=group.policies, members=group.members)
 
 
-def setup_instance_group(context, request_spec, filter_properties):
+def setup_instance_group(context, request_spec):
     """Add group_hosts and group_policies fields to filter_properties dict
     based on instance uuids provided in request_spec, if those instances are
     belonging to a group.
 
     :param request_spec: Request spec
-    :param filter_properties: Filter properties
     """
-    group_hosts = filter_properties.get('group_hosts')
-    # NOTE(sbauza) If there are multiple instance UUIDs, it's a boot
-    # request and they will all be in the same group, so it's safe to
-    # only check the first one.
-    instance_uuid = request_spec.get('instance_properties', {}).get('uuid')
+    if request_spec.instance_group and request_spec.instance_group.hosts:
+        group_hosts = request_spec.instance_group.hosts
+    else:
+        group_hosts = None
+    instance_uuid = request_spec.instance_uuid
     group_info = _get_group_details(context, instance_uuid, group_hosts)
     if group_info is not None:
-        filter_properties['group_updated'] = True
-        filter_properties['group_hosts'] = group_info.hosts
-        filter_properties['group_policies'] = group_info.policies
-        filter_properties['group_members'] = group_info.members
+        request_spec.instance_group.hosts = list(group_info.hosts)
+        request_spec.instance_group.policies = group_info.policies
+        request_spec.instance_group.members = group_info.members
 
 
 def retry_on_timeout(retries=1):
@@ -383,3 +739,85 @@ def retry_on_timeout(retries=1):
     return outer
 
 retry_select_destinations = retry_on_timeout(CONF.scheduler.max_attempts - 1)
+
+
+def request_is_rebuild(spec_obj):
+    """Returns True if request is for a rebuild.
+
+    :param spec_obj: An objects.RequestSpec to examine (or None).
+    """
+    if not spec_obj:
+        return False
+    if 'scheduler_hints' not in spec_obj:
+        return False
+    check_type = spec_obj.scheduler_hints.get('_nova_check_type')
+    return check_type == ['rebuild']
+
+
+def claim_resources(ctx, client, spec_obj, instance_uuid, alloc_req,
+        allocation_request_version=None):
+    """Given an instance UUID (representing the consumer of resources) and the
+    allocation_request JSON object returned from Placement, attempt to claim
+    resources for the instance in the placement API. Returns True if the claim
+    process was successful, False otherwise.
+
+    :param ctx: The RequestContext object
+    :param client: The scheduler client to use for making the claim call
+    :param spec_obj: The RequestSpec object - needed to get the project_id
+    :param instance_uuid: The UUID of the consuming instance
+    :param alloc_req: The allocation_request received from placement for the
+                      resources we want to claim against the chosen host. The
+                      allocation_request satisfies the original request for
+                      resources and can be supplied as-is (along with the
+                      project and user ID to the placement API's PUT
+                      /allocations/{consumer_uuid} call to claim resources for
+                      the instance
+    :param allocation_request_version: The microversion used to request the
+                                       allocations.
+    """
+    if request_is_rebuild(spec_obj):
+        # NOTE(danms): This is a rebuild-only scheduling request, so we should
+        # not be doing any extra claiming
+        LOG.debug('Not claiming resources in the placement API for '
+                  'rebuild-only scheduling of instance %(uuid)s',
+                  {'uuid': instance_uuid})
+        return True
+
+    LOG.debug("Attempting to claim resources in the placement API for "
+              "instance %s", instance_uuid)
+
+    project_id = spec_obj.project_id
+
+    # NOTE(jaypipes): So, the RequestSpec doesn't store the user_id,
+    # only the project_id, so we need to grab the user information from
+    # the context. Perhaps we should consider putting the user ID in
+    # the spec object?
+    user_id = ctx.user_id
+
+    return client.claim_resources(ctx, instance_uuid, alloc_req, project_id,
+            user_id, allocation_request_version=allocation_request_version)
+
+
+def remove_allocation_from_compute(context, instance, compute_node_uuid,
+                                   reportclient, flavor=None):
+    """Removes the instance allocation from the compute host.
+
+    :param context: The request context
+    :param instance: the instance object owning the allocation
+    :param compute_node_uuid: the UUID of the compute node where the allocation
+                              needs to be removed
+    :param reportclient: the SchedulerReportClient instances to be used to
+                         communicate with Placement
+    :param flavor: If provided then it is used to calculate the amount of
+                   resource that needs to be removed. If not provided then
+                   instance.flavor will be used
+    :return: True if the removal was successful, False otherwise
+    """
+
+    if not flavor:
+        flavor = instance.flavor
+
+    my_resources = resources_from_flavor(instance, flavor)
+    return reportclient.remove_provider_from_instance_allocation(
+        context, instance.uuid, compute_node_uuid, instance.user_id,
+        instance.project_id, my_resources)

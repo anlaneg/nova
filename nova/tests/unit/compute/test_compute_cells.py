@@ -33,6 +33,8 @@ from nova.compute import vm_states
 import nova.conf
 from nova import context
 from nova import db
+from nova.db.sqlalchemy import api as db_api
+from nova.db.sqlalchemy import api_models
 from nova import exception
 from nova import objects
 from nova.objects import fields as obj_fields
@@ -159,6 +161,81 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
 
     def test_create_instance_associates_security_groups(self):
         self.skipTest("Test is incompatible with cells.")
+
+    @mock.patch('nova.objects.quotas.Quotas.check_deltas')
+    def test_create_instance_over_quota_during_recheck(
+            self, check_deltas_mock):
+        self.stub_out('nova.tests.unit.image.fake._FakeImageService.show',
+                      self.fake_show)
+
+        # Simulate a race where the first check passes and the recheck fails.
+        fake_quotas = {'instances': 5, 'cores': 10, 'ram': 4096}
+        fake_headroom = {'instances': 5, 'cores': 10, 'ram': 4096}
+        fake_usages = {'instances': 5, 'cores': 10, 'ram': 4096}
+        exc = exception.OverQuota(overs=['instances'], quotas=fake_quotas,
+                                  headroom=fake_headroom, usages=fake_usages)
+        check_deltas_mock.side_effect = [None, exc]
+
+        inst_type = flavors.get_default_flavor()
+        # Try to create 3 instances.
+        self.assertRaises(exception.QuotaError, self.compute_api.create,
+            self.context, inst_type, self.fake_image['id'], min_count=3)
+
+        project_id = self.context.project_id
+
+        self.assertEqual(2, check_deltas_mock.call_count)
+        call1 = mock.call(self.context,
+                          {'instances': 3, 'cores': inst_type.vcpus * 3,
+                           'ram': inst_type.memory_mb * 3},
+                          project_id, user_id=None,
+                          check_project_id=project_id, check_user_id=None)
+        call2 = mock.call(self.context, {'instances': 0, 'cores': 0, 'ram': 0},
+                          project_id, user_id=None,
+                          check_project_id=project_id, check_user_id=None)
+        check_deltas_mock.assert_has_calls([call1, call2])
+
+        # Verify we removed the artifacts that were added after the first
+        # quota check passed.
+        instances = objects.InstanceList.get_all(self.context)
+        self.assertEqual(0, len(instances))
+        build_requests = objects.BuildRequestList.get_all(self.context)
+        self.assertEqual(0, len(build_requests))
+
+        @db_api.api_context_manager.reader
+        def request_spec_get_all(context):
+            return context.session.query(api_models.RequestSpec).all()
+
+        request_specs = request_spec_get_all(self.context)
+        self.assertEqual(0, len(request_specs))
+
+        instance_mappings = objects.InstanceMappingList.get_by_project_id(
+            self.context, project_id)
+        self.assertEqual(0, len(instance_mappings))
+
+    @mock.patch('nova.objects.quotas.Quotas.check_deltas')
+    def test_create_instance_no_quota_recheck(
+            self, check_deltas_mock):
+        self.stub_out('nova.tests.unit.image.fake._FakeImageService.show',
+                      self.fake_show)
+        # Disable recheck_quota.
+        self.flags(recheck_quota=False, group='quota')
+
+        inst_type = flavors.get_default_flavor()
+        (refs, resv_id) = self.compute_api.create(self.context,
+                                                  inst_type,
+                                                  self.fake_image['id'])
+        self.assertEqual(1, len(refs))
+
+        project_id = self.context.project_id
+
+        # check_deltas should have been called only once.
+        check_deltas_mock.assert_called_once_with(self.context,
+                                                  {'instances': 1,
+                                                   'cores': inst_type.vcpus,
+                                                   'ram': inst_type.memory_mb},
+                                                  project_id, user_id=None,
+                                                  check_project_id=project_id,
+                                                  check_user_id=None)
 
     @mock.patch.object(compute_api.API, '_local_delete')
     @mock.patch.object(compute_api.API, '_lookup_instance',
@@ -389,7 +466,7 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
         instance = self._create_fake_instance_obj()
         bdms = [block_device.BlockDeviceDict({'source_type': 'image',
                                               'destination_type': 'local',
-                                              'image_id': 'fake-image',
+                                              'image_id': uuids.image,
                                               'boot_index': 0})]
         self.compute_api._create_block_device_mapping(
             instance_type, instance.uuid, bdms)
@@ -573,14 +650,13 @@ class CellsConductorAPIRPCRedirect(test.NoDBTestCase):
     @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
     @mock.patch.object(compute_api.API, '_record_action_start')
     @mock.patch.object(compute_api.API, '_resize_cells_support')
-    @mock.patch.object(compute_utils, 'reserve_quota_delta')
     @mock.patch.object(compute_utils, 'upsize_quota_delta')
     @mock.patch.object(objects.Instance, 'save')
     @mock.patch.object(flavors, 'extract_flavor')
     @mock.patch.object(compute_api.API, '_check_auto_disk_config')
     @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
     def test_resize_instance(self, _bdms, _check, _extract, _save, _upsize,
-                             _reserve, _cells, _record, _spec_get_by_uuid):
+                             _cells, _record, _spec_get_by_uuid):
         flavor = objects.Flavor(**test_flavor.fake_flavor)
         _extract.return_value = flavor
         orig_system_metadata = {}
@@ -626,13 +702,16 @@ class CellsConductorAPIRPCRedirect(test.NoDBTestCase):
         orig_system_metadata = {}
         instance = fake_instance.fake_instance_obj(self.context,
                 vm_state=vm_states.ACTIVE, cell_name='fake-cell',
-                launched_at=timeutils.utcnow(),
+                launched_at=timeutils.utcnow(), image_ref=uuids.image_id,
                 system_metadata=orig_system_metadata,
                 expected_attrs=['system_metadata'])
         get_flavor.return_value = ''
-        image_href = ''
+        # The API request schema validates that a UUID is passed for the
+        # imageRef parameter so we need to provide an image.
+        image_href = uuids.image_id
         image = {"min_ram": 10, "min_disk": 1,
-                 "properties": {'architecture': 'x86_64'}}
+                 "properties": {'architecture': 'x86_64'},
+                 "id": uuids.image_id}
         admin_pass = ''
         files_to_inject = []
         bdms = objects.BlockDeviceMappingList()

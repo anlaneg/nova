@@ -14,6 +14,8 @@
 #    under the License.
 
 
+from oslo_policy import policy
+
 from nova.policies import base
 
 
@@ -21,10 +23,10 @@ BASE_POLICY_NAME = 'os_compute_api:os-flavor-rxtx'
 
 
 flavor_rxtx_policies = [
-    base.create_rule_default(
+    policy.DocumentedRuleDefault(
         BASE_POLICY_NAME,
         base.RULE_ADMIN_OR_OWNER,
-        "Adds the rxtx_factor key into some Flavor APIs",
+        "Add the rxtx_factor key into some Flavor APIs",
         [
             {
                 'method': 'GET',
@@ -38,7 +40,19 @@ flavor_rxtx_policies = [
                 'method': 'POST',
                 'path': '/flavors'
             },
-        ]),
+            {
+                'method': 'PUT',
+                'path': '/flavors/{flavor_id}'
+            },
+        ],
+        deprecated_for_removal=True,
+        deprecated_reason=(
+            'Nova API extension concept has been removed in Pike. Those '
+            'extensions have their own policies enforcement. As there is '
+            'no extensions now, "os_compute_api:os-flavor-rxtx" policy '
+            'which was added for extensions is not needed any more'
+        ),
+        deprecated_since='17.0.0'),
 ]
 
 

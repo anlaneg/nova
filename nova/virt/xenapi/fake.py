@@ -68,7 +68,8 @@ from nova.i18n import _
 
 
 _CLASSES = ['host', 'network', 'session', 'pool', 'SR', 'VBD',
-            'PBD', 'VDI', 'VIF', 'PIF', 'VM', 'VLAN', 'task']
+            'PBD', 'VDI', 'VIF', 'PIF', 'VM', 'VLAN', 'task',
+            'GPU_group', 'PGPU', 'VGPU_type']
 _after_create_functions = {}
 _destroy_functions = {}
 
@@ -236,7 +237,13 @@ def after_VBD_create(vbd_ref, vbd_rec):
     is created.
     """
     vbd_rec['currently_attached'] = False
-    vbd_rec['device'] = ''
+
+    # TODO(snikitin): Find a better way for generating of device name.
+    # Usually 'userdevice' has numeric values like '1', '2', '3', etc.
+    # Ideally they should be transformed to something like 'xvda', 'xvdb',
+    # 'xvdx', etc. But 'userdevice' also may be 'autodetect', 'fake' or even
+    # unset. We should handle it in future.
+    vbd_rec['device'] = vbd_rec.get('userdevice', '')
     vbd_rec.setdefault('other_config', {})
 
     vm_ref = vbd_rec['VM']
@@ -353,6 +360,7 @@ def _create_local_pif(host_ref):
 def _create_object(table, obj):
     ref = uuidutils.generate_uuid()
     obj['uuid'] = uuidutils.generate_uuid()
+    obj['ref'] = ref
     _db_content[table][ref] = obj
     return ref
 
@@ -496,9 +504,11 @@ class Failure(Exception):
 class SessionBase(object):
     """Base class for Fake Sessions."""
 
-    def __init__(self, uri):
+    def __init__(self, uri, user=None, passwd=None):
         self._session = None
         xenapi_session.apply_session_helpers(self)
+        if user is not None:
+            self.xenapi.login_with_password(user, passwd)
 
     def pool_get_default_SR(self, _1, pool_ref):
         return list(_db_content['pool'].values())[0]['default-SR']
@@ -836,6 +846,19 @@ class SessionBase(object):
         db_ref = _db_content['VM'][vm_ref]
         db_ref['power_state'] = 'Paused'
 
+    def VM_query_data_source(self, session, vm_ref, field):
+        vm = {'cpu0': 0.11,
+              'cpu1': 0.22,
+              'cpu2': 0.33,
+              'cpu3': 0.44,
+              'memory': 8 * units.Gi,                # 8GB in bytes
+              'memory_internal_free': 5 * units.Mi,  # 5GB in kilobytes
+              'vif_0_rx': 50,
+              'vif_0_tx': 100,
+              'vbd_0_read': 50,
+              'vbd_0_write': 100}
+        return vm.get(field, 0)
+
     def pool_eject(self, session, host_ref):
         pass
 
@@ -877,11 +900,21 @@ class SessionBase(object):
                     methodname)
             return meth(*full_params)
 
+    def call_xenapi(self, *args):
+        return self.xenapi_request(args[0], args[1:])
+
+    def get_all_refs_and_recs(self, cls):
+        return get_all_records(cls).items()
+
+    def get_rec(self, cls, ref):
+        return _db_content[cls].get(ref, None)
+
     def _login(self, method, params):
         self._session = uuidutils.generate_uuid()
         _session_info = {'uuid': uuidutils.generate_uuid(),
                          'this_host': list(_db_content['host'])[0]}
         _db_content['session'][self._session] = _session_info
+        self.host_ref = list(_db_content['host'])[0]
 
     def _logout(self):
         s = self._session

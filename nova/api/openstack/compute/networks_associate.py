@@ -16,15 +16,12 @@ from nova.api.openstack.api_version_request \
     import MAX_PROXY_API_SUPPORT_VERSION
 from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import networks_associate
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova import exception
 from nova.i18n import _
 from nova import network
 from nova.policies import networks_associate as na_policies
-
-ALIAS = "os-networks-associate"
 
 
 class NetworkAssociateActionController(wsgi.Controller):
@@ -36,7 +33,7 @@ class NetworkAssociateActionController(wsgi.Controller):
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.action("disassociate_host")
     @wsgi.response(202)
-    @extensions.expected_errors((404, 501))
+    @wsgi.expected_errors((404, 501))
     def _disassociate_host_only(self, req, id, body):
         context = req.environ['nova.context']
         context.can(na_policies.BASE_POLICY_NAME)
@@ -51,7 +48,7 @@ class NetworkAssociateActionController(wsgi.Controller):
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.action("disassociate_project")
     @wsgi.response(202)
-    @extensions.expected_errors((404, 501))
+    @wsgi.expected_errors((404, 501))
     def _disassociate_project_only(self, req, id, body):
         context = req.environ['nova.context']
         context.can(na_policies.BASE_POLICY_NAME)
@@ -66,7 +63,7 @@ class NetworkAssociateActionController(wsgi.Controller):
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.action("associate_host")
     @wsgi.response(202)
-    @extensions.expected_errors((404, 501))
+    @wsgi.expected_errors((404, 501))
     @validation.schema(networks_associate.associate_host)
     def _associate_host(self, req, id, body):
         context = req.environ['nova.context']
@@ -80,20 +77,3 @@ class NetworkAssociateActionController(wsgi.Controller):
             raise exc.HTTPNotFound(explanation=msg)
         except NotImplementedError:
             common.raise_feature_not_supported()
-
-
-class NetworksAssociate(extensions.V21APIExtensionBase):
-    """Network association support."""
-
-    name = "NetworkAssociationSupport"
-    alias = ALIAS
-    version = 1
-
-    def get_controller_extensions(self):
-        extension = extensions.ControllerExtension(
-                self, 'os-networks', NetworkAssociateActionController())
-
-        return [extension]
-
-    def get_resources(self):
-        return []

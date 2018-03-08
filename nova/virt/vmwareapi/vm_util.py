@@ -33,7 +33,7 @@ from oslo_vmware import vim_util as vutil
 
 import nova.conf
 from nova import exception
-from nova.i18n import _, _LE, _LI, _LW
+from nova.i18n import _
 from nova.network import model as network_model
 from nova.virt.vmwareapi import constants
 from nova.virt.vmwareapi import vim_util
@@ -92,7 +92,7 @@ class ExtraSpecs(object):
     def __init__(self, cpu_limits=None, hw_version=None,
                  storage_policy=None, cores_per_socket=None,
                  memory_limits=None, disk_io_limits=None,
-                 vif_limits=None):
+                 vif_limits=None, firmware=None):
         """ExtraSpecs object holds extra_specs for the instance."""
         self.cpu_limits = cpu_limits or Limits()
         self.memory_limits = memory_limits or Limits()
@@ -101,6 +101,7 @@ class ExtraSpecs(object):
         self.hw_version = hw_version
         self.storage_policy = storage_policy
         self.cores_per_socket = cores_per_socket
+        self.firmware = firmware
 
 
 def vm_refs_cache_reset():
@@ -242,6 +243,9 @@ def get_vm_create_spec(client_factory, instance, data_store_name,
         config_spec.memoryAllocation = _get_allocation_info(
             client_factory, extra_specs.memory_limits,
             'ns0:ResourceAllocationInfo')
+
+    if extra_specs.firmware:
+        config_spec.firmware = extra_specs.firmware
 
     devices = []
     for vif_info in vif_infos:
@@ -933,15 +937,24 @@ def clone_vm_spec(client_factory, location,
     return clone_spec
 
 
-def relocate_vm_spec(client_factory, datastore=None, host=None,
+def relocate_vm_spec(client_factory, res_pool=None, datastore=None, host=None,
                      disk_move_type="moveAllDiskBackingsAndAllowSharing"):
-    """Builds the VM relocation spec."""
     rel_spec = client_factory.create('ns0:VirtualMachineRelocateSpec')
     rel_spec.datastore = datastore
+    rel_spec.host = host
+    rel_spec.pool = res_pool
     rel_spec.diskMoveType = disk_move_type
-    if host:
-        rel_spec.host = host
     return rel_spec
+
+
+def relocate_vm(session, vm_ref, res_pool=None, datastore=None, host=None,
+                disk_move_type="moveAllDiskBackingsAndAllowSharing"):
+    client_factory = session.vim.client.factory
+    rel_spec = relocate_vm_spec(client_factory, res_pool, datastore, host,
+                                disk_move_type)
+    relocate_task = session._call_method(session.vim, "RelocateVM_Task",
+                                         vm_ref, spec=rel_spec)
+    session._wait_for_task(relocate_task)
 
 
 def get_machine_id_change_spec(client_factory, machine_id_str):
@@ -1054,7 +1067,12 @@ def _get_object_from_results(session, results, value, func):
 
 
 def _get_vm_ref_from_name(session, vm_name):
-    """Get reference to the VM with the name specified."""
+    """Get reference to the VM with the name specified.
+
+    This method reads all of the names of the VM's that are running
+    on the backend, then it filters locally the matching vm_name.
+    It is far more optimal to use _get_vm_ref_from_vm_uuid.
+    """
     vms = session._call_method(vim_util, "get_objects",
                 "VirtualMachine", ["name"])
     return _get_object_from_results(session, vms, vm_name,
@@ -1065,20 +1083,6 @@ def _get_vm_ref_from_name(session, vm_name):
 def get_vm_ref_from_name(session, vm_name):
     return (_get_vm_ref_from_vm_uuid(session, vm_name) or
             _get_vm_ref_from_name(session, vm_name))
-
-
-def _get_vm_ref_from_uuid(session, instance_uuid):
-    """Get reference to the VM with the uuid specified.
-
-    This method reads all of the names of the VM's that are running
-    on the backend, then it filters locally the matching
-    instance_uuid. It is far more optimal to use
-    _get_vm_ref_from_vm_uuid.
-    """
-    vms = session._call_method(vim_util, "get_objects",
-                "VirtualMachine", ["name"])
-    return _get_object_from_results(session, vms, instance_uuid,
-                                    _get_object_for_value)
 
 
 def _get_vm_ref_from_vm_uuid(session, instance_uuid):
@@ -1129,7 +1133,7 @@ def search_vm_ref_by_identifier(session, identifier):
     """
     vm_ref = (_get_vm_ref_from_vm_uuid(session, identifier) or
               _get_vm_ref_from_extraconfig(session, identifier) or
-              _get_vm_ref_from_uuid(session, identifier))
+              _get_vm_ref_from_name(session, identifier))
     return vm_ref
 
 
@@ -1159,7 +1163,10 @@ def get_vm_state(session, instance):
 def get_stats_from_cluster(session, cluster):
     """Get the aggregate resource stats of a cluster."""
     vcpus = 0
-    mem_info = {'total': 0, 'free': 0}
+    max_vcpus_per_host = 0
+    used_mem_mb = 0
+    total_mem_mb = 0
+    max_mem_mb_per_host = 0
     # Get the Host and Resource Pool Managed Object Refs
     prop_dict = session._call_method(vutil,
                                      "get_object_properties_dict",
@@ -1172,27 +1179,29 @@ def get_stats_from_cluster(session, cluster):
             result = session._call_method(vim_util,
                          "get_properties_for_a_collection_of_objects",
                          "HostSystem", host_mors,
-                         ["summary.hardware", "summary.runtime"])
+                         ["summary.hardware", "summary.runtime",
+                          "summary.quickStats"])
             for obj in result.objects:
-                hardware_summary = obj.propSet[0].val
-                runtime_summary = obj.propSet[1].val
+                host_props = propset_dict(obj.propSet)
+                hardware_summary = host_props['summary.hardware']
+                runtime_summary = host_props['summary.runtime']
+                stats_summary = host_props['summary.quickStats']
                 if (runtime_summary.inMaintenanceMode is False and
                     runtime_summary.connectionState == "connected"):
                     # Total vcpus is the sum of all pCPUs of individual hosts
                     # The overcommitment ratio is factored in by the scheduler
-                    vcpus += hardware_summary.numCpuThreads
-
-        res_mor = prop_dict.get('resourcePool')
-        if res_mor:
-            res_usage = session._call_method(vutil, "get_object_property",
-                                             res_mor, "summary.runtime.memory")
-            if res_usage:
-                # maxUsage is the memory limit of the cluster available to VM's
-                mem_info['total'] = int(res_usage.maxUsage / units.Mi)
-                # overallUsage is the hypervisor's view of memory usage by VM's
-                consumed = int(res_usage.overallUsage / units.Mi)
-                mem_info['free'] = mem_info['total'] - consumed
-    stats = {'vcpus': vcpus, 'mem': mem_info}
+                    threads = hardware_summary.numCpuThreads
+                    vcpus += threads
+                    max_vcpus_per_host = max(max_vcpus_per_host, threads)
+                    used_mem_mb += stats_summary.overallMemoryUsage
+                    mem_mb = hardware_summary.memorySize // units.Mi
+                    total_mem_mb += mem_mb
+                    max_mem_mb_per_host = max(max_mem_mb_per_host, mem_mb)
+    stats = {'cpu': {'vcpus': vcpus,
+                     'max_vcpus_per_host': max_vcpus_per_host},
+             'mem': {'total': total_mem_mb,
+                     'free': total_mem_mb - used_mem_mb,
+                     'max_mem_mb_per_host': max_mem_mb_per_host}}
     return stats
 
 
@@ -1280,7 +1289,7 @@ def get_all_cluster_mors(session):
             return results.objects
 
     except Exception as excep:
-        LOG.warning(_LW("Failed to get cluster references %s"), excep)
+        LOG.warning("Failed to get cluster references %s", excep)
 
 
 def get_cluster_ref_by_name(session, cluster_name):
@@ -1327,10 +1336,10 @@ def create_vm(session, instance, vm_folder, config_spec, res_pool_ref):
         # Consequently, a value which we don't recognise may in fact be valid.
         with excutils.save_and_reraise_exception():
             if config_spec.guestId not in constants.VALID_OS_TYPES:
-                LOG.warning(_LW('vmware_ostype from image is not recognised: '
-                                '\'%(ostype)s\'. An invalid os type may be '
-                                'one cause of this instance creation failure'),
-                         {'ostype': config_spec.guestId})
+                LOG.warning('vmware_ostype from image is not recognised: '
+                            '\'%(ostype)s\'. An invalid os type may be '
+                            'one cause of this instance creation failure',
+                            {'ostype': config_spec.guestId})
     LOG.debug("Created VM on the ESX host", instance=instance)
     return task_info.result
 
@@ -1344,9 +1353,9 @@ def destroy_vm(session, instance, vm_ref=None):
         destroy_task = session._call_method(session.vim, "Destroy_Task",
                                             vm_ref)
         session._wait_for_task(destroy_task)
-        LOG.info(_LI("Destroyed the VM"), instance=instance)
+        LOG.info("Destroyed the VM", instance=instance)
     except Exception:
-        LOG.exception(_LE('Destroy VM failed'), instance=instance)
+        LOG.exception(_('Destroy VM failed'), instance=instance)
 
 
 def create_virtual_disk(session, dc_ref, adapter_type, disk_type,
@@ -1598,15 +1607,12 @@ def create_folder(session, parent_folder_ref, name):
     The moref of the folder is returned.
     """
 
-    folder = _get_folder(session, parent_folder_ref, name)
-    if folder:
-        return folder
     LOG.debug("Creating folder: %(name)s. Parent ref: %(parent)s.",
               {'name': name, 'parent': parent_folder_ref.value})
     try:
         folder = session._call_method(session.vim, "CreateFolder",
                                       parent_folder_ref, name=name)
-        LOG.info(_LI("Created folder: %(name)s in parent %(parent)s."),
+        LOG.info("Created folder: %(name)s in parent %(parent)s.",
                  {'name': name, 'parent': parent_folder_ref.value})
     except vexc.DuplicateName as e:
         LOG.debug("Folder already exists: %(name)s. Parent ref: %(parent)s.",

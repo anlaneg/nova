@@ -166,6 +166,13 @@ tests:
 - name: get that inventory
   GET: $LOCATION
   status: 200
+  request_headers:
+      # set microversion to 1.15 to get timestamp headers
+      openstack-api-version: placement 1.15
+  response_headers:
+      cache-control: no-cache
+      # Does last-modified look like a legit timestamp?
+      last-modified:  /^\w+, \d+ \w+ \d{4} [\d:]+ GMT$/
   response_json_paths:
       $.resource_provider_generation: 1
       $.total: 2048
@@ -174,6 +181,15 @@ tests:
       $.max_unit: 1024
       $.step_size: 10
       $.allocation_ratio: 1.0
+
+- name: get inventory v1.14 no cache headers
+  GET: $LAST_URL
+  status: 200
+  request_headers:
+      openstack-api-version: placement 1.14
+  response_forbidden_headers:
+      - cache-control
+      - last-modified
 
 - name: modify the inventory
   PUT: $LAST_URL
@@ -310,6 +326,13 @@ tests:
 
 - name: get list of inventories
   GET: /resource_providers/$ENVIRON['RP_UUID']/inventories
+  request_headers:
+      # set microversion to 1.15 to get timestamp headers
+      openstack-api-version: placement 1.15
+  response_headers:
+      cache-control: no-cache
+      # Does last-modified look like a legit timestamp?
+      last-modified:  /^\w+, \d+ \w+ \d{4} [\d:]+ GMT$/
   response_json_paths:
       $.resource_provider_generation: 2
       $.inventories.DISK_GB.total: 2048
@@ -407,6 +430,8 @@ tests:
   PUT: $LOCATION/inventories
   request_headers:
       content-type: application/json
+      # set microversion to 1.15 to get timestamp headers
+      openstack-api-version: placement 1.15
   data:
       resource_provider_generation: 0
       inventories:
@@ -415,6 +440,10 @@ tests:
         DISK_GB:
           total: 1024
   status: 200
+  response_headers:
+      cache-control: no-cache
+      # Does last-modified look like a legit timestamp?
+      last-modified:  /^\w+, \d+ \w+ \d{4} [\d:]+ GMT$/
   response_json_paths:
       $.resource_provider_generation: 1
       $.inventories.IPV4_ADDRESS.total: 253
@@ -642,17 +671,56 @@ tests:
       openstack-api-version: placement 1.5
   status: 204
 
-- name: get inventories after deletion
-  GET: /resource_providers/$ENVIRON['RP_UUID']/inventories
-  response_json_paths:
-      $.resource_provider_generation: 7
-      $.inventories: {}
-
 - name: delete empty inventories
   DELETE: /resource_providers/$ENVIRON['RP_UUID']/inventories
   request_headers:
       openstack-api-version: placement 1.5
   status: 204
+
+- name: get inventories after deletions
+  GET: /resource_providers/$ENVIRON['RP_UUID']/inventories
+  response_json_paths:
+      $.resource_provider_generation: 8
+      $.inventories: {}
+
+- name: post an inventory again
+  POST: /resource_providers/$ENVIRON['RP_UUID']/inventories
+  request_headers:
+      content-type: application/json
+  data:
+      resource_class: DISK_GB
+      total: 2048
+      reserved: 512
+      min_unit: 10
+      max_unit: 1024
+      step_size: 10
+      allocation_ratio: 1.0
+  status: 201
+  response_headers:
+      location: $SCHEME://$NETLOC/resource_providers/$ENVIRON['RP_UUID']/inventories/DISK_GB
+  response_json_paths:
+      $.resource_provider_generation: 9
+      $.total: 2048
+      $.reserved: 512
+
+- name: delete all inventory with put
+  PUT: /resource_providers/$ENVIRON['RP_UUID']/inventories
+  request_headers:
+      content-type: application/json
+      openstack-api-version: placement 1.4
+  data:
+      resource_provider_generation: 9
+      inventories: {}
+  response_json_paths:
+      $.resource_provider_generation: 10
+      $.inventories: {}
+  status: 200
+
+- name: get generation after deletion
+  GET: /resource_providers/$ENVIRON['RP_UUID']/inventories
+  response_json_paths:
+      $.resource_provider_generation: 10
+      $.inventories: {}
 
 - name: delete inventories earlier version
   DELETE: /resource_providers/$ENVIRON['RP_UUID']/inventories

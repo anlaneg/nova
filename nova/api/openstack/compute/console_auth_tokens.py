@@ -15,13 +15,10 @@
 
 import webob
 
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.consoleauth import rpcapi as consoleauth_rpcapi
 from nova.i18n import _
 from nova.policies import console_auth_tokens as cat_policies
-
-ALIAS = "os-console-auth-tokens"
 
 
 class ConsoleAuthTokensController(wsgi.Controller):
@@ -57,27 +54,11 @@ class ConsoleAuthTokensController(wsgi.Controller):
                  if i in connect_info}}
 
     @wsgi.Controller.api_version("2.1", "2.30")
-    @extensions.expected_errors((400, 401, 404))
+    @wsgi.expected_errors((400, 401, 404))
     def show(self, req, id):
         return self._show(req, id, True)
 
     @wsgi.Controller.api_version("2.31")  # noqa
-    @extensions.expected_errors((400, 404))
+    @wsgi.expected_errors((400, 404))
     def show(self, req, id):
         return self._show(req, id, False)
-
-
-class ConsoleAuthTokens(extensions.V21APIExtensionBase):
-    """Console token authentication support."""
-    name = "ConsoleAuthTokens"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        controller = ConsoleAuthTokensController()
-        ext = extensions.ResourceExtension(ALIAS,
-                                           controller)
-        return [ext]
-
-    def get_controller_extensions(self):
-        return []

@@ -62,6 +62,8 @@ vmware_utils_opts = [
 Set this value if affected by an increased network latency causing
 repeated characters when typing in a remote console.
 """),
+    # NOTE(takashin): 'serial_port_service_uri' can be non URI format.
+    # See https://github.com/openstack/vmware-vspc/blob/master/README.rst
     cfg.StrOpt('serial_port_service_uri',
                help="""
 Identifies the remote system where the serial port traffic will
@@ -76,18 +78,26 @@ Possible values:
 
 * Any valid URI
 """),
-    cfg.StrOpt('serial_port_proxy_uri',
+    cfg.URIOpt('serial_port_proxy_uri',
+               schemes=['telnet', 'telnets'],
                help="""
 Identifies a proxy service that provides network access to the
 serial_port_service_uri.
 
 Possible values:
 
-* Any valid URI
+* Any valid URI (The scheme is 'telnet' or 'telnets'.)
 
 Related options:
 This option is ignored if serial_port_service_uri is not specified.
 * serial_port_service_uri
+"""),
+    cfg.StrOpt('serial_log_dir',
+               default='/opt/vmware/vspc',
+               help="""
+Specifies the directory where the Virtual Serial Port Concentrator is
+storing console log files. It should match the 'serial_log_dir' config
+value of VSPC.
 """),
 ]
 
@@ -189,25 +199,15 @@ in the shared datastore. If set to true, the above copy operation
 is avoided as it creates copy of the virtual machine that shares
 virtual disks with its parent VM.
 """),
-    cfg.StrOpt('wsdl_location',
-               deprecated_for_removal=True,
-               deprecated_reason='Only vCenter versions earlier than 5.1 '
-                                 'require this option and the current '
-                                 'minimum version is 5.1.',
-               deprecated_since='15.0.0',
+    cfg.IntOpt('connection_pool_size',
+               min=10,
+               default=10,
                help="""
-This option specifies VIM Service WSDL Location
+This option sets the http connection pool size
 
-If vSphere API versions 5.1 and later is being used, this section can
-be ignored. If version is less than 5.1, WSDL files must be hosted
-locally and their location must be specified in the above section.
-
-Optional over-ride to default location for bug work-arounds.
-
-Possible values:
-
-* http://<server>/vimService.wsdl
-* file:///opt/stack/vmware/SDK/wsdl/vim25/vimService.wsdl
+The connection pool size is the maximum number of connections from nova to
+vSphere.  It should only be increased if there are warnings indicating that
+the connection pool is full, otherwise, the default should suffice.
 """)
 ]
 

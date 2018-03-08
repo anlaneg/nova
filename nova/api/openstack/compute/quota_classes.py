@@ -13,26 +13,34 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-
+import copy
 import webob
 
 from nova.api.openstack.compute.schemas import quota_classes
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import db
 from nova import exception
+from nova import objects
 from nova.policies import quota_class_sets as qcs_policies
 from nova import quota
 from nova import utils
 
 
 QUOTAS = quota.QUOTAS
-ALIAS = "os-quota-class-sets"
 
-# Quotas that are only enabled by specific extensions
-EXTENDED_QUOTAS = {'server_groups': 'os-server-group-quotas',
-                   'server_group_members': 'os-server-group-quotas'}
+# NOTE(gmann): Quotas which were returned in v2 but in v2.1 those
+# were not returned. Fixed in microversion 2.50. Bug#1693168.
+EXTENDED_QUOTAS = ['server_groups', 'server_group_members']
+
+# NOTE(gmann): Network related quotas are filter out in
+# microversion 2.50. Bug#1701211.
+FILTERED_QUOTAS_2_50 = ["fixed_ips", "floating_ips", "networks",
+                        "security_group_rules", "security_groups"]
+
+# Microversion 2.57 removes personality (injected) files from the API.
+FILTERED_QUOTAS_2_57 = list(FILTERED_QUOTAS_2_50)
+FILTERED_QUOTAS_2_57.extend(['injected_files', 'injected_file_content_bytes',
+                             'injected_file_path_bytes'])
 
 
 class QuotaClassSetsController(wsgi.Controller):
@@ -41,35 +49,74 @@ class QuotaClassSetsController(wsgi.Controller):
 
     def __init__(self, **kwargs):
         self.supported_quotas = QUOTAS.resources
-        extension_info = kwargs.pop('extension_info').get_extensions()
-        for resource, extension in EXTENDED_QUOTAS.items():
-            if extension not in extension_info:
-                self.supported_quotas.remove(resource)
 
-    def _format_quota_set(self, quota_class, quota_set):
+    def _format_quota_set(self, quota_class, quota_set, filtered_quotas=None,
+                          exclude_server_groups=False):
         """Convert the quota object to a result dict."""
 
         if quota_class:
             result = dict(id=str(quota_class))
         else:
             result = {}
-
-        for resource in self.supported_quotas:
+        original_quotas = copy.deepcopy(self.supported_quotas)
+        if filtered_quotas:
+            original_quotas = [resource for resource in original_quotas
+                               if resource not in filtered_quotas]
+        # NOTE(gmann): Before microversion v2.50, v2.1 API does not return the
+        # 'server_groups' & 'server_group_members' key in quota class API
+        # response.
+        if exclude_server_groups:
+            for resource in EXTENDED_QUOTAS:
+                original_quotas.remove(resource)
+        for resource in original_quotas:
             if resource in quota_set:
                 result[resource] = quota_set[resource]
 
         return dict(quota_class_set=result)
 
-    @extensions.expected_errors(())
+    @wsgi.Controller.api_version('2.1', '2.49')
+    @wsgi.expected_errors(())
     def show(self, req, id):
+        return self._show(req, id, exclude_server_groups=True)
+
+    @wsgi.Controller.api_version('2.50', '2.56')  # noqa
+    @wsgi.expected_errors(())
+    def show(self, req, id):
+        return self._show(req, id, FILTERED_QUOTAS_2_50)
+
+    @wsgi.Controller.api_version('2.57')  # noqa
+    @wsgi.expected_errors(())
+    def show(self, req, id):
+        return self._show(req, id, FILTERED_QUOTAS_2_57)
+
+    def _show(self, req, id, filtered_quotas=None,
+              exclude_server_groups=False):
         context = req.environ['nova.context']
         context.can(qcs_policies.POLICY_ROOT % 'show', {'quota_class': id})
         values = QUOTAS.get_class_quotas(context, id)
-        return self._format_quota_set(id, values)
+        return self._format_quota_set(id, values, filtered_quotas,
+                                      exclude_server_groups)
 
-    @extensions.expected_errors(400)
+    @wsgi.Controller.api_version("2.1", "2.49")  # noqa
+    @wsgi.expected_errors(400)
     @validation.schema(quota_classes.update)
     def update(self, req, id, body):
+        return self._update(req, id, body, exclude_server_groups=True)
+
+    @wsgi.Controller.api_version("2.50", "2.56")  # noqa
+    @wsgi.expected_errors(400)
+    @validation.schema(quota_classes.update_v250)
+    def update(self, req, id, body):
+        return self._update(req, id, body, FILTERED_QUOTAS_2_50)
+
+    @wsgi.Controller.api_version("2.57")  # noqa
+    @wsgi.expected_errors(400)
+    @validation.schema(quota_classes.update_v257)
+    def update(self, req, id, body):
+        return self._update(req, id, body, FILTERED_QUOTAS_2_57)
+
+    def _update(self, req, id, body, filtered_quotas=None,
+                exclude_server_groups=False):
         context = req.environ['nova.context']
         context.can(qcs_policies.POLICY_ROOT % 'update', {'quota_class': id})
         try:
@@ -83,28 +130,10 @@ class QuotaClassSetsController(wsgi.Controller):
 
         for key, value in body['quota_class_set'].items():
             try:
-                db.quota_class_update(context, quota_class, key, value)
+                objects.Quotas.update_class(context, quota_class, key, value)
             except exception.QuotaClassNotFound:
-                db.quota_class_create(context, quota_class, key, value)
+                objects.Quotas.create_class(context, quota_class, key, value)
 
         values = QUOTAS.get_class_quotas(context, quota_class)
-        return self._format_quota_set(None, values)
-
-
-class QuotaClasses(extensions.V21APIExtensionBase):
-    """Quota classes management support."""
-
-    name = "QuotaClasses"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        resources = []
-        res = extensions.ResourceExtension(
-            ALIAS,
-            QuotaClassSetsController(extension_info=self.extension_info))
-        resources.append(res)
-        return resources
-
-    def get_controller_extensions(self):
-        return []
+        return self._format_quota_set(None, values, filtered_quotas,
+                                      exclude_server_groups)

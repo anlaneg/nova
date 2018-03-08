@@ -20,7 +20,6 @@ import oslo_messaging as messaging
 from nova import baserpc
 from nova.conductor import rpcapi
 import nova.conf
-from nova.i18n import _LI, _LW
 
 CONF = nova.conf.CONF
 
@@ -67,16 +66,16 @@ class API(object):
                 self.base_rpcapi.ping(context, '1.21 GigaWatts',
                                       timeout=timeout)
                 if has_timedout:
-                    LOG.info(_LI('nova-conductor connection '
-                                 'established successfully'))
+                    LOG.info('nova-conductor connection '
+                             'established successfully')
                 break
             except messaging.MessagingTimeout:
                 has_timedout = True
-                LOG.warning(_LW('Timed out waiting for nova-conductor.  '
-                                'Is it running? Or did this service start '
-                                'before nova-conductor?  '
-                                'Reattempting establishment of '
-                                'nova-conductor connection...'))
+                LOG.warning('Timed out waiting for nova-conductor.  '
+                            'Is it running? Or did this service start '
+                            'before nova-conductor?  '
+                            'Reattempting establishment of '
+                            'nova-conductor connection...')
 
 
 class ComputeTaskAPI(object):
@@ -86,8 +85,9 @@ class ComputeTaskAPI(object):
         self.conductor_compute_rpcapi = rpcapi.ComputeTaskAPI()
 
     def resize_instance(self, context, instance, extra_instance_updates,
-                        scheduler_hint, flavor, reservations,
-                        clean_shutdown=True, request_spec=None):
+                        scheduler_hint, flavor, reservations=None,
+                        clean_shutdown=True, request_spec=None,
+                        host_list=None):
         # NOTE(comstud): 'extra_instance_updates' is not used here but is
         # needed for compatibility with the cells_rpcapi version of this
         # method.
@@ -95,7 +95,7 @@ class ComputeTaskAPI(object):
             context, instance, scheduler_hint, live=False, rebuild=False,
             flavor=flavor, block_migration=None, disk_over_commit=None,
             reservations=reservations, clean_shutdown=clean_shutdown,
-            request_spec=request_spec)
+            request_spec=request_spec, host_list=host_list)
 
     def live_migrate_instance(self, context, instance, host_name,
                               block_migration, disk_over_commit,
@@ -113,7 +113,8 @@ class ComputeTaskAPI(object):
 
     def build_instances(self, context, instances, image, filter_properties,
             admin_password, injected_files, requested_networks,
-            security_groups, block_device_mapping, legacy_bdm=True):
+            security_groups, block_device_mapping, legacy_bdm=True,
+            request_spec=None, host_lists=None):
         self.conductor_compute_rpcapi.build_instances(context,
                 instances=instances, image=image,
                 filter_properties=filter_properties,
@@ -121,16 +122,18 @@ class ComputeTaskAPI(object):
                 requested_networks=requested_networks,
                 security_groups=security_groups,
                 block_device_mapping=block_device_mapping,
-                legacy_bdm=legacy_bdm)
+                legacy_bdm=legacy_bdm, request_spec=request_spec,
+                host_lists=host_lists)
 
     def schedule_and_build_instances(self, context, build_requests,
                                      request_spec, image,
                                      admin_password, injected_files,
-                                     requested_networks, block_device_mapping):
+                                     requested_networks, block_device_mapping,
+                                     tags=None):
         self.conductor_compute_rpcapi.schedule_and_build_instances(
             context, build_requests, request_spec, image,
             admin_password, injected_files, requested_networks,
-            block_device_mapping)
+            block_device_mapping, tags)
 
     def unshelve_instance(self, context, instance, request_spec=None):
         self.conductor_compute_rpcapi.unshelve_instance(context,

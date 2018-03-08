@@ -12,17 +12,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_log import log as logging
-
 import webob.exc
 
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
-from nova import exception
 from nova.policies import extensions as ext_policies
-
-ALIAS = 'extensions'
-LOG = logging.getLogger(__name__)
 
 
 EXTENSION_LIST = [
@@ -866,7 +859,7 @@ class ExtensionInfoController(wsgi.Controller):
                                   ' to the virtual interface list.'}
         all_extensions.append(vif_extension_info)
 
-    @extensions.expected_errors(())
+    @wsgi.expected_errors(())
     def index(self, req):
         context = req.environ['nova.context']
         context.can(ext_policies.BASE_POLICY_NAME)
@@ -878,7 +871,7 @@ class ExtensionInfoController(wsgi.Controller):
 
         return dict(extensions=EXTENSION_LIST)
 
-    @extensions.expected_errors(404)
+    @wsgi.expected_errors(404)
     def show(self, req, id):
         context = req.environ['nova.context']
         context.can(ext_policies.BASE_POLICY_NAME)
@@ -894,60 +887,3 @@ class ExtensionInfoController(wsgi.Controller):
                 return dict(extension=ext)
 
         raise webob.exc.HTTPNotFound()
-
-
-class ExtensionInfo(extensions.V21APIExtensionBase):
-    """Extension information."""
-
-    name = "Extensions"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        resources = [
-            extensions.ResourceExtension(
-                ALIAS, ExtensionInfoController(self.extension_info),
-                member_name='extension')]
-        return resources
-
-    def get_controller_extensions(self):
-        return []
-
-
-#负责保存api对应的扩展信息
-class LoadedExtensionInfo(object):
-    """Keep track of all loaded API extensions."""
-
-    def __init__(self):
-        #保存扩展
-        self.extensions = {}
-
-    def register_extension(self, ext):
-        #必须要有is-valid函数
-        if not self._check_extension(ext):
-            return False
-
-        #取它的别名
-        alias = ext.alias
-
-        #排除已存在
-        if alias in self.extensions:
-            raise exception.NovaException("Found duplicate extension: %s"
-                                          % alias)
-        self.extensions[alias] = ext
-        return True
-
-    #如果extension有is-valid函数，则返回True
-    def _check_extension(self, extension):
-        """Checks for required methods in extension objects."""
-        try:
-            extension.is_valid()
-        except AttributeError:
-            LOG.exception("Exception loading extension")
-            return False
-
-        return True
-
-    #返回注册的扩展信息
-    def get_extensions(self):
-        return self.extensions

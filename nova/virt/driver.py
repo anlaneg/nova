@@ -27,7 +27,7 @@ from oslo_utils import importutils
 import six
 
 import nova.conf
-from nova.i18n import _, _LE, _LI
+from nova.i18n import _
 from nova.virt import event as virtevent
 
 CONF = nova.conf.CONF
@@ -63,7 +63,7 @@ def get_block_device_info(instance, block_device_mapping):
     return block_device_info
 
 
-def block_device_info_get_root(block_device_info):
+def block_device_info_get_root_device(block_device_info):
     block_device_info = block_device_info or {}
     return block_device_info.get('root_device_name')
 
@@ -129,7 +129,16 @@ class ComputeDriver(object):
         "supports_device_tagging": False,
         "supports_tagged_attach_interface": False,
         "supports_tagged_attach_volume": False,
+        "supports_extend_volume": False,
+        "supports_multiattach": False
     }
+
+    requires_allocation_refresh = False
+
+    # Indicates if this driver will rebalance nodes among compute service
+    # hosts. This is really here for ironic and should not be used by any
+    # other driver.
+    rebalances_nodes = False
 
     def __init__(self, virtapi):
         self.virtapi = virtapi
@@ -149,11 +158,10 @@ class ComputeDriver(object):
         pass
 
     def get_info(self, instance):
-        """Get the current status of an instance, by name (not ID!)
+        """Get the current status of an instance.
 
         :param instance: nova.objects.instance.Instance object
-
-        Returns a InstanceInfo object
+        :returns: An InstanceInfo object
         """
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
@@ -221,7 +229,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def rebuild(self, context, instance, image_meta, injected_files,
-                admin_password, bdms, detach_block_devices,
+                admin_password, allocations, bdms, detach_block_devices,
                 attach_block_devices, network_info=None,
                 recreate=False, block_device_info=None,
                 preserve_ephemeral=False):
@@ -244,6 +252,9 @@ class ComputeDriver(object):
             The metadata of the image of the instance.
         :param injected_files: User files to inject into instance.
         :param admin_password: Administrator password to set in instance.
+        :param allocations: Information about resources allocated to the
+                            instance via placement, of the form returned by
+                            SchedulerReportClient.get_allocations_for_consumer.
         :param bdms: block-device-mappings to use for rebuild
         :param detach_block_devices: function to detach block devices. See
             nova.compute.manager.ComputeManager:_rebuild_default_impl for
@@ -262,7 +273,8 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def spawn(self, context, instance, image_meta, injected_files,
-              admin_password, network_info=None, block_device_info=None):
+              admin_password, allocations, network_info=None,
+              block_device_info=None):
         """Create a new instance/VM/domain on the virtualization platform.
 
         Once this successfully completes, the instance should be
@@ -280,6 +292,9 @@ class ComputeDriver(object):
             The metadata of the image of the instance.
         :param injected_files: User files to inject into instance.
         :param admin_password: Administrator password to set in instance.
+        :param allocations: Information about resources allocated to the
+                            instance via placement, of the form returned by
+                            SchedulerReportClient.get_allocations_for_consumer.
         :param network_info: instance network information
         :param block_device_info: Information about block devices to be
                                   attached to the instance.
@@ -287,7 +302,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def destroy(self, context, instance, network_info, block_device_info=None,
-                destroy_disks=True, migrate_data=None):
+                destroy_disks=True):
         """Destroy the specified instance from the Hypervisor.
 
         If the instance is not found (for example if networking failed), this
@@ -300,7 +315,6 @@ class ComputeDriver(object):
         :param block_device_info: Information about block devices that should
                                   be detached from the instance.
         :param destroy_disks: Indicates if disks should be destroyed
-        :param migrate_data: implementation specific params
         """
         raise NotImplementedError()
 
@@ -442,7 +456,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def get_host_ip_addr(self):
-        """Retrieves the IP address of the dom0
+        """Retrieves the IP address of the host running compute service
         """
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
@@ -452,15 +466,16 @@ class ComputeDriver(object):
         """Attach the disk to the instance at mountpoint using info."""
         raise NotImplementedError()
 
-    def detach_volume(self, connection_info, instance, mountpoint,
+    def detach_volume(self, context, connection_info, instance, mountpoint,
                       encryption=None):
         """Detach the disk attached to the instance."""
         raise NotImplementedError()
 
-    def swap_volume(self, old_connection_info, new_connection_info,
+    def swap_volume(self, context, old_connection_info, new_connection_info,
                     instance, mountpoint, resize_to):
         """Replace the volume attached to the given `instance`.
 
+        :param context: The request context.
         :param dict old_connection_info:
             The volume for this connection gets detached from the given
             `instance`.
@@ -479,6 +494,45 @@ class ComputeDriver(object):
         :return: None
         """
         raise NotImplementedError()
+
+    def extend_volume(self, connection_info, instance):
+        """Extend the disk attached to the instance.
+
+        :param dict connection_info:
+            The connection for the extended volume.
+        :param nova.objects.instance.Instance instance:
+            The instance whose volume gets extended.
+
+        :return: None
+        """
+        raise NotImplementedError()
+
+    def prepare_networks_before_block_device_mapping(self, instance,
+                                                     network_info):
+        """Prepare networks before the block devices are mapped to instance.
+
+        Drivers who need network information for block device preparation can
+        do some network preparation necessary for block device preparation.
+
+        :param nova.objects.instance.Instance instance:
+            The instance whose networks are prepared.
+        :param nova.network.model.NetworkInfoAsyncWrapper network_info:
+            The network information of the given `instance`.
+        """
+        pass
+
+    def clean_networks_preparation(self, instance, network_info):
+        """Clean networks preparation when block device mapping is failed.
+
+        Drivers who need network information for block device preparaion should
+        clean the preparation when block device mapping is failed.
+
+        :param nova.objects.instance.Instance instance:
+            The instance whose networks are prepared.
+        :param nova.network.model.NetworkInfoAsyncWrapper network_info:
+            The network information of the given `instance`.
+        """
+        pass
 
     def attach_interface(self, context, instance, image_meta, vif):
         """Use hotplug to add a network interface to a running instance.
@@ -776,9 +830,56 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    def update_provider_tree(self, provider_tree, nodename):
+        """Update a ProviderTree object with current resource provider and
+        inventory information.
+
+        When this method returns, provider_tree should represent the correct
+        hierarchy of nested resource providers associated with this compute
+        node, as well as the inventory, aggregates, and traits associated with
+        those resource providers.
+
+        This method supersedes get_inventory(): if this method is implemented,
+        get_inventory() is not used.
+
+        :note: Renaming a provider (by deleting it from provider_tree and
+        re-adding it with a different name) is not supported at this time.
+
+        :param nova.compute.provider_tree.ProviderTree provider_tree:
+            A ProviderTree object representing all the providers associated
+            with the compute node, and any sharing providers (those with the
+            ``MISC_SHARES_VIA_AGGREGATE`` trait) associated via aggregate with
+            any of those providers (but not *their* tree- or aggregate-
+            associated providers), as currently known by placement.  This
+            object is fully owned by the ``update_provider_tree`` method, and
+            can therefore be modified without locking/concurrency
+            considerations.  Note, however, that it may contain providers not
+            directly owned/controlled by the compute host.  Care must be taken
+            not to remove or modify such providers inadvertently.
+        :param nodename:
+            Name of the compute node for which the caller is updating providers
+            and inventory.  Drivers managing more than one node may use this in
+            an advisory capacity to restrict changes to only the providers
+            associated with that one node, but this is not a requirement: the
+            caller always subsumes all changes regardless.
+        :return: True if the provider_tree was changed; False otherwise.
+        """
+        raise NotImplementedError()
+
     def get_inventory(self, nodename):
         """Return a dict, keyed by resource class, of inventory information for
         the supplied node.
+        """
+        raise NotImplementedError()
+
+    def get_traits(self, nodename):
+        """Get the traits for a given node.
+
+        Any custom traits returned are not required to exist in the placement
+        service - the caller will ensure their existence.
+
+        :param nodename: the name of the node.
+        :returns: an iterable of string trait names for the supplied node.
         """
         raise NotImplementedError()
 
@@ -805,6 +906,7 @@ class ComputeDriver(object):
         :param network_info: instance network information
         :param disk_info: instance disk information
         :param migrate_data: a LiveMigrateData object
+        :returns: migrate_data modified by the driver
         """
         raise NotImplementedError()
 
@@ -1162,8 +1264,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def get_host_uptime(self):
-        """Returns the result of calling the Linux command `uptime` on this
-        host.
+        """Returns the result of the time since start up of this hypervisor.
 
         :return: A text which contains the uptime of this host since the
                  last boot.
@@ -1278,32 +1379,6 @@ class ComputeDriver(object):
         :return: None, or a set of MAC ids (e.g. set(['12:34:56:78:90:ab'])).
             None means 'no constraints', a set means 'these and only these
             MAC addresses'.
-        """
-        return None
-
-    def dhcp_options_for_instance(self, instance):
-        """Get DHCP options for this instance.
-
-        Some hypervisors (such as bare metal) require that instances boot from
-        the network, and manage their own TFTP service. This requires passing
-        the appropriate options out to the DHCP service. Most hypervisors can
-        use the default implementation which returns None.
-
-        This is called during spawn_instance by the compute manager.
-
-        Note that the format of the return value is specific to the Neutron
-        client API.
-
-        :return: None, or a set of DHCP options, eg:
-
-             |    [{'opt_name': 'bootfile-name',
-             |      'opt_value': '/tftpboot/path/to/config'},
-             |     {'opt_name': 'server-ip-address',
-             |      'opt_value': '1.2.3.4'},
-             |     {'opt_name': 'tftp-server',
-             |      'opt_value': '1.2.3.4'}
-             |    ]
-
         """
         return None
 
@@ -1446,7 +1521,7 @@ class ComputeDriver(object):
             LOG.debug("Emitting event %s", six.text_type(event))
             self._compute_event_callback(event)
         except Exception as ex:
-            LOG.error(_LE("Exception dispatching event %(event)s: %(ex)s"),
+            LOG.error("Exception dispatching event %(event)s: %(ex)s",
                       {'event': event, 'ex': ex})
 
     def delete_instance_files(self, instance):
@@ -1616,10 +1691,10 @@ def load_compute_driver(virtapi, compute_driver=None):
         compute_driver = CONF.compute_driver
 
     if not compute_driver:
-        LOG.error(_LE("Compute driver option required, but not specified"))
+        LOG.error("Compute driver option required, but not specified")
         sys.exit(1)
 
-    LOG.info(_LI("Loading compute driver '%s'"), compute_driver)
+    LOG.info("Loading compute driver '%s'", compute_driver)
     try:
         #载入driver,并创建实例
         #第一个参数是要加载的类命名空间，第二个参数是构造实例的参数
@@ -1630,7 +1705,7 @@ def load_compute_driver(virtapi, compute_driver=None):
             return driver
         raise ValueError()
     except ImportError:
-        LOG.exception(_LE("Unable to load the virtualization driver"))
+        LOG.exception(_("Unable to load the virtualization driver"))
         sys.exit(1)
     except ValueError:
         LOG.exception("Compute driver '%s' from 'nova.virt' is not of type"

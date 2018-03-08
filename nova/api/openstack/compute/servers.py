@@ -27,7 +27,6 @@ from webob import exc
 
 from nova.api.openstack import api_version_request
 from nova.api.openstack import common
-from nova.api.openstack.compute import availability_zone
 from nova.api.openstack.compute import block_device_mapping
 from nova.api.openstack.compute import block_device_mapping_v1
 from nova.api.openstack.compute import config_drive
@@ -39,7 +38,6 @@ from nova.api.openstack.compute.schemas import servers as schema_servers
 from nova.api.openstack.compute import security_groups
 from nova.api.openstack.compute import user_data
 from nova.api.openstack.compute.views import servers as views_servers
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova import compute
@@ -49,8 +47,9 @@ import nova.conf
 from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
-from nova.image import glance
+from nova.image import api as image_api
 from nova import objects
+from nova.objects import service as service_obj
 from nova.policies import servers as server_policies
 from nova import utils
 
@@ -78,15 +77,18 @@ class ServersController(wsgi.Controller):
     schema_server_create_v219 = schema_servers.base_create_v219
     schema_server_update_v219 = schema_servers.base_update_v219
     schema_server_rebuild_v219 = schema_servers.base_rebuild_v219
+    schema_server_rebuild_v254 = schema_servers.base_rebuild_v254
+    schema_server_rebuild_v257 = schema_servers.base_rebuild_v257
 
     schema_server_create_v232 = schema_servers.base_create_v232
     schema_server_create_v237 = schema_servers.base_create_v237
     schema_server_create_v242 = schema_servers.base_create_v242
+    schema_server_create_v252 = schema_servers.base_create_v252
+    schema_server_create_v257 = schema_servers.base_create_v257
 
     # NOTE(alex_xu): Please do not add more items into this list. This list
     # should be removed in the future.
     schema_func_list = [
-        availability_zone.get_server_create_schema,
         block_device_mapping.get_server_create_schema,
         block_device_mapping_v1.get_server_create_schema,
         config_drive.get_server_create_schema,
@@ -100,7 +102,6 @@ class ServersController(wsgi.Controller):
     # NOTE(alex_xu): Please do not add more items into this list. This list
     # should be removed in the future.
     server_create_func_list = [
-        availability_zone.server_create,
         block_device_mapping.server_create,
         block_device_mapping_v1.server_create,
         config_drive.server_create,
@@ -125,9 +126,6 @@ class ServersController(wsgi.Controller):
         return robj
 
     def __init__(self, **kwargs):
-        # TODO(alex_xu): Remove this line when 'extension_info' won't be passed
-        # in when creating controller.
-        kwargs.pop('extension_info', None)
 
         super(ServersController, self).__init__(**kwargs)
         #创建compute对应的api,此对象将用来处理创建请求（在这一层我们主要是
@@ -136,6 +134,8 @@ class ServersController(wsgi.Controller):
 
         # TODO(alex_xu): The final goal is that merging all of
         # extended json-schema into server main json-schema.
+        self._create_schema(self.schema_server_create_v257, '2.57')
+        self._create_schema(self.schema_server_create_v252, '2.52')
         self._create_schema(self.schema_server_create_v242, '2.42')
         self._create_schema(self.schema_server_create_v237, '2.37')
         self._create_schema(self.schema_server_create_v232, '2.32')
@@ -143,7 +143,7 @@ class ServersController(wsgi.Controller):
         self._create_schema(self.schema_server_create, '2.1')
         self._create_schema(self.schema_server_create_v20, '2.0')
 
-    @extensions.expected_errors((400, 403))
+    @wsgi.expected_errors((400, 403))
     @validation.query_schema(schema_servers.query_params_v226, '2.26')
     @validation.query_schema(schema_servers.query_params_v21, '2.1', '2.25')
     def index(self, req):
@@ -156,7 +156,7 @@ class ServersController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=err.format_message())
         return servers
 
-    @extensions.expected_errors((400, 403))
+    @wsgi.expected_errors((400, 403))
     @validation.query_schema(schema_servers.query_params_v226, '2.26')
     @validation.query_schema(schema_servers.query_params_v21, '2.1', '2.25')
     def detail(self, req):
@@ -432,7 +432,7 @@ class ServersController(wsgi.Controller):
 
         return objects.NetworkRequestList(objects=networks)
 
-    @extensions.expected_errors(404)
+    @wsgi.expected_errors(404)
     def show(self, req, id):
         """Returns server details by server id."""
         context = req.environ['nova.context']
@@ -441,33 +441,27 @@ class ServersController(wsgi.Controller):
         return self._view_builder.show(req, instance)
 
     @wsgi.response(202)
-    @extensions.expected_errors((400, 403, 409))
+    @wsgi.expected_errors((400, 403, 409))
     @validation.schema(schema_server_create_v20, '2.0', '2.0')
     @validation.schema(schema_server_create, '2.1', '2.18')
     @validation.schema(schema_server_create_v219, '2.19', '2.31')
     @validation.schema(schema_server_create_v232, '2.32', '2.36')
     @validation.schema(schema_server_create_v237, '2.37', '2.41')
-    @validation.schema(schema_server_create_v242, '2.42')
+    @validation.schema(schema_server_create_v242, '2.42', '2.51')
+    @validation.schema(schema_server_create_v252, '2.52', '2.56')
+    @validation.schema(schema_server_create_v257, '2.57')
     def create(self, req, body):
         """Creates a new server for a given user."""
-
         context = req.environ['nova.context']
         #取出server的配置
         server_dict = body['server']
         password = self._get_server_admin_password(server_dict)
         #server的名称
         name = common.normalize_name(server_dict['name'])
-
+        description = name
         #2.19版本中引入了description字段
         if api_version_request.is_supported(req, min_version='2.19'):
-            if 'description' in server_dict:
-                # This is allowed to be None
-                description = server_dict['description']
-            else:
-                # No default description
-                description = None
-        else:
-            description = name
+            description = server_dict.get('description')
 
         # Arguments to be passed to instance create function
         create_kwargs = {}
@@ -477,7 +471,10 @@ class ServersController(wsgi.Controller):
         # all of extended code into ServersController.
         self._create_by_func_list(server_dict, create_kwargs, body)
 
-        availability_zone = create_kwargs.pop("availability_zone", None)
+        availability_zone = server_dict.pop("availability_zone", None)
+
+        if api_version_request.is_supported(req, min_version='2.52'):
+            create_kwargs['tags'] = server_dict.get('tags')
 
         helpers.translate_attributes(helpers.CREATE,
                                      server_dict, create_kwargs)
@@ -499,8 +496,8 @@ class ServersController(wsgi.Controller):
         if host or node:
             context.can(server_policies.SERVERS % 'create:forced_host', {})
 
-        min_compute_version = objects.Service.get_minimum_version(
-            nova_context.get_admin_context(), 'nova-compute')
+        min_compute_version = service_obj.get_minimum_version_all_cells(
+            nova_context.get_admin_context(), ['nova-compute'])
         supports_device_tagging = (min_compute_version >=
                                    DEVICE_TAGGING_MIN_COMPUTE_VERSION)
 
@@ -517,7 +514,7 @@ class ServersController(wsgi.Controller):
 
         image_uuid = self._image_from_req_data(server_dict, create_kwargs)
 
-        # NOTE(cyeoh): Although an extension can set
+        # NOTE(cyeoh): Although upper layer can set the value of
         # return_reservation_id in order to request that a reservation
         # id be returned to the client instead of the newly created
         # instance information we do not want to pass this parameter
@@ -544,6 +541,8 @@ class ServersController(wsgi.Controller):
         try:
             inst_type = flavors.get_flavor_by_flavor_id(
                     flavor_id, ctxt=context, read_deleted="no")
+
+            supports_multiattach = common.supports_multiattach_volume(req)
             #调用compute_api创建instances
             (instances, resv_id) = self.compute_api.create(context,
                             inst_type,
@@ -556,6 +555,7 @@ class ServersController(wsgi.Controller):
                             admin_password=password,
                             requested_networks=requested_networks,
                             check_server_group_quota=True,
+                            supports_multiattach=supports_multiattach,
                             **create_kwargs)
         except (exception.QuotaError,
                 exception.PortLimitExceeded) as error:
@@ -593,7 +593,6 @@ class ServersController(wsgi.Controller):
                 exception.MultiplePortsNotApplicable,
                 exception.InvalidFixedIpAndMaxCountRequest,
                 exception.InstanceUserDataMalformed,
-                exception.InstanceUserDataTooLarge,
                 exception.PortNotFound,
                 exception.FixedIpAlreadyInUse,
                 exception.SecurityGroupNotFound,
@@ -628,12 +627,14 @@ class ServersController(wsgi.Controller):
                 exception.RealtimeConfigurationInvalid,
                 exception.RealtimeMaskNotFoundOrInvalid,
                 exception.SnapshotNotFound,
-                exception.UnableToAutoAllocateNetwork) as error:
+                exception.UnableToAutoAllocateNetwork,
+                exception.MultiattachNotSupportedOldMicroversion) as error:
             raise exc.HTTPBadRequest(explanation=error.format_message())
         except (exception.PortInUse,
                 exception.InstanceExists,
                 exception.NetworkAmbiguous,
-                exception.NoUniqueMatch) as error:
+                exception.NoUniqueMatch,
+                exception.MultiattachSupportNotYetAvailable) as error:
             raise exc.HTTPConflict(explanation=error.format_message())
 
         # If the caller wanted a reservation_id, return it
@@ -690,7 +691,7 @@ class ServersController(wsgi.Controller):
         else:
             self.compute_api.delete(context, instance)
 
-    @extensions.expected_errors((400, 404))
+    @wsgi.expected_errors(404)
     @validation.schema(schema_server_update_v20, '2.0', '2.0')
     @validation.schema(schema_server_update, '2.1', '2.18')
     @validation.schema(schema_server_update_v219, '2.19')
@@ -729,7 +730,7 @@ class ServersController(wsgi.Controller):
     # for representing async API as this API just accepts the request and
     # request hypervisor driver to complete the same in async mode.
     @wsgi.response(204)
-    @extensions.expected_errors((400, 404, 409))
+    @wsgi.expected_errors((400, 404, 409))
     @wsgi.action('confirmResize')
     def _action_confirm_resize(self, req, id, body):
         context = req.environ['nova.context']
@@ -749,7 +750,7 @@ class ServersController(wsgi.Controller):
                     'confirmResize', id)
 
     @wsgi.response(202)
-    @extensions.expected_errors((400, 404, 409))
+    @wsgi.expected_errors((400, 404, 409))
     @wsgi.action('revertResize')
     def _action_revert_resize(self, req, id, body):
         context = req.environ['nova.context']
@@ -772,7 +773,7 @@ class ServersController(wsgi.Controller):
                     'revertResize', id)
 
     @wsgi.response(202)
-    @extensions.expected_errors((404, 409))
+    @wsgi.expected_errors((404, 409))
     @wsgi.action('reboot')
     @validation.schema(schema_servers.reboot)
     def _action_reboot(self, req, id, body):
@@ -830,7 +831,7 @@ class ServersController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=msg)
 
     @wsgi.response(204)
-    @extensions.expected_errors((404, 409))
+    @wsgi.expected_errors((404, 409))
     def delete(self, req, id):
         """Destroys a server."""
         try:
@@ -868,7 +869,7 @@ class ServersController(wsgi.Controller):
         return common.get_id_from_href(flavor_ref)
 
     @wsgi.response(202)
-    @extensions.expected_errors((400, 401, 403, 404, 409))
+    @wsgi.expected_errors((400, 401, 403, 404, 409))
     @wsgi.action('resize')
     @validation.schema(schema_servers.resize)
     def _action_resize(self, req, id, body):
@@ -882,11 +883,13 @@ class ServersController(wsgi.Controller):
         self._resize(req, id, flavor_ref, **kwargs)
 
     @wsgi.response(202)
-    @extensions.expected_errors((400, 403, 404, 409))
+    @wsgi.expected_errors((400, 403, 404, 409))
     @wsgi.action('rebuild')
     @validation.schema(schema_server_rebuild_v20, '2.0', '2.0')
     @validation.schema(schema_server_rebuild, '2.1', '2.18')
-    @validation.schema(schema_server_rebuild_v219, '2.19')
+    @validation.schema(schema_server_rebuild_v219, '2.19', '2.53')
+    @validation.schema(schema_server_rebuild_v254, '2.54', '2.56')
+    @validation.schema(schema_server_rebuild_v257, '2.57')
     def _action_rebuild(self, req, id, body):
         """Rebuild an instance with the given attributes."""
         rebuild_dict = body['rebuild']
@@ -909,6 +912,17 @@ class ServersController(wsgi.Controller):
         kwargs = {}
 
         helpers.translate_attributes(helpers.REBUILD, rebuild_dict, kwargs)
+
+        if (api_version_request.is_supported(req, min_version='2.54')
+                and 'key_name' in rebuild_dict):
+            kwargs['key_name'] = rebuild_dict.get('key_name')
+
+        # If user_data is not specified, we don't include it in kwargs because
+        # we don't want to overwrite the existing user_data.
+        include_user_data = api_version_request.is_supported(
+            req, min_version='2.57')
+        if include_user_data and 'user_data' in rebuild_dict:
+            kwargs['user_data'] = rebuild_dict['user_data']
 
         for request_attribute, instance_attribute in attr_map.items():
             try:
@@ -940,9 +954,13 @@ class ServersController(wsgi.Controller):
         except exception.ImageNotFound:
             msg = _("Cannot find image for rebuild")
             raise exc.HTTPBadRequest(explanation=msg)
+        except exception.KeypairNotFound:
+            msg = _("Invalid key_name provided.")
+            raise exc.HTTPBadRequest(explanation=msg)
         except exception.QuotaError as error:
             raise exc.HTTPForbidden(explanation=error.format_message())
         except (exception.ImageNotActive,
+                exception.ImageUnacceptable,
                 exception.FlavorDiskTooSmall,
                 exception.FlavorMemoryTooSmall,
                 exception.InvalidMetadata,
@@ -958,11 +976,18 @@ class ServersController(wsgi.Controller):
         if CONF.api.enable_instance_password:
             view['server']['adminPass'] = password
 
+        if api_version_request.is_supported(req, min_version='2.54'):
+            # NOTE(liuyulong): set the new key_name for the API response.
+            view['server']['key_name'] = instance.key_name
+
+        if include_user_data:
+            view['server']['user_data'] = instance.user_data
+
         robj = wsgi.ResponseObject(view)
         return self._add_location(robj)
 
     @wsgi.response(202)
-    @extensions.expected_errors((400, 403, 404, 409))
+    @wsgi.expected_errors((400, 403, 404, 409))
     @wsgi.action('createImage')
     @common.check_snapshots_enabled
     @validation.schema(schema_servers.create_image, '2.0', '2.0')
@@ -1020,7 +1045,7 @@ class ServersController(wsgi.Controller):
 
         # build location of newly-created image entity
         image_id = str(image['id'])
-        image_ref = glance.generate_image_url(image_id)
+        image_ref = image_api.API().generate_image_url(image_id, context)
 
         resp = webob.Response(status_int=202)
         resp.headers['Location'] = image_ref
@@ -1060,7 +1085,7 @@ class ServersController(wsgi.Controller):
             raise webob.exc.HTTPNotFound(explanation=e.format_message())
 
     @wsgi.response(202)
-    @extensions.expected_errors((404, 409))
+    @wsgi.expected_errors((404, 409))
     @wsgi.action('os-start')
     def _start_server(self, req, id, body):
         """Start an instance."""
@@ -1078,7 +1103,7 @@ class ServersController(wsgi.Controller):
                 'start', id)
 
     @wsgi.response(202)
-    @extensions.expected_errors((404, 409))
+    @wsgi.expected_errors((404, 409))
     @wsgi.action('os-stop')
     def _stop_server(self, req, id, body):
         """Stop an instance."""
@@ -1099,7 +1124,7 @@ class ServersController(wsgi.Controller):
 
     @wsgi.Controller.api_version("2.17")
     @wsgi.response(202)
-    @extensions.expected_errors((400, 404, 409))
+    @wsgi.expected_errors((400, 404, 409))
     @wsgi.action('trigger_crash_dump')
     @validation.schema(schema_servers.trigger_crash_dump)
     def _action_trigger_crash_dump(self, req, id, body):

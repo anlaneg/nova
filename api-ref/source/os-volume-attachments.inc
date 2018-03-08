@@ -58,6 +58,11 @@ Error response codes: badRequest(400), unauthorized(401), forbidden(403), itemNo
 .. note:: From v2.20 attach a volume to an instance in SHELVED or SHELVED_OFFLOADED
           state is allowed.
 
+.. note:: From v2.60, attaching a multiattach volume to multiple instances is
+          supported for instances that are not SHELVED_OFFLOADED. The ability
+          to actually support a multiattach volume depends on the volume type
+          and compute hosting the instance.
+
 Request
 -------
 
@@ -67,10 +72,16 @@ Request
   - volumeAttachment: volumeAttachment_post
   - volumeId: volumeId
   - device: device
+  - tag: device_tag_bdm_attachment
 
 **Example Attach a volume to an instance: JSON request**
 
 .. literalinclude:: ../../doc/api_samples/os-volumes/attach-volume-to-server-req.json
+   :language: javascript
+
+**Example Attach a volume to an instance and tag it (v2.49): JSON request**
+
+.. literalinclude:: ../../doc/api_samples/os-volumes/v2.49/attach-volume-to-server-req.json
    :language: javascript
 
 Response
@@ -92,7 +103,7 @@ Response
 Show a detail of a volume attachment
 ====================================
 
-.. rest_method:: GET /servers/{server_id}/os-volume_attachments/{attachment_id}
+.. rest_method:: GET /servers/{server_id}/os-volume_attachments/{volume_id}
 
 Show a detail of a volume attachment.
 
@@ -106,7 +117,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
   - server_id: server_id_path
-  - attachment_id: attachment_id
+  - volume_id: volume_id
 
 Response
 --------
@@ -130,6 +141,9 @@ Update a volume attachment
 .. rest_method:: PUT /servers/{server_id}/os-volume_attachments/{attachment_id}
 
 Update a volume attachment.
+
+.. note:: This action only valid when the server is in ACTIVE, PAUSED and RESIZED state,
+          or a conflict(409) error will be returned.
 
 Normal response codes: 202
 
@@ -158,7 +172,7 @@ No body is returned on successful request.
 Detach a volume from an instance
 ================================
 
-.. rest_method:: DELETE /servers/{server_id}/os-volume_attachments/{attachment_id}
+.. rest_method:: DELETE /servers/{server_id}/os-volume_attachments/{volume_id}
 
 Detach a volume from an instance.
 
@@ -175,7 +189,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
   - server_id: server_id_path
-  - attachment_id: attachment_id
+  - volume_id: volume_id
 
 Response
 --------

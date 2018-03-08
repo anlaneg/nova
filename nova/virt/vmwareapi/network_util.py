@@ -17,6 +17,8 @@
 """
 Utility functions for ESX Networking.
 """
+import re
+
 from oslo_log import log as logging
 from oslo_vmware import exceptions as vexc
 from oslo_vmware import vim_util as vutil
@@ -27,6 +29,20 @@ from nova.virt.vmwareapi import vim_util
 from nova.virt.vmwareapi import vm_util
 
 LOG = logging.getLogger(__name__)
+
+# a virtual wire will have the following format:
+# vxw-<dvs-moref>-<virtualwire-moref>-<sid-moref>-<name>
+# Examples:
+# - vxw-dvs-22-virtualwire-89-sid-5008-NAME
+# - vxw-dvs-22-virtualwire-89-sid-5008-UUID
+VWIRE_REGEX = re.compile('vxw-dvs-(\d+)-virtualwire-(\d+)-sid-(\d+)-(.*)')
+
+
+def _get_name_from_dvs_name(dvs_name):
+    vwire = VWIRE_REGEX.match(dvs_name)
+    if not vwire:
+        return dvs_name
+    return vwire.group(4)
 
 
 def _get_network_obj(session, network_objects, network_name):
@@ -64,10 +80,8 @@ def _get_network_obj(session, network_objects, network_name):
                                                  "config")
                     # NOTE(asomya): This only works on ESXi if the port binding
                     # is set to ephemeral
-                    # For a VLAN the network name will be the UUID. For a VXLAN
-                    # network this will have a VXLAN prefix and then the
-                    # network name.
-                    if network_name in props.name:
+                    net_name = _get_name_from_dvs_name(props.name)
+                    if network_name in net_name:
                         network_obj['type'] = 'DistributedVirtualPortgroup'
                         network_obj['dvpg'] = props.key
                         dvs_props = session._call_method(vutil,
@@ -95,16 +109,12 @@ def get_network_with_the_name(session, network_name="vmnet0", cluster=None):
                                        'get_object_properties',
                                        None, cluster,
                                        'ClusterComputeResource', ['network'])
-    while vm_networks:
-        if vm_networks.objects:
-            network_obj = _get_network_obj(session, vm_networks.objects,
-                                           network_name)
-            if network_obj:
-                session._call_method(vutil, 'cancel_retrieval',
-                                     vm_networks)
-                return network_obj
-        vm_networks = session._call_method(vutil, 'continue_retrieval',
-                                           vm_networks)
+
+    with vutil.WithRetrieval(session.vim, vm_networks) as network_objs:
+        network_obj = _get_network_obj(session, network_objs, network_name)
+        if network_obj:
+            return network_obj
+
     LOG.debug("Network %s not found on cluster!", network_name)
 
 

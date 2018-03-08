@@ -32,14 +32,15 @@ from nova.conf import console
 from nova.conf import consoleauth
 from nova.conf import crypto
 from nova.conf import database
+from nova.conf import devices
 from nova.conf import ephemeral_storage
 from nova.conf import flavors
 from nova.conf import glance
 from nova.conf import guestfs
 from nova.conf import hyperv
-from nova.conf import ipv6
 from nova.conf import ironic
 from nova.conf import key_manager
+from nova.conf import keystone
 from nova.conf import libvirt
 from nova.conf import mks
 from nova.conf import netconf
@@ -60,7 +61,6 @@ from nova.conf import service
 from nova.conf import service_token
 from nova.conf import servicegroup
 from nova.conf import spice
-from nova.conf import ssl
 from nova.conf import upgrade_levels
 from nova.conf import vendordata
 from nova.conf import vmware
@@ -85,15 +85,16 @@ console.register_opts(CONF)
 consoleauth.register_opts(CONF)
 crypto.register_opts(CONF)
 database.register_opts(CONF)
+devices.register_opts(CONF)
 ephemeral_storage.register_opts(CONF)
 flavors.register_opts(CONF)
 glance.register_opts(CONF)
 guestfs.register_opts(CONF)
 hyperv.register_opts(CONF)
 mks.register_opts(CONF)
-ipv6.register_opts(CONF)
 ironic.register_opts(CONF)
 key_manager.register_opts(CONF)
+keystone.register_opts(CONF)
 libvirt.register_opts(CONF)
 netconf.register_opts(CONF)
 network.register_opts(CONF)
@@ -112,7 +113,6 @@ service.register_opts(CONF)
 service_token.register_opts(CONF)
 servicegroup.register_opts(CONF)
 spice.register_opts(CONF)
-ssl.register_opts(CONF)
 upgrade_levels.register_opts(CONF)
 vendordata.register_opts(CONF)
 vmware.register_opts(CONF)

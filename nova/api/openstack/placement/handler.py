@@ -30,6 +30,7 @@ from oslo_log import log as logging
 
 from nova.api.openstack.placement.handlers import aggregate
 from nova.api.openstack.placement.handlers import allocation
+from nova.api.openstack.placement.handlers import allocation_candidate
 from nova.api.openstack.placement.handlers import inventory
 from nova.api.openstack.placement.handlers import resource_class
 from nova.api.openstack.placement.handlers import resource_provider
@@ -99,10 +100,16 @@ ROUTE_DECLARATIONS = {
     '/resource_providers/{uuid}/allocations': {
         'GET': allocation.list_for_resource_provider,
     },
+    '/allocations': {
+        'POST': allocation.set_allocations,
+    },
     '/allocations/{consumer_uuid}': {
         'GET': allocation.list_for_consumer,
-        'PUT': allocation.set_allocations,
+        'PUT': allocation.set_allocations_for_consumer,
         'DELETE': allocation.delete_allocations,
+    },
+    '/allocation_candidates': {
+        'GET': allocation_candidate.list_allocation_candidates,
     },
     '/traits': {
         'GET': trait.list_traits,
@@ -116,6 +123,9 @@ ROUTE_DECLARATIONS = {
         'GET': trait.list_traits_for_resource_provider,
         'PUT': trait.update_traits_for_resource_provider,
         'DELETE': trait.delete_traits_for_resource_provider
+    },
+    '/usages': {
+        'GET': usage.get_total_usages,
     },
 }
 
@@ -151,9 +161,11 @@ def handle_405(environ, start_response):
         # In the process done by Routes to save the allowed methods
         # to its routing table they become unicode in py2.
         headers['allow'] = str(_methods)
-    raise webob.exc.HTTPMethodNotAllowed(
+    # Use Exception class as WSGI Application. We don't want to raise here.
+    response = webob.exc.HTTPMethodNotAllowed(
         _('The method specified is not allowed for this resource.'),
         headers=headers, json_formatter=util.json_error_formatter)
+    return response(environ, start_response)
 
 
 def make_map(declarations):

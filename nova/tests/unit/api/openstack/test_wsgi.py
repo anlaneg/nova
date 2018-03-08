@@ -17,7 +17,6 @@ import testscenarios
 import webob
 
 from nova.api.openstack import api_version_request as api_version
-from nova.api.openstack import extensions
 from nova.api.openstack import versioned_method
 from nova.api.openstack import wsgi
 from nova import exception
@@ -97,27 +96,6 @@ class RequestTest(MicroversionedTest):
                 {'uuid0': instances[0],
                  'uuid1': instances[1],
                  'uuid2': instances[2]})
-
-    def test_cache_and_retrieve_compute_nodes(self):
-        request = wsgi.Request.blank('/foo')
-        compute_nodes = []
-        for x in range(3):
-            compute_nodes.append({'id': 'id%s' % x})
-        # Store 2
-        request.cache_db_compute_nodes(compute_nodes[:2])
-        # Store 1
-        request.cache_db_compute_node(compute_nodes[2])
-        self.assertEqual(request.get_db_compute_node('id0'),
-                compute_nodes[0])
-        self.assertEqual(request.get_db_compute_node('id1'),
-                compute_nodes[1])
-        self.assertEqual(request.get_db_compute_node('id2'),
-                compute_nodes[2])
-        self.assertIsNone(request.get_db_compute_node('id3'))
-        self.assertEqual(request.get_db_compute_nodes(),
-                {'id0': compute_nodes[0],
-                 'id1': compute_nodes[1],
-                 'id2': compute_nodes[2]})
 
     def test_from_request(self):
         request = wsgi.Request.blank('/')
@@ -290,7 +268,7 @@ class ResourceTest(MicroversionedTest):
                     raise webob.exc.HTTPInternalServerError()
                 return 'success'
 
-        app = fakes.TestRouterV21(Controller())
+        app = fakes.TestRouter(Controller())
         req = webob.Request.blank('/tests')
         response = req.get_response(app)
         self.assertEqual(b'success', response.body)
@@ -308,7 +286,7 @@ class ResourceTest(MicroversionedTest):
                     raise webob.exc.HTTPInternalServerError()
                 return 'success'
 
-        app = fakes.TestRouterV21(Controller())
+        app = fakes.TestRouter(Controller())
         req = webob.Request.blank('/tests')
         req.headers = self._make_microversion_header(version)
         response = req.get_response(app)
@@ -322,7 +300,7 @@ class ResourceTest(MicroversionedTest):
             def index(self, req):
                 return 'success'
 
-        app = fakes.TestRouterV21(Controller())
+        app = fakes.TestRouter(Controller())
         req = webob.Request.blank('/tests')
         req.headers = self._make_microversion_header(invalid_version)
         response = req.get_response(app)
@@ -350,7 +328,7 @@ class ResourceTest(MicroversionedTest):
 
     def test_resource_call_with_method_post(self):
         class Controller(object):
-            @extensions.expected_errors(400)
+            @wsgi.expected_errors(400)
             def create(self, req, body):
                 if expected_body != body:
                     msg = "The request body invalid"
@@ -1039,3 +1017,41 @@ class TestController(test.NoDBTestCase):
         result = wsgi.Controller.check_for_versions_intersection(func_list=
                                                                  func_list)
         self.assertTrue(result)
+
+
+class ExpectedErrorTestCase(test.NoDBTestCase):
+
+    def test_expected_error(self):
+        @wsgi.expected_errors(404)
+        def fake_func():
+            raise webob.exc.HTTPNotFound()
+
+        self.assertRaises(webob.exc.HTTPNotFound, fake_func)
+
+    def test_expected_error_from_list(self):
+        @wsgi.expected_errors((404, 403))
+        def fake_func():
+            raise webob.exc.HTTPNotFound()
+
+        self.assertRaises(webob.exc.HTTPNotFound, fake_func)
+
+    def test_unexpected_error(self):
+        @wsgi.expected_errors(404)
+        def fake_func():
+            raise webob.exc.HTTPConflict()
+
+        self.assertRaises(webob.exc.HTTPInternalServerError, fake_func)
+
+    def test_unexpected_error_from_list(self):
+        @wsgi.expected_errors((404, 413))
+        def fake_func():
+            raise webob.exc.HTTPConflict()
+
+        self.assertRaises(webob.exc.HTTPInternalServerError, fake_func)
+
+    def test_unexpected_policy_not_authorized_error(self):
+        @wsgi.expected_errors(404)
+        def fake_func():
+            raise exception.PolicyNotAuthorized(action="foo")
+
+        self.assertRaises(exception.PolicyNotAuthorized, fake_func)

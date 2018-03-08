@@ -19,11 +19,13 @@ Client side of the scheduler manager RPC API.
 import oslo_messaging as messaging
 
 import nova.conf
+from nova import exception as exc
 from nova.objects import base as objects_base
 from nova import profiler
 from nova import rpc
 
 CONF = nova.conf.CONF
+RPC_TOPIC = "scheduler"
 
 
 @profiler.trace_cls("rpc")
@@ -94,6 +96,15 @@ class SchedulerAPI(object):
         changes to existing methods in 4.x after that point should be done such
         that they can handle the version_cap being set to 4.3.
 
+        * 4.4 - Modify select_destinations() signature by providing the
+                instance_uuids for the request.
+
+        ... Pike supports message version 4.4. So any changes to existing
+        methods in 4.x after that point should be done such
+        that they can handle the version_cap being set to 4.4.
+
+        * 4.5 - Modify select_destinations() to optionally return a list of
+                lists of Selection objects, along with zero or more alternates.
     '''
 
     VERSION_ALIASES = {
@@ -106,20 +117,37 @@ class SchedulerAPI(object):
         'mitaka': '4.3',
         'newton': '4.3',
         'ocata': '4.3',
+        'pike': '4.4',
     }
 
     def __init__(self):
         super(SchedulerAPI, self).__init__()
-        target = messaging.Target(topic=CONF.scheduler_topic, version='4.0')
+        target = messaging.Target(topic=RPC_TOPIC, version='4.0')
         version_cap = self.VERSION_ALIASES.get(CONF.upgrade_levels.scheduler,
                                                CONF.upgrade_levels.scheduler)
         serializer = objects_base.NovaObjectSerializer()
         self.client = rpc.get_client(target, version_cap=version_cap,
                                      serializer=serializer)
 
-    def select_destinations(self, ctxt, spec_obj):
-        version = '4.3'
-        msg_args = {'spec_obj': spec_obj}
+    def select_destinations(self, ctxt, spec_obj, instance_uuids,
+            return_objects=False, return_alternates=False):
+        # Modify the parameters if an older version is requested
+        version = '4.5'
+        msg_args = {'instance_uuids': instance_uuids,
+                    'spec_obj': spec_obj,
+                    'return_objects': return_objects,
+                    'return_alternates': return_alternates}
+        if not self.client.can_send_version(version):
+            if msg_args['return_objects'] or msg_args['return_alternates']:
+                # The client is requesting an RPC version we can't support.
+                raise exc.SelectionObjectsWithOldRPCVersionNotSupported(
+                        version=self.client.version_cap)
+            del msg_args['return_objects']
+            del msg_args['return_alternates']
+            version = '4.4'
+        if not self.client.can_send_version(version):
+            del msg_args['instance_uuids']
+            version = '4.3'
         if not self.client.can_send_version(version):
             del msg_args['spec_obj']
             msg_args['request_spec'] = spec_obj.to_legacy_request_spec_dict()

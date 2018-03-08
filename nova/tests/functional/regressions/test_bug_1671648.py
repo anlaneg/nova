@@ -63,10 +63,6 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
 
         self.start_service('conductor')
         self.start_service('consoleauth')
-
-        # Configure a minimal filter scheduler setup.
-        self.flags(enabled_filters=['ComputeFilter', 'RetryFilter'],
-                   group='filter_scheduler')
         self.start_service('scheduler')
 
         # We start two compute services because we're going to fake one
@@ -84,7 +80,7 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
         self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host2')
 
-        self.useFixture(cast_as_call.CastAsCall(self.stubs))
+        self.useFixture(cast_as_call.CastAsCall(self))
 
         self.image_id = self.admin_api.get_images()[0]['id']
         self.flavor_id = self.admin_api.get_flavors()[0]['id']
@@ -152,3 +148,11 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
 
         # Assert that we retried.
         self.assertEqual(2, self.attempts)
+
+
+class TestRetryBetweenComputeNodeBuildsCachingScheduler(
+        TestRetryBetweenComputeNodeBuilds):
+    """Tests the reschedule scenario using the CachingScheduler."""
+    def setUp(self):
+        self.flags(driver='caching_scheduler', group='scheduler')
+        super(TestRetryBetweenComputeNodeBuildsCachingScheduler, self).setUp()

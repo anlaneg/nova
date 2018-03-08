@@ -37,8 +37,8 @@ class AggregatePayload(base.NotificationPayloadBase):
         'metadata': fields.DictOfStringsField(nullable=True),
     }
 
-    def __init__(self, aggregate, **kwargs):
-        super(AggregatePayload, self).__init__(**kwargs)
+    def __init__(self, aggregate):
+        super(AggregatePayload, self).__init__()
         self.populate_schema(aggregate=aggregate)
 
 
@@ -46,6 +46,10 @@ class AggregatePayload(base.NotificationPayloadBase):
 @base.notification_sample('aggregate-create-end.json')
 @base.notification_sample('aggregate-delete-start.json')
 @base.notification_sample('aggregate-delete-end.json')
+@base.notification_sample('aggregate-add_host-start.json')
+@base.notification_sample('aggregate-add_host-end.json')
+@base.notification_sample('aggregate-remove_host-start.json')
+@base.notification_sample('aggregate-remove_host-end.json')
 @nova_base.NovaObjectRegistry.register_notification
 class AggregateNotification(base.NotificationBase):
     # Version 1.0: Initial version

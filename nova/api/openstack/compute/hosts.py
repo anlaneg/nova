@@ -21,7 +21,6 @@ import webob.exc
 
 from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import hosts
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova import compute
@@ -31,7 +30,6 @@ from nova import objects
 from nova.policies import hosts as hosts_policies
 
 LOG = logging.getLogger(__name__)
-ALIAS = 'os-hosts'
 
 
 class HostController(wsgi.Controller):
@@ -41,7 +39,8 @@ class HostController(wsgi.Controller):
         super(HostController, self).__init__()
 
     @wsgi.Controller.api_version("2.1", "2.42")
-    @extensions.expected_errors(())
+    @validation.query_schema(hosts.index_query)
+    @wsgi.expected_errors(())
     def index(self, req):
         """Returns a dict in the format
 
@@ -98,7 +97,7 @@ class HostController(wsgi.Controller):
         return {'hosts': hosts}
 
     @wsgi.Controller.api_version("2.1", "2.42")
-    @extensions.expected_errors((400, 404, 501))
+    @wsgi.expected_errors((400, 404, 501))
     @validation.schema(hosts.update)
     def update(self, req, id, body):
         """Return booleanized version of body dict.
@@ -190,17 +189,17 @@ class HostController(wsgi.Controller):
         return {"host": host_name, "power_action": result}
 
     @wsgi.Controller.api_version("2.1", "2.42")
-    @extensions.expected_errors((400, 404, 501))
+    @wsgi.expected_errors((400, 404, 501))
     def startup(self, req, id):
         return self._host_power_action(req, host_name=id, action="startup")
 
     @wsgi.Controller.api_version("2.1", "2.42")
-    @extensions.expected_errors((400, 404, 501))
+    @wsgi.expected_errors((400, 404, 501))
     def shutdown(self, req, id):
         return self._host_power_action(req, host_name=id, action="shutdown")
 
     @wsgi.Controller.api_version("2.1", "2.42")
-    @extensions.expected_errors((400, 404, 501))
+    @wsgi.expected_errors((400, 404, 501))
     def reboot(self, req, id):
         return self._host_power_action(req, host_name=id, action="reboot")
 
@@ -254,7 +253,7 @@ class HostController(wsgi.Controller):
         return project_map
 
     @wsgi.Controller.api_version("2.1", "2.42")
-    @extensions.expected_errors(404)
+    @wsgi.expected_errors(404)
     def show(self, req, id):
         """Shows the physical/usage resource given by hosts.
 
@@ -289,21 +288,3 @@ class HostController(wsgi.Controller):
         for resource in six.itervalues(by_proj_resources):
             resources.append({'resource': resource})
         return {'host': resources}
-
-
-class Hosts(extensions.V21APIExtensionBase):
-    """Admin-only host administration."""
-
-    name = "Hosts"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        resources = [extensions.ResourceExtension(ALIAS,
-                HostController(),
-                member_actions={"startup": "GET", "shutdown": "GET",
-                        "reboot": "GET"})]
-        return resources
-
-    def get_controller_extensions(self):
-        return []

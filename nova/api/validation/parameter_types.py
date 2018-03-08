@@ -42,6 +42,15 @@ def multi_params(schema):
     return {'type': 'array', 'items': schema}
 
 
+# NOTE: We don't check actual values of queries on params
+# which are defined as the following common_param.
+# Please note those are for backward compatible existing
+# query parameters because previously multiple parameters
+# might be input and accepted.
+common_query_param = multi_params({'type': 'string'})
+common_query_regex_param = multi_params({'type': 'string', 'format': 'regex'})
+
+
 class ValidationRegex(object):
     def __init__(self, regex, reason):
         self.regex = regex
@@ -150,6 +159,24 @@ valid_name_leading_trailing_spaces_regex_base = (
     "^[%(ws)s]*[%(no_ws)s][%(no_ws)s%(ws)s]+[%(no_ws)s][%(ws)s]*$")
 
 
+valid_az_name_regex = ValidationRegex(
+    valid_name_regex_base % (
+        _build_regex_range(ws=False, invert=True),
+        _build_regex_range(exclude=[':']),
+        _build_regex_range(ws=False, invert=True)),
+    _("printable characters except :."
+      "Can not start or end with whitespace."))
+
+
+# az's name disallow ':'.
+valid_az_name_leading_trailing_spaces_regex = ValidationRegex(
+    valid_name_leading_trailing_spaces_regex_base % {
+        'ws': _build_regex_range(exclude=[':']),
+        'no_ws': _build_regex_range(ws=False, exclude=[':'])},
+    _("printable characters except :, "
+      "with at least one non space character"))
+
+
 valid_cell_name_regex = ValidationRegex(
     valid_name_regex_base % (
         _build_regex_range(ws=False, invert=True),
@@ -199,6 +226,14 @@ none = {
 }
 
 
+name_or_none = {
+    'oneOf': [
+        {'type': 'string', 'minLength': 1, 'maxLength': 255},
+        {'type': 'null'},
+    ]
+}
+
+
 positive_integer = {
     'type': ['integer', 'string'],
     'pattern': '^[0-9]*$', 'minimum': 1, 'minLength': 1
@@ -242,6 +277,18 @@ name = {
     # This definition is used for all their parameters.
     'type': 'string', 'minLength': 1, 'maxLength': 255,
     'format': 'name'
+}
+
+
+az_name = {
+    'type': 'string', 'minLength': 1, 'maxLength': 255,
+    'format': 'az_name'
+}
+
+
+az_name_with_leading_trailing_spaces = {
+    'type': 'string', 'minLength': 1, 'maxLength': 255,
+    'format': 'az_name_with_leading_trailing_spaces'
 }
 
 

@@ -20,7 +20,6 @@ from webob import exc
 
 from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import attach_interfaces
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova import compute
@@ -28,9 +27,6 @@ from nova import exception
 from nova.i18n import _
 from nova import network
 from nova.policies import attach_interfaces as ai_policies
-
-
-ALIAS = 'os-attach-interfaces'
 
 
 def _translate_interface_attachment_view(port_info):
@@ -52,7 +48,7 @@ class InterfaceAttachmentController(wsgi.Controller):
         self.network_api = network.API()
         super(InterfaceAttachmentController, self).__init__()
 
-    @extensions.expected_errors((404, 501))
+    @wsgi.expected_errors((404, 501))
     def index(self, req, server_id):
         """Returns the list of interface attachments for a given instance."""
         context = req.environ['nova.context']
@@ -74,7 +70,7 @@ class InterfaceAttachmentController(wsgi.Controller):
 
         return {'interfaceAttachments': results}
 
-    @extensions.expected_errors((403, 404))
+    @wsgi.expected_errors((403, 404))
     def show(self, req, server_id, id):
         """Return data about the given interface attachment."""
         context = req.environ['nova.context']
@@ -101,8 +97,9 @@ class InterfaceAttachmentController(wsgi.Controller):
         return {'interfaceAttachment': _translate_interface_attachment_view(
                 port_info['port'])}
 
-    @extensions.expected_errors((400, 404, 409, 500, 501))
-    @validation.schema(attach_interfaces.create)
+    @wsgi.expected_errors((400, 404, 409, 500, 501))
+    @validation.schema(attach_interfaces.create, '2.0', '2.48')
+    @validation.schema(attach_interfaces.create_v249, '2.49')
     def create(self, req, server_id, body):
         """Attach an interface to an instance."""
         context = req.environ['nova.context']
@@ -112,10 +109,12 @@ class InterfaceAttachmentController(wsgi.Controller):
         network_id = None
         port_id = None
         req_ip = None
+        tag = None
         if body:
             attachment = body['interfaceAttachment']
             network_id = attachment.get('net_id', None)
             port_id = attachment.get('port_id', None)
+            tag = attachment.get('tag', None)
             try:
                 req_ip = attachment['fixed_ips'][0]['ip_address']
             except Exception:
@@ -131,13 +130,14 @@ class InterfaceAttachmentController(wsgi.Controller):
         instance = common.get_instance(self.compute_api, context, server_id)
         try:
             vif = self.compute_api.attach_interface(context,
-                instance, network_id, port_id, req_ip)
+                instance, network_id, port_id, req_ip, tag=tag)
         except (exception.InterfaceAttachFailedNoNetwork,
                 exception.NetworkAmbiguous,
                 exception.NoMoreFixedIps,
                 exception.PortNotUsable,
                 exception.AttachInterfaceNotSupported,
-                exception.SecurityGroupCannotBeApplied) as e:
+                exception.SecurityGroupCannotBeApplied,
+                exception.TaggedAttachmentNotSupported) as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
         except (exception.InstanceIsLocked,
                 exception.FixedIpAlreadyInUse,
@@ -156,7 +156,7 @@ class InterfaceAttachmentController(wsgi.Controller):
         return self.show(req, server_id, vif['id'])
 
     @wsgi.response(202)
-    @extensions.expected_errors((404, 409, 501))
+    @wsgi.expected_errors((404, 409, 501))
     def delete(self, req, server_id, id):
         """Detach an interface from an instance."""
         context = req.environ['nova.context']
@@ -164,7 +164,8 @@ class InterfaceAttachmentController(wsgi.Controller):
         context.can(ai_policies.POLICY_ROOT % 'delete')
         port_id = id
 
-        instance = common.get_instance(self.compute_api, context, server_id)
+        instance = common.get_instance(self.compute_api, context, server_id,
+                                       expected_attrs=['device_metadata'])
         try:
             self.compute_api.detach_interface(context,
                 instance, port_id=port_id)
@@ -177,25 +178,3 @@ class InterfaceAttachmentController(wsgi.Controller):
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'detach_interface', server_id)
-
-
-class AttachInterfaces(extensions.V21APIExtensionBase):
-    """Attach interface support."""
-
-    name = "AttachInterfaces"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        res = [extensions.ResourceExtension('os-interface',
-                                            InterfaceAttachmentController(),
-                                            parent=dict(
-                                                member_name='server',
-                                                collection_name='servers'))]
-        return res
-
-    def get_controller_extensions(self):
-        """It's an abstract function V21APIExtensionBase and the extension
-        will not be loaded without it.
-        """
-        return []

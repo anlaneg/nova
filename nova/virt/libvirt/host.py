@@ -38,6 +38,7 @@ from eventlet import greenthread
 from eventlet import patcher
 from eventlet import tpool
 from oslo_log import log as logging
+from oslo_utils import encodeutils
 from oslo_utils import excutils
 from oslo_utils import importutils
 from oslo_utils import units
@@ -48,9 +49,6 @@ import nova.conf
 from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LE
-from nova.i18n import _LI
-from nova.i18n import _LW
 from nova import rpc
 from nova import utils
 from nova.virt import event as virtevent
@@ -149,7 +147,7 @@ class Host(object):
         try:
             handler()
         except Exception:
-            LOG.exception(_LE('Exception handling connection event'))
+            LOG.exception(_('Exception handling connection event'))
         finally:
             self._conn_event_handler_queue.task_done()
 
@@ -378,25 +376,16 @@ class Host(object):
                 self._event_lifecycle_callback,
                 self)
         except Exception as e:
-            LOG.warning(_LW("URI %(uri)s does not support events: %(error)s"),
-                     {'uri': self._uri, 'error': e})
+            LOG.warning("URI %(uri)s does not support events: %(error)s",
+                        {'uri': self._uri, 'error': e})
 
         try:
             LOG.debug("Registering for connection events: %s", str(self))
             wrapped_conn.registerCloseCallback(self._close_callback, None)
-        except (TypeError, AttributeError) as e:
-            # NOTE: The registerCloseCallback of python-libvirt 1.0.1+
-            # is defined with 3 arguments, and the above registerClose-
-            # Callback succeeds. However, the one of python-libvirt 1.0.0
-            # is defined with 4 arguments and TypeError happens here.
-            # Then python-libvirt 0.9 does not define a method register-
-            # CloseCallback.
-            LOG.debug("The version of python-libvirt does not support "
-                      "registerCloseCallback or is too old: %s", e)
         except libvirt.libvirtError as e:
-            LOG.warning(_LW("URI %(uri)s does not support connection"
-                         " events: %(error)s"),
-                     {'uri': self._uri, 'error': e})
+            LOG.warning("URI %(uri)s does not support connection"
+                        " events: %(error)s",
+                        {'uri': self._uri, 'error': e})
 
         return wrapped_conn
 
@@ -453,7 +442,7 @@ class Host(object):
         try:
             conn = self._get_connection()
         except libvirt.libvirtError as ex:
-            LOG.exception(_LE("Connection to libvirt failed: %s"), ex)
+            LOG.exception(_("Connection to libvirt failed: %s"), ex)
             payload = dict(ip=CONF.my_ip,
                            method='_connect',
                            reason=ex)
@@ -534,10 +523,9 @@ class Host(object):
         :raises exception.InstanceNotFound: The domain was not found
         :raises exception.InternalError: A libvirt error occurred
         """
-        return libvirt_guest.Guest(self.get_domain(instance))
+        return libvirt_guest.Guest(self._get_domain(instance))
 
-    # TODO(sahid): needs to be private
-    def get_domain(self, instance):
+    def _get_domain(self, instance):
         """Retrieve libvirt domain object for an instance.
 
         All libvirt error handling should be handled in this method and
@@ -551,7 +539,7 @@ class Host(object):
         """
         try:
             conn = self.get_connection()
-            return conn.lookupByName(instance.name)
+            return conn.lookupByUUIDString(instance.uuid)
         except libvirt.libvirtError as ex:
             error_code = ex.get_error_code()
             if error_code == libvirt.VIR_ERR_NO_DOMAIN:
@@ -637,7 +625,7 @@ class Host(object):
         """
         if not self._caps:
             xmlstr = self.get_connection().getCapabilities()
-            LOG.info(_LI("Libvirt host capabilities %s"), xmlstr)
+            LOG.info("Libvirt host capabilities %s", xmlstr)
             self._caps = vconfig.LibvirtConfigCaps()
             self._caps.parse_str(xmlstr)
             # NOTE(mriedem): Don't attempt to get baseline CPU features
@@ -658,8 +646,8 @@ class Host(object):
                 except libvirt.libvirtError as ex:
                     error_code = ex.get_error_code()
                     if error_code == libvirt.VIR_ERR_NO_SUPPORT:
-                        LOG.warning(_LW("URI %(uri)s does not support full set"
-                                     " of host capabilities: %(error)s"),
+                        LOG.warning("URI %(uri)s does not support full set"
+                                    " of host capabilities: %(error)s",
                                      {'uri': self._uri, 'error': ex})
                     else:
                         raise
@@ -689,10 +677,9 @@ class Host(object):
         if self._hostname is None:
             self._hostname = hostname
         elif hostname != self._hostname:
-            LOG.error(_LE('Hostname has changed from %(old)s '
-                          'to %(new)s. A restart is required to take effect.'),
-                          {'old': self._hostname,
-                           'new': hostname})
+            LOG.error('Hostname has changed from %(old)s '
+                      'to %(new)s. A restart is required to take effect.',
+                      {'old': self._hostname, 'new': hostname})
         return self._hostname
 
     def find_secret(self, usage_type, usage_id):
@@ -750,7 +737,7 @@ class Host(object):
             return secret
         except libvirt.libvirtError:
             with excutils.save_and_reraise_exception():
-                LOG.error(_LE('Error defining a secret with XML: %s'), xml)
+                LOG.error('Error defining a secret with XML: %s', xml)
 
     def delete_secret(self, usage_type, usage_id):
         """Delete a secret.
@@ -800,8 +787,8 @@ class Host(object):
                     # TODO(sahid): Use get_info...
                     dom_mem = int(guest._get_domain_info(self)[2])
                 except libvirt.libvirtError as e:
-                    LOG.warning(_LW("couldn't obtain the memory from domain:"
-                                    " %(uuid)s, exception: %(ex)s"),
+                    LOG.warning("couldn't obtain the memory from domain:"
+                                " %(uuid)s, exception: %(ex)s",
                                 {"uuid": guest.uuid, "ex": e})
                     continue
                 # skip dom0
@@ -837,6 +824,8 @@ class Host(object):
 
         :returns: an instance of Guest
         """
+        if six.PY2:
+            xml = encodeutils.safe_encode(xml)
         domain = self.get_connection().defineXML(xml)
         return libvirt_guest.Guest(domain)
 
@@ -853,7 +842,39 @@ class Host(object):
 
         :returns: a list of virNodeDevice instance
         """
+        # TODO(sbauza): Replace that call by a generic _list_devices("pci")
         return self.get_connection().listDevices("pci", flags)
+
+    def list_mdev_capable_devices(self, flags=0):
+        """Lookup devices supporting mdev capabilities.
+
+        :returns: a list of virNodeDevice instance
+        """
+        return self._list_devices("mdev_types", flags=flags)
+
+    def list_mediated_devices(self, flags=0):
+        """Lookup mediated devices.
+
+        :returns: a list of virNodeDevice instance
+        """
+        return self._list_devices("mdev", flags=flags)
+
+    def _list_devices(self, cap, flags=0):
+        """Lookup devices.
+
+        :returns: a list of virNodeDevice instance
+        """
+        try:
+            return self.get_connection().listDevices(cap, flags)
+        except libvirt.libvirtError as ex:
+            error_code = ex.get_error_code()
+            if error_code == libvirt.VIR_ERR_NO_SUPPORT:
+                LOG.warning("URI %(uri)s does not support "
+                            "listDevices: %(error)s",
+                            {'uri': self._uri, 'error': ex})
+                return []
+            else:
+                raise
 
     def compare_cpu(self, xmlDesc, flags=0):
         """Compares the given CPU description with the host CPU."""

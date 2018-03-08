@@ -24,20 +24,21 @@ import errno
 import functools
 import hashlib
 import inspect
+import mmap
 import os
 import pyclbr
 import random
 import re
 import shutil
-import socket
-import struct
 import sys
 import tempfile
-import textwrap
 import time
 
 import eventlet
+from keystoneauth1 import exceptions as ks_exc
+from keystoneauth1 import loading as ks_loading
 import netaddr
+from os_service_types import service_types
 from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
 from oslo_context import context as common_context
@@ -49,7 +50,6 @@ from oslo_utils import importutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
 from oslo_utils import units
-import prettytable
 import six
 from six.moves import range
 
@@ -65,15 +65,6 @@ profiler = importutils.try_import('osprofiler.profiler')
 CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
-
-# used in limits
-TIME_UNITS = {
-    'SECOND': 1,
-    'MINUTE': 60,
-    'HOUR': 3600,
-    'DAY': 86400
-}
-
 
 _IS_NEUTRON = None
 
@@ -101,57 +92,7 @@ VIM_IMAGE_ATTRIBUTES = (
 
 _FILE_CACHE = {}
 
-
-def vpn_ping(address, port, timeout=0.05, session_id=None):
-    """Sends a vpn negotiation packet and returns the server session.
-
-    Returns Boolean indicating whether the vpn_server is listening.
-    Basic packet structure is below.
-
-    Client packet (14 bytes)::
-
-         0 1      8 9  13
-        +-+--------+-----+
-        |x| cli_id |?????|
-        +-+--------+-----+
-        x = packet identifier 0x38
-        cli_id = 64 bit identifier
-        ? = unknown, probably flags/padding
-
-    Server packet (26 bytes)::
-
-         0 1      8 9  13 14    21 2225
-        +-+--------+-----+--------+----+
-        |x| srv_id |?????| cli_id |????|
-        +-+--------+-----+--------+----+
-        x = packet identifier 0x40
-        cli_id = 64 bit identifier
-        ? = unknown, probably flags/padding
-        bit 9 was 1 and the rest were 0 in testing
-
-    """
-    # NOTE(tonyb) session_id isn't used for a real VPN connection so using a
-    #             cryptographically weak value is fine.
-    if session_id is None:
-        session_id = random.randint(0, 0xffffffffffffffff)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    data = struct.pack('!BQxxxxx', 0x38, session_id)
-    sock.sendto(data, (address, port))
-    sock.settimeout(timeout)
-    try:
-        received = sock.recv(2048)
-    except socket.timeout:
-        return False
-    finally:
-        sock.close()
-    fmt = '!BQxxxxxQxxxx'
-    if len(received) != struct.calcsize(fmt):
-        LOG.warning(_LW('Expected to receive %(exp)s bytes, '
-                        'but actually %(act)s'),
-                    dict(exp=struct.calcsize(fmt), act=len(received)))
-        return False
-    (identifier, server_sess, client_sess) = struct.unpack(fmt, received)
-    return (identifier == 0x40 and client_sess == session_id)
+_SERVICE_TYPES = service_types.ServiceTypes()
 
 
 def get_root_helper():
@@ -355,7 +296,7 @@ def last_completed_audit_period(unit=None, before=None):
     else:
         rightnow = timeutils.utcnow()
     if unit not in ('month', 'day', 'year', 'hour'):
-        raise ValueError('Time period must be hour, day, month or year')
+        raise ValueError(_('Time period must be hour, day, month or year'))
     if unit == 'month':
         if offset == 0:
             offset = 1
@@ -450,23 +391,6 @@ def generate_password(length=None, symbolgroups=DEFAULT_PASSWORD_SYMBOLS):
     return ''.join(password)
 
 
-def get_my_linklocal(interface):
-    try:
-        if_str = execute('ip', '-f', 'inet6', '-o', 'addr', 'show', interface)
-        condition = '\s+inet6\s+([0-9a-f:]+)/\d+\s+scope\s+link'
-        links = [re.search(condition, x) for x in if_str[0].split('\n')]
-        address = [w.group(1) for w in links if w is not None]
-        if address[0] is not None:
-            return address[0]
-        else:
-            msg = _('Link Local address is not found.:%s') % if_str
-            raise exception.NovaException(msg)
-    except Exception as ex:
-        msg = _("Couldn't get Link Local IP of %(interface)s"
-                " :%(ex)s") % {'interface': interface, 'ex': ex}
-        raise exception.NovaException(msg)
-
-
 # TODO(sfinucan): Replace this with the equivalent from oslo.utils
 def utf8(value):
     """Try to turn a string into utf-8 if possible.
@@ -523,17 +447,6 @@ def get_shortened_ipv6_cidr(address):
     return str(net.cidr)
 
 
-def get_ip_version(network):
-    """Returns the IP version of a network (IPv4 or IPv6).
-
-    Raises AddrFormatError if invalid network.
-    """
-    if netaddr.IPNetwork(network).version == 6:
-        return "IPv6"
-    elif netaddr.IPNetwork(network).version == 4:
-        return "IPv4"
-
-
 def safe_ip_format(ip):
     """Transform ip string to "safe" format.
 
@@ -563,8 +476,9 @@ def format_remote_path(host, path):
     return "%s:%s" % (safe_ip_format(host), path)
 
 
+# TODO(mriedem): Remove this in Rocky.
 def monkey_patch():
-    """If the CONF.monkey_patch set as True,
+    """DEPRECATED: If the CONF.monkey_patch set as True,
     this function patches a decorator
     for all functions in specified modules.
     You can set decorators for each modules
@@ -582,6 +496,7 @@ def monkey_patch():
     # If CONF.monkey_patch is not True, this function do nothing.
     if not CONF.monkey_patch:
         return
+    LOG.warning('Monkey patching nova is deprecated for removal.')
     if six.PY2:
         is_method = inspect.ismethod
     else:
@@ -729,15 +644,10 @@ def generate_mac_address():
     return ':'.join(map(lambda x: "%02x" % x, mac))
 
 
-def read_file_as_root(file_path):
-    """Secure helper to read file as root."""
-    try:
-        out, _err = execute('cat', file_path, run_as_root=True)
-        return out
-    except processutils.ProcessExecutionError:
-        raise exception.FileNotFound(file_path=file_path)
-
-
+# NOTE(mikal): I really wanted this code to go away, but I can't find a way
+# to implement what the callers of this method want with privsep. Basically,
+# if we could hand off either a file descriptor or a file like object then
+# we could make this go away.
 @contextlib.contextmanager
 def temporary_chown(path, owner_uid=None):
     """Temporarily chown a path.
@@ -750,12 +660,12 @@ def temporary_chown(path, owner_uid=None):
     orig_uid = os.stat(path).st_uid
 
     if orig_uid != owner_uid:
-        execute('chown', owner_uid, path, run_as_root=True)
+        nova.privsep.path.chown(path, uid=owner_uid)
     try:
         yield
     finally:
         if orig_uid != owner_uid:
-            execute('chown', orig_uid, path, run_as_root=True)
+            nova.privsep.path.chown(path, uid=orig_uid)
 
 
 @contextlib.contextmanager
@@ -811,55 +721,6 @@ class UndoManager(object):
                 LOG.exception(msg, **kwargs)
 
             self._rollback()
-
-
-def mkfs(fs, path, label=None, run_as_root=False):
-    """Format a file or block device
-
-    :param fs: Filesystem type (examples include 'swap', 'ext3', 'ext4'
-               'btrfs', etc.)
-    :param path: Path to file or block device to format
-    :param label: Volume label to use
-    """
-    if fs == 'swap':
-        args = ['mkswap']
-    else:
-        args = ['mkfs', '-t', fs]
-    # add -F to force no interactive execute on non-block device.
-    if fs in ('ext3', 'ext4', 'ntfs'):
-        args.extend(['-F'])
-    if label:
-        if fs in ('msdos', 'vfat'):
-            label_opt = '-n'
-        else:
-            label_opt = '-L'
-        args.extend([label_opt, label])
-    args.append(path)
-    execute(*args, run_as_root=run_as_root)
-
-
-def last_bytes(file_like_object, num):
-    """Return num bytes from the end of the file, and remaining byte count.
-
-    :param file_like_object: The file to read
-    :param num: The number of bytes to return
-
-    :returns: (data, remaining)
-    """
-
-    try:
-        file_like_object.seek(-num, os.SEEK_END)
-    except IOError as e:
-        # seek() fails with EINVAL when trying to go before the start of the
-        # file. It means that num is larger than the file size, so just
-        # go to the start.
-        if e.errno == errno.EINVAL:
-            file_like_object.seek(0, os.SEEK_SET)
-        else:
-            raise
-
-    remaining = file_like_object.tell()
-    return (file_like_object.read(), remaining)
 
 
 def metadata_to_dict(metadata, include_deleted=False):
@@ -965,29 +826,19 @@ def check_string_length(value, name=None, min_length=0, max_length=None):
 
 
 def validate_integer(value, name, min_value=None, max_value=None):
-    """Make sure that value is a valid integer, potentially within range."""
-    try:
-        value = int(str(value))
-    except (ValueError, UnicodeEncodeError):
-        msg = _('%(value_name)s must be an integer')
-        raise exception.InvalidInput(reason=(
-            msg % {'value_name': name}))
+    """Make sure that value is a valid integer, potentially within range.
 
-    if min_value is not None:
-        if value < min_value:
-            msg = _('%(value_name)s must be >= %(min_value)d')
-            raise exception.InvalidInput(
-                reason=(msg % {'value_name': name,
-                               'min_value': min_value}))
-    if max_value is not None:
-        if value > max_value:
-            msg = _('%(value_name)s must be <= %(max_value)d')
-            raise exception.InvalidInput(
-                reason=(
-                    msg % {'value_name': name,
-                           'max_value': max_value})
-            )
-    return value
+    :param value: value of the integer
+    :param name: name of the integer
+    :param min_value: min_value of the integer
+    :param max_value: max_value of the integer
+    :returns: integer
+    :raise: InvalidInput If value is not a valid integer
+    """
+    try:
+        return strutils.validate_integer(value, name, min_value, max_value)
+    except ValueError as e:
+        raise exception.InvalidInput(reason=six.text_type(e))
 
 
 def _serialize_profile_info():
@@ -1377,7 +1228,7 @@ def isotime(at=None):
         at = timeutils.utcnow()
     date_string = at.strftime("%Y-%m-%dT%H:%M:%S")
     tz = at.tzinfo.tzname(None) if at.tzinfo else 'UTC'
-    date_string += ('Z' if tz == 'UTC' else tz)
+    date_string += ('Z' if tz in ['UTC', 'UTC+00:00'] else tz)
     return date_string
 
 
@@ -1385,63 +1236,160 @@ def strtime(at):
     return at.strftime("%Y-%m-%dT%H:%M:%S.%f")
 
 
-def print_dict(dct, dict_property="Property", wrap=0, dict_value='Value'):
-    """Print a `dict` as a table of two columns.
+def get_ksa_adapter(service_type, ksa_auth=None, ksa_session=None,
+                    min_version=None, max_version=None):
+    """Construct a keystoneauth1 Adapter for a given service type.
 
-    :param dct: `dict` to print
-    :param dict_property: name of the first column
-    :param wrap: wrapping for the second column
-    :param dict_value: header label for the value (second) column
+    We expect to find a conf group whose name corresponds to the service_type's
+    project according to the service-types-authority.  That conf group must
+    provide at least ksa adapter options.  Depending how the result is to be
+    used, ksa auth and/or session options may also be required, or the relevant
+    parameter supplied.
+
+    :param service_type: String name of the service type for which the Adapter
+                         is to be constructed.
+    :param ksa_auth: A keystoneauth1 auth plugin. If not specified, we attempt
+                     to find one in ksa_session.  Failing that, we attempt to
+                     load one from the conf.
+    :param ksa_session: A keystoneauth1 Session.  If not specified, we attempt
+                        to load one from the conf.
+    :param min_version: The minimum major version of the adapter's endpoint,
+                        intended to be used as the lower bound of a range with
+                        max_version.
+                        If min_version is given with no max_version it is as
+                        if max version is 'latest'.
+    :param max_version: The maximum major version of the adapter's endpoint,
+                        intended to be used as the upper bound of a range with
+                        min_version.
+    :return: A keystoneauth1 Adapter object for the specified service_type.
+    :raise: ConfGroupForServiceTypeNotFound If no conf group name could be
+            found for the specified service_type.
     """
-    pt = prettytable.PrettyTable([dict_property, dict_value])
-    pt.align = 'l'
-    for k, v in sorted(dct.items()):
-        # convert dict to str to check length
-        if isinstance(v, dict):
-            v = six.text_type(v)
-        if wrap > 0:
-            v = textwrap.fill(six.text_type(v), wrap)
-        # if value has a newline, add in multiple rows
-        # e.g. fault with stacktrace
-        if v and isinstance(v, six.string_types) and r'\n' in v:
-            lines = v.strip().split(r'\n')
-            col1 = k
-            for line in lines:
-                pt.add_row([col1, line])
-                col1 = ''
+    # Get the conf group corresponding to the service type.
+    confgrp = _SERVICE_TYPES.get_project_name(service_type)
+    if not confgrp or not hasattr(CONF, confgrp):
+        # Try the service type as the conf group.  This is necessary for e.g.
+        # placement, while it's still part of the nova project.
+        # Note that this might become the first thing we try if/as we move to
+        # using service types for conf group names in general.
+        confgrp = service_type
+        if not confgrp or not hasattr(CONF, confgrp):
+            raise exception.ConfGroupForServiceTypeNotFound(stype=service_type)
+
+    # Ensure we have an auth.
+    # NOTE(efried): This could be None, and that could be okay - e.g. if the
+    # result is being used for get_endpoint() and the conf only contains
+    # endpoint_override.
+    if not ksa_auth:
+        if ksa_session and ksa_session.auth:
+            ksa_auth = ksa_session.auth
         else:
-            pt.add_row([k, v])
+            ksa_auth = ks_loading.load_auth_from_conf_options(CONF, confgrp)
 
-    if six.PY2:
-        print(encodeutils.safe_encode(pt.get_string()))
-    else:
-        print(encodeutils.safe_encode(pt.get_string()).decode())
+    if not ksa_session:
+        ksa_session = ks_loading.load_session_from_conf_options(
+            CONF, confgrp, auth=ksa_auth)
+
+    return ks_loading.load_adapter_from_conf_options(
+        CONF, confgrp, session=ksa_session, auth=ksa_auth,
+        min_version=min_version, max_version=max_version)
 
 
-def validate_args(fn, *args, **kwargs):
-    """Check that the supplied args are sufficient for calling a function.
+def get_endpoint(ksa_adapter):
+    """Get the endpoint URL represented by a keystoneauth1 Adapter.
 
-    >>> validate_args(lambda a: None)
-    Traceback (most recent call last):
-        ...
-    MissingArgs: Missing argument(s): a
-    >>> validate_args(lambda a, b, c, d: None, 0, c=1)
-    Traceback (most recent call last):
-        ...
-    MissingArgs: Missing argument(s): b, d
+    This method is equivalent to what
 
-    :param fn: the function to check
-    :param arg: the positional arguments supplied
-    :param kwargs: the keyword arguments supplied
+        ksa_adapter.get_endpoint()
+
+    should do, if it weren't for a panoply of bugs.
+
+    :param ksa_adapter: keystoneauth1.adapter.Adapter, appropriately set up
+                        with an endpoint_override; or service_type, interface
+                        (list) and auth/service_catalog.
+    :return: String endpoint URL.
+    :raise EndpointNotFound: If endpoint discovery fails.
     """
-    argspec = inspect.getargspec(fn)
+    # TODO(efried): This will be unnecessary once bug #1707993 is fixed.
+    # (At least for the non-image case, until 1707995 is fixed.)
+    if ksa_adapter.endpoint_override:
+        return ksa_adapter.endpoint_override
+    # TODO(efried): Remove this once bug #1707995 is fixed.
+    if ksa_adapter.service_type == 'image':
+        try:
+            return ksa_adapter.get_endpoint_data().catalog_url
+        except AttributeError:
+            # ksa_adapter.auth is a _ContextAuthPlugin, which doesn't have
+            # get_endpoint_data.  Fall through to using get_endpoint().
+            pass
+    # TODO(efried): The remainder of this method reduces to
+    # TODO(efried):     return ksa_adapter.get_endpoint()
+    # TODO(efried): once bug #1709118 is fixed.
+    # NOTE(efried): Id9bd19cca68206fc64d23b0eaa95aa3e5b01b676 may also do the
+    #               trick, once it's in a ksa release.
+    # The EndpointNotFound exception happens when _ContextAuthPlugin is in play
+    # because its get_endpoint() method isn't yet set up to handle interface as
+    # a list.  (It could also happen with a real auth if the endpoint isn't
+    # there; but that's covered below.)
+    try:
+        return ksa_adapter.get_endpoint()
+    except ks_exc.EndpointNotFound:
+        pass
 
-    num_defaults = len(argspec.defaults or [])
-    required_args = argspec.args[:len(argspec.args) - num_defaults]
+    interfaces = list(ksa_adapter.interface)
+    for interface in interfaces:
+        ksa_adapter.interface = interface
+        try:
+            return ksa_adapter.get_endpoint()
+        except ks_exc.EndpointNotFound:
+            pass
+    raise ks_exc.EndpointNotFound(
+        "Could not find requested endpoint for any of the following "
+        "interfaces: %s" % interfaces)
 
-    if six.get_method_self(fn) is not None:
-        required_args.pop(0)
 
-    missing = [arg for arg in required_args if arg not in kwargs]
-    missing = missing[len(args):]
-    return missing
+def supports_direct_io(dirpath):
+
+    if not hasattr(os, 'O_DIRECT'):
+        LOG.debug("This python runtime does not support direct I/O")
+        return False
+
+    testfile = os.path.join(dirpath, ".directio.test")
+
+    hasDirectIO = True
+    fd = None
+    try:
+        fd = os.open(testfile, os.O_CREAT | os.O_WRONLY | os.O_DIRECT)
+        # Check is the write allowed with 512 byte alignment
+        align_size = 512
+        m = mmap.mmap(-1, align_size)
+        m.write(b"x" * align_size)
+        os.write(fd, m)
+        LOG.debug("Path '%(path)s' supports direct I/O",
+                  {'path': dirpath})
+    except OSError as e:
+        if e.errno == errno.EINVAL:
+            LOG.debug("Path '%(path)s' does not support direct I/O: "
+                      "'%(ex)s'", {'path': dirpath, 'ex': e})
+            hasDirectIO = False
+        else:
+            with excutils.save_and_reraise_exception():
+                LOG.error("Error on '%(path)s' while checking "
+                          "direct I/O: '%(ex)s'",
+                          {'path': dirpath, 'ex': e})
+    except Exception as e:
+        with excutils.save_and_reraise_exception():
+            LOG.error("Error on '%(path)s' while checking direct I/O: "
+                      "'%(ex)s'", {'path': dirpath, 'ex': e})
+    finally:
+        # ensure unlink(filepath) will actually remove the file by deleting
+        # the remaining link to it in close(fd)
+        if fd is not None:
+            os.close(fd)
+
+        try:
+            os.unlink(testfile)
+        except Exception:
+            pass
+
+    return hasDirectIO

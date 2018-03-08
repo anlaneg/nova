@@ -27,6 +27,7 @@ import nova.conf
 import nova.image.glance
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional.api import client as api_client
 from nova.tests.unit import cast_as_call
 import nova.tests.unit.image.fake
 from nova.tests import uuidsentinel as uuids
@@ -74,12 +75,14 @@ class _IntegratedTestBase(test.TestCase):
 
         # TODO(mriedem): Fix the functional tests to work with Neutron.
         self.flags(use_neutron=self.USE_NEUTRON)
-        self.flags(keep_alive=False, group="wsgi")
 
         nova.tests.unit.image.fake.stub_out_image_service(self)
-        self._setup_services()
 
-        self.useFixture(cast_as_call.CastAsCall(self.stubs))
+        self.useFixture(cast_as_call.CastAsCall(self))
+        placement = self.useFixture(nova_fixtures.PlacementFixture())
+        self.placement_api = placement.api
+
+        self._setup_services()
 
         self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
 
@@ -87,7 +90,6 @@ class _IntegratedTestBase(test.TestCase):
         return self.start_service('compute')
 
     def _setup_scheduler_service(self):
-        self.flags(group='scheduler', driver='chance_scheduler')
         return self.start_service('scheduler')
 
     def _setup_services(self):
@@ -99,8 +101,11 @@ class _IntegratedTestBase(test.TestCase):
         self.conductor = self.start_service('conductor')
         self.consoleauth = self.start_service('consoleauth')
 
-        self.network = self.start_service('network',
-                                          manager=CONF.network_manager)
+        if self.USE_NEUTRON:
+            self.neutron = self.useFixture(nova_fixtures.NeutronFixture(self))
+        else:
+            self.network = self.start_service('network',
+                                              manager=CONF.network_manager)
         self.scheduler = self._setup_scheduler_service()
 
         self.compute = self._setup_compute_service()
@@ -135,11 +140,14 @@ class _IntegratedTestBase(test.TestCase):
     def get_invalid_image(self):
         return uuids.fake
 
-    def _build_minimal_create_server_request(self):
+    def _build_minimal_create_server_request(self, image_uuid=None):
         server = {}
 
-        # We now have a valid imageId
-        server[self._image_ref_parameter] = self.api.get_images()[0]['id']
+        # NOTE(takashin): In API version 2.36, image APIs were deprecated.
+        # In API version 2.36 or greater, self.api.get_images() returns
+        # a 404 error. In that case, 'image_uuid' should be specified.
+        server[self._image_ref_parameter] = (image_uuid or
+                                             self.api.get_images()[0]['id'])
 
         # Set a valid flavorId
         flavor = self.api.get_flavors()[0]
@@ -181,13 +189,16 @@ class _IntegratedTestBase(test.TestCase):
             self.api_fixture.admin_api.post_extra_spec(flv_id, spec)
         return flv_id
 
-    def _build_server(self, flavor_id):
+    def _build_server(self, flavor_id, image=None):
         server = {}
-        image = self.api.get_images()[0]
-        LOG.debug("Image: %s", image)
+        if image is None:
+            image = self.api.get_images()[0]
+            LOG.debug("Image: %s", image)
 
-        # We now have a valid imageId
-        server[self._image_ref_parameter] = image['id']
+            # We now have a valid imageId
+            server[self._image_ref_parameter] = image['id']
+        else:
+            server[self._image_ref_parameter] = image
 
         # Set a valid flavorId
         flavor = self.api.get_flavor(flavor_id)
@@ -201,7 +212,7 @@ class _IntegratedTestBase(test.TestCase):
         return server
 
     def _check_api_endpoint(self, endpoint, expected_middleware):
-        app = self.api_fixture.osapi.app.get((None, '/v2'))
+        app = self.api_fixture.app().get((None, '/v2'))
 
         while getattr(app, 'application', False):
             for middleware in expected_middleware:
@@ -217,21 +228,27 @@ class _IntegratedTestBase(test.TestCase):
 
 
 class InstanceHelperMixin(object):
-    def _wait_for_state_change(self, admin_api, server, expected_status,
-                               max_retries=10):
+    def _wait_for_server_parameter(self, admin_api, server, expected_params,
+                                   max_retries=10):
         retry_count = 0
         while True:
             server = admin_api.get_server(server['id'])
-            if server['status'] == expected_status:
+            if all([server[attr] == expected_params[attr]
+                    for attr in expected_params]):
                 break
             retry_count += 1
             if retry_count == max_retries:
                 self.fail('Wait for state change failed, '
-                          'expected_status=%s, actual_status=%s'
-                          % (expected_status, server['status']))
+                          'expected_params=%s, server=%s'
+                          % (expected_params, server))
             time.sleep(0.5)
 
         return server
+
+    def _wait_for_state_change(self, admin_api, server, expected_status,
+                               max_retries=10):
+        return self._wait_for_server_parameter(
+            admin_api, server, {'status': expected_status}, max_retries)
 
     def _build_minimal_create_server_request(self, api, name, image_uuid=None,
                                              flavor_id=None, networks=None):
@@ -248,3 +265,74 @@ class InstanceHelperMixin(object):
         if networks is not None:
             server['networks'] = networks
         return server
+
+    def _wait_until_deleted(self, server):
+        initially_in_error = (server['status'] == 'ERROR')
+        try:
+            for i in range(40):
+                server = self.api.get_server(server['id'])
+                if not initially_in_error and server['status'] == 'ERROR':
+                    self.fail('Server went to error state instead of'
+                              'disappearing.')
+                time.sleep(0.5)
+
+            self.fail('Server failed to delete.')
+        except api_client.OpenStackApiNotFoundException:
+            return
+
+    def _wait_for_action_fail_completion(
+            self, server, expected_action, event_name, api=None):
+        """Polls instance action events for the given instance, action and
+        action event name until it finds the action event with an error
+        result.
+        """
+        if api is None:
+            api = self.api
+        completion_event = None
+        for attempt in range(10):
+            actions = api.get_instance_actions(server['id'])
+            # Look for the migrate action.
+            for action in actions:
+                if action['action'] == expected_action:
+                    events = (
+                        api.api_get(
+                            '/servers/%s/os-instance-actions/%s' %
+                            (server['id'], action['request_id'])
+                        ).body['instanceAction']['events'])
+                    # Look for the action event being in error state.
+                    for event in events:
+                        if (event['event'] == event_name and
+                                event['result'] is not None and
+                                event['result'].lower() == 'error'):
+                            completion_event = event
+                            # Break out of the events loop.
+                            break
+                    if completion_event:
+                        # Break out of the actions loop.
+                        break
+            # We didn't find the completion event yet, so wait a bit.
+            time.sleep(0.5)
+
+        if completion_event is None:
+            self.fail('Timed out waiting for %s failure event. Current '
+                      'instance actions: %s' % (event_name, actions))
+
+    def _wait_for_migration_status(self, server, expected_statuses):
+        """Waits for a migration record with the given statuses to be found
+        for the given server, else the test fails. The migration record, if
+        found, is returned.
+        """
+        api = getattr(self, 'admin_api', None)
+        if api is None:
+            api = self.api
+
+        statuses = [status.lower() for status in expected_statuses]
+        for attempt in range(10):
+            migrations = api.api_get('/os-migrations').body['migrations']
+            for migration in migrations:
+                if (migration['instance_uuid'] == server['id'] and
+                        migration['status'].lower() in statuses):
+                    return migration
+            time.sleep(0.5)
+        self.fail('Timed out waiting for migration with status "%s" for '
+                  'instance: %s' % (expected_statuses, server['id']))

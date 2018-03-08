@@ -75,14 +75,6 @@ asse_true_false_with_in_or_not_in_spaces = re.compile(r"assert(True|False)"
                     r"[\[|'|\"](, .*)?\)")
 asse_raises_regexp = re.compile(r"assertRaisesRegexp\(")
 conf_attribute_set_re = re.compile(r"CONF\.[a-z0-9_.]+\s*=\s*\w")
-log_translation = re.compile(
-    r"(.)*LOG\.(audit|error|critical)\(\s*('|\")")
-log_translation_info = re.compile(
-    r"(.)*LOG\.(info)\(\s*(_\(|'|\")")
-log_translation_exception = re.compile(
-    r"(.)*LOG\.(exception)\(\s*(_\(|'|\")")
-log_translation_LW = re.compile(
-    r"(.)*LOG\.(warning|warn)\(\s*(_\(|'|\")")
 translated_log = re.compile(
     r"(.)*LOG\.(audit|error|info|critical|exception)"
     "\(\s*_\(\s*('|\")")
@@ -105,6 +97,8 @@ doubled_words_re = re.compile(
 log_remove_context = re.compile(
     r"(.)*LOG\.(.*)\(.*(context=[_a-zA-Z0-9].*)+.*\)")
 return_not_followed_by_space = re.compile(r"^\s*return(?:\(|{|\"|'|#).*$")
+uuid4_re = re.compile(r"uuid4\(\)($|[^\.]|\.hex)")
+redundant_import_alias_re = re.compile(r"import (?:.*\.)?(.+) as \1$")
 
 
 class BaseASTChecker(ast.NodeVisitor):
@@ -611,7 +605,7 @@ def check_config_option_in_central_place(logical_line, filename):
     conf_exceptions = [
         # CLI opts are allowed to be outside of nova/conf directory
         'nova/cmd/manage.py',
-        'nova/cmd/policy_check.py',
+        'nova/cmd/policy.py',
         'nova/cmd/status.py',
         # config options should not be declared in tests, but there is
         # another checker for it (N320)
@@ -787,10 +781,7 @@ def check_uuid4(logical_line):
     msg = ("N357: Use oslo_utils.uuidutils or uuidsentinel(in case of test "
            "cases) to generate UUID instead of uuid4().")
 
-    if "uuid4()." in logical_line:
-        return
-
-    if "uuid4()" in logical_line:
+    if uuid4_re.search(logical_line):
         yield (0, msg)
 
 
@@ -809,6 +800,21 @@ def return_followed_by_space(logical_line):
     if return_not_followed_by_space.match(logical_line):
         yield (0,
                "N357: Return keyword should be followed by a space.")
+
+
+def no_redundant_import_alias(logical_line):
+    """Check for redundant import aliases.
+
+    Imports should not be in the forms below.
+
+    from x import y as y
+    import x as x
+    import x.y as y
+
+    N359
+    """
+    if re.search(redundant_import_alias_re, logical_line):
+        yield (0, "N359: Import alias should not be redundant.")
 
 
 def factory(register):
@@ -852,3 +858,4 @@ def factory(register):
     register(no_assert_true_false_is_not)
     register(check_uuid4)
     register(return_followed_by_space)
+    register(no_redundant_import_alias)

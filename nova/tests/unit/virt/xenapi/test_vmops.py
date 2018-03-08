@@ -13,7 +13,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import base64
 import uuid
+import zlib
 
 try:
     import xmlrpclib
@@ -22,7 +24,7 @@ except ImportError:
 
 from eventlet import greenthread
 import mock
-from os_xenapi.client import session as xenapi_session
+from os_xenapi.client import host_xenstore
 import six
 
 from nova.compute import power_state
@@ -55,8 +57,8 @@ class VMOpsTestBase(stubs.XenAPITestBaseNoDB):
 
     def _setup_mock_vmops(self, product_brand=None, product_version=None):
         stubs.stubout_session(self.stubs, xenapi_fake.SessionBase)
-        self._session = xenapi_session.XenAPISession('test_url', 'root',
-                                                     'test_pass')
+        self._session = xenapi_fake.SessionBase(
+            'http://localhost', 'root', 'test_pass')
         self.vmops = vmops.VMOps(self._session, fake.FakeVirtAPI())
 
     def create_vm(self, name, state="Running"):
@@ -234,8 +236,15 @@ class InjectAutoDiskConfigTestCase(VMOpsTestBase):
 
 
 class GetConsoleOutputTestCase(VMOpsTestBase):
-    def test_get_console_output_works(self):
+    def _mock_console_log(self, session, domid):
+        if domid == 0:
+            raise session.XenAPI.Failure('No console')
+        return base64.b64encode(zlib.compress(six.b('dom_id: %s' % domid)))
+
+    @mock.patch.object(vmops.vm_management, 'get_console_log')
+    def test_get_console_output_works(self, mock_console_log):
         ctxt = context.RequestContext('user', 'project')
+        mock_console_log.side_effect = self._mock_console_log
         instance = fake_instance.fake_instance_obj(ctxt)
         with mock.patch.object(self.vmops, '_get_last_dom_id',
                                return_value=42) as mock_last_dom:
@@ -243,7 +252,9 @@ class GetConsoleOutputTestCase(VMOpsTestBase):
                              self.vmops.get_console_output(instance))
             mock_last_dom.assert_called_once_with(instance, check_rescue=True)
 
-    def test_get_console_output_not_available(self):
+    @mock.patch.object(vmops.vm_management, 'get_console_log')
+    def test_get_console_output_not_available(self, mock_console_log):
+        mock_console_log.side_effect = self._mock_console_log
         ctxt = context.RequestContext('user', 'project')
         instance = fake_instance.fake_instance_obj(ctxt)
         # dom_id=0 used to trigger exception in fake XenAPI
@@ -301,6 +312,8 @@ class SpawnTestCase(VMOpsTestBase):
         self.mox.StubOutWithMock(self.vmops, '_create_vm_record')
         self.mox.StubOutWithMock(self.vmops, '_destroy')
         self.mox.StubOutWithMock(self.vmops, '_attach_disks')
+        self.mox.StubOutWithMock(self.vmops, '_save_device_metadata')
+        self.mox.StubOutWithMock(self.vmops, '_prepare_disk_metadata')
         self.mox.StubOutWithMock(pci_manager, 'get_instance_pci_devs')
         self.mox.StubOutWithMock(vm_utils, 'set_other_config_pci')
         self.mox.StubOutWithMock(self.vmops, '_attach_orig_disks')
@@ -323,14 +336,24 @@ class SpawnTestCase(VMOpsTestBase):
                                  'apply_instance_filter')
         self.mox.StubOutWithMock(self.vmops, '_update_last_dom_id')
         self.mox.StubOutWithMock(self.vmops._session, 'call_xenapi')
+        self.mox.StubOutWithMock(self.vmops, '_attach_vgpu')
+
+    @staticmethod
+    def _new_instance(obj):
+        class _Instance(dict):
+            __getattr__ = dict.__getitem__
+            __setattr__ = dict.__setitem__
+        return _Instance(**obj)
 
     def _test_spawn(self, name_label_param=None, block_device_info_param=None,
                     rescue=False, include_root_vdi=True, throw_exception=None,
                     attach_pci_dev=False, neutron_exception=False,
-                    network_info=None):
+                    network_info=None, vgpu_info=None):
         self._stub_out_common()
 
-        instance = {"name": "dummy", "uuid": "fake_uuid"}
+        instance = self._new_instance({"name": "dummy", "uuid": "fake_uuid",
+                                    "device_metadata": None})
+
         name_label = name_label_param
         if name_label is None:
             name_label = "dummy"
@@ -382,6 +405,7 @@ class SpawnTestCase(VMOpsTestBase):
         step += 1
         self.vmops._update_instance_progress(context, instance, step, steps)
 
+        self.vmops._save_device_metadata(context, instance, block_device_info)
         self.vmops._attach_disks(context, instance, image_meta, vm_ref,
                             name_label, vdis, di_type, network_info, rescue,
                             admin_password, injected_files)
@@ -409,6 +433,9 @@ class SpawnTestCase(VMOpsTestBase):
                                           "0/0000:00:00.0")
         else:
             pci_manager.get_instance_pci_devs(instance).AndReturn([])
+
+        self.vmops._attach_vgpu(vm_ref, vgpu_info, instance)
+
         step += 1
         self.vmops._update_instance_progress(context, instance, step, steps)
 
@@ -478,8 +505,8 @@ class SpawnTestCase(VMOpsTestBase):
 
         self.mox.ReplayAll()
         self.vmops.spawn(context, instance, image_meta, injected_files,
-                         admin_password, network_info,
-                         block_device_info_param, name_label_param, rescue)
+                         admin_password, network_info, block_device_info_param,
+                         vgpu_info, name_label_param, rescue)
 
     def test_spawn(self):
         self._test_spawn()
@@ -491,6 +518,11 @@ class SpawnTestCase(VMOpsTestBase):
 
     def test_spawn_with_pci_available_on_the_host(self):
         self._test_spawn(attach_pci_dev=True)
+
+    def test_spawn_with_vgpu(self):
+        vgpu_info = {'grp_uuid': uuids.gpu_group_1,
+                     'vgpu_type_uuid': uuids.vgpu_type_1}
+        self._test_spawn(vgpu_info=vgpu_info)
 
     def test_spawn_performs_rollback_and_throws_exception(self):
         self.assertRaises(test.TestingException, self._test_spawn,
@@ -507,13 +539,133 @@ class SpawnTestCase(VMOpsTestBase):
                                  '_neutron_failed_callback')
         self._test_spawn(network_info=network_info)
 
+    @staticmethod
+    def _dev_mock(obj):
+        dev = mock.MagicMock(**obj)
+        dev.__contains__.side_effect = (
+            lambda attr: getattr(dev, attr, None) is not None)
+        return dev
+
+    @mock.patch.object(objects, 'XenDeviceBus')
+    @mock.patch.object(objects, 'IDEDeviceBus')
+    @mock.patch.object(objects, 'DiskMetadata')
+    def test_prepare_disk_metadata(self, mock_DiskMetadata,
+        mock_IDEDeviceBus, mock_XenDeviceBus):
+        mock_IDEDeviceBus.side_effect = \
+            lambda **kw: \
+                self._dev_mock({"address": kw.get("address"), "bus": "ide"})
+        mock_XenDeviceBus.side_effect = \
+            lambda **kw: \
+                self._dev_mock({"address": kw.get("address"), "bus": "xen"})
+        mock_DiskMetadata.side_effect = \
+            lambda **kw: self._dev_mock(dict(**kw))
+
+        bdm = self._dev_mock({"device_name": "/dev/xvda", "tag": "disk_a"})
+        disk_metadata = self.vmops._prepare_disk_metadata(bdm)
+
+        self.assertEqual(disk_metadata[0].tags, ["disk_a"])
+        self.assertEqual(disk_metadata[0].bus.bus, "ide")
+        self.assertEqual(disk_metadata[0].bus.address, "0:0")
+        self.assertEqual(disk_metadata[1].tags, ["disk_a"])
+        self.assertEqual(disk_metadata[1].bus.bus, "xen")
+        self.assertEqual(disk_metadata[1].bus.address, "000000")
+        self.assertEqual(disk_metadata[2].tags, ["disk_a"])
+        self.assertEqual(disk_metadata[2].bus.bus, "xen")
+        self.assertEqual(disk_metadata[2].bus.address, "51712")
+        self.assertEqual(disk_metadata[3].tags, ["disk_a"])
+        self.assertEqual(disk_metadata[3].bus.bus, "xen")
+        self.assertEqual(disk_metadata[3].bus.address, "768")
+
+        bdm = self._dev_mock({"device_name": "/dev/xvdc", "tag": "disk_c"})
+        disk_metadata = self.vmops._prepare_disk_metadata(bdm)
+
+        self.assertEqual(disk_metadata[0].tags, ["disk_c"])
+        self.assertEqual(disk_metadata[0].bus.bus, "ide")
+        self.assertEqual(disk_metadata[0].bus.address, "1:0")
+        self.assertEqual(disk_metadata[1].tags, ["disk_c"])
+        self.assertEqual(disk_metadata[1].bus.bus, "xen")
+        self.assertEqual(disk_metadata[1].bus.address, "000200")
+        self.assertEqual(disk_metadata[2].tags, ["disk_c"])
+        self.assertEqual(disk_metadata[2].bus.bus, "xen")
+        self.assertEqual(disk_metadata[2].bus.address, "51744")
+        self.assertEqual(disk_metadata[3].tags, ["disk_c"])
+        self.assertEqual(disk_metadata[3].bus.bus, "xen")
+        self.assertEqual(disk_metadata[3].bus.address, "5632")
+
+        bdm = self._dev_mock({"device_name": "/dev/xvde", "tag": "disk_e"})
+        disk_metadata = self.vmops._prepare_disk_metadata(bdm)
+
+        self.assertEqual(disk_metadata[0].tags, ["disk_e"])
+        self.assertEqual(disk_metadata[0].bus.bus, "xen")
+        self.assertEqual(disk_metadata[0].bus.address, "000400")
+        self.assertEqual(disk_metadata[1].tags, ["disk_e"])
+        self.assertEqual(disk_metadata[1].bus.bus, "xen")
+        self.assertEqual(disk_metadata[1].bus.address, "51776")
+
+    @mock.patch.object(objects.VirtualInterfaceList, 'get_by_instance_uuid')
+    @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
+    @mock.patch.object(objects, 'NetworkInterfaceMetadata')
+    @mock.patch.object(objects, 'InstanceDeviceMetadata')
+    @mock.patch.object(objects, 'PCIDeviceBus')
+    @mock.patch.object(vmops.VMOps, '_prepare_disk_metadata')
+    def test_save_device_metadata(self, mock_prepare_disk_metadata,
+        mock_PCIDeviceBus, mock_InstanceDeviceMetadata,
+        mock_NetworkInterfaceMetadata, mock_get_bdms, mock_get_vifs):
+        context = {}
+        instance = {"uuid": "fake_uuid"}
+        vif = self._dev_mock({"address": "fake_address", "tag": "vif_tag"})
+        bdm = self._dev_mock({"device_name": "/dev/xvdx", "tag": "bdm_tag"})
+        block_device_info = {'block_device_mapping': [bdm]}
+
+        mock_get_vifs.return_value = [vif]
+        mock_get_bdms.return_value = [bdm]
+        mock_InstanceDeviceMetadata.side_effect = \
+            lambda **kw: {"devices": kw.get("devices")}
+        mock_NetworkInterfaceMetadata.return_value = mock.sentinel.vif_metadata
+        mock_prepare_disk_metadata.return_value = [mock.sentinel.bdm_metadata]
+
+        dev_meta = self.vmops._save_device_metadata(context, instance,
+            block_device_info)
+
+        mock_get_vifs.assert_called_once_with(context, instance["uuid"])
+
+        mock_NetworkInterfaceMetadata.assert_called_once_with(mac=vif.address,
+                                            bus=mock_PCIDeviceBus.return_value,
+                                            tags=[vif.tag])
+        mock_prepare_disk_metadata.assert_called_once_with(bdm)
+        self.assertEqual(dev_meta["devices"],
+            [mock.sentinel.vif_metadata, mock.sentinel.bdm_metadata])
+
+    @mock.patch.object(objects.VirtualInterfaceList, 'get_by_instance_uuid')
+    @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
+    @mock.patch.object(vmops.VMOps, '_prepare_disk_metadata')
+    def test_save_device_metadata_no_vifs_no_bdms(
+            self, mock_prepare_disk_metadata, mock_get_bdms, mock_get_vifs):
+        """Tests that we don't save any device metadata when there are no
+        VIFs or BDMs.
+        """
+        ctxt = context.RequestContext('fake-user', 'fake-project')
+        instance = objects.Instance(uuid=uuids.instance_uuid)
+        block_device_info = {'block_device_mapping': []}
+
+        mock_get_vifs.return_value = objects.VirtualInterfaceList()
+
+        dev_meta = self.vmops._save_device_metadata(
+            ctxt, instance, block_device_info)
+        self.assertIsNone(dev_meta)
+
+        mock_get_vifs.assert_called_once_with(ctxt, uuids.instance_uuid)
+        mock_get_bdms.assert_not_called()
+        mock_prepare_disk_metadata.assert_not_called()
+
     def test_spawn_with_neutron_exception(self):
         self.mox.StubOutWithMock(self.vmops, '_get_neutron_events')
         self.assertRaises(exception.VirtualInterfaceCreateException,
                           self._test_spawn, neutron_exception=True)
 
     def _test_finish_migration(self, power_on=True, resize_instance=True,
-                               throw_exception=None, booted_from_volume=False):
+                               throw_exception=None, booted_from_volume=False,
+                               vgpu_info=None):
         self._stub_out_common()
         self.mox.StubOutWithMock(volumeops.VolumeOps, "connect_volume")
         self.mox.StubOutWithMock(vm_utils, "import_all_migrated_disks")
@@ -522,8 +674,8 @@ class SpawnTestCase(VMOpsTestBase):
         context = "context"
         migration = {}
         name_label = "dummy"
-        instance = {"name": name_label, "uuid": "fake_uuid",
-                "root_device_name": "/dev/xvda"}
+        instance = self._new_instance({"name": name_label, "uuid": "fake_uuid",
+                "root_device_name": "/dev/xvda", "device_metadata": None})
         disk_info = "disk_info"
         network_info = "net_info"
         image_meta = objects.ImageMeta.from_dict({"id": uuids.image_id})
@@ -565,11 +717,14 @@ class SpawnTestCase(VMOpsTestBase):
 
         if resize_instance:
             self.vmops._resize_up_vdis(instance, vdis)
+        self.vmops._save_device_metadata(context, instance, block_device_info)
         self.vmops._attach_disks(context, instance, image_meta, vm_ref,
                             name_label, vdis, di_type, network_info, False,
                             None, None)
         self.vmops._attach_mapped_block_devices(instance, block_device_info)
         pci_manager.get_instance_pci_devs(instance).AndReturn([])
+
+        self.vmops._attach_vgpu(vm_ref, vgpu_info, instance)
 
         self.vmops._inject_instance_metadata(instance, vm_ref)
         self.vmops._inject_auto_disk_config(instance, vm_ref)
@@ -1307,35 +1462,43 @@ class XenstoreCallsTestCase(VMOpsTestBase):
     from vmops.
     """
 
-    @mock.patch.object(vmops.VMOps, '_make_plugin_call')
-    def test_read_from_xenstore(self, fake_xapi_call):
-        fake_xapi_call.return_value = "fake_xapi_return"
+    @mock.patch.object(vmops.VMOps, '_get_dom_id')
+    @mock.patch.object(host_xenstore, 'read_record')
+    def test_read_from_xenstore(self, mock_read_record, mock_dom_id):
+        mock_read_record.return_value = "fake_xapi_return"
+        mock_dom_id.return_value = "fake_dom_id"
         fake_instance = {"name": "fake_instance"}
         path = "attr/PVAddons/MajorVersion"
         self.assertEqual("fake_xapi_return",
                          self.vmops._read_from_xenstore(fake_instance, path,
                                                         vm_ref="vm_ref"))
+        mock_dom_id.assert_called_once_with(fake_instance, "vm_ref")
 
-    @mock.patch.object(vmops.VMOps, '_make_plugin_call')
-    def test_read_from_xenstore_ignore_missing_path(self, fake_xapi_call):
+    @mock.patch.object(vmops.VMOps, '_get_dom_id')
+    @mock.patch.object(host_xenstore, 'read_record')
+    def test_read_from_xenstore_ignore_missing_path(self, mock_read_record,
+                                                    mock_dom_id):
+        mock_read_record.return_value = "fake_xapi_return"
+        mock_dom_id.return_value = "fake_dom_id"
         fake_instance = {"name": "fake_instance"}
         path = "attr/PVAddons/MajorVersion"
         self.vmops._read_from_xenstore(fake_instance, path, vm_ref="vm_ref")
-        fake_xapi_call.assert_called_once_with('xenstore.py', 'read_record',
-                                               fake_instance, vm_ref="vm_ref",
-                                               path=path,
-                                               ignore_missing_path='True')
+        mock_read_record.assert_called_once_with(
+            self._session, "fake_dom_id", path, ignore_missing_path=True)
 
-    @mock.patch.object(vmops.VMOps, '_make_plugin_call')
-    def test_read_from_xenstore_missing_path(self, fake_xapi_call):
+    @mock.patch.object(vmops.VMOps, '_get_dom_id')
+    @mock.patch.object(host_xenstore, 'read_record')
+    def test_read_from_xenstore_missing_path(self, mock_read_record,
+                                             mock_dom_id):
+        mock_read_record.return_value = "fake_xapi_return"
+        mock_dom_id.return_value = "fake_dom_id"
         fake_instance = {"name": "fake_instance"}
         path = "attr/PVAddons/MajorVersion"
         self.vmops._read_from_xenstore(fake_instance, path, vm_ref="vm_ref",
                                        ignore_missing_path=False)
-        fake_xapi_call.assert_called_once_with('xenstore.py', 'read_record',
-                                               fake_instance, vm_ref="vm_ref",
-                                               path=path,
-                                               ignore_missing_path='False')
+        mock_read_record.assert_called_once_with(self._session, "fake_dom_id",
+                                                 path,
+                                                 ignore_missing_path=False)
 
 
 class LiveMigrateTestCase(VMOpsTestBase):
@@ -1636,8 +1799,8 @@ class LiveMigrateHelperTestCase(VMOpsTestBase):
                                'get_other_config') as mock_other_config, \
              mock.patch.object(self._session.VM,
                               'get_VIFs') as mock_get_vif:
-            mock_other_config.side_effect = [{'nicira-iface-id': 'vif_id_a'},
-                                             {'nicira-iface-id': 'vif_id_b'}]
+            mock_other_config.side_effect = [{'neutron-port-id': 'vif_id_a'},
+                                             {'neutron-port-id': 'vif_id_b'}]
             mock_get_vif.return_value = ['vif_ref1', 'vif_ref2']
             vif_uuid_map = {'vif_id_b': 'dest_net_ref2',
                             'vif_id_a': 'dest_net_ref1'}
@@ -1652,8 +1815,8 @@ class LiveMigrateHelperTestCase(VMOpsTestBase):
                                'get_other_config') as mock_other_config, \
              mock.patch.object(self._session.VM,
                               'get_VIFs') as mock_get_vif:
-            mock_other_config.side_effect = [{'nicira-iface-id': 'vif_id_a'},
-                                             {'nicira-iface-id': 'vif_id_b'}]
+            mock_other_config.side_effect = [{'neutron-port-id': 'vif_id_a'},
+                                             {'neutron-port-id': 'vif_id_b'}]
             mock_get_vif.return_value = ['vif_ref1']
             vif_uuid_map = {'': 'default_net_ref'}
             vif_map = self.vmops._generate_vif_network_map('vm_ref',
@@ -1666,8 +1829,8 @@ class LiveMigrateHelperTestCase(VMOpsTestBase):
                                'get_other_config') as mock_other_config, \
              mock.patch.object(self._session.VM,
                               'get_VIFs') as mock_get_vif:
-            mock_other_config.side_effect = [{'nicira-iface-id': 'vif_id_a'},
-                                             {'nicira-iface-id': 'vif_id_b'}]
+            mock_other_config.side_effect = [{'neutron-port-id': 'vif_id_a'},
+                                             {'neutron-port-id': 'vif_id_b'}]
             mock_get_vif.return_value = ['vif_ref1', 'vif_ref2']
             vif_uuid_map = {'vif_id_c': 'dest_net_ref2',
                             'vif_id_d': 'dest_net_ref1'}

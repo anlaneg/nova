@@ -18,9 +18,9 @@ import datetime
 
 import webob.exc
 
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova import compute
+from nova.compute import rpcapi as compute_rpcapi
 import nova.conf
 from nova.i18n import _
 from nova.policies import instance_usage_audit_log as iual_policies
@@ -33,14 +33,14 @@ class InstanceUsageAuditLogController(wsgi.Controller):
     def __init__(self):
         self.host_api = compute.HostAPI()
 
-    @extensions.expected_errors(())
+    @wsgi.expected_errors(())
     def index(self, req):
         context = req.environ['nova.context']
         context.can(iual_policies.BASE_POLICY_NAME)
         task_log = self._get_audit_task_logs(context)
         return {'instance_usage_audit_logs': task_log}
 
-    @extensions.expected_errors(400)
+    @wsgi.expected_errors(400)
     def show(self, req, id):
         context = req.environ['nova.context']
         context.can(iual_policies.BASE_POLICY_NAME)
@@ -72,7 +72,7 @@ class InstanceUsageAuditLogController(wsgi.Controller):
                                                    begin, end)
         # We do this in this way to include disabled compute services,
         # which can have instances on them. (mdragon)
-        filters = {'topic': CONF.compute_topic}
+        filters = {'topic': compute_rpcapi.RPC_TOPIC}
         services = self.host_api.service_get_all(context, filters=filters)
         hosts = set(serv['host'] for serv in services)
         seen_hosts = set()

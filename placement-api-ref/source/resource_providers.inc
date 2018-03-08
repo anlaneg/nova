@@ -6,7 +6,7 @@ Resource providers are entities which provide consumable inventory of one or
 more classes of resource (such as disk or memory). They can be listed (with
 filters), created, updated and deleted.
 
-List Resource Providers
+List resource providers
 =======================
 
 .. rest_method:: GET /resource_providers
@@ -14,6 +14,12 @@ List Resource Providers
 List an optionally filtered collection of resource providers.
 
 Normal Response Codes: 200
+
+Error response codes: badRequest(400)
+
+A `400 BadRequest` response code will be returned
+if a resource class specified in ``resources`` request parameter
+does not exist.
 
 Request
 -------
@@ -24,10 +30,12 @@ of all filters are merged with a boolean `AND`.
 
 .. rest_parameters:: parameters.yaml
 
-  - resources: resources_query
-  - member_of: member_of
-  - uuid: resource_provider_uuid_query
   - name: resource_provider_name_query
+  - uuid: resource_provider_uuid_query
+  - member_of: member_of
+  - resources: resources_query
+  - required: resource_provider_required_query
+  - in_tree: resource_provider_tree_query
 
 Response
 --------
@@ -39,10 +47,50 @@ Response
   - uuid: resource_provider_uuid
   - links: resource_provider_links
   - name: resource_provider_name
-
+  - parent_provider_uuid: resource_provider_parent_provider_uuid_required
+  - root_provider_uuid: resource_provider_root_provider_uuid_required
 
 Response Example
 ----------------
 
-.. literalinclude:: get-resource_providers.json
+.. literalinclude:: ./samples/resource_providers/get-resource_providers.json
    :language: javascript
+
+Create resource provider
+========================
+
+.. rest_method:: POST /resource_providers
+
+Create a new resource provider.
+
+Normal Response Codes: 201
+
+Error response codes: conflict(409)
+
+A `409 Conflict` response code will
+be returned if another resource provider exists with the provided name
+or uuid.
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+  - name: resource_provider_name
+  - uuid: resource_provider_uuid_opt
+  - parent_provider_uuid: resource_provider_parent_provider_uuid
+
+Request example
+---------------
+
+.. literalinclude:: ./samples/resource_providers/create-resource_providers-request.json
+   :language: javascript
+
+Response
+--------
+
+.. rest_parameters:: parameters.yaml
+
+  - Location: location
+
+No body content is returned on a successful POST.

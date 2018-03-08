@@ -273,6 +273,13 @@ class ComputeTaskAPI(object):
     1.14 - Added request_spec to unshelve_instance()
     1.15 - Added live_migrate_instance
     1.16 - Added schedule_and_build_instances
+    1.17 - Added tags to schedule_and_build_instances()
+    1.18 - Added request_spec to build_instances().
+    1.19 - build_instances() now gets a 'host_lists' parameter that represents
+           potential alternate hosts for retries within a cell for each
+           instance.
+    1.20 - migrate_server() now gets a 'host_list' parameter that represents
+           potential alternate hosts for retries within a cell.
     """
 
     def __init__(self):
@@ -294,9 +301,12 @@ class ComputeTaskAPI(object):
         cctxt = self.client.prepare(version=version)
         cctxt.cast(context, 'live_migrate_instance', **kw)
 
+    # TODO(melwitt): Remove the reservations parameter in version 2.0 of the
+    # RPC API.
     def migrate_server(self, context, instance, scheduler_hint, live, rebuild,
                   flavor, block_migration, disk_over_commit,
-                  reservations=None, clean_shutdown=True, request_spec=None):
+                  reservations=None, clean_shutdown=True, request_spec=None,
+                  host_list=None):
         kw = {'instance': instance, 'scheduler_hint': scheduler_hint,
               'live': live, 'rebuild': rebuild, 'flavor': flavor,
               'block_migration': block_migration,
@@ -304,8 +314,12 @@ class ComputeTaskAPI(object):
               'reservations': reservations,
               'clean_shutdown': clean_shutdown,
               'request_spec': request_spec,
+              'host_list': host_list,
               }
-        version = '1.13'
+        version = '1.20'
+        if not self.client.can_send_version(version):
+            del kw['host_list']
+            version = '1.13'
         if not self.client.can_send_version(version):
             del kw['request_spec']
             version = '1.11'
@@ -324,49 +338,65 @@ class ComputeTaskAPI(object):
 
     def build_instances(self, context, instances, image, filter_properties,
             admin_password, injected_files, requested_networks,
-            security_groups, block_device_mapping, legacy_bdm=True):
+            security_groups, block_device_mapping, legacy_bdm=True,
+            request_spec=None, host_lists=None):
         image_p = jsonutils.to_primitive(image)
-        version = '1.10'
+        kwargs = {"instances": instances, "image": image_p,
+                  "filter_properties": filter_properties,
+                  "admin_password": admin_password,
+                  "injected_files": injected_files,
+                  "requested_networks": requested_networks,
+                  "security_groups": security_groups,
+                  "request_spec": request_spec,
+                  "host_lists": host_lists}
+        version = '1.19'
+        if not self.client.can_send_version(version):
+            version = '1.18'
+            kwargs.pop("host_lists")
+        if not self.client.can_send_version(version):
+            version = '1.10'
+            kwargs.pop("request_spec")
         if not self.client.can_send_version(version):
             version = '1.9'
             if 'instance_type' in filter_properties:
                 flavor = filter_properties['instance_type']
                 flavor_p = objects_base.obj_to_primitive(flavor)
-                filter_properties = dict(filter_properties,
-                                         instance_type=flavor_p)
-        kw = {'instances': instances, 'image': image_p,
-               'filter_properties': filter_properties,
-               'admin_password': admin_password,
-               'injected_files': injected_files,
-               'requested_networks': requested_networks,
-               'security_groups': security_groups}
+                kwargs["filter_properties"] = dict(filter_properties,
+                                                   instance_type=flavor_p)
         if not self.client.can_send_version(version):
             version = '1.8'
-            kw['requested_networks'] = kw['requested_networks'].as_tuples()
+            nets = kwargs['requested_networks'].as_tuples()
+            kwargs['requested_networks'] = nets
         if not self.client.can_send_version('1.7'):
             version = '1.5'
             bdm_p = objects_base.obj_to_primitive(block_device_mapping)
-            kw.update({'block_device_mapping': bdm_p,
-                       'legacy_bdm': legacy_bdm})
+            kwargs.update({'block_device_mapping': bdm_p,
+                           'legacy_bdm': legacy_bdm})
 
         #发送rpc消息，调用build_instances
         cctxt = self.client.prepare(version=version)
-        cctxt.cast(context, 'build_instances', **kw)
+        cctxt.cast(context, 'build_instances', **kwargs)
         #这个消息一传给中介，则本函数返回。
 
     def schedule_and_build_instances(self, context, build_requests,
-                                      request_specs,
-                                      image, admin_password, injected_files,
-                                      requested_networks,
-                                      block_device_mapping):
-        version = '1.16'
+                                     request_specs,
+                                     image, admin_password, injected_files,
+                                     requested_networks,
+                                     block_device_mapping,
+                                     tags=None):
+        version = '1.17'
         kw = {'build_requests': build_requests,
               'request_specs': request_specs,
               'image': jsonutils.to_primitive(image),
               'admin_password': admin_password,
               'injected_files': injected_files,
               'requested_networks': requested_networks,
-              'block_device_mapping': block_device_mapping}
+              'block_device_mapping': block_device_mapping,
+              'tags': tags}
+
+        if not self.client.can_send_version(version):
+            version = '1.16'
+            del kw['tags']
 
         cctxt = self.client.prepare(version=version)
         cctxt.cast(context, 'schedule_and_build_instances', **kw)

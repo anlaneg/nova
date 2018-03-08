@@ -13,10 +13,15 @@
 #   under the License.
 
 """The Extended Volumes API extension."""
+from oslo_log import log as logging
+
 from nova.api.openstack import api_version_request
 from nova.api.openstack import wsgi
+from nova import context
 from nova import objects
 from nova.policies import extended_volumes as ev_policies
+
+LOG = logging.getLogger(__name__)
 
 
 class ExtendedVolumesController(wsgi.Controller):
@@ -45,14 +50,41 @@ class ExtendedVolumesController(wsgi.Controller):
             instance_bdms = self._get_instance_bdms(bdms, server)
             self._extend_server(context, server, req, instance_bdms)
 
+    @staticmethod
+    def _get_instance_bdms_in_multiple_cells(ctxt, servers):
+        instance_uuids = [server['id'] for server in servers]
+        inst_maps = objects.InstanceMappingList.get_by_instance_uuids(
+                        ctxt, instance_uuids)
+
+        cell_mappings = {}
+        for inst_map in inst_maps:
+            if (inst_map.cell_mapping is not None and
+                    inst_map.cell_mapping.uuid not in cell_mappings):
+                cell_mappings.update(
+                    {inst_map.cell_mapping.uuid: inst_map.cell_mapping})
+
+        bdms = {}
+        results = context.scatter_gather_cells(
+                        ctxt, cell_mappings.values(), 60,
+                        objects.BlockDeviceMappingList.bdms_by_instance_uuid,
+                        instance_uuids)
+        for cell_uuid, result in results.items():
+            if result is context.raised_exception_sentinel:
+                LOG.warning('Failed to get block device mappings for cell %s',
+                            cell_uuid)
+            elif result is context.did_not_respond_sentinel:
+                LOG.warning('Timeout getting block device mappings for cell '
+                            '%s', cell_uuid)
+            else:
+                bdms.update(result)
+        return bdms
+
     @wsgi.extends
     def detail(self, req, resp_obj):
         context = req.environ['nova.context']
         if context.can(ev_policies.BASE_POLICY_NAME, fatal=False):
             servers = list(resp_obj.obj['servers'])
-            instance_uuids = [server['id'] for server in servers]
-            bdms = objects.BlockDeviceMappingList.bdms_by_instance_uuid(
-                context, instance_uuids)
+            bdms = self._get_instance_bdms_in_multiple_cells(context, servers)
             for server in servers:
                 instance_bdms = self._get_instance_bdms(bdms, server)
                 self._extend_server(context, server, req, instance_bdms)

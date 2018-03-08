@@ -14,13 +14,13 @@
 #    under the License.
 
 import re
-import uuid
 from xml.dom import minidom
 
 from eventlet import greenthread
 from lxml import etree
 import mock
 from oslo_concurrency.fixture import lockutils as lock_fixture
+from oslo_utils import uuidutils
 
 from nova import exception
 from nova.network import linux_net
@@ -65,7 +65,7 @@ class NWFilterFakes(object):
         name = tree.get('name')
         u = tree.find('uuid')
         if u is None:
-            u = uuid.uuid4().hex
+            u = uuidutils.generate_uuid(dashed=False)
         else:
             u = u.text
         if name not in self.filters:
@@ -149,9 +149,10 @@ class IptablesFirewallTestCase(test.NoDBTestCase):
         inst.info_cache.deleted = False
         return inst
 
+    @mock.patch.object(linux_net.iptables_manager, "execute")
     @mock.patch.object(objects.InstanceList, "get_by_security_group_id")
     @mock.patch.object(objects.SecurityGroupRuleList, "get_by_instance")
-    def test_static_filters(self, mock_secrule, mock_instlist):
+    def test_static_filters(self, mock_secrule, mock_instlist, fake_execute):
         UUID = "2674993b-6adb-4733-abd9-a7c10cc1f146"
         SRC_UUID = "0e0a76b2-7c52-4bc0-9a60-d83017e42c1a"
         instance_ref = self._create_instance_ref(UUID)
@@ -247,9 +248,9 @@ class IptablesFirewallTestCase(test.NoDBTestCase):
 
         network_model = _fake_network_info(self, 1)
 
-        linux_net.iptables_manager.execute = fake_iptables_execute
+        fake_execute.side_effect = fake_iptables_execute
 
-        self.stub_out('nova.compute.utils.get_nw_info_for_instance',
+        self.stub_out('nova.objects.Instance.get_network_info',
                       lambda instance: network_model)
 
         self.fw.prepare_instance_filter(instance_ref, network_model)

@@ -32,6 +32,7 @@ from nova.compute import rpcapi as compute_rpcapi
 from nova.compute import task_states
 from nova.compute import vm_states
 from nova import exception
+from nova.i18n import _
 from nova import objects
 from nova.objects import base as obj_base
 from nova import rpc
@@ -110,7 +111,7 @@ class RPCClientCellsProxy(object):
         version = kwargs.pop('version', None)
 
         if kwargs:
-            raise ValueError("Unsupported kwargs: %s" % kwargs.keys())
+            raise ValueError(_("Unsupported kwargs: %s") % kwargs.keys())
 
         if server:
             ret._server = server
@@ -226,8 +227,6 @@ class ComputeCellsAPI(compute_api.API):
             delete_type = method_name == 'soft_delete' and 'soft' or 'hard'
             self.cells_rpcapi.instance_delete_everywhere(context,
                     instance, delete_type)
-            bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
-                    context, instance.uuid)
             # NOTE(danms): If we try to delete an instance with no cell,
             # there isn't anything to salvage, so we can hard-delete here.
             try:
@@ -261,6 +260,8 @@ class ComputeCellsAPI(compute_api.API):
                 # Instance has been deleted out from under us
                 return
 
+            bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
+                    context, instance.uuid)
             try:
                 super(ComputeCellsAPI, self)._local_delete(context, instance,
                                                            bdms, method_name,
@@ -458,20 +459,24 @@ class ComputeCellsAPI(compute_api.API):
                 *args, **kwargs)
 
     @check_instance_cell
-    def _attach_volume(self, context, instance, volume_id, device,
-                       disk_bus, device_type):
+    def _attach_volume(self, context, instance, volume, device,
+                       disk_bus, device_type, tag=None,
+                       supports_multiattach=False):
         """Attach an existing volume to an existing instance."""
-        volume = self.volume_api.get(context, volume_id)
+        if tag:
+            raise exception.VolumeTaggedAttachNotSupported()
+        if volume['multiattach']:
+            # We don't support multiattach volumes with cells v1.
+            raise exception.MultiattachSupportNotYetAvailable()
         self.volume_api.check_availability_zone(context, volume,
                                                 instance=instance)
 
         return self._call_to_cells(context, instance, 'attach_volume',
-                volume_id, device, disk_bus, device_type)
+                volume['id'], device, disk_bus, device_type)
 
     @check_instance_cell
     def _detach_volume(self, context, instance, volume):
         """Detach a volume from an instance."""
-        self.volume_api.check_detach(context, volume, instance=instance)
         self._cast_to_cells(context, instance, 'detach_volume',
                 volume)
 
@@ -649,7 +654,7 @@ class HostAPI(compute_api.HostAPI):
                                                   state=state)
 
     def compute_node_get(self, context, compute_id):
-        """Get a compute node from a particular cell by its integer ID.
+        """Get a compute node from a particular cell by its integer ID or UUID.
         compute_id should be in the format of 'path!to!cell@ID'.
         """
         try:
@@ -676,7 +681,9 @@ class InstanceActionAPI(compute_api.InstanceActionAPI):
         super(InstanceActionAPI, self).__init__()
         self.cells_rpcapi = cells_rpcapi.CellsAPI()
 
-    def actions_get(self, context, instance):
+    def actions_get(self, context, instance, limit=None, marker=None,
+                    filters=None):
+        # Paging and filtering isn't supported in cells v1.
         return self.cells_rpcapi.actions_get(context, instance)
 
     def action_get_by_request_id(self, context, instance, request_id):

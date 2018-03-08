@@ -85,6 +85,7 @@ class BlockDeviceInfoManager(object):
             if bdm_obj and 'tag' in bdm_obj and bdm_obj.tag:
                 bus = self._get_device_bus(bdm)
                 device = objects.DiskMetadata(bus=bus,
+                                              serial=bdm_obj.volume_id,
                                               tags=[bdm_obj.tag])
                 bdm_metadata.append(device)
 
@@ -126,8 +127,9 @@ class BlockDeviceInfoManager(object):
         # either booting from volume, or booting from image/iso
         root_disk = {}
 
-        root_device = (driver.block_device_info_get_root(block_device_info) or
-                       self._DEFAULT_ROOT_DEVICE)
+        root_device = driver.block_device_info_get_root_device(
+                block_device_info)
+        root_device = root_device or self._DEFAULT_ROOT_DEVICE
 
         if self.is_boot_from_volume(block_device_info):
             root_volume = self._get_root_device_bdm(
@@ -259,7 +261,7 @@ class BlockDeviceInfoManager(object):
         boot_order = []
         for dev in devices:
             if dev.get('connection_info'):
-                dev_path = self._volops.get_mounted_disk_path_from_volume(
+                dev_path = self._volops.get_disk_resource_path(
                     dev['connection_info'])
                 boot_order.append(dev_path)
             else:

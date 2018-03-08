@@ -20,6 +20,7 @@ from nova import context
 from nova import exception
 from nova import objects
 from nova import test
+from nova.tests import fixtures as nova_fixtures
 from nova.tests import uuidsentinel as uuids
 
 
@@ -96,19 +97,24 @@ class ContextTestCase(test.NoDBTestCase):
                 service_catalog=None)
         self.assertEqual([], ctxt.service_catalog)
 
-    def test_service_catalog_cinder_only(self):
+    def test_service_catalog_filter(self):
         service_catalog = [
                 {u'type': u'compute', u'name': u'nova'},
                 {u'type': u's3', u'name': u's3'},
                 {u'type': u'image', u'name': u'glance'},
-                {u'type': u'volume', u'name': u'cinder'},
+                {u'type': u'volumev3', u'name': u'cinderv3'},
+                {u'type': u'network', u'name': u'neutron'},
                 {u'type': u'ec2', u'name': u'ec2'},
                 {u'type': u'object-store', u'name': u'swift'},
                 {u'type': u'identity', u'name': u'keystone'},
+                {u'type': u'block-storage', u'name': u'cinder'},
                 {u'type': None, u'name': u'S_withouttype'},
                 {u'type': u'vo', u'name': u'S_partofvolume'}]
 
-        volume_catalog = [{u'type': u'volume', u'name': u'cinder'}]
+        volume_catalog = [{u'type': u'image', u'name': u'glance'},
+                          {u'type': u'volumev3', u'name': u'cinderv3'},
+                          {u'type': u'network', u'name': u'neutron'},
+                          {u'type': u'block-storage', u'name': u'cinder'}]
         ctxt = context.RequestContext('111', '222',
                 service_catalog=service_catalog)
         self.assertEqual(volume_catalog, ctxt.service_catalog)
@@ -273,6 +279,26 @@ class ContextTestCase(test.NoDBTestCase):
         self.assertEqual(mock.sentinel.db_conn, ctxt.db_connection)
         self.assertEqual(mock.sentinel.mq_conn, ctxt.mq_connection)
 
+    @mock.patch('nova.context.set_target_cell')
+    def test_target_cell_regenerates(self, mock_set):
+        ctxt = context.RequestContext('fake', 'fake')
+        # Set a non-tracked property on the context to make sure it
+        # does not make it to the targeted one (like a copy would do)
+        ctxt.sentinel = mock.sentinel.parent
+        with context.target_cell(ctxt, mock.sentinel.cm) as cctxt:
+            # Should be a different object
+            self.assertIsNot(cctxt, ctxt)
+
+            # Should not have inherited the non-tracked property
+            self.assertFalse(hasattr(cctxt, 'sentinel'),
+                             'Targeted context was copied from original')
+
+            # Set another non-tracked property
+            cctxt.sentinel = mock.sentinel.child
+
+        # Make sure we didn't pollute the original context
+        self.assertNotEqual(ctxt.sentinel, mock.sentinel.child)
+
     def test_get_context(self):
         ctxt = context.get_context()
         self.assertIsNone(ctxt.user_id)
@@ -302,3 +328,135 @@ class ContextTestCase(test.NoDBTestCase):
             self.assertEqual(mock.sentinel.mq_conn_obj, cctxt.mq_connection)
         mock_create_cm.assert_not_called()
         mock_create_tport.assert_not_called()
+
+    @mock.patch('nova.context.target_cell')
+    @mock.patch('nova.objects.InstanceList.get_by_filters')
+    def test_scatter_gather_cells(self, mock_get_inst, mock_target_cell):
+        ctxt = context.get_context()
+        mapping = objects.CellMapping(database_connection='fake://db',
+                                      transport_url='fake://mq',
+                                      uuid=uuids.cell)
+        mappings = objects.CellMappingList(objects=[mapping])
+
+        # Use a mock manager to assert call order across mocks.
+        manager = mock.Mock()
+        manager.attach_mock(mock_get_inst, 'get_inst')
+        manager.attach_mock(mock_target_cell, 'target_cell')
+
+        filters = {'deleted': False}
+        context.scatter_gather_cells(
+            ctxt, mappings, 60, objects.InstanceList.get_by_filters, filters,
+            sort_dir='foo')
+
+        # NOTE(melwitt): This only works without the SpawnIsSynchronous fixture
+        # because when the spawn is treated as synchronous and the thread
+        # function is called immediately, it will occur inside the target_cell
+        # context manager scope when it wouldn't with a real spawn.
+
+        # Assert that InstanceList.get_by_filters was called before the
+        # target_cell context manager exited.
+        get_inst_call = mock.call.get_inst(
+            mock_target_cell.return_value.__enter__.return_value, filters,
+            sort_dir='foo')
+        expected_calls = [get_inst_call,
+                          mock.call.target_cell().__exit__(None, None, None)]
+        manager.assert_has_calls(expected_calls)
+
+    @mock.patch('nova.context.LOG.warning')
+    @mock.patch('eventlet.timeout.Timeout')
+    @mock.patch('eventlet.queue.LightQueue.get')
+    @mock.patch('nova.objects.InstanceList.get_by_filters')
+    def test_scatter_gather_cells_timeout(self, mock_get_inst,
+                                          mock_get_result, mock_timeout,
+                                          mock_log_warning):
+        # This is needed because we're mocking get_by_filters.
+        self.useFixture(nova_fixtures.SpawnIsSynchronousFixture())
+        ctxt = context.get_context()
+        mapping0 = objects.CellMapping(database_connection='fake://db0',
+                                       transport_url='none:///',
+                                       uuid=objects.CellMapping.CELL0_UUID)
+        mapping1 = objects.CellMapping(database_connection='fake://db1',
+                                       transport_url='fake://mq1',
+                                       uuid=uuids.cell1)
+        mappings = objects.CellMappingList(objects=[mapping0, mapping1])
+
+        # Simulate cell1 not responding.
+        mock_get_result.side_effect = [(mapping0.uuid,
+                                        mock.sentinel.instances),
+                                       exception.CellTimeout()]
+
+        results = context.scatter_gather_cells(
+            ctxt, mappings, 30, objects.InstanceList.get_by_filters)
+        self.assertEqual(2, len(results))
+        self.assertIn(mock.sentinel.instances, results.values())
+        self.assertIn(context.did_not_respond_sentinel, results.values())
+        mock_timeout.assert_called_once_with(30, exception.CellTimeout)
+        self.assertTrue(mock_log_warning.called)
+
+    @mock.patch('nova.context.LOG.exception')
+    @mock.patch('nova.objects.InstanceList.get_by_filters')
+    def test_scatter_gather_cells_exception(self, mock_get_inst,
+                                            mock_log_exception):
+        # This is needed because we're mocking get_by_filters.
+        self.useFixture(nova_fixtures.SpawnIsSynchronousFixture())
+        ctxt = context.get_context()
+        mapping0 = objects.CellMapping(database_connection='fake://db0',
+                                       transport_url='none:///',
+                                       uuid=objects.CellMapping.CELL0_UUID)
+        mapping1 = objects.CellMapping(database_connection='fake://db1',
+                                       transport_url='fake://mq1',
+                                       uuid=uuids.cell1)
+        mappings = objects.CellMappingList(objects=[mapping0, mapping1])
+
+        # Simulate cell1 raising an exception.
+        mock_get_inst.side_effect = [mock.sentinel.instances,
+                                     test.TestingException()]
+
+        results = context.scatter_gather_cells(
+            ctxt, mappings, 30, objects.InstanceList.get_by_filters)
+        self.assertEqual(2, len(results))
+        self.assertIn(mock.sentinel.instances, results.values())
+        self.assertIn(context.raised_exception_sentinel, results.values())
+        self.assertTrue(mock_log_exception.called)
+
+    @mock.patch('nova.context.scatter_gather_cells')
+    @mock.patch('nova.objects.CellMappingList.get_all')
+    def test_scatter_gather_all_cells(self, mock_get_all, mock_scatter):
+        ctxt = context.get_context()
+        mapping0 = objects.CellMapping(database_connection='fake://db0',
+                                       transport_url='none:///',
+                                       uuid=objects.CellMapping.CELL0_UUID)
+        mapping1 = objects.CellMapping(database_connection='fake://db1',
+                                       transport_url='fake://mq1',
+                                       uuid=uuids.cell1)
+        mock_get_all.return_value = objects.CellMappingList(
+            objects=[mapping0, mapping1])
+
+        filters = {'deleted': False}
+        context.scatter_gather_all_cells(
+            ctxt, objects.InstanceList.get_by_filters, filters, sort_dir='foo')
+
+        mock_scatter.assert_called_once_with(
+            ctxt, mock_get_all.return_value, 60,
+            objects.InstanceList.get_by_filters, filters, sort_dir='foo')
+
+    @mock.patch('nova.context.scatter_gather_cells')
+    @mock.patch('nova.objects.CellMappingList.get_all')
+    def test_scatter_gather_skip_cell0(self, mock_get_all, mock_scatter):
+        ctxt = context.get_context()
+        mapping0 = objects.CellMapping(database_connection='fake://db0',
+                                       transport_url='none:///',
+                                       uuid=objects.CellMapping.CELL0_UUID)
+        mapping1 = objects.CellMapping(database_connection='fake://db1',
+                                       transport_url='fake://mq1',
+                                       uuid=uuids.cell1)
+        mock_get_all.return_value = objects.CellMappingList(
+            objects=[mapping0, mapping1])
+
+        filters = {'deleted': False}
+        context.scatter_gather_skip_cell0(
+            ctxt, objects.InstanceList.get_by_filters, filters, sort_dir='foo')
+
+        mock_scatter.assert_called_once_with(
+            ctxt, [mapping1], 60, objects.InstanceList.get_by_filters, filters,
+            sort_dir='foo')

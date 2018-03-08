@@ -22,7 +22,6 @@ import six
 from nova import exception
 from nova.i18n import _
 from nova.network import model as network_model
-from nova import objects
 
 
 # Import field errors from oslo.versionedobjects
@@ -66,12 +65,14 @@ AutoTypedField = fields.AutoTypedField
 BaseEnumField = fields.BaseEnumField
 MACAddressField = fields.MACAddressField
 ListOfIntegersField = fields.ListOfIntegersField
+PCIAddressField = fields.PCIAddressField
 
 
 # NOTE(danms): These are things we need to import for some of our
 # own implementations below, our tests, or other transitional
 # bits of code. These should be removable after we finish our
-# conversion
+# conversion. So do not use these nova fields directly in any new code;
+# instead, use the oslo.versionedobjects fields.
 Enum = fields.Enum
 Field = fields.Field
 FieldType = fields.FieldType
@@ -461,6 +462,9 @@ class OSType(BaseNovaEnum):
 class ResourceClass(StringField):
     """Classes of resources provided to consumers."""
 
+    CUSTOM_NAMESPACE = 'CUSTOM_'
+    """All non-standard resource classes must begin with this string."""
+
     VCPU = 'VCPU'
     MEMORY_MB = 'MEMORY_MB'
     DISK_GB = 'DISK_GB'
@@ -471,12 +475,14 @@ class ResourceClass(StringField):
     NUMA_THREAD = 'NUMA_THREAD'
     NUMA_MEMORY_MB = 'NUMA_MEMORY_MB'
     IPV4_ADDRESS = 'IPV4_ADDRESS'
+    VGPU = 'VGPU'
+    VGPU_DISPLAY_HEAD = 'VGPU_DISPLAY_HEAD'
 
     # The ordering here is relevant. If you must add a value, only
     # append.
     STANDARD = (VCPU, MEMORY_MB, DISK_GB, PCI_DEVICE, SRIOV_NET_VF,
                 NUMA_SOCKET, NUMA_CORE, NUMA_THREAD, NUMA_MEMORY_MB,
-                IPV4_ADDRESS)
+                IPV4_ADDRESS, VGPU, VGPU_DISPLAY_HEAD)
 
     # This is the set of standard resource classes that existed before
     # we opened up for custom resource classes in version 1.1 of various
@@ -484,12 +490,12 @@ class ResourceClass(StringField):
     V1_0 = (VCPU, MEMORY_MB, DISK_GB, PCI_DEVICE, SRIOV_NET_VF, NUMA_SOCKET,
             NUMA_CORE, NUMA_THREAD, NUMA_MEMORY_MB, IPV4_ADDRESS)
 
-    @staticmethod
-    def normalize_name(rc_name):
+    @classmethod
+    def normalize_name(cls, rc_name):
         if rc_name is None:
             return None
         norm_name = rc_name.upper()
-        cust_prefix = objects.ResourceClass.CUSTOM_NAMESPACE
+        cust_prefix = cls.CUSTOM_NAMESPACE
         norm_name = cust_prefix + norm_name
         # Replace some punctuation characters with underscores
         norm_name = re.sub('[^0-9A-Z]+', '_', norm_name)
@@ -728,6 +734,15 @@ class PciDeviceType(BaseNovaEnum):
     ALL = (STANDARD, SRIOV_PF, SRIOV_VF)
 
 
+class PCINUMAAffinityPolicy(BaseNovaEnum):
+
+    REQUIRED = "required"
+    LEGACY = "legacy"
+    PREFERRED = "preferred"
+
+    ALL = (REQUIRED, LEGACY, PREFERRED)
+
+
 class DiskFormat(BaseNovaEnum):
     RBD = "rbd"
     LVM = "lvm"
@@ -740,6 +755,16 @@ class DiskFormat(BaseNovaEnum):
     ISO = "iso"
 
     ALL = (RBD, LVM, QCOW2, RAW, PLOOP, VHD, VMDK, VDI, ISO)
+
+
+class HypervisorDriver(BaseNovaEnum):
+    LIBVIRT = "libvirt"
+    XENAPI = "xenapi"
+    VMWAREAPI = "vmwareapi"
+    IRONIC = "ironic"
+    HYPERV = "hyperv"
+
+    ALL = (LIBVIRT, XENAPI, VMWAREAPI, IRONIC, HYPERV)
 
 
 class PointerModelType(BaseNovaEnum):
@@ -769,6 +794,37 @@ class NotificationPhase(BaseNovaEnum):
     ALL = (START, END, ERROR)
 
 
+class NotificationSource(BaseNovaEnum):
+    """Represents possible nova binary service names in notification envelope.
+
+    The publisher_id field of the nova notifications consists of the name of
+    the host and the name of the service binary that emits the notification.
+    The below values are the ones that is used in every notification. Please
+    note that on the REST API the nova-api service binary is called
+    nova-osapi_compute. This is not reflected here as notifications always used
+    the name nova-api instead.
+    """
+
+    COMPUTE = 'nova-compute'
+    API = 'nova-api'
+    CONDUCTOR = 'nova-conductor'
+    SCHEDULER = 'nova-scheduler'
+    NETWORK = 'nova-network'
+    CONSOLEAUTH = 'nova-consoleauth'
+    CELLS = 'nova-cells'
+    CONSOLE = 'nova-console'
+    METADATA = 'nova-metadata'
+
+    ALL = (API, COMPUTE, CONDUCTOR, SCHEDULER,
+           NETWORK, CONSOLEAUTH, CELLS, CONSOLE, METADATA)
+
+    @staticmethod
+    def get_source_by_binary(binary):
+        # nova-osapi_compute binary name needs to be translated to nova-api
+        # notification source enum value.
+        return "nova-api" if binary == "nova-osapi_compute" else binary
+
+
 class NotificationAction(BaseNovaEnum):
     UPDATE = 'update'
     EXCEPTION = 'exception'
@@ -783,7 +839,7 @@ class NotificationAction(BaseNovaEnum):
     REBOOT = 'reboot'
     SHUTDOWN = 'shutdown'
     SNAPSHOT = 'snapshot'
-    ADD_FIXED_IP = 'add_fixed_ip'
+    INTERFACE_ATTACH = 'interface_attach'
     SHELVE = 'shelve'
     RESUME = 'resume'
     RESTORE = 'restore'
@@ -792,6 +848,7 @@ class NotificationAction(BaseNovaEnum):
     VOLUME_ATTACH = 'volume_attach'
     VOLUME_DETACH = 'volume_detach'
     CREATE = 'create'
+    IMPORT = 'import'
     EVACUATE = 'evacuate'
     RESIZE_FINISH = 'resize_finish'
     LIVE_MIGRATION_ABORT = 'live_migration_abort'
@@ -801,7 +858,7 @@ class NotificationAction(BaseNovaEnum):
     LIVE_MIGRATION_ROLLBACK_DEST = 'live_migration_rollback_dest'
     LIVE_MIGRATION_ROLLBACK = 'live_migration_rollback'
     REBUILD = 'rebuild'
-    REMOVE_FIXED_IP = 'remove_fixed_ip'
+    INTERFACE_DETACH = 'interface_detach'
     RESIZE_CONFIRM = 'resize_confirm'
     RESIZE_PREP = 'resize_prep'
     RESIZE_REVERT = 'resize_revert'
@@ -814,12 +871,12 @@ class NotificationAction(BaseNovaEnum):
     REMOVE_HOST = 'remove_host'
 
     ALL = (UPDATE, EXCEPTION, DELETE, PAUSE, UNPAUSE, RESIZE, VOLUME_SWAP,
-           SUSPEND, POWER_ON, REBOOT, SHUTDOWN, SNAPSHOT, ADD_FIXED_IP,
+           SUSPEND, POWER_ON, REBOOT, SHUTDOWN, SNAPSHOT, INTERFACE_ATTACH,
            POWER_OFF, SHELVE, RESUME, RESTORE, EXISTS, RESCUE, VOLUME_ATTACH,
-           VOLUME_DETACH, CREATE, EVACUATE, RESIZE_FINISH,
+           VOLUME_DETACH, CREATE, IMPORT, EVACUATE, RESIZE_FINISH,
            LIVE_MIGRATION_ABORT, LIVE_MIGRATION_POST_DEST, LIVE_MIGRATION_POST,
            LIVE_MIGRATION_PRE, LIVE_MIGRATION_ROLLBACK,
-           LIVE_MIGRATION_ROLLBACK_DEST, REBUILD, REMOVE_FIXED_IP,
+           LIVE_MIGRATION_ROLLBACK_DEST, REBUILD, INTERFACE_DETACH,
            RESIZE_CONFIRM, RESIZE_PREP, RESIZE_REVERT, SHELVE_OFFLOAD,
            SOFT_DELETE, TRIGGER_CRASH_DUMP, UNRESCUE, UNSHELVE, ADD_HOST,
            REMOVE_HOST)
@@ -990,14 +1047,6 @@ class AddressBase(FieldType):
         return {'type': ['string'], 'pattern': self.PATTERN}
 
 
-class PCIAddress(AddressBase):
-    PATTERN = '[a-f0-9]{4}:[a-f0-9]{2}:[a-f0-9]{2}.[a-f0-9]'
-
-    @staticmethod
-    def coerce(obj, attr, value):
-        return AddressBase.coerce(PCIAddress, attr, value)
-
-
 class USBAddress(AddressBase):
     PATTERN = '[a-f0-9]+:[a-f0-9]+'
 
@@ -1022,8 +1071,12 @@ class IDEAddress(AddressBase):
         return AddressBase.coerce(IDEAddress, attr, value)
 
 
-class PCIAddressField(AutoTypedField):
-    AUTO_TYPE = PCIAddress()
+class XenAddress(AddressBase):
+    PATTERN = '(00[0-9]{2}00)|[1-9][0-9]+'
+
+    @staticmethod
+    def coerce(obj, attr, value):
+        return AddressBase.coerce(XenAddress, attr, value)
 
 
 class USBAddressField(AutoTypedField):
@@ -1036,6 +1089,10 @@ class SCSIAddressField(AutoTypedField):
 
 class IDEAddressField(AutoTypedField):
     AUTO_TYPE = IDEAddress()
+
+
+class XenAddressField(AutoTypedField):
+    AUTO_TYPE = XenAddress()
 
 
 class ArchitectureField(BaseEnumField):
@@ -1154,8 +1211,16 @@ class PciDeviceTypeField(BaseEnumField):
     AUTO_TYPE = PciDeviceType()
 
 
+class PCINUMAAffinityPolicyField(BaseEnumField):
+    AUTO_TYPE = PCINUMAAffinityPolicy()
+
+
 class DiskFormatField(BaseEnumField):
     AUTO_TYPE = DiskFormat()
+
+
+class HypervisorDriverField(BaseEnumField):
+    AUTO_TYPE = HypervisorDriver()
 
 
 class PointerModelField(BaseEnumField):
@@ -1172,6 +1237,10 @@ class NotificationPhaseField(BaseEnumField):
 
 class NotificationActionField(BaseEnumField):
     AUTO_TYPE = NotificationAction()
+
+
+class NotificationSourceField(BaseEnumField):
+    AUTO_TYPE = NotificationSource()
 
 
 class InstanceStateField(BaseEnumField):

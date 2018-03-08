@@ -41,7 +41,6 @@ import webob
 from nova.api.metadata import base
 from nova.api.metadata import handler
 from nova.api.metadata import password
-from nova.api.metadata import vendordata
 from nova.api.metadata import vendordata_dynamic
 from nova import block_device
 from nova.compute import flavors
@@ -114,8 +113,7 @@ def fake_keypair_obj(name, data):
 
 def fake_InstanceMetadata(testcase, inst_data, address=None,
                           sgroups=None, content=None, extra_md=None,
-                          vd_driver=None, network_info=None,
-                          network_metadata=None):
+                          network_info=None, network_metadata=None):
     content = content or []
     extra_md = extra_md or {}
     if sgroups is None:
@@ -124,8 +122,7 @@ def fake_InstanceMetadata(testcase, inst_data, address=None,
     fakes.stub_out_secgroup_api(testcase, security_groups=sgroups)
     return base.InstanceMetadata(inst_data, address=address,
         content=content, extra_md=extra_md,
-        vd_driver=vd_driver, network_info=network_info,
-        network_metadata=network_metadata)
+        network_info=network_info, network_metadata=network_metadata)
 
 
 def fake_request(testcase, mdinst, relpath, address="127.0.0.1",
@@ -165,14 +162,6 @@ def fake_request(testcase, mdinst, relpath, address="127.0.0.1",
     return response
 
 
-class FakeDeviceMetadata(metadata_obj.DeviceMetadata):
-    pass
-
-
-class FakeDeviceBus(metadata_obj.DeviceBus):
-    pass
-
-
 def fake_metadata_objects():
     nic_obj = metadata_obj.NetworkInterfaceMetadata(
         bus=metadata_obj.PCIDeviceBus(address='0000:00:01.0'),
@@ -202,9 +191,9 @@ def fake_metadata_objects():
         path='/dev/sda',
         tags=['baz'],
     )
-    fake_device_obj = FakeDeviceMetadata()
+    fake_device_obj = metadata_obj.DeviceMetadata()
     device_with_fake_bus_obj = metadata_obj.NetworkInterfaceMetadata(
-        bus=FakeDeviceBus(),
+        bus=metadata_obj.DeviceBus(),
         mac='00:00:00:00:00:00',
         tags=['foo']
     )
@@ -397,6 +386,35 @@ class MetadataTestCase(test.TestCase):
         self.assertRaises(base.InvalidMetadataPath,
             md.lookup, "/2009-04-04/meta-data/kernel-id")
 
+    def test_instance_is_sanitized(self):
+        inst = self.instance.obj_clone()
+        # The instance already has some fake device_metadata stored on it,
+        # and we want to test to see it gets lazy-loaded, so save off the
+        # original attribute value and delete the attribute from the instance,
+        # then we can assert it gets loaded up later.
+        original_device_meta = inst.device_metadata
+        delattr(inst, 'device_metadata')
+
+        def fake_obj_load_attr(attrname):
+            if attrname == 'device_metadata':
+                inst.device_metadata = original_device_meta
+            elif attrname == 'ec2_ids':
+                inst.ec2_ids = objects.EC2Ids()
+            else:
+                self.fail('Unexpected instance lazy-load: %s' % attrname)
+
+        inst._will_not_pass = True
+        with mock.patch.object(
+                inst, 'obj_load_attr',
+                side_effect=fake_obj_load_attr) as mock_obj_load_attr:
+            md = fake_InstanceMetadata(self, inst)
+        self.assertFalse(hasattr(md.instance, '_will_not_pass'))
+        self.assertEqual(2, mock_obj_load_attr.call_count)
+        mock_obj_load_attr.assert_has_calls(
+            [mock.call('device_metadata'), mock.call('ec2_ids')],
+            any_order=True)
+        self.assertIs(original_device_meta, inst.device_metadata)
+
     def test_check_version(self):
         inst = self.instance.obj_clone()
         md = fake_InstanceMetadata(self, inst)
@@ -569,6 +587,24 @@ class MetadataTestCase(test.TestCase):
         for os_version in base.OPENSTACK_VERSIONS:
             self._test_as_json_with_options(is_cells=True,
                                             os_version=os_version)
+
+    @mock.patch('nova.cells.rpcapi.CellsAPI.get_keypair_at_top',
+                side_effect=exception.KeypairNotFound(
+                name='key', user_id='fake_user'))
+    @mock.patch.object(objects.Instance, 'get_by_uuid')
+    def test_as_json_deleted_keypair_in_cells_mode(self,
+                                                   mock_get_keypair_at_top,
+                                                   mock_inst_get_by_uuid):
+        self.flags(enable=True, group='cells')
+        self.flags(cell_type='compute', group='cells')
+
+        instance = self.instance.obj_clone()
+        delattr(instance, 'keypairs')
+        md = fake_InstanceMetadata(self, instance)
+        meta = md._metadata_as_json(base.OPENSTACK_VERSIONS[-1], path=None)
+        meta = jsonutils.loads(meta)
+        self.assertNotIn('keys', meta)
+        self.assertNotIn('public_keys', meta)
 
     @mock.patch.object(objects.Instance, 'get_by_uuid')
     def test_metadata_as_json_deleted_keypair(self, mock_inst_get_by_uuid):
@@ -817,36 +853,6 @@ class OpenStackMetadataTestCase(test.TestCase):
         # assert that we never created a ksa session for dynamic vendordata if
         # we didn't make a request
         self.assertIsNone(mdinst.vendordata_providers['DynamicJSON'].session)
-
-    def test_vendor_data_response(self):
-        inst = self.instance.obj_clone()
-
-        mydata = {'mykey1': 'value1', 'mykey2': 'value2'}
-
-        class myVdriver(vendordata.VendorDataDriver):
-            def __init__(self, *args, **kwargs):
-                super(myVdriver, self).__init__(*args, **kwargs)
-                data = mydata.copy()
-                uuid = kwargs['instance']['uuid']
-                data.update({'inst_uuid': uuid})
-                self.data = data
-
-            def get(self):
-                return self.data
-
-        mdinst = fake_InstanceMetadata(self, inst, vd_driver=myVdriver)
-
-        # verify that 2013-10-17 has the vendor_data.json file
-        vdpath = "/openstack/2013-10-17/vendor_data.json"
-        vd = jsonutils.loads(mdinst.lookup(vdpath))
-
-        # the instance should be passed through, and our class copies the
-        # uuid through to 'inst_uuid'.
-        self.assertEqual(vd['inst_uuid'], inst['uuid'])
-
-        # check the other expected values
-        for k, v in mydata.items():
-            self.assertEqual(vd[k], v)
 
     def _test_vendordata2_response_inner(self, request_mock, response_code,
                                          include_rest_result=True):
@@ -1596,17 +1602,33 @@ class MetadataPasswordTestCase(test.TestCase):
         result = password.handle_password(request, self.mdinst)
         self.assertEqual(result, 'foo')
 
+    @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid',
+                       return_value=objects.InstanceMapping(cell_mapping=None))
+    @mock.patch.object(objects.Instance, 'get_by_uuid')
+    def test_set_password_instance_not_found(self, get_by_uuid, get_mapping):
+        """Tests that a 400 is returned if the instance can not be found."""
+        get_by_uuid.side_effect = exception.InstanceNotFound(
+            instance_id=self.instance.uuid)
+        request = webob.Request.blank('')
+        request.method = 'POST'
+        request.val = b'foo'
+        request.content_length = len(request.body)
+        self.assertRaises(webob.exc.HTTPBadRequest, password.handle_password,
+                          request, self.mdinst)
+
     def test_bad_method(self):
         request = webob.Request.blank('')
         request.method = 'PUT'
         self.assertRaises(webob.exc.HTTPBadRequest,
                           password.handle_password, request, self.mdinst)
 
+    @mock.patch('nova.objects.InstanceMapping.get_by_instance_uuid')
     @mock.patch('nova.objects.Instance.get_by_uuid')
-    def _try_set_password(self, get_by_uuid, val=b'bar'):
+    def _try_set_password(self, get_by_uuid, get_mapping, val=b'bar'):
         request = webob.Request.blank('')
         request.method = 'POST'
         request.body = val
+        get_mapping.return_value = objects.InstanceMapping(cell_mapping=None)
         get_by_uuid.return_value = self.instance
 
         with mock.patch.object(self.instance, 'save') as save:
@@ -1614,6 +1636,7 @@ class MetadataPasswordTestCase(test.TestCase):
             save.assert_called_once_with()
 
         self.assertIn('password_0', self.instance.system_metadata)
+        get_mapping.assert_called_once_with(mock.ANY, self.instance.uuid)
 
     def test_set_password(self):
         self.mdinst.password = ''

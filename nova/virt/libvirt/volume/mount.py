@@ -19,12 +19,14 @@ import threading
 
 from oslo_concurrency import processutils
 from oslo_log import log
+from oslo_utils import fileutils
 import six
 
 import nova.conf
 from nova import exception
-from nova.i18n import _LE, _LW
-from nova import utils
+from nova.i18n import _
+import nova.privsep.fs
+import nova.privsep.path
 
 CONF = nova.conf.CONF
 LOG = log.getLogger(__name__)
@@ -111,8 +113,7 @@ class _HostMountStateManager(object):
         """
         with self.cond:
             if self.state is not None:
-                LOG.warning(_LW("host_up called, but we think host is "
-                                "already up"))
+                LOG.warning("host_up called, but we think host is already up")
                 self._host_down()
 
             # Wait until all operations using a previous state generation are
@@ -139,8 +140,7 @@ class _HostMountStateManager(object):
         """
         with self.cond:
             if self.state is None:
-                LOG.warning(_LW("host_down called, but we don't think host "
-                                "is up"))
+                LOG.warning("host_down called, but we don't think host is up")
                 return
 
             self._host_down()
@@ -293,30 +293,29 @@ class _HostMountState(object):
                    'mountpoint': mountpoint, 'options': options,
                    'gen': self.generation})
         with self._get_locked(mountpoint) as mount:
-            if not os.path.ismount(mountpoint):
+            if os.path.ismount(mountpoint):
+                LOG.debug(('Mounting %(mountpoint)s generation %(gen)s, '
+                           'mountpoint already mounted'),
+                          {'mountpoint': mountpoint, 'gen': self.generation})
+            else:
                 LOG.debug('Mounting %(mountpoint)s generation %(gen)s',
                           {'mountpoint': mountpoint, 'gen': self.generation})
 
-                utils.execute('mkdir', '-p', mountpoint)
-
-                mount_cmd = ['mount', '-t', fstype]
-                if options is not None:
-                    mount_cmd.extend(options)
-                mount_cmd.extend([export, mountpoint])
+                fileutils.ensure_tree(mountpoint)
 
                 try:
-                    utils.execute(*mount_cmd, run_as_root=True)
-                except Exception:
+                    nova.privsep.fs.mount(fstype, export, mountpoint, options)
+                except processutils.ProcessExecutionError():
                     # Check to see if mountpoint is mounted despite the error
                     # eg it was already mounted
                     if os.path.ismount(mountpoint):
                         # We're not going to raise the exception because we're
                         # in the desired state anyway. However, this is still
                         # unusual so we'll log it.
-                        LOG.exception(_LE('Error mounting %(fstype)s export '
-                                          '%(export)s on %(mountpoint)s. '
-                                          'Continuing because mountpount is '
-                                          'mounted despite this.'),
+                        LOG.exception(_('Error mounting %(fstype)s export '
+                                        '%(export)s on %(mountpoint)s. '
+                                        'Continuing because mountpount is '
+                                        'mounted despite this.'),
                                       {'fstype': fstype, 'export': export,
                                        'mountpoint': mountpoint})
 
@@ -353,10 +352,9 @@ class _HostMountState(object):
             try:
                 mount.remove_attachment(vol_name, instance.uuid)
             except KeyError:
-                LOG.warning(_LW("Request to remove attachment "
-                                "(%(vol_name)s, %(instance)s) from "
-                                "%(mountpoint)s, but we don't think it's in "
-                                "use."),
+                LOG.warning("Request to remove attachment "
+                            "(%(vol_name)s, %(instance)s) from "
+                            "%(mountpoint)s, but we don't think it's in use.",
                             {'vol_name': vol_name, 'instance': instance.uuid,
                              'mountpoint': mountpoint})
 
@@ -381,20 +379,13 @@ class _HostMountState(object):
                   {'mountpoint': mountpoint, 'gen': self.generation})
 
         try:
-            utils.execute('umount', mountpoint, run_as_root=True,
-                          attempts=3, delay_on_retry=True)
+            nova.privsep.fs.umount(mountpoint)
         except processutils.ProcessExecutionError as ex:
-            LOG.error(_LE("Couldn't unmount %(mountpoint)s: %(reason)s"),
+            LOG.error("Couldn't unmount %(mountpoint)s: %(reason)s",
                       {'mountpoint': mountpoint, 'reason': six.text_type(ex)})
 
         if not os.path.ismount(mountpoint):
-            try:
-                utils.execute('rmdir', mountpoint)
-            except processutils.ProcessExecutionError as ex:
-                LOG.error(_LE("Couldn't remove directory %(mountpoint)s: "
-                              "%(reason)s"),
-                          {'mountpoint': mountpoint,
-                           'reason': six.text_type(ex)})
+            nova.privsep.path.rmdir(mountpoint)
             return False
 
         return True

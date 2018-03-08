@@ -29,7 +29,7 @@ class ComputeManagerTestCase(test.TestCase):
     def setUp(self):
         super(ComputeManagerTestCase, self).setUp()
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
-        self.useFixture(cast_as_call.CastAsCall(self.stubs))
+        self.useFixture(cast_as_call.CastAsCall(self))
         self.conductor = self.start_service('conductor')
         self.start_service('scheduler')
         self.compute = self.start_service('compute')
@@ -70,8 +70,10 @@ class ComputeManagerTestCase(test.TestCase):
             mock_spawn.side_effect = test.TestingException('Preserve this')
             # Simulate that we're on the last retry attempt
             filter_properties = {'retry': {'num_attempts': 3}}
+            request_spec = objects.RequestSpec.from_primitives(
+                self.context, {}, filter_properties)
             self.compute.manager.build_and_run_instance(
-                    self.context, instance, {}, {}, filter_properties,
-                    block_device_mapping=[])
+                    self.context, instance, {}, request_spec,
+                    filter_properties, block_device_mapping=[])
         _test()
         self.assertIn('Preserve this', instance.fault.message)

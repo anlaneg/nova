@@ -16,10 +16,12 @@
 from oslo_log import log as logging
 from oslo_utils import excutils
 from pypowervm import adapter as pvm_apt
+from pypowervm import const as pvm_const
 from pypowervm import exceptions as pvm_exc
 from pypowervm.helpers import log_helper as log_hlp
 from pypowervm.helpers import vios_busy as vio_hlp
 from pypowervm.tasks import partition as pvm_par
+from pypowervm.tasks import storage as pvm_stor
 from pypowervm.tasks import vterm as pvm_vterm
 from pypowervm.wrappers import managed_system as pvm_ms
 import six
@@ -28,9 +30,14 @@ from taskflow.patterns import linear_flow as tf_lf
 from nova import conf as cfg
 from nova.console import type as console_type
 from nova import exception as exc
+from nova import image
+from nova.virt import configdrive
 from nova.virt import driver
+from nova.virt.powervm.disk import ssp
 from nova.virt.powervm import host as pvm_host
 from nova.virt.powervm.tasks import base as tf_base
+from nova.virt.powervm.tasks import network as tf_net
+from nova.virt.powervm.tasks import storage as tf_stg
 from nova.virt.powervm.tasks import vm as tf_vm
 from nova.virt.powervm import vm
 
@@ -52,7 +59,7 @@ class PowerVMDriver(driver.ComputeDriver):
 
         Includes catching up with currently running VMs on the given host.
         """
-        # Build the adapter.  May need to attempt the connection multiple times
+        # Build the adapter. May need to attempt the connection multiple times
         # in case the PowerVM management API service is starting.
         # TODO(efried): Implement async compute service enable/disable like
         # I73a34eb6e0ca32d03e54d12a5e066b2ed4f19a61
@@ -62,6 +69,17 @@ class PowerVMDriver(driver.ComputeDriver):
         # Make sure the Virtual I/O Server(s) are available.
         pvm_par.validate_vios_ready(self.adapter)
         self.host_wrapper = pvm_ms.System.get(self.adapter)[0]
+
+        # Do a scrub of the I/O plane to make sure the system is in good shape
+        LOG.info("Clearing stale I/O connections on driver init.")
+        pvm_stor.ComprehensiveScrub(self.adapter).execute()
+
+        # Initialize the disk adapter
+        # TODO(efried): Other disk adapters (localdisk), by conf selection.
+        self.disk_dvr = ssp.SSPDiskAdapter(self.adapter,
+                                           self.host_wrapper.uuid)
+        self.image_api = image.API()
+
         LOG.info("The PowerVM compute driver has been initialized.")
 
     @staticmethod
@@ -73,20 +91,12 @@ class PowerVMDriver(driver.ComputeDriver):
                   'name': instance.name}, instance=instance)
 
     def get_info(self, instance):
-        """Get the current status of an instance, by name (not ID!)
+        """Get the current status of an instance.
 
         :param instance: nova.objects.instance.Instance object
-
-        Returns a InstanceInfo object containing:
-
-        :state:           the running state, one of the power_state codes
-        :max_mem_kb:      (int) the maximum memory in KBytes allowed
-        :mem_kb:          (int) the memory in KBytes used by the domain
-        :num_cpu:         (int) the number of virtual CPUs for the domain
-        :cpu_time_ns:     (int) the CPU time used in nanoseconds
-        :id:              a unique ID for the instance
+        :returns: An InstanceInfo object.
         """
-        return vm.InstanceInfo(self.adapter, instance)
+        return vm.get_vm_info(self.adapter, instance)
 
     def list_instances(self):
         """Return the names of all the instances known to the virt host.
@@ -104,7 +114,7 @@ class PowerVMDriver(driver.ComputeDriver):
         [hypervisor_hostname].
         """
 
-        return [self.host_wrapper.mtms.mtms_str]
+        return [CONF.host]
 
     def get_available_resource(self, nodename):
         """Retrieve resource information.
@@ -125,13 +135,14 @@ class PowerVMDriver(driver.ComputeDriver):
         data = pvm_host.build_host_resource_from_ms(self.host_wrapper)
 
         # Add the disk information
-        # TODO(efried): Get real stats when disk support is added.
-        data["local_gb"] = 100000
-        data["local_gb_used"] = 10
+        data["local_gb"] = self.disk_dvr.capacity
+        data["local_gb_used"] = self.disk_dvr.capacity_used
+
         return data
 
     def spawn(self, context, instance, image_meta, injected_files,
-              admin_password, network_info=None, block_device_info=None):
+              admin_password, allocations, network_info=None,
+              block_device_info=None):
         """Create a new instance/VM/domain on the virtualization platform.
 
         Once this successfully completes, the instance should be
@@ -149,6 +160,9 @@ class PowerVMDriver(driver.ComputeDriver):
             The metadata of the image of the instance.
         :param injected_files: User files to inject into instance.
         :param admin_password: Administrator password to set in instance.
+        :param allocations: Information about resources allocated to the
+                            instance via placement, of the form returned by
+                            SchedulerReportClient.get_allocations_for_consumer.
         :param network_info: instance network information
         :param block_device_info: Information about block devices to be
                                   attached to the instance.
@@ -156,10 +170,40 @@ class PowerVMDriver(driver.ComputeDriver):
         self._log_operation('spawn', instance)
         # Define the flow
         flow_spawn = tf_lf.Flow("spawn")
-        flow_spawn.add(tf_vm.Create(self.adapter, self.host_wrapper, instance))
-        # TODO(thorst, efried) Plug the VIFs
-        # TODO(thorst, efried) Create/Connect the disk
-        # TODO(thorst, efried) Add the config drive
+
+        # This FeedTask accumulates VIOS storage connection operations to be
+        # run in parallel. Include both SCSI and fibre channel mappings for
+        # the scrubber.
+        stg_ftsk = pvm_par.build_active_vio_feed_task(
+            self.adapter, xag={pvm_const.XAG.VIO_SMAP, pvm_const.XAG.VIO_FMAP})
+
+        flow_spawn.add(tf_vm.Create(
+            self.adapter, self.host_wrapper, instance, stg_ftsk))
+
+        # Create a flow for the IO
+        flow_spawn.add(tf_net.PlugVifs(
+            self.virtapi, self.adapter, instance, network_info))
+        flow_spawn.add(tf_net.PlugMgmtVif(
+            self.adapter, instance))
+
+        # Create the boot image.
+        flow_spawn.add(tf_stg.CreateDiskForImg(
+            self.disk_dvr, context, instance, image_meta))
+        # Connects up the disk to the LPAR
+        flow_spawn.add(tf_stg.AttachDisk(
+            self.disk_dvr, instance, stg_ftsk=stg_ftsk))
+
+        # If the config drive is needed, add those steps.  Should be done
+        # after all the other I/O.
+        if configdrive.required_by(instance):
+            flow_spawn.add(tf_stg.CreateAndConnectCfgDrive(
+                self.adapter, instance, injected_files, network_info,
+                stg_ftsk, admin_pass=admin_password))
+
+        # Add the transaction manager flow at the end of the 'I/O
+        # connection' tasks. This will run all the connections in parallel.
+        flow_spawn.add(stg_ftsk)
+
         # Last step is to power on the system.
         flow_spawn.add(tf_vm.PowerOn(self.adapter, instance))
 
@@ -167,11 +211,11 @@ class PowerVMDriver(driver.ComputeDriver):
         tf_base.run(flow_spawn, instance=instance)
 
     def destroy(self, context, instance, network_info, block_device_info=None,
-                destroy_disks=True, migrate_data=None):
+                destroy_disks=True):
         """Destroy the specified instance from the Hypervisor.
 
         If the instance is not found (for example if networking failed), this
-        function should still succeed.  It's probably a good idea to log a
+        function should still succeed. It's probably a good idea to log a
         warning in that case.
 
         :param context: security context
@@ -180,9 +224,9 @@ class PowerVMDriver(driver.ComputeDriver):
         :param block_device_info: Information about block devices that should
                                   be detached from the instance.
         :param destroy_disks: Indicates if disks should be destroyed
-        :param migrate_data: implementation specific params
         """
         # TODO(thorst, efried) Add resize checks for destroy
+
         self._log_operation('destroy', instance)
 
         def _setup_flow_and_run():
@@ -193,10 +237,34 @@ class PowerVMDriver(driver.ComputeDriver):
             # hard shutdown.
             flow.add(tf_vm.PowerOff(self.adapter, instance,
                                     force_immediate=destroy_disks))
-            # TODO(thorst, efried) Add unplug vifs task
-            # TODO(thorst, efried) Add config drive tasks
+
+            # The FeedTask accumulates storage disconnection tasks to be run in
+            # parallel.
+            stg_ftsk = pvm_par.build_active_vio_feed_task(
+                self.adapter, xag=[pvm_const.XAG.VIO_SMAP])
+
+            # Call the unplug VIFs task.  While CNAs get removed from the LPAR
+            # directly on the destroy, this clears up the I/O Host side.
+            flow.add(tf_net.UnplugVifs(self.adapter, instance, network_info))
+
+            # Add the disconnect/deletion of the vOpt to the transaction
+            # manager.
+            if configdrive.required_by(instance):
+                flow.add(tf_stg.DeleteVOpt(
+                    self.adapter, instance, stg_ftsk=stg_ftsk))
+
             # TODO(thorst, efried) Add volume disconnect tasks
-            # TODO(thorst, efried) Add disk disconnect/destroy tasks
+
+            # Detach the disk storage adapters
+            flow.add(tf_stg.DetachDisk(self.disk_dvr, instance))
+
+            # Accumulated storage disconnection tasks next
+            flow.add(stg_ftsk)
+
+            # Delete the storage disks
+            if destroy_disks:
+                flow.add(tf_stg.DeleteDisk(self.disk_dvr))
+
             # TODO(thorst, efried) Add LPAR id based scsi map clean up task
             flow.add(tf_vm.Delete(self.adapter, instance))
 
@@ -272,7 +340,7 @@ class PowerVMDriver(driver.ComputeDriver):
         lpar_uuid = vm.get_pvm_uuid(instance)
 
         # Build the connection to the VNC.
-        host = CONF.vnc.vncserver_proxyclient_address
+        host = CONF.vnc.server_proxyclient_address
         # TODO(thorst, efried) Add the x509 certificate support when it lands
 
         try:
@@ -289,3 +357,11 @@ class PowerVMDriver(driver.ComputeDriver):
                 if e.response.status == 404:
                     sare.reraise = False
                     raise exc.InstanceNotFound(instance_id=instance.uuid)
+
+    def deallocate_networks_on_reschedule(self, instance):
+        """Does the driver want networks deallocated on reschedule?
+
+        :param instance: the instance object.
+        :returns: Boolean value. If True deallocate networks on reschedule.
+        """
+        return True

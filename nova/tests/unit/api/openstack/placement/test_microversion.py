@@ -14,9 +14,9 @@
 
 import collections
 import operator
+import webob
 
 import mock
-import webob
 
 # import the handlers to load up handler decorators
 import nova.api.openstack.placement.handler  # noqa
@@ -26,6 +26,16 @@ from nova import test
 
 def handler():
     return True
+
+
+class TestMicroversionFindMethod(test.NoDBTestCase):
+    def test_method_405(self):
+        self.assertRaises(webob.exc.HTTPMethodNotAllowed,
+                          microversion._find_method, handler, '1.1', 405)
+
+    def test_method_404(self):
+        self.assertRaises(webob.exc.HTTPNotFound,
+                          microversion._find_method, handler, '1.1', 404)
 
 
 class TestMicroversionDecoration(test.NoDBTestCase):
@@ -74,7 +84,7 @@ class TestMicroversionIntersection(test.NoDBTestCase):
     # if you add two different versions of method 'foobar' the
     # number only goes up by one if no other version foobar yet
     # exists. This operates as a simple sanity check.
-    TOTAL_VERSIONED_METHODS = 12
+    TOTAL_VERSIONED_METHODS = 19
 
     def test_methods_versioned(self):
         methods_data = microversion.VERSIONED_METHODS
@@ -124,35 +134,16 @@ class TestMicroversionIntersection(test.NoDBTestCase):
                 'method %s has intersecting versioned handlers' % method_name)
 
 
-class TestMicroversionUtility(test.NoDBTestCase):
+class MicroversionSequentialTest(test.NoDBTestCase):
 
-    req = webob.Request.blank('/', method="GET")
-    req.accept = 'application/json'
-
-    def test_raise_405_out_of_date_version(self):
-        version_obj = microversion.parse_version_string('1.4')
-        self.req.environ['placement.microversion'] = version_obj
-        self.assertRaises(webob.exc.HTTPMethodNotAllowed,
-             microversion.raise_http_status_code_if_not_version,
-             self.req, 405, (1, 5))
-
-    def test_raise_405_out_of_date_version_max(self):
-        version_obj = microversion.parse_version_string('1.4')
-        self.req.environ['placement.microversion'] = version_obj
-        self.assertRaises(webob.exc.HTTPMethodNotAllowed,
-             microversion.raise_http_status_code_if_not_version,
-             self.req, 405, (1, 2), '1.3')
-
-    def test_raise_keyerror_out_of_date_version_tuple(self):
-        version_obj = microversion.parse_version_string('1.4')
-        self.req.environ['placement.microversion'] = version_obj
-        self.assertRaises(KeyError,
-             microversion.raise_http_status_code_if_not_version,
-             self.req, 999, (1, 5))
-
-    def test_raise_keyerror_out_of_date_version_string(self):
-        version_obj = microversion.parse_version_string('1.4')
-        self.req.environ['placement.microversion'] = version_obj
-        self.assertRaises(KeyError,
-             microversion.raise_http_status_code_if_not_version,
-             self.req, 999, '1.5')
+    def test_microversion_sequential(self):
+        for method_name, method_list in microversion.VERSIONED_METHODS.items():
+            previous_min_version = method_list[0][0]
+            for method in method_list[1:]:
+                previous_min_version = microversion.parse_version_string(
+                    '%s.%s' % (previous_min_version.major,
+                               previous_min_version.minor - 1))
+                self.assertEqual(previous_min_version, method[1],
+                    "The microversions aren't sequential in the mehtod %s" %
+                    method_name)
+                previous_min_version = method[0]

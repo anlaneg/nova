@@ -18,11 +18,14 @@ from oslo_serialization import jsonutils
 import six
 import webob
 
+from nova.api.openstack import api_version_request
 from nova.api.openstack.compute import flavor_access as flavor_access_v21
 from nova.api.openstack.compute import flavor_manage as flavormanage_v21
 from nova.compute import flavors
 from nova import db
 from nova import exception
+from nova import objects
+from nova import policy
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 
@@ -44,6 +47,7 @@ class FlavorManageTestV21(test.NoDBTestCase):
     controller = flavormanage_v21.FlavorManageController()
     validation_error = exception.ValidationError
     base_url = '/v2/fake/flavors'
+    microversion = '2.1'
 
     def setUp(self):
         super(FlavorManageTestV21, self).setUp()
@@ -65,7 +69,8 @@ class FlavorManageTestV21(test.NoDBTestCase):
         self.expected_flavor = self.request_body
 
     def _get_http_request(self, url=''):
-        return fakes.HTTPRequest.blank(url)
+        return fakes.HTTPRequest.blank(url, version=self.microversion,
+                                       use_admin_context=True)
 
     @property
     def app(self):
@@ -125,6 +130,7 @@ class FlavorManageTestV21(test.NoDBTestCase):
     def _create_flavor_success_case(self, body, req=None):
         req = req if req else self._get_http_request(url=self.base_url)
         req.headers['Content-Type'] = 'application/json'
+        req.headers['X-OpenStack-Nova-API-Version'] = self.microversion
         req.method = 'POST'
         req.body = jsonutils.dump_as_bytes(body)
         res = req.get_response(self.app)
@@ -292,7 +298,7 @@ class FlavorManageTestV21(test.NoDBTestCase):
         }
 
         def fake_create(name, memory_mb, vcpus, root_gb, ephemeral_gb,
-                        flavorid, swap, rxtx_factor, is_public):
+                        flavorid, swap, rxtx_factor, is_public, description):
             raise exception.FlavorExists(name=name)
 
         self.stub_out('nova.compute.flavors.create', fake_create)
@@ -311,6 +317,112 @@ class FlavorManageTestV21(test.NoDBTestCase):
                           512, 2, None, 1, 1234, 512, 1, True)
         self.assertRaises(exception.InvalidInput, flavors.create, "abcdef",
                           "test_memory_mb", 2, None, 1, 1234, 512, 1, True)
+
+    def test_create_with_description(self):
+        """With microversion <2.55 this should return a failure."""
+        self.request_body['flavor']['description'] = 'invalid'
+        ex = self.assertRaises(
+            self.validation_error, self.controller._create,
+            self._get_http_request(), body=self.request_body)
+        self.assertIn('description', six.text_type(ex))
+
+    def test_flavor_update_description(self):
+        """With microversion <2.55 this should return a failure."""
+        flavor = self._create_flavor_success_case(self.request_body)['flavor']
+        self.assertRaises(
+            exception.VersionNotFoundForAPIMethod, self.controller._update,
+            self._get_http_request(), flavor['id'],
+            body={'flavor': {'description': 'nope'}})
+
+
+class FlavorManageTestV2_55(FlavorManageTestV21):
+    microversion = '2.55'
+
+    def setUp(self):
+        super(FlavorManageTestV2_55, self).setUp()
+        # Send a description in POST /flavors requests.
+        self.request_body['flavor']['description'] = 'test description'
+
+    def test_create_with_description(self):
+        # test_create already tests this.
+        pass
+
+    @mock.patch('nova.objects.Flavor.get_by_flavor_id')
+    @mock.patch('nova.objects.Flavor.save')
+    def test_flavor_update_description(self, mock_flavor_save, mock_get):
+        """Tests updating a flavor description."""
+        # First create a flavor.
+        flavor = self._create_flavor_success_case(self.request_body)['flavor']
+        self.assertEqual('test description', flavor['description'])
+        mock_get.return_value = objects.Flavor(
+            flavorid=flavor['id'], name=flavor['name'],
+            memory_mb=flavor['ram'], vcpus=flavor['vcpus'],
+            root_gb=flavor['disk'], swap=flavor['swap'],
+            ephemeral_gb=flavor['OS-FLV-EXT-DATA:ephemeral'],
+            disabled=flavor['OS-FLV-DISABLED:disabled'],
+            is_public=flavor['os-flavor-access:is_public'],
+            rxtx_factor=flavor['rxtx_factor'],
+            description=flavor['description'])
+        # Now null out the flavor description.
+        flavor = self.controller._update(
+            self._get_http_request(), flavor['id'],
+            body={'flavor': {'description': None}})['flavor']
+        self.assertIsNone(flavor['description'])
+        mock_get.assert_called_once_with(
+            test.MatchType(fakes.FakeRequestContext), flavor['id'])
+        mock_flavor_save.assert_called_once_with()
+
+    @mock.patch('nova.objects.Flavor.get_by_flavor_id',
+                side_effect=exception.FlavorNotFound(flavor_id='notfound'))
+    def test_flavor_update_not_found(self, mock_get):
+        """Tests that a 404 is returned if the flavor is not found."""
+        self.assertRaises(webob.exc.HTTPNotFound,
+                          self.controller._update,
+                          self._get_http_request(), 'notfound',
+                          body={'flavor': {'description': None}})
+
+    def test_flavor_update_missing_description(self):
+        """Tests that a schema validation error is raised if no description
+        is provided in the update request body.
+        """
+        self.assertRaises(self.validation_error,
+                          self.controller._update,
+                          self._get_http_request(), 'invalid',
+                          body={'flavor': {}})
+
+    def test_create_with_invalid_description(self):
+        # NOTE(mriedem): Intentionally not using ddt for this since ddt will
+        # create a test name that has 65536 'a's in the name which blows up
+        # the console output.
+        for description in ('bad !@#!$%\x00 description',   # printable chars
+                            'a' * 65536):                   # maxLength
+            self.request_body['flavor']['description'] = description
+            self.assertRaises(self.validation_error, self.controller._create,
+                              self._get_http_request(), body=self.request_body)
+
+    @mock.patch('nova.objects.Flavor.get_by_flavor_id')
+    @mock.patch('nova.objects.Flavor.save')
+    def test_update_with_invalid_description(self, mock_flavor_save, mock_get):
+        # First create a flavor.
+        flavor = self._create_flavor_success_case(self.request_body)['flavor']
+        self.assertEqual('test description', flavor['description'])
+        mock_get.return_value = objects.Flavor(
+            flavorid=flavor['id'], name=flavor['name'],
+            memory_mb=flavor['ram'], vcpus=flavor['vcpus'],
+            root_gb=flavor['disk'], swap=flavor['swap'],
+            ephemeral_gb=flavor['OS-FLV-EXT-DATA:ephemeral'],
+            disabled=flavor['OS-FLV-DISABLED:disabled'],
+            is_public=flavor['os-flavor-access:is_public'],
+            description=flavor['description'])
+        # NOTE(mriedem): Intentionally not using ddt for this since ddt will
+        # create a test name that has 65536 'a's in the name which blows up
+        # the console output.
+        for description in ('bad !@#!$%\x00 description',   # printable chars
+                            'a' * 65536):                   # maxLength
+            self.request_body['flavor']['description'] = description
+            self.assertRaises(self.validation_error, self.controller._update,
+                              self._get_http_request(), flavor['id'],
+                              body={'flavor': {'description': description}})
 
 
 class PrivateFlavorManageTestV21(test.TestCase):
@@ -373,19 +485,20 @@ class PrivateFlavorManageTestV21(test.TestCase):
             self.assertEqual(body["flavor"][key], self.expected["flavor"][key])
 
 
-class FlavorManagerPolicyEnforcementV21(test.NoDBTestCase):
+class FlavorManagerPolicyEnforcementV21(test.TestCase):
 
     def setUp(self):
         super(FlavorManagerPolicyEnforcementV21, self).setUp()
         self.controller = flavormanage_v21.FlavorManageController()
+        self.adm_req = fakes.HTTPRequest.blank('', use_admin_context=True)
+        self.req = fakes.HTTPRequest.blank('')
 
     def test_create_policy_failed(self):
         rule_name = "os_compute_api:os-flavor-manage"
         self.policy.set_rules({rule_name: "project:non_fake"})
-        req = fakes.HTTPRequest.blank('')
         exc = self.assertRaises(
             exception.PolicyNotAuthorized,
-            self.controller._create, req,
+            self.controller._create, self.req,
             body={"flavor": {
                 "name": "test",
                 "ram": 512,
@@ -394,6 +507,8 @@ class FlavorManagerPolicyEnforcementV21(test.NoDBTestCase):
                 "swap": 512,
                 "rxtx_factor": 1,
             }})
+        # The deprecated action is being enforced since the rule that is
+        # configured is different than the default rule
         self.assertEqual(
             "Policy doesn't allow %s to be performed." % rule_name,
             exc.format_message())
@@ -401,11 +516,187 @@ class FlavorManagerPolicyEnforcementV21(test.NoDBTestCase):
     def test_delete_policy_failed(self):
         rule_name = "os_compute_api:os-flavor-manage"
         self.policy.set_rules({rule_name: "project:non_fake"})
-        req = fakes.HTTPRequest.blank('')
         exc = self.assertRaises(
             exception.PolicyNotAuthorized,
-            self.controller._delete, req,
+            self.controller._delete, self.req,
             fakes.FAKE_UUID)
+        # The deprecated action is being enforced since the rule that is
+        # configured is different than the default rule
         self.assertEqual(
             "Policy doesn't allow %s to be performed." % rule_name,
             exc.format_message())
+
+    @mock.patch.object(policy.LOG, 'warning')
+    def test_create_policy_rbac_inherit_default(self, mock_warning):
+        """Test to verify inherited rule is working. The rule of the
+           deprecated action is not set to the default, so the deprecated
+           action is being enforced
+        """
+
+        default_flavor_policy = "os_compute_api:os-flavor-manage"
+        create_flavor_policy = "os_compute_api:os-flavor-manage:create"
+        rules = {default_flavor_policy: 'is_admin:True',
+                 create_flavor_policy: 'rule:%s' % default_flavor_policy,
+                 "os_compute_api:os-flavor-access": "project:non_fake"}
+        self.policy.set_rules(rules)
+        body = {
+            "flavor": {
+                "name": "azAZ09. -_",
+                "ram": 512,
+                "vcpus": 2,
+                "disk": 1,
+                "OS-FLV-EXT-DATA:ephemeral": 1,
+                "id": six.text_type('1234'),
+                "swap": 512,
+                "rxtx_factor": 1,
+                "os-flavor-access:is_public": True,
+            }
+        }
+        # check for success as admin
+        self.controller._create(self.adm_req, body=body)
+        # check for failure as non-admin
+        exc = self.assertRaises(exception.PolicyNotAuthorized,
+                                self.controller._create, self.req,
+                                body=body)
+        # The deprecated action is being enforced since the rule that is
+        # configured is different than the default rule
+        self.assertEqual(
+            "Policy doesn't allow %s to be performed." % default_flavor_policy,
+            exc.format_message())
+        mock_warning.assert_called_with("Start using the new "
+            "action '{0}'. The existing action '{1}' is being deprecated and "
+            "will be removed in future release.".format(create_flavor_policy,
+                                                        default_flavor_policy))
+
+    @mock.patch.object(policy.LOG, 'warning')
+    def test_delete_policy_rbac_inherit_default(self, mock_warning):
+        """Test to verify inherited rule is working. The rule of the
+           deprecated action is not set to the default, so the deprecated
+           action is being enforced
+        """
+
+        default_flavor_policy = "os_compute_api:os-flavor-manage"
+        create_flavor_policy = "os_compute_api:os-flavor-manage:create"
+        delete_flavor_policy = "os_compute_api:os-flavor-manage:delete"
+        rules = {default_flavor_policy: 'is_admin:True',
+                 create_flavor_policy: 'rule:%s' % default_flavor_policy,
+                 delete_flavor_policy: 'rule:%s' % default_flavor_policy}
+        self.policy.set_rules(rules)
+        body = {
+            "flavor": {
+                "name": "azAZ09. -_",
+                "ram": 512,
+                "vcpus": 2,
+                "disk": 1,
+                "OS-FLV-EXT-DATA:ephemeral": 1,
+                "id": six.text_type('1234'),
+                "swap": 512,
+                "rxtx_factor": 1,
+                "os-flavor-access:is_public": True,
+            }
+        }
+        self.flavor = self.controller._create(self.adm_req, body=body)
+        mock_warning.assert_called_once_with("Start using the new "
+            "action '{0}'. The existing action '{1}' is being deprecated and "
+            "will be removed in future release.".format(create_flavor_policy,
+                                                        default_flavor_policy))
+        # check for success as admin
+        flavor = self.flavor
+        self.controller._delete(self.adm_req, flavor['flavor']['id'])
+        # check for failure as non-admin
+        flavor = self.flavor
+        exc = self.assertRaises(exception.PolicyNotAuthorized,
+                                self.controller._delete, self.req,
+                                flavor['flavor']['id'])
+        # The deprecated action is being enforced since the rule that is
+        # configured is different than the default rule
+        self.assertEqual(
+            "Policy doesn't allow %s to be performed." % default_flavor_policy,
+            exc.format_message())
+        mock_warning.assert_called_with("Start using the new "
+            "action '{0}'. The existing action '{1}' is being deprecated and "
+            "will be removed in future release.".format(delete_flavor_policy,
+                                                        default_flavor_policy))
+
+    def test_create_policy_rbac_no_change_to_default_action_rule(self):
+        """Test to verify the correct action is being enforced. When the
+           rule configured for the deprecated action is the same as the
+           default, the new action should be enforced.
+        """
+
+        default_flavor_policy = "os_compute_api:os-flavor-manage"
+        create_flavor_policy = "os_compute_api:os-flavor-manage:create"
+        # The default rule of the deprecated action is admin_api
+        rules = {default_flavor_policy: 'rule:admin_api',
+                 create_flavor_policy: 'rule:%s' % default_flavor_policy}
+        self.policy.set_rules(rules)
+        body = {
+            "flavor": {
+                "name": "azAZ09. -_",
+                "ram": 512,
+                "vcpus": 2,
+                "disk": 1,
+                "OS-FLV-EXT-DATA:ephemeral": 1,
+                "id": six.text_type('1234'),
+                "swap": 512,
+                "rxtx_factor": 1,
+                "os-flavor-access:is_public": True,
+            }
+        }
+        exc = self.assertRaises(exception.PolicyNotAuthorized,
+                                self.controller._create, self.req,
+                                body=body)
+        self.assertEqual(
+            "Policy doesn't allow %s to be performed." % create_flavor_policy,
+            exc.format_message())
+
+    def test_delete_policy_rbac_change_to_default_action_rule(self):
+        """Test to verify the correct action is being enforced. When the
+           rule configured for the deprecated action is the same as the
+           default, the new action should be enforced.
+        """
+
+        default_flavor_policy = "os_compute_api:os-flavor-manage"
+        create_flavor_policy = "os_compute_api:os-flavor-manage:create"
+        delete_flavor_policy = "os_compute_api:os-flavor-manage:delete"
+        # The default rule of the deprecated action is admin_api
+        # Set the rule of the create flavor action to is_admin:True so that
+        # admin context can be used to create a flavor
+        rules = {default_flavor_policy: 'rule:admin_api',
+                 create_flavor_policy: 'is_admin:True',
+                 delete_flavor_policy: 'rule:%s' % default_flavor_policy}
+        self.policy.set_rules(rules)
+        body = {
+            "flavor": {
+                "name": "azAZ09. -_",
+                "ram": 512,
+                "vcpus": 2,
+                "disk": 1,
+                "OS-FLV-EXT-DATA:ephemeral": 1,
+                "id": six.text_type('1234'),
+                "swap": 512,
+                "rxtx_factor": 1,
+                "os-flavor-access:is_public": True,
+            }
+        }
+        flavor = self.controller._create(self.adm_req, body=body)
+        exc = self.assertRaises(exception.PolicyNotAuthorized,
+                                self.controller._delete, self.req,
+                                flavor['flavor']['id'])
+        self.assertEqual(
+            "Policy doesn't allow %s to be performed." % delete_flavor_policy,
+            exc.format_message())
+
+    def test_flavor_update_non_admin_fails(self):
+        """Tests that trying to update a flavor as a non-admin fails due
+        to the default policy.
+        """
+        self.req.api_version_request = api_version_request.APIVersionRequest(
+            '2.55')
+        exc = self.assertRaises(
+            exception.PolicyNotAuthorized,
+            self.controller._update, self.req, 'fake_id',
+            body={"flavor": {"description": "not authorized"}})
+        self.assertEqual(
+            "Policy doesn't allow os_compute_api:os-flavor-manage:update to "
+            "be performed.", exc.format_message())
