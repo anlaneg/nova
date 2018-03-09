@@ -609,12 +609,14 @@ class ComputeManager(manager.Manager):
 
         # The driver doesn't support uuids listing, so we'll have
         # to brute force.
+        # 在不支持uuid列表时，采用list_instances来获取所有instance
         driver_instances = self.driver.list_instances()
         # NOTE(mjozefcz): In this case we need to apply host filter.
         # Without this all instance data would be fetched from db.
         filters['host'] = self.host
         instances = objects.InstanceList.get_by_filters(context, filters,
                                                         use_slave=True)
+        #构造虚拟机与虚拟机对象的map
         name_map = {instance.name: instance for instance in instances}
         local_instances = []
         for driver_instance in driver_instances:

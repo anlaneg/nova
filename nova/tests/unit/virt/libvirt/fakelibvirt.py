@@ -1083,13 +1083,16 @@ class Connection(object):
                     vms.append(vm)
         return vms
 
+    #事件周期时间发送
     def _emit_lifecycle(self, dom, event, detail):
         if VIR_DOMAIN_EVENT_ID_LIFECYCLE not in self._event_callbacks:
             return
 
+        #取生命周期事件id对应的回调
         cbinfo = self._event_callbacks[VIR_DOMAIN_EVENT_ID_LIFECYCLE]
         callback = cbinfo[0]
         opaque = cbinfo[1]
+        #发起回调，传入self,dom,event,deatil,及注册时传入的参数
         callback(self, dom, event, detail, opaque)
 
     def defineXML(self, xml):
@@ -1117,6 +1120,7 @@ class Connection(object):
     def getHostname(self):
         return 'compute1'
 
+    #为事件eventid注册回调callback及其对应的参数
     def domainEventRegisterAny(self, dom, eventid, callback, opaque):
         self._event_callbacks[eventid] = [callback, opaque]
 

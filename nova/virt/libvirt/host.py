@@ -71,7 +71,7 @@ CONF = nova.conf.CONF
 HV_DRIVER_QEMU = "QEMU"
 HV_DRIVER_XEN = "Xen"
 
-
+#封装与libvrit的连接，实现对某个机器的hypervisor层的抽象
 class Host(object):
 
     def __init__(self, uri, read_only=False,
@@ -82,6 +82,7 @@ class Host(object):
         if libvirt is None:
             libvirt = importutils.import_module('libvirt')
 
+        #定义连接方的url（例如:qemu:///system)
         self._uri = uri
         self._read_only = read_only
         self._initial_connection = True
@@ -129,6 +130,7 @@ class Host(object):
         """
 
         while True:
+            #死循环分发事件
             self._dispatch_events()
 
     def _conn_event_thread(self):
@@ -151,6 +153,11 @@ class Host(object):
         finally:
             self._conn_event_handler_queue.task_done()
 
+    #@conn 连接
+    #@dom  虚机dom
+    #@event 事件类型
+    #@detail 事件详情
+    #@opaque 注册时传入的用户参数
     @staticmethod
     def _event_lifecycle_callback(conn, dom, event, detail, opaque):
         """Receives lifecycle events from libvirt.
@@ -166,17 +173,23 @@ class Host(object):
         uuid = dom.UUIDString()
         transition = None
         if event == libvirt.VIR_DOMAIN_EVENT_STOPPED:
+            #停止
             transition = virtevent.EVENT_LIFECYCLE_STOPPED
         elif event == libvirt.VIR_DOMAIN_EVENT_STARTED:
+            #启动
             transition = virtevent.EVENT_LIFECYCLE_STARTED
         elif event == libvirt.VIR_DOMAIN_EVENT_SUSPENDED:
+            #挂起
             transition = virtevent.EVENT_LIFECYCLE_PAUSED
         elif event == libvirt.VIR_DOMAIN_EVENT_RESUMED:
+            #恢复
             transition = virtevent.EVENT_LIFECYCLE_RESUMED
 
         if transition is not None:
+            #生命周期类事件入队
             self._queue_event(virtevent.LifecycleEvent(uuid, transition))
 
+    #连接close类事件入队
     def _close_callback(self, conn, reason, opaque):
         close_info = {'conn': conn, 'reason': reason}
         self._queue_event(close_info)
@@ -224,6 +237,7 @@ class Host(object):
             (libvirt.virDomain, libvirt.virConnect),
             libvirt.openAuth, uri, auth, flags)
 
+    #将事件event存入事件队列，并知会进行处理
     def _queue_event(self, event):
         """Puts an event on the queue for dispatch.
 
@@ -236,9 +250,11 @@ class Host(object):
             return
 
         # Queue the event...
+        #事件入队
         self._event_queue.put(event)
 
         # ...then wakeup the green thread to dispatch it
+        # 新产生的消息已发入，故采用socket通知事件可以进行处理了
         c = ' '.encode()
         self._event_notify_send.write(c)
         self._event_notify_send.flush()
@@ -253,6 +269,7 @@ class Host(object):
         # Wait to be notified that there are some
         # events pending
         try:
+            #阻塞等待时间通知
             _c = self._event_notify_recv.read(1)
             assert _c
         except ValueError:
@@ -261,18 +278,22 @@ class Host(object):
         # Process as many events as possible without
         # blocking
         last_close_event = None
+        #如果事件队列不为空，则以非阻塞方式提取事件
         while not self._event_queue.empty():
             try:
                 event = self._event_queue.get(block=False)
                 if isinstance(event, virtevent.LifecycleEvent):
                     # call possibly with delay
+                    # 虚拟机生命调期类事件处理
                     self._event_emit_delayed(event)
 
                 elif 'conn' in event and 'reason' in event:
+                    #与虚拟化技术，例如qemu:///system，连接断开时触发
                     last_close_event = event
             except native_Queue.Empty:
                 pass
         if last_close_event is None:
+            #非'conn','reason'的event,直接认为处理完成
             return
         conn = last_close_event['conn']
         # get_new_connection may already have disabled the host,
@@ -282,6 +303,7 @@ class Host(object):
                 reason = str(last_close_event['reason'])
                 msg = _("Connection to libvirt lost: %s") % reason
                 self._wrapped_conn = None
+                #连接断开事件处理
                 self._queue_conn_event_handler(False, msg)
 
     def _event_emit_delayed(self, event):
@@ -326,6 +348,7 @@ class Host(object):
 
         self._event_queue = native_Queue.Queue()
         try:
+            #构造pipe,并将wpipe用于通知消息发送，将rpipe用于通知消息接收
             rpipe, wpipe = os.pipe()
             self._event_notify_send = greenio.GreenPipe(wpipe, 'wb', 0)
             self._event_notify_recv = greenio.GreenPipe(rpipe, 'rb', 0)
@@ -361,6 +384,7 @@ class Host(object):
         LOG.debug("Starting green dispatch thread")
         utils.spawn(self._dispatch_thread)
 
+    #获得与self._uri的连接
     def _get_new_connection(self):
         # call with _wrapped_conn_lock held
         LOG.debug('Connecting to libvirt: %s', self._uri)
@@ -370,6 +394,7 @@ class Host(object):
 
         try:
             LOG.debug("Registering for lifecycle events %s", self)
+            #注册生命周期event_id事件处理回调,当虚拟机状态发生变化时，此回调将被触发
             wrapped_conn.domainEventRegisterAny(
                 None,
                 libvirt.VIR_DOMAIN_EVENT_ID_LIFECYCLE,
@@ -380,6 +405,7 @@ class Host(object):
                         {'uri': self._uri, 'error': e})
 
         try:
+            #注册连接关闭时的回调
             LOG.debug("Registering for connection events: %s", str(self))
             wrapped_conn.registerCloseCallback(self._close_callback, None)
         except libvirt.libvirtError as e:
@@ -398,6 +424,7 @@ class Host(object):
 
         self._conn_event_handler_queue.put(handler)
 
+    #创建与qemu:///system的连接
     def _get_connection(self):
         # multiple concurrent connections are protected by _wrapped_conn_lock
         with self._wrapped_conn_lock:
@@ -431,6 +458,7 @@ class Host(object):
 
         return self._wrapped_conn
 
+    #建立与hypervisor连接
     def get_connection(self):
         """Returns a connection to the hypervisor
 

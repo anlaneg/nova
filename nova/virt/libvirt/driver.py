@@ -351,6 +351,7 @@ class LibvirtDriver(driver.ComputeDriver):
             libvirt = importutils.import_module('libvirt')
             libvirt_migrate.libvirt = libvirt
 
+        #构造Host,self._uri返回对应的虚拟化技术连接串
         self._host = host.Host(self._uri(), read_only,
                                lifecycle_event_handler=self.emit_event,
                                conn_event_handler=self._handle_conn_event)
@@ -721,10 +722,12 @@ class LibvirtDriver(driver.ComputeDriver):
     # is to avoid a direct dependency on the libvirt API from the
     # driver.py file.
     def _get_connection(self):
+        #生成与本compute对应host机的hypervisor的连接
         return self._host.get_connection()
 
     _conn = property(_get_connection)
 
+    #依据虚拟化技术类型，返回对应的url连接方式
     @staticmethod
     def _uri():
         if CONF.libvirt.virt_type == 'uml':
@@ -736,14 +739,14 @@ class LibvirtDriver(driver.ComputeDriver):
         elif CONF.libvirt.virt_type == 'parallels':
             uri = CONF.libvirt.connection_uri or 'parallels:///system'
         else:
+            #默认连接本机上对应的qemu
             uri = CONF.libvirt.connection_uri or 'qemu:///system'
-        #kvm类型时，走此
         return uri
 
     @staticmethod
     def _live_migration_uri(dest):
         uris = {
-            'kvm': 'qemu+%s://%s/system',
+            'kvm': 'qemu+%s://%s/system',#连接指定主机上的qemu
             'qemu': 'qemu+%s://%s/system',
             'xen': 'xenmigr://%s/system',
             'parallels': 'parallels+tcp://%s/system',
@@ -754,6 +757,7 @@ class LibvirtDriver(driver.ComputeDriver):
         if uri:
             return uri % dest
 
+        #取对应的virt_type对应的url
         uri = uris.get(virt_type)
         if uri is None:
             raise exception.LiveMigrationURINotAvailable(virt_type=virt_type)
@@ -761,7 +765,9 @@ class LibvirtDriver(driver.ComputeDriver):
         str_format = (dest,)
         if virt_type in ('kvm', 'qemu'):
             scheme = CONF.libvirt.live_migration_scheme or 'tcp'
+            #指定采用那种协议，默认是tcp协议
             str_format = (scheme, dest)
+        #返回到对端的连接
         return uris.get(virt_type) % str_format
 
     @staticmethod
