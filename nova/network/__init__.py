@@ -34,7 +34,7 @@ def is_neutron():
     return CONF.use_neutron
 
 
-#按配置载入不同的network api
+#按配置载入不同的network api，对外提供网络功能
 def API():
     if is_neutron():
         network_api_class = NEUTRON_NET_API

@@ -80,6 +80,7 @@ class Host(object):
 
         global libvirt
         if libvirt is None:
+            #载入libvirt-python包，用于控制libvirt库
             libvirt = importutils.import_module('libvirt')
 
         #定义连接方的url（例如:qemu:///system)
@@ -216,6 +217,7 @@ class Host(object):
             _("Can not handle authentication request for %d credentials")
             % len(creds))
 
+    #实现与url的libvirt连接
     @staticmethod
     def _connect(uri, read_only):
         auth = [[libvirt.VIR_CRED_AUTHNAME,
@@ -224,7 +226,7 @@ class Host(object):
                  libvirt.VIR_CRED_PASSPHRASE,
                  libvirt.VIR_CRED_NOECHOPROMPT,
                  libvirt.VIR_CRED_EXTERNAL],
-                Host._connect_auth_cb,
+                Host._connect_auth_cb,#连接时授权函数
                 None]
 
         flags = 0
@@ -233,6 +235,7 @@ class Host(object):
         # tpool.proxy_call creates a native thread. Due to limitations
         # with eventlet locking we cannot use the logging API inside
         # the called function.
+        # 调用libvirt.openAuth建立一条连接，连接的是uri
         return tpool.proxy_call(
             (libvirt.virDomain, libvirt.virConnect),
             libvirt.openAuth, uri, auth, flags)
@@ -539,6 +542,7 @@ class Host(object):
         return self._version_check(
             lv_ver=lv_ver, hv_ver=hv_ver, hv_type=hv_type, op=operator.ne)
 
+    #返回一个guest对象
     def get_guest(self, instance):
         """Retrieve libvirt guest object for an instance.
 
@@ -552,7 +556,15 @@ class Host(object):
         :raises exception.InternalError: A libvirt error occurred
         """
         return libvirt_guest.Guest(self._get_domain(instance))
-
+    
+    # 来自于：https://libvirt.org/docs/libvirt-appdev-guide-python/en-US/html/index.html
+    # A domain is an instance of an operating system running on a
+    # virtualized machine. A guest domain can refer to either a running 
+    # virtual machine or a configuration which can be used to launch a 
+    #virtual machine. The connection object provides methods to enumerate
+    # the guest domains, create new guest domains and manage existing domains.
+    # A guest domain is represented with the virDomainPtr object and has a number 
+    #of unique identifiers:
     def _get_domain(self, instance):
         """Retrieve libvirt domain object for an instance.
 
@@ -566,7 +578,9 @@ class Host(object):
         :raises exception.InternalError: A libvirt error occurred
         """
         try:
+            #建立一条连接
             conn = self.get_connection()
+            #通过uuid取dom
             return conn.lookupByUUIDString(instance.uuid)
         except libvirt.libvirtError as ex:
             error_code = ex.get_error_code()
@@ -845,6 +859,7 @@ class Host(object):
         stats["frequency"] = self._get_hardware_info()[3]
         return stats
 
+    #通过xml定义为domain(完成虚机的define)
     def write_instance_config(self, xml):
         """Defines a domain, but does not start it.
 
@@ -854,7 +869,10 @@ class Host(object):
         """
         if six.PY2:
             xml = encodeutils.safe_encode(xml)
+        #实现domain的定义
+        #The defineXML method will store the configuration for a persistent guest domain.
         domain = self.get_connection().defineXML(xml)
+        #封装成Guest
         return libvirt_guest.Guest(domain)
 
     def device_lookup_by_name(self, name):

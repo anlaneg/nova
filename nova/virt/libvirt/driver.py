@@ -788,6 +788,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # conversion which will return value of type unicode.
         return uri and str(uri)
 
+    #检查对应的虚拟机是否存在
     def instance_exists(self, instance):
         """Efficient override of base instance_exists method."""
         try:

@@ -44,6 +44,7 @@ def HostAPI(*args, **kwargs):
     """Returns the 'HostAPI' class from the same module as the configured
     compute api
     """
+    #实例化compute api处于同一模块的HostAPI类
     compute_api_class_name = _get_compute_api_class_name()
     compute_api_class = importutils.import_class(compute_api_class_name)
     class_name = compute_api_class.__module__ + ".HostAPI"

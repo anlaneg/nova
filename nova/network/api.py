@@ -34,7 +34,7 @@ CONF = cfg.CONF
 
 LOG = logging.getLogger(__name__)
 
-
+#采用nova-network进行网络管理
 @profiler.trace_cls("network_api")
 class API(base_api.NetworkAPI):
     """API for doing networking via the nova-network network manager.

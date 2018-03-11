@@ -361,7 +361,7 @@ def translate_mixed_exceptions(method):
 def _reraise(desired_exc):
     six.reraise(type(desired_exc), desired_exc, sys.exc_info()[2])
 
-
+#通过cinder对外提供volume管理
 class API(object):
     """API for interacting with the volume manager."""
 

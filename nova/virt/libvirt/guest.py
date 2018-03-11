@@ -76,7 +76,7 @@ LIBVIRT_POWER_STATE = {
     VIR_DOMAIN_PMSUSPENDED: power_state.SUSPENDED,
 }
 
-
+#实现对libvirt dom的封装
 class Guest(object):
 
     def __init__(self, domain):
@@ -85,6 +85,7 @@ class Guest(object):
         if libvirt is None:
             libvirt = importutils.import_module('libvirt')
 
+        #设置_domain
         self._domain = domain
 
     def __repr__(self):
@@ -96,20 +97,24 @@ class Guest(object):
 
     @property
     def id(self):
+        #获得虚机对应的id号
         return self._domain.ID()
 
     @property
     def uuid(self):
+        #获得虚机对应的uuid
         return self._domain.UUIDString()
 
     @property
     def name(self):
+        #获得虚拟对应的名称
         return self._domain.name()
 
     @property
     def _encoded_xml(self):
         return encodeutils.safe_decode(self._domain.XMLDesc(0))
 
+    #实现虚拟的创建（但不start)
     @classmethod
     def create(cls, xml, host):
         """Create a new Guest
@@ -122,11 +127,13 @@ class Guest(object):
         try:
             if six.PY3 and isinstance(xml, six.binary_type):
                 xml = xml.decode('utf-8')
+            #在指定host上通过xml创建domain
             guest = host.write_instance_config(xml)
         except Exception:
             with excutils.save_and_reraise_exception():
                 LOG.error('Error defining a guest with XML: %s',
                           encodeutils.safe_decode(xml))
+        #返回创建的domain
         return guest
 
     def launch(self, pause=False):
@@ -136,6 +143,7 @@ class Guest(object):
         """
         flags = pause and libvirt.VIR_DOMAIN_START_PAUSED or 0
         try:
+            #启动domain
             return self._domain.createWithFlags(flags)
         except Exception:
             with excutils.save_and_reraise_exception():
@@ -145,6 +153,10 @@ class Guest(object):
 
     def poweroff(self):
         """Stops a running guest."""
+        # 直接断电关机
+        #The destroy and the destroyFlags method immediately terminate 
+        #the guest domain. The destroy process is analogous to pulling 
+        #the plug on a physical machine.
         self._domain.destroy()
 
     def sync_guest_time(self):
@@ -192,6 +204,7 @@ class Guest(object):
         self._domain.injectNMI()
 
     def resume(self):
+        # 恢复挂起的虚机
         """Resumes a paused guest."""
         self._domain.resume()
 
@@ -258,6 +271,7 @@ class Guest(object):
             yield VCPUInfo(
                 id=vcpu[0], cpu=vcpu[3], state=vcpu[1], time=vcpu[2])
 
+    #undefine指定虚机
     def delete_configuration(self, support_uefi=False):
         """Undefines a domain from hypervisor."""
         try:
@@ -586,6 +600,15 @@ class Guest(object):
 
     def shutdown(self):
         """Shutdown guest"""
+        #实现关机
+        #The shutdown method is a clean stop process, which sends 
+        #a signal to the guest domain operating system asking it to 
+        #shut down immediately. The guest will only be stopped once 
+        #the operating system has successfully shut down. The shutdown 
+        #process is analogous to running a shutdown command on a physical 
+        #machine. There is also a shutdownFlags method which can, 
+        #depending on what the guest OS supports, can shutdown the domain
+        # and leave the object in a usable state.
         self._domain.shutdown()
 
     def pause(self):
@@ -597,6 +620,7 @@ class Guest(object):
 
         See method "resume()" to reactive guest.
         """
+        #虚拟机挂起
         self._domain.suspend()
 
     def migrate(self, destination, migrate_uri=None, params=None, flags=0,

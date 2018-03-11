@@ -10,7 +10,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-
+#提供glance镜像处理功能
 def API():
     # Needed to prevent circular import...
     import nova.image.api

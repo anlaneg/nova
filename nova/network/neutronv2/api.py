@@ -268,7 +268,7 @@ def _filter_hypervisor_macs(instance, requested_ports_dict, hypervisor_macs):
 
     return available_macs
 
-
+#采用neutron提供网络功能
 class API(base_api.NetworkAPI):
     """API for interacting with the neutron 2.x API."""
 
@@ -1876,6 +1876,7 @@ class API(base_api.NetworkAPI):
         """Get specific network for client."""
         client = get_client(context)
         try:
+            #显示指定network
             network = client.show_network(network_uuid).get('network') or {}
         except neutron_client_exc.NetworkNotFoundClient:
             #network找不到时，扔异常
