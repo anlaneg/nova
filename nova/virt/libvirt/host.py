@@ -887,6 +887,7 @@ class Host(object):
         improve scheduler latency.
         """
         try:
+            #分析mount的挂载选项，如果其中含cpu，则认为
             with open("/proc/self/mounts", "r") as fd:
                 for line in fd.readlines():
                     # mount options and split options

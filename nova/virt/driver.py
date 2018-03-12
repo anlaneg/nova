@@ -90,6 +90,7 @@ def block_device_info_get_mapping(block_device_info):
     return block_device_mapping
 
 
+#定义计算虚拟化驱动
 class ComputeDriver(object):
     """Base class for compute drivers.
 
@@ -1671,7 +1672,7 @@ class ComputeDriver(object):
         """
         return instance.get('host')
 
-
+#加载并返回计算虚拟化驱动
 def load_compute_driver(virtapi, compute_driver=None):
     """Load a compute driver module.
 
@@ -1687,7 +1688,7 @@ def load_compute_driver(virtapi, compute_driver=None):
     :returns: a ComputeDriver instance
     """
     if not compute_driver:
-        #一般情况下，我们采用的是libvirt.LibvirtDriver
+        #加载计算虚拟化驱动，一般情况下，我们采用的是libvirt.LibvirtDriver
         compute_driver = CONF.compute_driver
 
     if not compute_driver:

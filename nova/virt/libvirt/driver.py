@@ -782,6 +782,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # conversion which will return value of type unicode.
         return uri and str(uri)
 
+    #检查指定虚机是否存在
     def instance_exists(self, instance):
         """Efficient override of base instance_exists method."""
         try:
@@ -818,6 +819,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 overhead['vcpus'] += 1
         return overhead
 
+    #列出所有实例名称
     def list_instances(self):
         names = []
         for guest in self._host.list_guests(only_running=False):
@@ -825,6 +827,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
         return names
 
+    #列出当前所有实例的uuid
     def list_instance_uuids(self):
         uuids = []
         for guest in self._host.list_guests(only_running=False):

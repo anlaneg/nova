@@ -14,4 +14,5 @@
 
 from nova.virt.libvirt import driver
 
+#定义LibvirtDriver为driver.LibvirtDriver,这样就可以libvirt.LibvirtDriver
 LibvirtDriver = driver.LibvirtDriver
