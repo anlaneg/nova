@@ -130,6 +130,7 @@ class RBDDriver(object):
         client = rados.Rados(rados_id=self.rbd_user,
                                   conffile=self.ceph_conf)
         try:
+            #连接到ceph
             client.connect()
             pool_to_open = pool or self.pool
             # NOTE(luogangyi): open_ioctx >= 10.1.0 could handle unicode

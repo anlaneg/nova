@@ -1933,6 +1933,7 @@ def _instances_fill_metadata(context, instances, manual_joins=None):
                          combination of 'metadata' and 'system_metadata' or
                          None to take the default of both)
     """
+    #取所有instance的uuid
     uuids = [inst['uuid'] for inst in instances]
 
     if manual_joins is None:
@@ -2589,6 +2590,7 @@ def _instance_get_all_query(context, project_only=False, joins=None):
     if joins is None:
         joins = ['info_cache', 'security_groups']
 
+    #执行表Instance查询
     query = model_query(context,
                         models.Instance,
                         project_only=project_only)
@@ -2603,6 +2605,7 @@ def _instance_get_all_query(context, project_only=False, joins=None):
 @pick_context_manager_reader_allow_async
 def instance_get_all_by_host(context, host, columns_to_join=None):
     query = _instance_get_all_query(context, joins=columns_to_join)
+    #通过query.filter_by(host=host)查出绑定在host上的所有instance
     return _instances_fill_metadata(context,
                                     query.filter_by(host=host).all(),
                                     manual_joins=columns_to_join)

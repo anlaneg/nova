@@ -48,16 +48,19 @@ class Whitelist(object):
             ``nova.conf.pci`` for details and examples.
         """
         if whitelist_spec:
+            #如果指明了白名单，则解析白名单
             self.specs = self._parse_white_list_from_config(whitelist_spec)
         else:
             self.specs = []
 
+    #解析配置的json串为pci白名单
     @staticmethod
     def _parse_white_list_from_config(whitelists):
         """Parse and validate the pci whitelist from the nova config."""
         specs = []
         for jsonspec in whitelists:
             try:
+                #解析json串
                 dev_spec = jsonutils.loads(jsonspec)
             except ValueError:
                 raise exception.PciConfigInvalidWhitelist(
@@ -65,12 +68,14 @@ class Whitelist(object):
             if isinstance(dev_spec, dict):
                 dev_spec = [dev_spec]
             elif not isinstance(dev_spec, list):
+                #非dict，也非list,报异常
                 raise exception.PciConfigInvalidWhitelist(
                           reason=_("Invalid entry: '%s'; "
                                    "Expecting list or dict") % jsonspec)
 
             for ds in dev_spec:
                 if not isinstance(ds, dict):
+                    #ds必须为dict
                     raise exception.PciConfigInvalidWhitelist(
                               reason=_("Invalid entry: '%s'; "
                                        "Expecting dict") % ds)

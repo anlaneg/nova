@@ -158,6 +158,7 @@ class InjectionInfo(collections.namedtuple(
         return ('InjectionInfo(network_info=%r, files=%r, '
                 'admin_pass=<SANITIZED>)') % (self.network_info, self.files)
 
+#各volume类型对应的驱动
 libvirt_volume_drivers = [
     'iscsi=nova.virt.libvirt.volume.iscsi.LibvirtISCSIVolumeDriver',
     'iser=nova.virt.libvirt.volume.iser.LibvirtISERVolumeDriver',
@@ -370,6 +371,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # demand as needed rather than doing this on startup, as there might
         # be unsupported volume drivers in this list based on the underlying
         # platform.
+        # 加载系统已注册的volume驱动
         self.volume_drivers = self._get_volume_drivers()
 
         self._disk_cachemode = None
@@ -421,18 +423,23 @@ class LibvirtDriver(driver.ComputeDriver):
         # avoid any re-calculation when computing resources.
         self._reserved_hugepages = hardware.numa_get_reserved_huge_pages()
 
+    #获取当前volume的所有驱动
     def _get_volume_drivers(self):
         driver_registry = dict()
 
         for driver_str in libvirt_volume_drivers:
+            #通过'='进行分隔，驱动类型，驱动名称
             driver_type, _sep, driver = driver_str.partition('=')
+            #载入驱动
             driver_class = importutils.import_class(driver)
             try:
+                #用当前host构造volume驱动类
                 driver_registry[driver_type] = driver_class(self._host)
             except brick_exception.InvalidConnectorProtocol:
                 LOG.debug('Unable to load volume driver %s. It is not '
                           'supported on this host.', driver)
 
+        #返回所有注册的volumn驱动类
         return driver_registry
 
     @property
@@ -476,6 +483,7 @@ class LibvirtDriver(driver.ComputeDriver):
         """
         caps = self._host.get_capabilities()
         hostarch = caps.host.cpu.arch
+        #非qemu,kvm及非x86_64机型，显示警告
         if (CONF.libvirt.virt_type not in ('qemu', 'kvm') or
             hostarch not in (fields.Architecture.I686,
                              fields.Architecture.X86_64)):
@@ -494,6 +502,7 @@ class LibvirtDriver(driver.ComputeDriver):
     def _version_to_string(self, version):
         return '.'.join([str(x) for x in version])
 
+    #指定host名称或者地址，进行本机libvirt初始化,检查版本
     def init_host(self, host):
         self._host.initialize()
 
@@ -503,8 +512,10 @@ class LibvirtDriver(driver.ComputeDriver):
 
         self._supported_perf_events = self._get_supported_perf_events()
 
+        #通过检查libvirt版本，确认是否支持multattach
         self._set_multiattach_support()
 
+        #lxc这种隔离
         if (CONF.libvirt.virt_type == 'lxc' and
                 not (CONF.libvirt.uid_maps and CONF.libvirt.gid_maps)):
             LOG.warning("Running libvirt-lxc without user namespaces is "
@@ -520,6 +531,7 @@ class LibvirtDriver(driver.ComputeDriver):
             guestfs.force_tcg()
 
         if not self._host.has_min_version(MIN_LIBVIRT_VERSION):
+            #版本必须大于1.2.9
             raise exception.InternalError(
                 _('Nova requires libvirt version %s or greater.') %
                 self._version_to_string(MIN_LIBVIRT_VERSION))
@@ -620,6 +632,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # the capability appropriately.
         if (self._host.has_min_version(lv_ver=MIN_LIBVIRT_MULTIATTACH) or
                 not self._host.has_min_version(hv_ver=(2, 10, 0))):
+            #通过检查库版本，来标记是否支持多attach
             self.capabilities['supports_multiattach'] = True
         else:
             LOG.debug('Volume multiattach is not supported based on current '
@@ -888,6 +901,7 @@ class LibvirtDriver(driver.ComputeDriver):
         if guest is not None:
             try:
                 old_domid = guest.id
+                #关机
                 guest.poweroff()
 
             except libvirt.libvirtError as e:
@@ -998,7 +1012,9 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def destroy(self, context, instance, network_info, block_device_info=None,
                 destroy_disks=True):
+        #稍毁主机
         self._destroy(instance)
+        #资源清理
         self.cleanup(context, instance, network_info, block_device_info,
                      destroy_disks)
 
@@ -1066,12 +1082,14 @@ class LibvirtDriver(driver.ComputeDriver):
         # NOTE(vish): we disconnect from volumes regardless
         block_device_mapping = driver.block_device_info_get_mapping(
             block_device_info)
+        #遍历映射的每一个volumn
         for vol in block_device_mapping:
             connection_info = vol['connection_info']
             disk_dev = vol['mount_device']
             if disk_dev is not None:
                 disk_dev = disk_dev.rpartition("/")[2]
             try:
+                #与volume断开连接
                 self._disconnect_volume(context, connection_info, instance)
             except Exception as exc:
                 with excutils.save_and_reraise_exception() as ctxt:
@@ -1107,7 +1125,7 @@ class LibvirtDriver(driver.ComputeDriver):
             if success:
                 instance.cleaned = True
             instance.save()
-
+        #undefine对应的虚拟机
         self._undefine_domain(instance)
 
     def _detach_encrypted_volumes(self, instance, block_device_info):
@@ -1156,6 +1174,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 ceph_conf=CONF.libvirt.images_rbd_ceph_conf,
                 rbd_user=CONF.libvirt.rbd_user)
 
+    # 实现rbd类型块的删除
     def _cleanup_rbd(self, instance):
         # NOTE(nic): On revert_resize, the cleanup steps for the root
         # volume are handled with an "rbd snap rollback" command,
@@ -1249,9 +1268,11 @@ class LibvirtDriver(driver.ComputeDriver):
             self.unplug_vifs(instance, network_info)
             self.unfilter_instance(instance, network_info)
 
+    #通过联接信息，获取volume的驱动
     def _get_volume_driver(self, connection_info):
         driver_type = connection_info.get('driver_volume_type')
         if driver_type not in self.volume_drivers:
+            #不认识此驱动，报错
             raise exception.VolumeDriverNotFound(driver_type=driver_type)
         return self.volume_drivers[driver_type]
 
@@ -1302,6 +1323,7 @@ class LibvirtDriver(driver.ComputeDriver):
                            encryption=None):
         self._detach_encryptor(context, connection_info, encryption=encryption)
         if self._should_disconnect_target(context, connection_info, instance):
+            #取对应volume类型的驱动实例，例如'rbd=nova.virt.libvirt.volume.net.LibvirtNetVolumeDriver'
             vol_driver = self._get_volume_driver(connection_info)
             vol_driver.disconnect_volume(connection_info, instance)
         else:

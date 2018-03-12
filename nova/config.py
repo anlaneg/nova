@@ -46,6 +46,7 @@ def parse_args(argv, default_config_files=None, configure_db=True,
         profiler.set_defaults(CONF)
     config.set_middleware_defaults()
 
+    #加载nova配置
     CONF(argv[1:],
          project='nova',
          version=version.version_string(),

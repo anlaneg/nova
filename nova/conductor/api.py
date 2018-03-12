@@ -25,7 +25,7 @@ CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
 
-
+#负责实现conductor的api
 class API(object):
     """Conductor API that does updates via RPC to the ConductorManager."""
 

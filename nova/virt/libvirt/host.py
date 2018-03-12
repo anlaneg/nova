@@ -490,6 +490,7 @@ class Host(object):
         pass
 
     def initialize(self):
+        #如果已初始化，则跳过
         if self._initialized:
             return
 
@@ -505,6 +506,7 @@ class Host(object):
 
         self._initialized = True
 
+    #取libvirt,hypervisor版本，取hypervisor类型，进行比对，不一致的，返回False
     def _version_check(self, lv_ver=None, hv_ver=None, hv_type=None,
                        op=operator.lt):
         """Check libvirt version, hypervisor version, and hypervisor type
@@ -514,6 +516,7 @@ class Host(object):
         conn = self.get_connection()
         try:
             if lv_ver is not None:
+                #取libvirt版本号
                 libvirt_version = conn.getLibVersion()
                 if op(libvirt_version,
                       versionutils.convert_version_to_int(lv_ver)):

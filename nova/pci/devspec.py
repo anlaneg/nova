@@ -238,7 +238,7 @@ class WhitelistPciAddress(object):
         pci_addr_obj = PhysicalPciAddress(pci_addr)
         return self.pci_address_spec.match(pci_addr_obj)
 
-
+#pci设备抽象
 class PciDeviceSpec(PciAddressSpec):
     def __init__(self, dev_spec):
         self.tags = dev_spec

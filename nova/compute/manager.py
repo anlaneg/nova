@@ -644,6 +644,7 @@ class ComputeManager(manager.Manager):
         for the migration records and those local guests are destroyed, along
         with instance allocation records in Placement for this node.
         """
+        #查询原来在本机，但已被成功搬离本机，但还没有来得及删除的instance，记录为evacuations
         filters = {
             'source_compute': self.host,
             # NOTE(mriedem): Migration records that have been accepted are
@@ -657,18 +658,21 @@ class ComputeManager(manager.Manager):
             evacuations = objects.MigrationList.get_by_filters(context,
                                                                filters)
         if not evacuations:
+            #如果不存在这种instance,则退出
             return
         evacuations = {mig.instance_uuid: mig for mig in evacuations}
 
+        #返回本机上存在的instances
         local_instances = self._get_instances_on_driver(context)
         evacuated = [inst for inst in local_instances
-                     if inst.uuid in evacuations]
+                     if inst.uuid in evacuations] #获得需要移除的instance
 
         # NOTE(gibi): We are called from init_host and at this point the
         # compute_nodes of the resource tracker has not been populated yet so
         # we cannot rely on the resource tracker here.
         compute_nodes = {}
 
+        #将其移除
         for instance in evacuated:
             migration = evacuations[instance.uuid]
             LOG.info('Deleting instance as it has been evacuated from '
@@ -688,6 +692,8 @@ class ComputeManager(manager.Manager):
                          instance=instance)
                 # always destroy disks if the instance was deleted
                 destroy_disks = True
+            #指明移除instance,需要释放的网络资源network_info,需要移除的块设备bdi,需要移除的
+            #共享存储destroy_disks
             self.driver.destroy(context, instance,
                                 network_info,
                                 bdi, destroy_disks)
@@ -1145,8 +1151,10 @@ class ComputeManager(manager.Manager):
         if CONF.placement.os_region_name is None:
             raise exception.PlacementNotConfigured()
 
+        #调用compute的底层驱动，例如libvirt来初始化host
         self.driver.init_host(host=self.host)
         context = nova.context.get_admin_context()
+        #取绑定在当前host机上的所有instance
         instances = objects.InstanceList.get_by_host(
             context, self.host, expected_attrs=['info_cache', 'metadata'])
 

@@ -20,6 +20,7 @@
 # the object.
 
 #将object中的所有对象载入
+#这个目录下存放的均为nova中用来抽象数据库数据的实体类
 def register_all():
     # NOTE(danms): You must make sure your object gets imported in this
     # function in order for it to be registered by services that may
