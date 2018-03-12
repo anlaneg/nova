@@ -1122,6 +1122,7 @@ Related options:
 
 * ``use_neutron``
 """),
+    #定义firewall驱动
     cfg.StrOpt('firewall_driver',
         deprecated_for_removal=True,
         deprecated_since='16.0.0',

@@ -91,6 +91,7 @@ def refresh_cache(f):
 SENTINEL = object()
 
 
+#提供nova 网络api接口定义
 class NetworkAPI(base.Base):
     """Base Network API for doing networking operations.
     New operations available on specific clients must be added here as well.

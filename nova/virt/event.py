@@ -76,6 +76,7 @@ class InstanceEvent(Event):
     def __init__(self, uuid, timestamp=None):
         super(InstanceEvent, self).__init__(timestamp)
 
+        #实例对应的uuid
         self.uuid = uuid
 
     def get_instance_uuid(self):
@@ -101,9 +102,11 @@ class LifecycleEvent(InstanceEvent):
     def __init__(self, uuid, transition, timestamp=None):
         super(LifecycleEvent, self).__init__(uuid, timestamp)
 
+        #事件类型
         self.transition = transition
 
     def get_transition(self):
+        #取对应的事件类型，例如stoped,started...
         return self.transition
 
     def get_name(self):

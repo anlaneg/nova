@@ -27,6 +27,7 @@ def get_domain_info(libvirt, host, virt_dom):
                 'cannot read cputime for domain' in message)
 
     try:
+        #取虚机信息
         return virt_dom.info()
     except libvirt.libvirtError as e:
         if not host.has_min_version((1, 2, 11)) and is_race(e):

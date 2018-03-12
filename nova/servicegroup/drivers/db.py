@@ -32,6 +32,7 @@ LOG = logging.getLogger(__name__)
 class DbDriver(base.Driver):
 
     def __init__(self, *args, **kwargs):
+        #设置服务down的时间，默认是60s
         self.service_down_time = CONF.service_down_time
 
     def join(self, member, group, service=None):

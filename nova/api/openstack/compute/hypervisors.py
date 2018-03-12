@@ -160,6 +160,7 @@ class HypervisorsController(wsgi.Controller):
                 raise webob.exc.HTTPBadRequest(explanation=msg)
 
         hypervisors_list = []
+        #遍历每个compute节点
         for hyp in compute_nodes:
             try:
                 instances = None

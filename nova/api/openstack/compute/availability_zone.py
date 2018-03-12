@@ -28,6 +28,7 @@ class AvailabilityZoneController(wsgi.Controller):
 
     def __init__(self):
         super(AvailabilityZoneController, self).__init__()
+        #实际化serivcegroup api对象
         self.servicegroup_api = servicegroup.API()
         self.host_api = compute.HostAPI()
 
@@ -87,6 +88,7 @@ class AvailabilityZoneController(wsgi.Controller):
             for host in zone_hosts.get(zone, []):
                 hosts[host] = {}
                 for service in host_services[zone + host]:
+                    #检查service是否up
                     alive = self.servicegroup_api.service_is_up(service)
                     hosts[host][service['binary']] = {'available': alive,
                                       'active': True != service['disabled'],
