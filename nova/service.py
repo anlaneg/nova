@@ -51,6 +51,7 @@ LOG = logging.getLogger(__name__)
 
 CONF = nova.conf.CONF
 
+#各service对应的manager
 SERVICE_MANAGERS = {
     'nova-compute': 'nova.compute.manager.ComputeManager',
     'nova-console': 'nova.console.manager.ConsoleProxyManager',
@@ -242,13 +243,15 @@ class Service(service.Service):
         if not host:
             host = CONF.host
         if not binary:
+            #未指定service名称，则以进程名为准
             binary = os.path.basename(sys.argv[0])
         if not topic:
             topic = binary.rpartition('nova-')[2]
-        #如果manager没有指定，则采用binary在manager数组中获取
         if not manager:
+            #如果manager没有指定，则采用binary在manager数组中获取
             manager = SERVICE_MANAGERS.get(binary)
         if report_interval is None:
+            #如果未指定report间隔，则以配置为准
             report_interval = CONF.report_interval
         if periodic_enable is None:
             periodic_enable = CONF.periodic_enable
@@ -257,6 +260,7 @@ class Service(service.Service):
 
         debugger.init()
 
+        #创建service对象
         service_obj = cls(host, binary, topic, manager,
                           report_interval=report_interval,
                           periodic_enable=periodic_enable,

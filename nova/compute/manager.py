@@ -495,6 +495,7 @@ class ComputeManager(manager.Manager):
     def __init__(self, compute_driver=None, *args, **kwargs):
         """Load configuration options and connect to the hypervisor."""
         self.virtapi = ComputeVirtAPI(self)
+        #网络api
         self.network_api = network.API()
         self.volume_api = cinder.API()
         self.image_api = image.API()
@@ -587,6 +588,7 @@ class ComputeManager(manager.Manager):
             LOG.debug('Instance has been destroyed from under us while '
                       'trying to set it to ERROR', instance=instance)
 
+    #返回本机上满足filter条件的instance
     def _get_instances_on_driver(self, context, filters=None):
         """Return a list of instance records for the instances found
         on the hypervisor which satisfy the specified filters. If filters=None
@@ -596,13 +598,16 @@ class ComputeManager(manager.Manager):
         if not filters:
             filters = {}
         try:
+            #取本地所有vm的uuid
             driver_uuids = self.driver.list_instance_uuids()
             if len(driver_uuids) == 0:
                 # Short circuit, don't waste a DB call
                 return objects.InstanceList()
+            #自数据库中找出这些虚拟的记录
             filters['uuid'] = driver_uuids
             local_instances = objects.InstanceList.get_by_filters(
                 context, filters, use_slave=True)
+            #返回记录
             return local_instances
         except NotImplementedError:
             pass
@@ -613,10 +618,12 @@ class ComputeManager(manager.Manager):
         driver_instances = self.driver.list_instances()
         # NOTE(mjozefcz): In this case we need to apply host filter.
         # Without this all instance data would be fetched from db.
+        #自数据库中找出所有本机上的记录
         filters['host'] = self.host
         instances = objects.InstanceList.get_by_filters(context, filters,
                                                         use_slave=True)
-        #构造虚拟机与虚拟机对象的map
+        #构造数据库中虚拟机名称与虚机记录映射的dict
+        #如果某一个虚机在driver_instance中，且它也在name_map中，则返回
         name_map = {instance.name: instance for instance in instances}
         local_instances = []
         for driver_instance in driver_instances:

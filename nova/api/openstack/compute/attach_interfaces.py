@@ -58,6 +58,7 @@ class InterfaceAttachmentController(wsgi.Controller):
         search_opts = {'device_id': instance.uuid}
 
         try:
+            #列出所有接口
             data = self.network_api.list_ports(context, **search_opts)
         except exception.NotFound as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
