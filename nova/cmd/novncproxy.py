@@ -31,7 +31,7 @@ from nova.console.securityproxy import rfb
 CONF = nova.conf.CONF
 vnc.register_cli_opts(CONF)
 
-
+#nova-novncproxy，基于 Web 浏览器的 VNC 访问
 def main():
     # set default web flag option
     CONF.set_default('web', '/usr/share/novnc')
