@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import datetime
 import sys
 
 import ddt
@@ -446,15 +447,18 @@ Archiving.....complete
     def test_archive_deleted_rows_until_complete_quiet(self):
         self.test_archive_deleted_rows_until_complete(verbose=False)
 
+    @mock.patch('nova.db.sqlalchemy.api.purge_shadow_tables')
     @mock.patch.object(db, 'archive_deleted_rows')
     def test_archive_deleted_rows_until_stopped(self, mock_db_archive,
+                                                mock_db_purge,
                                                 verbose=True):
         mock_db_archive.side_effect = [
             ({'instances': 10, 'instance_extra': 5}, list()),
             ({'instances': 5, 'instance_faults': 1}, list()),
             KeyboardInterrupt]
         result = self.commands.archive_deleted_rows(20, verbose=verbose,
-                                                    until_complete=True)
+                                                    until_complete=True,
+                                                    purge=True)
         self.assertEqual(1, result)
         if verbose:
             expected = """\
@@ -466,6 +470,7 @@ Archiving.....stopped
 | instance_faults | 1                       |
 | instances       | 15                      |
 +-----------------+-------------------------+
+Rows were archived, running purge...
 """
         else:
             expected = ''
@@ -474,15 +479,19 @@ Archiving.....stopped
         mock_db_archive.assert_has_calls([mock.call(20),
                                           mock.call(20),
                                           mock.call(20)])
+        mock_db_purge.assert_called_once_with(mock.ANY, None,
+                                              status_fn=mock.ANY)
 
     def test_archive_deleted_rows_until_stopped_quiet(self):
         self.test_archive_deleted_rows_until_stopped(verbose=False)
 
     @mock.patch.object(db, 'archive_deleted_rows', return_value=({}, []))
     def test_archive_deleted_rows_verbose_no_results(self, mock_db_archive):
-        result = self.commands.archive_deleted_rows(20, verbose=True)
+        result = self.commands.archive_deleted_rows(20, verbose=True,
+                                                    purge=True)
         mock_db_archive.assert_called_once_with(20)
         output = self.output.getvalue()
+        # If nothing was archived, there should be no purge messages
         self.assertIn('Nothing was archived.', output)
         self.assertEqual(0, result)
 
@@ -533,6 +542,78 @@ Archiving.....stopped
             self.assertEqual(expected, output)
         else:
             self.assertEqual(0, len(output))
+
+    @mock.patch('nova.db.sqlalchemy.api.purge_shadow_tables')
+    def test_purge_all(self, mock_purge):
+        mock_purge.return_value = 1
+        ret = self.commands.purge(purge_all=True)
+        self.assertEqual(0, ret)
+        mock_purge.assert_called_once_with(mock.ANY, None, status_fn=mock.ANY)
+
+    @mock.patch('nova.db.sqlalchemy.api.purge_shadow_tables')
+    def test_purge_date(self, mock_purge):
+        mock_purge.return_value = 1
+        ret = self.commands.purge(before='oct 21 2015')
+        self.assertEqual(0, ret)
+        mock_purge.assert_called_once_with(mock.ANY,
+                                           datetime.datetime(2015, 10, 21),
+                                           status_fn=mock.ANY)
+
+    @mock.patch('nova.db.sqlalchemy.api.purge_shadow_tables')
+    def test_purge_date_fail(self, mock_purge):
+        ret = self.commands.purge(before='notadate')
+        self.assertEqual(2, ret)
+        self.assertFalse(mock_purge.called)
+
+    @mock.patch('nova.db.sqlalchemy.api.purge_shadow_tables')
+    def test_purge_no_args(self, mock_purge):
+        ret = self.commands.purge()
+        self.assertEqual(1, ret)
+        self.assertFalse(mock_purge.called)
+
+    @mock.patch('nova.db.sqlalchemy.api.purge_shadow_tables')
+    def test_purge_nothing_deleted(self, mock_purge):
+        mock_purge.return_value = 0
+        ret = self.commands.purge(purge_all=True)
+        self.assertEqual(3, ret)
+
+    @mock.patch('nova.db.sqlalchemy.api.purge_shadow_tables')
+    @mock.patch('nova.objects.CellMappingList.get_all')
+    def test_purge_all_cells(self, mock_get_cells, mock_purge):
+        cell1 = objects.CellMapping(uuid=uuidsentinel.cell1, name='cell1',
+                                    database_connection='foo1',
+                                    transport_url='bar1')
+        cell2 = objects.CellMapping(uuid=uuidsentinel.cell2, name='cell2',
+                                    database_connection='foo2',
+                                    transport_url='bar2')
+
+        mock_get_cells.return_value = [cell1, cell2]
+
+        values = [123, 456]
+
+        def fake_purge(*args, **kwargs):
+            val = values.pop(0)
+            kwargs['status_fn'](val)
+            return val
+        mock_purge.side_effect = fake_purge
+
+        ret = self.commands.purge(purge_all=True, all_cells=True, verbose=True)
+        self.assertEqual(0, ret)
+        mock_get_cells.assert_called_once_with(mock.ANY)
+        output = self.output.getvalue()
+        expected = """\
+Cell %s: 123
+Cell %s: 456
+""" % (cell1.identity, cell2.identity)
+
+        self.assertEqual(expected, output)
+
+    @mock.patch('nova.objects.CellMappingList.get_all')
+    def test_purge_all_cells_no_api_config(self, mock_get_cells):
+        mock_get_cells.side_effect = db_exc.DBError
+        ret = self.commands.purge(purge_all=True, all_cells=True)
+        self.assertEqual(4, ret)
+        self.assertIn('Unable to get cell list', self.output.getvalue())
 
     @mock.patch.object(migration, 'db_null_instance_uuid_scan',
                        return_value={'foo': 0})

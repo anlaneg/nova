@@ -474,12 +474,11 @@ class LibvirtDriver(driver.ComputeDriver):
             conf.driver_cache = cache_mode
 
     def _do_quality_warnings(self):
-        """Warn about untested driver configurations.
+        """Warn about potential configuration issues.
 
-        This will log a warning message about untested driver or host arch
-        configurations to indicate to administrators that the quality is
-        unknown. Currently, only qemu or kvm on intel 32- or 64-bit systems
-        is tested upstream.
+        This will log a warning message for things such as untested driver or
+        host arch configurations in order to indicate potential issues to
+        administrators.
         """
         caps = self._host.get_capabilities()
         hostarch = caps.host.cpu.arch
@@ -493,6 +492,18 @@ class LibvirtDriver(driver.ComputeDriver):
                         'information, see: https://docs.openstack.org/'
                         'nova/latest/user/support-matrix.html',
                         {'type': CONF.libvirt.virt_type, 'arch': hostarch})
+
+        if CONF.vnc.keymap:
+            LOG.warning('The option "[vnc] keymap" has been deprecated '
+                        'in favor of configuration within the guest. '
+                        'Update nova.conf to address this change and '
+                        'refer to bug #1682020 for more information.')
+
+        if CONF.spice.keymap:
+            LOG.warning('The option "[spice] keymap" has been deprecated '
+                        'in favor of configuration within the guest. '
+                        'Update nova.conf to address this change and '
+                        'refer to bug #1682020 for more information.')
 
     def _handle_conn_event(self, enabled, reason):
         LOG.info("Connection event '%(enabled)d' reason '%(reason)s'",
@@ -5061,6 +5072,23 @@ class LibvirtDriver(driver.ComputeDriver):
                 cpu_config.features.add(xf)
         return cpu_config
 
+    def _guest_add_pcie_root_ports(self, guest):
+        """Add PCI Express root ports.
+
+        PCI Express machine can have as many PCIe devices as it has
+        pcie-root-port controllers (slots in virtual motherboard).
+
+        If we want to have more PCIe slots for hotplug then we need to create
+        whole PCIe structure (libvirt limitation).
+        """
+
+        pcieroot = vconfig.LibvirtConfigGuestPCIeRootController()
+        guest.add_device(pcieroot)
+
+        for x in range(0, CONF.libvirt.num_pcie_ports):
+            pcierootport = vconfig.LibvirtConfigGuestPCIeRootPortController()
+            guest.add_device(pcierootport)
+
     def _guest_add_usb_host_keyboard(self, guest):
         """Add USB Host controller and keyboard for graphical console use.
 
@@ -5191,6 +5219,16 @@ class LibvirtDriver(driver.ComputeDriver):
         if virt_type in ('qemu', 'kvm'):
             self._set_qemu_guest_agent(guest, flavor, instance, image_meta)
 
+        # Add PCIe root port controllers for PCI Express machines
+        # but only if their amount is configured
+        if (CONF.libvirt.num_pcie_ports and
+                ((caps.host.cpu.arch == fields.Architecture.AARCH64 and
+                guest.os_mach_type.startswith('virt')) or
+                (caps.host.cpu.arch == fields.Architecture.X86_64 and
+                guest.os_mach_type is not None and
+                'q35' in guest.os_mach_type))):
+            self._guest_add_pcie_root_ports(guest)
+
         self._guest_add_pci_devices(guest, instance)
 
         self._guest_add_watchdog_action(guest, flavor, image_meta)
@@ -5271,9 +5309,6 @@ class LibvirtDriver(driver.ComputeDriver):
             graphics = vconfig.LibvirtConfigGuestGraphics()
             graphics.type = "vnc"
             if CONF.vnc.keymap:
-                # TODO(stephenfin): There are some issues here that may
-                # necessitate deprecating this option entirely in the future.
-                # Refer to bug #1682020 for more information.
                 graphics.keymap = CONF.vnc.keymap
             graphics.listen = CONF.vnc.server_listen
             guest.add_device(graphics)
@@ -5282,9 +5317,6 @@ class LibvirtDriver(driver.ComputeDriver):
             graphics = vconfig.LibvirtConfigGuestGraphics()
             graphics.type = "spice"
             if CONF.spice.keymap:
-                # TODO(stephenfin): There are some issues here that may
-                # necessitate deprecating this option entirely in the future.
-                # Refer to bug #1682020 for more information.
                 graphics.keymap = CONF.spice.keymap
             graphics.listen = CONF.spice.server_listen
             guest.add_device(graphics)
