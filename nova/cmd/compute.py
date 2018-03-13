@@ -40,6 +40,9 @@ CONF = nova.conf.CONF
 
 
 #nova compute入口
+#主要工作，完成本主机上具体的虚机维护工作。
+#比如：虚拟创建过程中，接受conductor传递过来的创建请求，并在本机上调用libvirt接口
+#完成xml配置书写，虚拟启动
 def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, 'nova')

@@ -716,6 +716,7 @@ class Host(object):
 
         return self.get_connection().getVersion()
 
+    #取自身主机名称
     def get_hostname(self):
         """Returns the hostname of the hypervisor."""
         hostname = self.get_connection().getHostname()

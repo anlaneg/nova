@@ -249,7 +249,7 @@ class ConductorAPI(object):
         return cctxt.call(context, 'object_backport_versions', objinst=objinst,
                           object_versions=object_versions)
 
-
+#向conductor发送消息
 @profiler.trace_cls("rpc")
 class ComputeTaskAPI(object):
     """Client side of the conductor 'compute' namespaced RPC API

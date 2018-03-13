@@ -36,7 +36,7 @@ from nova import version
 CONF = nova.conf.CONF
 LOG = logging.getLogger('nova.network')
 
-
+#旧的nova网络功能
 def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, "nova")

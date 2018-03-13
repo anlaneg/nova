@@ -1154,7 +1154,11 @@ class API(base.Base):
                         # and instance mappings.
                         self._cleanup_build_artifacts(instances,
                                                       instances_to_build)
-
+            
+            #api层将此api消息做为一个task来处理，task会被通过rpc交给conductor来处理
+            #而conductor会通过调度，找到合适的host，并将创建任务交由给compute节点来
+            #具体完成创建，然后compute节点会依据hypervisor层采用的技术将创建请求调给
+            #具体的driver来完成，常用的driver是libvirt
             self.compute_task_api.build_instances(context,
                 instances=instances, image=boot_meta,
                 filter_properties=filter_properties,
@@ -1632,7 +1636,7 @@ class API(base.Base):
         filter_properties = scheduler_utils.build_filter_properties(
                 scheduler_hints, forced_host, forced_node, instance_type)
 
-        #创建
+        #创建虚机实例
         return self._create_instance(
                        context, instance_type,
                        image_href, kernel_id, ramdisk_id,

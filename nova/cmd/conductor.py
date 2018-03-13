@@ -30,7 +30,9 @@ from nova import version
 
 CONF = nova.conf.CONF
 
-
+#conductor进程
+#主要工作：接受api层送来的请求，完成相关的调度工作（通过调度进程），
+# 并向compute进程下发相应的创建删除任务
 def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, "nova")

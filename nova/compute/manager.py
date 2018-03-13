@@ -416,6 +416,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
         super(ComputeVirtAPI, self).__init__()
         self._compute = compute
 
+    #产生事件失败异常
     def _default_error_callback(self, event_name, instance):
         raise exception.NovaException(_('Instance event failed'))
 
@@ -454,9 +455,11 @@ class ComputeVirtAPI(virtapi.VirtAPI):
         """
 
         if error_callback is None:
+            #未提供错误回调，使用我们默认的错误回调，默认的错误回调负责扔出异常
             error_callback = self._default_error_callback
         events = {}
         for event_name in event_names:
+            #如果event_name是一个元组，则提供name及tag
             if isinstance(event_name, tuple):
                 name, tag = event_name
                 event_name = objects.InstanceExternalEvent.make_key(
@@ -466,6 +469,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
                     self._compute.instance_events.prepare_for_instance_event(
                         instance, event_name))
             except exception.NovaException:
+                #设置事件准备失败，产生错误回调
                 error_callback(event_name, instance)
                 # NOTE(danms): Don't wait for any of the events. They
                 # should all be canceled and fired immediately below,
@@ -473,13 +477,15 @@ class ComputeVirtAPI(virtapi.VirtAPI):
                 deadline = 0
         yield
         with eventlet.timeout.Timeout(deadline):
+            #遍历所有events
             for event_name, event in events.items():
                 actual_event = event.wait()
                 if actual_event.status == 'completed':
                     continue
+                #产生错误回调
                 decision = error_callback(event_name, instance)
                 if decision is False:
-                    break
+                    break#不能再继续时，跳出
 
 #computer节点的Manager
 class ComputeManager(manager.Manager):
@@ -495,9 +501,11 @@ class ComputeManager(manager.Manager):
     def __init__(self, compute_driver=None, *args, **kwargs):
         """Load configuration options and connect to the hypervisor."""
         self.virtapi = ComputeVirtAPI(self)
-        #网络api
+        #网络api,一般我们加载neutron
         self.network_api = network.API()
+        #使用cinder提供块服务
         self.volume_api = cinder.API()
+        #使用glance提供image服务
         self.image_api = image.API()
         self._last_host_check = 0
         self._last_bw_usage_poll = 0
@@ -1739,7 +1747,8 @@ class ComputeManager(manager.Manager):
             LOG.warning('%(fails)i consecutive build failures',
                         {'fails': self._failed_builds})
 
-    #compute收到build_and_run_instance消息进行处理
+    #compute节点收到build_and_run_instance消息进行处理（构造并运行instance)
+    #此消息来源于conductor
     @wrap_exception()
     @reverts_task_state
     @wrap_instance_fault
@@ -1757,7 +1766,7 @@ class ComputeManager(manager.Manager):
             # to do anything with this instance while we wait.
             with self._build_semaphore:
                 try:
-                    #调用本函数完成build_and_run
+                    #完成虚拟构造并启动
                     result = self._do_build_and_run_instance(*args, **kwargs)
                 except Exception:
                     # NOTE(mriedem): This should really only happen if
@@ -1837,7 +1846,8 @@ class ComputeManager(manager.Manager):
 
         try:
             LOG.debug('Starting instance...', instance=instance)
-            #vm状态改为building,task_state改为空。
+            #vm状态改为building,task_state改为空。compute节点此时将数据库状态改为building
+            #说明消息已到达compute节点
             instance.vm_state = vm_states.BUILDING
             instance.task_state = None
             instance.save(expected_task_state=
@@ -2046,7 +2056,7 @@ class ComputeManager(manager.Manager):
                     LOG.debug('Start spawning the instance on the hypervisor.',
                               instance=instance)
                     with timeutils.StopWatch() as timer:
-                        #孵化instances
+                        #孵化instances，并完在虚机开机
                         self.driver.spawn(context, instance, image_meta,
                                           injected_files, admin_password,
                                           allocs, network_info=network_info,

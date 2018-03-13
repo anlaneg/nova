@@ -90,7 +90,7 @@ def block_device_info_get_mapping(block_device_info):
     return block_device_mapping
 
 
-#定义计算虚拟化驱动
+#定义计算虚拟化驱动基类
 class ComputeDriver(object):
     """Base class for compute drivers.
 

@@ -32,7 +32,9 @@ from nova import version
 
 CONF = nova.conf.CONF
 
-
+#nova的调度进程
+#主要工作：实现各节点用量收集，通过不同的调度策略完在虚机创建迁移时的
+#主机选择问题。
 def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, "nova")

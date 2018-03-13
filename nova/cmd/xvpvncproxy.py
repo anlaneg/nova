@@ -29,7 +29,7 @@ from nova.vnc import xvp_proxy
 
 CONF = nova.conf.CONF
 
-
+#nova-xvpnvncproxy，基于 Java 客户端的 VNC 访问
 def main():
     config.parse_args(sys.argv)
     logging.setup(config.CONF, "nova")

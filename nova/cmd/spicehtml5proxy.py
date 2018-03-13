@@ -29,7 +29,7 @@ from nova import config
 CONF = nova.conf.CONF
 spice.register_cli_opts(CONF)
 
-
+#nova-spicehtml5proxy，基于 HTML5 浏览器的 SPICE 访问
 def main():
     config.parse_args(sys.argv)
 

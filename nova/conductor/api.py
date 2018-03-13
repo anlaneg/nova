@@ -77,11 +77,11 @@ class API(object):
                             'Reattempting establishment of '
                             'nova-conductor connection...')
 
-
 class ComputeTaskAPI(object):
     """ComputeTask API that queues up compute tasks for nova-conductor."""
 
     def __init__(self):
+        #用于向Conductor发送rcp消息
         self.conductor_compute_rpcapi = rpcapi.ComputeTaskAPI()
 
     def resize_instance(self, context, instance, extra_instance_updates,
@@ -115,6 +115,7 @@ class ComputeTaskAPI(object):
             admin_password, injected_files, requested_networks,
             security_groups, block_device_mapping, legacy_bdm=True,
             request_spec=None, host_lists=None):
+        #要求conductor创建instances
         self.conductor_compute_rpcapi.build_instances(context,
                 instances=instances, image=image,
                 filter_properties=filter_properties,

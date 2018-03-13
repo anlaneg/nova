@@ -36,7 +36,8 @@ from nova import version
 
 CONF = nova.conf.CONF
 
-
+#负责收集前端的rstapi,并根据请求进行相应的响应
+#例如：在创建虚拟的工作中，api层主要将收到的请求，按task方式按序传递给conductor进程
 def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, "nova")

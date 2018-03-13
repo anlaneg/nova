@@ -2706,6 +2706,7 @@ class LibvirtDriver(driver.ComputeDriver):
         self._volume_snapshot_update_status(context, snapshot_id, 'deleting')
         self._volume_refresh_connection_info(context, instance, volume_id)
 
+    #实现虚机的reboot
     def reboot(self, context, instance, network_info, reboot_type,
                block_device_info=None, bad_volumes_callback=None):
         """Reboot a virtual machine, given an instance reference."""
@@ -3127,6 +3128,7 @@ class LibvirtDriver(driver.ComputeDriver):
                                   disk_info, image_meta,
                                   block_device_info=block_device_info,
                                   mdevs=mdevs)
+        #创建虚拟并开机
         self._create_domain_and_network(
             context, xml, instance, network_info,
             block_device_info=block_device_info,
@@ -5379,6 +5381,7 @@ class LibvirtDriver(driver.ComputeDriver):
                     model="usbtablet")
         return tablet
 
+    #将对guest机的配置转换为xml
     def _get_guest_xml(self, context, instance, network_info, disk_info,
                        image_meta, rescue=None,
                        block_device_info=None,
@@ -5401,6 +5404,7 @@ class LibvirtDriver(driver.ComputeDriver):
         conf = self._get_guest_config(instance, network_info, image_meta,
                                       disk_info, rescue, block_device_info,
                                       context, mdevs)
+        #将配置转换为xml
         xml = conf.to_xml()
 
         LOG.debug('End _get_guest_xml xml=%(xml)s',
@@ -5513,7 +5517,7 @@ class LibvirtDriver(driver.ComputeDriver):
         :returns guest.Guest: Guest just created
         """
         if xml:
-            #创建虚拟机
+            #创建虚拟机(指定xml,采用define方式定义xml)
             guest = libvirt_guest.Guest.create(xml, self._host)
             if post_xml_callback is not None:
                 post_xml_callback()
@@ -5521,9 +5525,11 @@ class LibvirtDriver(driver.ComputeDriver):
             guest = libvirt_guest.Guest(domain)
 
         if power_on or pause:
+            #启动xml,使之运行
             guest.launch(pause=pause)
 
         if not utils.is_neutron():
+            #非neutron时需要开启发卡弯
             guest.enable_hairpin()
 
         return guest
@@ -5614,6 +5620,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 with self._lxc_disk_handler(context, instance,
                                             instance.image_meta,
                                             block_device_info):
+                    #创建并开机（依据power_on与pause参数决定是否开机）
                     guest = self._create_domain(
                         xml, pause=pause, power_on=power_on,
                         post_xml_callback=post_xml_callback)

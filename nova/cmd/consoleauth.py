@@ -30,7 +30,7 @@ from nova import version
 
 CONF = nova.conf.CONF
 
-
+#负责对访问虚机控制台请亲提供 Token 认证 
 def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, "nova")

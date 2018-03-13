@@ -55,6 +55,7 @@ def _compute_host(host, instance):
     return instance.host
 
 
+#rpc客户端接口，用于向指定compute节点发送rcp请求
 @profiler.trace_cls("rpc")
 class ComputeAPI(object):
     '''Client side of the compute rpc API.
@@ -1005,7 +1006,7 @@ class ComputeAPI(object):
         cctxt.cast(ctxt, 'external_instance_event', instances=instances,
                    events=events)
 
-    #向compute发送build_and_run_instance消息
+    #向compute服务发送build_and_run_instance消息
     def build_and_run_instance(self, ctxt, instance, host, image, request_spec,
             filter_properties, admin_password=None, injected_files=None,
             requested_networks=None, security_groups=None,
@@ -1023,12 +1024,13 @@ class ComputeAPI(object):
                   "requested_networks": requested_networks,
                   "security_groups": security_groups,
                   "block_device_mapping": block_device_mapping,
-                  "node": node,
+                  "node": node,#创建instance的节点
                   "limits": limits,
                   "host_list": host_list,
                  }
         client = self.router.client(ctxt)
         version = '5.0'
+        #给指定的主机$host发送rpc消息，要求运行build_and_run_instance
         cctxt = client.prepare(server=host, version=version)
         cctxt.cast(ctxt, 'build_and_run_instance', **kwargs)
 

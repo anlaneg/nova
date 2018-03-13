@@ -223,6 +223,7 @@ class ComputeTaskManager(base.Base):
 
     def __init__(self):
         super(ComputeTaskManager, self).__init__()
+        #与各个compute节点通信时，需要的rpc接口
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
         self.image_api = image.API()
         self.network_api = network.API()
@@ -510,7 +511,7 @@ class ComputeTaskManager(base.Base):
                 inst_mapping.save()
         return inst_mapping
 
-    #conductor收到build_instances消息
+    #conductor收到build_instances消息,选出某个主机，向其发送消息，要求其创建vm
     # NOTE(danms): This is never cell-targeted because it is only used for
     # cellsv1 (which does not target cells directly) and n-cpu reschedules
     # (which go to the cell conductor and thus are always cell-specific).
@@ -527,6 +528,7 @@ class ComputeTaskManager(base.Base):
             requested_networks = objects.NetworkRequestList.from_tuples(
                 requested_networks)
         # TODO(melwitt): Remove this in version 2.0 of the RPC API
+        #取创建需要的flavor
         flavor = filter_properties.get('instance_type')
         if flavor and not isinstance(flavor, objects.Flavor):
             # Code downstream may expect extra_specs to be populated since it
@@ -553,6 +555,7 @@ class ComputeTaskManager(base.Base):
         # or during a reschedule from a pre-Queens compute. In all other cases,
         # it will be a list of lists, though the lists may be empty if there
         # are no more hosts left in a rescheduling situation.
+        #如果给定host列表，则不需要重新调度
         is_reschedule = host_lists is not None
         try:
             # check retry policy. Rather ugly use of instances[0]...
@@ -569,6 +572,7 @@ class ComputeTaskManager(base.Base):
             if is_reschedule:
                 # Make sure that we have a host, as we may have exhausted all
                 # our alternates
+                # 如果需要重新调度，则我们之前已经有一个host了，如果检查出来没有，则扔异常
                 if not host_lists[0]:
                     # We have an empty list of hosts, so this instance has
                     # failed to build.
@@ -579,9 +583,11 @@ class ComputeTaskManager(base.Base):
             else:
                 # This is not a reschedule, so we need to call the scheduler to
                 # get appropriate hosts for the request.
+                # 为需要创建的instances查找合适的host列表
                 host_lists = self._schedule_instances(context, spec_obj,
                         instance_uuids, return_alternates=True)
         except Exception as exc:
+            #未找到合适的hosts列表
             num_attempts = filter_properties.get(
                 'retry', {}).get('num_attempts', 1)
             updates = {'vm_state': vm_states.ERROR, 'task_state': None}
@@ -594,6 +600,7 @@ class ComputeTaskManager(base.Base):
                 # the build request should already be gone and we probably
                 # can't reach the API DB from the cell conductor.
                 if num_attempts <= 1:
+                    #尝试失败，构建请求失败
                     try:
                         # If the BuildRequest stays around then instance
                         # show/lists will pull from it rather than the errored
@@ -650,6 +657,7 @@ class ComputeTaskManager(base.Base):
             try:
                 # NOTE(danms): This saves the az change above, refreshes our
                 # instance, and tells us if it has been deleted underneath us
+                # 保存到数据库
                 instance.save()
             except (exception.InstanceNotFound,
                     exception.InstanceInfoCacheNotFound):
@@ -694,7 +702,7 @@ class ComputeTaskManager(base.Base):
             alts = [(alt.service_host, alt.nodename) for alt in host_list]
             LOG.debug("Selected host: %s; Selected node: %s; Alternates: %s",
                     host.service_host, host.nodename, alts, instance=instance)
-
+            #选中host来创建对应的instance(通知指定host来进行创建）
             self.compute_rpcapi.build_and_run_instance(context,
                     instance=instance, host=host.service_host, image=image,
                     request_spec=local_reqspec,
@@ -703,12 +711,13 @@ class ComputeTaskManager(base.Base):
                     injected_files=injected_files,
                     requested_networks=requested_networks,
                     security_groups=security_groups,
-                    block_device_mapping=bdms, node=host.nodename,
+                    block_device_mapping=bdms, node=host.nodename,#通过node指出需要创建instance的节点名称
                     limits=host.limits, host_list=host_list)
 
     def _schedule_instances(self, context, request_spec,
                             instance_uuids=None, return_alternates=False):
         scheduler_utils.setup_instance_group(context, request_spec)
+        #通过rpc向scheduler进程发送消息，获取可调度的主机列表
         host_lists = self.scheduler_client.select_destinations(context,
                 request_spec, instance_uuids, return_objects=True,
                 return_alternates=return_alternates)
@@ -1108,6 +1117,7 @@ class ComputeTaskManager(base.Base):
         # Add all the UUIDs for the instances
         instance_uuids = [spec.instance_uuid for spec in request_specs]
         try:
+            #请求调度服务，获得虚拟创建所需要的主机
             host_lists = self._schedule_instances(context, request_specs[0],
                     instance_uuids, return_alternates=True)
         except Exception as exc:
@@ -1251,6 +1261,7 @@ class ComputeTaskManager(base.Base):
             legacy_secgroups = [s.identifier
                                 for s in request_spec.security_groups]
             with obj_target_cell(instance, cell) as cctxt:
+                #要求在host节点上创建虚机
                 self.compute_rpcapi.build_and_run_instance(
                     cctxt, instance=instance, image=image,
                     request_spec=request_spec,

@@ -30,7 +30,11 @@ from nova import version
 
 CONF = cfg.CONF
 
-
+#负责对外提供虚拟的界面访问
+#用户可以通过多种方式访问虚机的控制台： 
+#nova-novncproxy，基于 Web 浏览器的 VNC 访问 
+#nova-spicehtml5proxy，基于 HTML5 浏览器的 SPICE 访问 
+#nova-xvpnvncproxy，基于 Java 客户端的 VNC 访问 
 def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, "nova")
