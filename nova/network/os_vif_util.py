@@ -483,15 +483,19 @@ def nova_to_osvif_vif(vif):
 
     LOG.debug("Converting VIF %s", vif)
 
+    #根据vif的类型，拼出函数名称，例如 "_nova_to_osvif_vif_bridge", "_nova_to_osvif_vif_vhostuser"
+    # "_nova_to_osvif_vif_ovs"
     funcname = "_nova_to_osvif_vif_" + vif['type'].replace(".", "_")
     func = getattr(sys.modules[__name__], funcname, None)
 
     if not func:
+        #不存在此函数名称,丢异常
         raise exception.NovaException(
             "Unsupported VIF type %(type)s convert '%(func)s'" %
             {'type': vif['type'], 'func': funcname})
 
     try:
+        #调用此函数，将vif转换为vifobj
         vifobj = func(vif)
         LOG.debug("Converted object %s", vifobj)
         return vifobj

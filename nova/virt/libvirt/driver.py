@@ -365,6 +365,7 @@ class LibvirtDriver(driver.ComputeDriver):
             DEFAULT_FIREWALL_DRIVER,
             host=self._host)
 
+        #虚接口的driver,可据此生成接口的xml配置
         self.vif_driver = libvirt_vif.LibvirtGenericVIFDriver()
 
         # TODO(mriedem): Long-term we should load up the volume drivers on
@@ -3124,6 +3125,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # Does the guest need to be assigned some vGPU mediated devices ?
         mdevs = self._allocate_mdevs(allocations)
 
+        #生成定义虚拟机所需要的xml字符串（后续会被写成文件）
         xml = self._get_guest_xml(context, instance, network_info,
                                   disk_info, image_meta,
                                   block_device_info=block_device_info,
@@ -5106,6 +5108,7 @@ class LibvirtDriver(driver.ComputeDriver):
         usbhost.index = 0
         guest.add_device(usbhost)
 
+    #生成虚机的配置信息
     def _get_guest_config(self, instance, network_info, image_meta,
                           disk_info, rescue=None, block_device_info=None,
                           context=None, mdevs=None):
@@ -5192,6 +5195,7 @@ class LibvirtDriver(driver.ComputeDriver):
         for config in storage_configs:
             guest.add_device(config)
 
+        #遍历虚机的所有网络接口
         for vif in network_info:
             config = self.vif_driver.get_config(
                 instance, vif, image_meta,
@@ -5389,6 +5393,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # NOTE(danms): Stringifying a NetworkInfo will take a lock. Do
         # this ahead of time so that we don't acquire it while also
         # holding the logging lock.
+        #显示log信息
         network_info_str = str(network_info)
         msg = ('Start _get_guest_xml '
                'network_info=%(network_info)s '
@@ -5401,6 +5406,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # NOTE(mriedem): block_device_info can contain auth_password so we
         # need to sanitize the password in the message.
         LOG.debug(strutils.mask_password(msg), instance=instance)
+        #生成配置
         conf = self._get_guest_config(instance, network_info, image_meta,
                                       disk_info, rescue, block_device_info,
                                       context, mdevs)

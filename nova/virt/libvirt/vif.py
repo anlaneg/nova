@@ -551,6 +551,7 @@ class LibvirtGenericVIFDriver(object):
                   "for this vif_driver implementation"))
 
         # Try os-vif codepath first
+        # 首先将vif转换为vif_obj
         vif_obj = os_vif_util.nova_to_osvif_vif(vif)
         if vif_obj is not None:
             return self._get_config_os_vif(instance, vif_obj, image_meta,
