@@ -14,20 +14,22 @@
 
 import mock
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 from oslo_versionedobjects import base as ovo_base
 
 from nova import context
 from nova import exception
+from nova.network import model as network_model
 from nova import objects
 from nova.objects import base
 from nova.objects import request_spec
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
+from nova.tests.unit import fake_network_cache_model
 from nova.tests.unit import fake_request_spec
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 class _TestRequestSpecObject(object):
@@ -78,12 +80,13 @@ class _TestRequestSpecObject(object):
         instance.numa_topology = None
         instance.pci_requests = None
         instance.project_id = fakes.FAKE_PROJECT_ID
+        instance.user_id = fakes.FAKE_USER_ID
         instance.availability_zone = 'nova'
 
         spec = objects.RequestSpec()
         spec._from_instance(instance)
         instance_fields = ['numa_topology', 'pci_requests', 'uuid',
-                           'project_id', 'availability_zone']
+                           'project_id', 'user_id', 'availability_zone']
         for field in instance_fields:
             if field == 'uuid':
                 self.assertEqual(getattr(instance, field),
@@ -97,12 +100,13 @@ class _TestRequestSpecObject(object):
                         numa_topology=None,
                         pci_requests=None,
                         project_id=fakes.FAKE_PROJECT_ID,
+                        user_id=fakes.FAKE_USER_ID,
                         availability_zone='nova')
 
         spec = objects.RequestSpec()
         spec._from_instance(instance)
         instance_fields = ['numa_topology', 'pci_requests', 'uuid',
-                           'project_id', 'availability_zone']
+                           'project_id', 'user_id', 'availability_zone']
         for field in instance_fields:
             if field == 'uuid':
                 self.assertEqual(instance.get(field),
@@ -124,6 +128,7 @@ class _TestRequestSpecObject(object):
             vcpus=1,
             numa_topology=None,
             project_id=fakes.FAKE_PROJECT_ID,
+            user_id=fakes.FAKE_USER_ID,
             availability_zone='nova',
             pci_requests={
                 'instance_uuid': 'fakeid',
@@ -142,6 +147,7 @@ class _TestRequestSpecObject(object):
             memory_mb=10,
             vcpus=1,
             project_id=fakes.FAKE_PROJECT_ID,
+            user_id=fakes.FAKE_USER_ID,
             availability_zone='nova',
             pci_requests=None,
             numa_topology={'cells': [{'id': 1, 'cpuset': ['1'], 'memory': 8192,
@@ -180,6 +186,7 @@ class _TestRequestSpecObject(object):
         spec.numa_topology = None
         spec.pci_requests = None
         spec.project_id = fakes.FAKE_PROJECT_ID
+        spec.user_id = fakes.FAKE_USER_ID
         spec.availability_zone = 'nova'
 
         instance = spec._to_legacy_instance()
@@ -190,6 +197,7 @@ class _TestRequestSpecObject(object):
                           'numa_topology': None,
                           'pci_requests': None,
                           'project_id': fakes.FAKE_PROJECT_ID,
+                          'user_id': fakes.FAKE_USER_ID,
                           'availability_zone': 'nova'}, instance)
 
     def test_to_legacy_instance_with_unset_values(self):
@@ -226,7 +234,7 @@ class _TestRequestSpecObject(object):
         spec = objects.RequestSpec()
         spec._populate_group_info(filt_props)
         self.assertIsInstance(spec.instance_group, objects.InstanceGroup)
-        self.assertEqual(['affinity'], spec.instance_group.policies)
+        self.assertEqual('affinity', spec.instance_group.policy)
         self.assertEqual(['fake1'], spec.instance_group.hosts)
         self.assertEqual(['fake-instance1'], spec.instance_group.members)
 
@@ -281,6 +289,7 @@ class _TestRequestSpecObject(object):
                          numa_topology=None,
                          pci_requests=None,
                          project_id=1,
+                         user_id=2,
                          availability_zone='nova')}
         filt_props = {}
 
@@ -292,7 +301,7 @@ class _TestRequestSpecObject(object):
         spec = objects.RequestSpec.from_primitives(ctxt, spec_dict, filt_props)
         mock_limits.assert_called_once_with({})
         # Make sure that all fields are set using that helper method
-        skip = ['id', 'security_groups']
+        skip = ['id', 'security_groups', 'network_metadata', 'is_bfv']
         for field in [f for f in spec.obj_fields if f not in skip]:
             self.assertTrue(spec.obj_attr_is_set(field),
                              'Field: %s is not set' % field)
@@ -322,7 +331,8 @@ class _TestRequestSpecObject(object):
                 filter_properties, instance_group, instance.availability_zone,
                 objects.SecurityGroupList())
         # Make sure that all fields are set using that helper method
-        for field in [f for f in spec.obj_fields if f != 'id']:
+        skip = ['id', 'network_metadata', 'is_bfv']
+        for field in [f for f in spec.obj_fields if f not in skip]:
             self.assertTrue(spec.obj_attr_is_set(field),
                             'Field: %s is not set' % field)
         # just making sure that the context is set by the method
@@ -458,7 +468,7 @@ class _TestRequestSpecObject(object):
                                            disk_gb=10.0,
                                            memory_mb=8192.0),
             instance_group=objects.InstanceGroup(hosts=['fake1'],
-                                                 policies=['affinity'],
+                                                 policy='affinity',
                                                  members=['inst1', 'inst2']),
             scheduler_hints={'foo': ['bar']},
             requested_destination=fake_dest)
@@ -491,6 +501,47 @@ class _TestRequestSpecObject(object):
     def test_to_legacy_filter_properties_dict_with_unset_values(self):
         spec = objects.RequestSpec()
         self.assertEqual({}, spec.to_legacy_filter_properties_dict())
+
+    def test_ensure_network_metadata(self):
+        network_a = fake_network_cache_model.new_network({
+            'physical_network': 'foo', 'tunneled': False})
+        vif_a = fake_network_cache_model.new_vif({'network': network_a})
+        network_b = fake_network_cache_model.new_network({
+            'physical_network': 'foo', 'tunneled': False})
+        vif_b = fake_network_cache_model.new_vif({'network': network_b})
+        network_c = fake_network_cache_model.new_network({
+            'physical_network': 'bar', 'tunneled': False})
+        vif_c = fake_network_cache_model.new_vif({'network': network_c})
+        network_d = fake_network_cache_model.new_network({
+            'physical_network': None, 'tunneled': True})
+        vif_d = fake_network_cache_model.new_vif({'network': network_d})
+        nw_info = network_model.NetworkInfo([vif_a, vif_b, vif_c, vif_d])
+        info_cache = objects.InstanceInfoCache(network_info=nw_info,
+                                               instance_uuid=uuids.instance)
+        instance = objects.Instance(id=3, uuid=uuids.instance,
+                                    info_cache=info_cache)
+
+        spec = objects.RequestSpec()
+        self.assertNotIn('network_metadata', spec)
+
+        spec.ensure_network_metadata(instance)
+        self.assertIn('network_metadata', spec)
+        self.assertIsInstance(spec.network_metadata, objects.NetworkMetadata)
+        self.assertEqual(spec.network_metadata.physnets, set(['foo', 'bar']))
+        self.assertTrue(spec.network_metadata.tunneled)
+
+    def test_ensure_network_metadata_missing(self):
+        nw_info = network_model.NetworkInfo([])
+        info_cache = objects.InstanceInfoCache(network_info=nw_info,
+                                               instance_uuid=uuids.instance)
+        instance = objects.Instance(id=3, uuid=uuids.instance,
+                                    info_cache=info_cache)
+
+        spec = objects.RequestSpec()
+        self.assertNotIn('network_metadata', spec)
+
+        spec.ensure_network_metadata(instance)
+        self.assertNotIn('network_metadata', spec)
 
     @mock.patch.object(request_spec.RequestSpec,
             '_get_by_instance_uuid_from_db')
@@ -535,13 +586,14 @@ class _TestRequestSpecObject(object):
 
         # object fields
         for field in ['image', 'numa_topology', 'pci_requests', 'flavor',
-                'retry', 'limits']:
+                      'limits', 'network_metadata']:
             self.assertEqual(
                     getattr(req_obj, field).obj_to_primitive(),
                     getattr(serialized_obj, field).obj_to_primitive())
 
         self.assertIsNone(serialized_obj.instance_group.members)
         self.assertIsNone(serialized_obj.instance_group.hosts)
+        self.assertIsNone(serialized_obj.retry)
 
     def test_create(self):
         req_obj = fake_request_spec.fake_spec_obj(remove_id=True)
@@ -623,6 +675,28 @@ class _TestRequestSpecObject(object):
                                              version_manifest=versions)
         self.assertNotIn('security_groups', primitive)
 
+    def test_compat_user_id(self):
+        req_obj = objects.RequestSpec(project_id=fakes.FAKE_PROJECT_ID,
+                                      user_id=fakes.FAKE_USER_ID)
+        versions = ovo_base.obj_tree_get_versions('RequestSpec')
+        primitive = req_obj.obj_to_primitive(target_version='1.8',
+                                             version_manifest=versions)
+        primitive = primitive['nova_object.data']
+        self.assertNotIn('user_id', primitive)
+        self.assertIn('project_id', primitive)
+
+    def test_compat_network_metadata(self):
+        network_metadata = objects.NetworkMetadata(physnets=set(),
+                                                   tunneled=False)
+        req_obj = objects.RequestSpec(network_metadata=network_metadata,
+                                      user_id=fakes.FAKE_USER_ID)
+        versions = ovo_base.obj_tree_get_versions('RequestSpec')
+        primitive = req_obj.obj_to_primitive(target_version='1.9',
+                                             version_manifest=versions)
+        primitive = primitive['nova_object.data']
+        self.assertNotIn('network_metadata', primitive)
+        self.assertIn('user_id', primitive)
+
     def test_default_requested_destination(self):
         req_obj = objects.RequestSpec()
         self.assertIsNone(req_obj.requested_destination)
@@ -633,6 +707,38 @@ class _TestRequestSpecObject(object):
         self.assertIsInstance(req_obj.security_groups,
                               objects.SecurityGroupList)
         self.assertIn('security_groups', req_obj)
+
+    def test_network_requests_load(self):
+        req_obj = objects.RequestSpec()
+        self.assertNotIn('network_metadata', req_obj)
+        self.assertIsInstance(req_obj.network_metadata,
+                              objects.NetworkMetadata)
+        self.assertIn('network_metadata', req_obj)
+
+    def test_destination_aggregates_default(self):
+        destination = objects.Destination()
+        self.assertIsNone(destination.aggregates)
+
+    def test_destination_require_aggregates(self):
+        destination = objects.Destination()
+        destination.require_aggregates(['foo', 'bar'])
+        destination.require_aggregates(['baz'])
+        self.assertEqual(['foo,bar', 'baz'], destination.aggregates)
+
+    def test_destination_1dotoh(self):
+        destination = objects.Destination(aggregates=['foo'])
+        primitive = destination.obj_to_primitive(target_version='1.0')
+        self.assertNotIn('aggregates', primitive['nova_object.data'])
+
+    def test_create_raises_on_unchanged_object(self):
+        ctxt = context.RequestContext(uuids.user_id, uuids.project_id)
+        req_obj = request_spec.RequestSpec(context=ctxt)
+        self.assertRaises(exception.ObjectActionError, req_obj.create)
+
+    def test_save_can_be_called_on_unchanged_object(self):
+        req_obj = fake_request_spec.fake_spec_obj(remove_id=True)
+        req_obj.create()
+        req_obj.save()
 
 
 class TestRequestSpecObject(test_objects._LocalTest,

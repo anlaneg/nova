@@ -29,7 +29,6 @@ from castellan import key_manager
 from oslo_log import log as logging
 from oslo_messaging import exceptions as oslo_exceptions
 from oslo_serialization import base64 as base64utils
-from oslo_serialization import jsonutils
 from oslo_utils import excutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
@@ -73,6 +72,7 @@ from nova.objects import fields as fields_obj
 from nova.objects import keypair as keypair_obj
 from nova.objects import quotas as quotas_obj
 from nova.pci import request as pci_request
+from nova.policies import servers as servers_policies
 import nova.policy
 from nova import profiler
 from nova import rpc
@@ -102,9 +102,10 @@ AGGREGATE_ACTION_UPDATE = 'Update'
 AGGREGATE_ACTION_UPDATE_META = 'UpdateMeta'
 AGGREGATE_ACTION_DELETE = 'Delete'
 AGGREGATE_ACTION_ADD = 'Add'
-BFV_RESERVE_MIN_COMPUTE_VERSION = 17
 CINDER_V3_ATTACH_MIN_COMPUTE_VERSION = 24
 MIN_COMPUTE_MULTIATTACH = 27
+MIN_COMPUTE_TRUSTED_CERTS = 31
+MIN_COMPUTE_ABORT_QUEUED_LIVE_MIGRATION = 34
 
 # FIXME(danms): Keep a global cache of the cells we find the
 # first time we look. This needs to be refreshed on a timer or
@@ -253,6 +254,13 @@ class API(base.Base):
         self.image_api = image_api or image.API()
         self.network_api = network_api or network.API()
         self.volume_api = volume_api or cinder.API()
+        # NOTE(mriedem): This looks a bit weird but we get the reportclient
+        # via SchedulerClient since it lazy-loads SchedulerReportClient on
+        # the first usage which helps to avoid a bunch of lockutils spam in
+        # the nova-api logs every time the service is restarted (remember
+        # that pretty much all of the REST API controllers construct this
+        # API class).
+        self.placementclient = scheduler_client.SchedulerClient().reportclient
         self.security_group_api = (security_group_api or
             openstack_driver.get_openstack_security_group_driver())
         self.consoleauth_rpcapi = consoleauth_rpcapi.ConsoleAuthAPI()
@@ -262,16 +270,13 @@ class API(base.Base):
         self.notifier = rpc.get_notifier('compute', CONF.host)
         if CONF.ephemeral_storage_encryption.enabled:
             self.key_manager = key_manager.API()
-
+        # Help us to record host in EventReporter
+        self.host = CONF.host
         super(API, self).__init__(**kwargs)
 
     @property
     def cell_type(self):
-        try:
-            return getattr(self, '_cell_type')
-        except AttributeError:
-            self._cell_type = cells_opts.get_cell_type()
-            return self._cell_type
+        return getattr(self, '_cell_type', cells_opts.get_cell_type())
 
     def _validate_cell(self, instance):
         if self.cell_type != 'api':
@@ -508,33 +513,6 @@ class API(base.Base):
             'auto_disk_config': auto_disk_config
         }
 
-    def _new_instance_name_from_template(self, uuid, display_name, index):
-        params = {
-            'uuid': uuid,
-            'name': display_name,
-            'count': index + 1,
-        }
-        try:
-            new_name = (CONF.multi_instance_display_name_template %
-                        params)
-        except (KeyError, TypeError):
-            LOG.exception('Failed to set instance name using '
-                          'multi_instance_display_name_template.')
-            new_name = display_name
-        return new_name
-
-    def _apply_instance_name_template(self, context, instance, index):
-        original_name = instance.display_name
-        new_name = self._new_instance_name_from_template(instance.uuid,
-                instance.display_name, index)
-        instance.display_name = new_name
-        if not instance.get('hostname', None):
-            if utils.sanitize_hostname(original_name) == "":
-                instance.hostname = self._default_host_name(instance.uuid)
-            else:
-                instance.hostname = utils.sanitize_hostname(new_name)
-        return instance
-
     def _check_config_drive(self, config_drive):
         if config_drive:
             try:
@@ -626,6 +604,15 @@ class API(base.Base):
                 if image_min_disk > dest_size:
                     raise exception.FlavorDiskSmallerThanMinDisk(
                         flavor_size=dest_size, image_min_disk=image_min_disk)
+            else:
+                # The user is attempting to create a server with a 0-disk
+                # image-backed flavor, which can lead to issues with a large
+                # image consuming an unexpectedly large amount of local disk
+                # on the compute host. Check to see if the deployment will
+                # allow that.
+                if not context.can(
+                        servers_policies.ZERO_DISK_FLAVOR, fatal=False):
+                    raise exception.BootFromVolumeRequiredForZeroDiskFlavor()
 
     def _get_image_defined_bdms(self, instance_type, image_meta,
                                 root_device_name):
@@ -829,8 +816,8 @@ class API(base.Base):
         # InstancePCIRequests object
         pci_request_info = pci_request.get_pci_requests_from_flavor(
             instance_type)
-        self.network_api.create_pci_requests_for_sriov_ports(context,
-            pci_request_info, requested_networks)
+        network_metadata = self.network_api.create_resource_requests(
+            context, requested_networks, pci_request_info)
 
         base_options = {
             'reservation_id': reservation_id,
@@ -870,13 +857,15 @@ class API(base.Base):
 
         # return the validated options and maximum number of instances allowed
         # by the network quotas
-        return base_options, max_network_count, key_pair, security_groups
+        return (base_options, max_network_count, key_pair, security_groups,
+                network_metadata)
 
     def _provision_instances(self, context, instance_type, min_count,
             max_count, base_options, boot_meta, security_groups,
             block_device_mapping, shutdown_terminate,
             instance_group, check_server_group_quota, filter_properties,
-            key_pair, tags, supports_multiattach=False):
+            key_pair, tags, trusted_certs, supports_multiattach,
+            network_metadata=None):
         # Check quotas
         num_instances = compute_utils.check_num_instances_quota(
                 context, instance_type, min_count, max_count)
@@ -897,11 +886,25 @@ class API(base.Base):
                         base_options['pci_requests'], filter_properties,
                         instance_group, base_options['availability_zone'],
                         security_groups=security_groups)
+
+                if block_device_mapping:
+                    # Record whether or not we are a BFV instance
+                    root = block_device_mapping.root_bdm()
+                    req_spec.is_bfv = bool(root and root.is_volume)
+                else:
+                    # If we have no BDMs, we're clearly not BFV
+                    req_spec.is_bfv = False
+
                 # NOTE(danms): We need to record num_instances on the request
                 # spec as this is how the conductor knows how many were in this
                 # batch.
                 req_spec.num_instances = num_instances
                 req_spec.create()
+
+                # NOTE(stephenfin): The network_metadata field is not persisted
+                # and is therefore set after 'create' is called.
+                if network_metadata:
+                    req_spec.network_metadata = network_metadata
 
                 # Create an instance object, but do not store in db yet.
                 instance = objects.Instance(context=context)
@@ -910,6 +913,10 @@ class API(base.Base):
                 instance.keypairs = objects.KeyPairList(objects=[])
                 if key_pair:
                     instance.keypairs.objects.append(key_pair)
+
+                instance.trusted_certs = self._retrieve_trusted_certs_object(
+                    context, trusted_certs)
+
                 instance = self.create_db_entry_for_new_instance(context,
                         instance_type, boot_meta, instance, security_groups,
                         block_device_mapping, num_instances, i,
@@ -984,6 +991,65 @@ class API(base.Base):
 
         return instances_to_build
 
+    @staticmethod
+    def _retrieve_trusted_certs_object(context, trusted_certs, rebuild=False):
+        """Convert user-requested trusted cert IDs to TrustedCerts object
+
+        Also validates that the deployment is new enough to support trusted
+        image certification validation.
+
+        :param context: The user request auth context
+        :param trusted_certs: list of user-specified trusted cert string IDs,
+            may be None
+        :param rebuild: True if rebuilding the server, False if creating a
+            new server
+        :returns: nova.objects.TrustedCerts object or None if no user-specified
+            trusted cert IDs were given and nova is not configured with
+            default trusted cert IDs
+        :raises: nova.exception.CertificateValidationNotYetAvailable: If
+            rebuilding a server with trusted certs on a compute host that is
+            too old to supported trusted image cert validation, or if creating
+            a server with trusted certs and there are no compute hosts in the
+            deployment that are new enough to support trusted image cert
+            validation
+        """
+        # Retrieve trusted_certs parameter, or use CONF value if certificate
+        # validation is enabled
+        if trusted_certs:
+            certs_to_return = objects.TrustedCerts(ids=trusted_certs)
+        elif (CONF.glance.verify_glance_signatures and
+              CONF.glance.enable_certificate_validation and
+              CONF.glance.default_trusted_certificate_ids):
+            certs_to_return = objects.TrustedCerts(
+                ids=CONF.glance.default_trusted_certificate_ids)
+        else:
+            return None
+
+        # Confirm trusted_certs are supported by the minimum nova
+        # compute service version
+        # TODO(mriedem): This minimum version compat code can be dropped in the
+        # 19.0.0 Stein release when all computes must be at a minimum running
+        # Rocky code.
+        if rebuild:
+            # we only care about the current cell since this is
+            # a rebuild
+            min_compute_version = objects.Service.get_minimum_version(
+                context, 'nova-compute')
+        else:
+            # we don't know which cell it's going to get scheduled
+            # to, so check all cells
+            # NOTE(mriedem): For multi-create server requests, we're hitting
+            # this for each instance since it's not cached; we could likely
+            # optimize this.
+            min_compute_version = \
+                objects.service.get_minimum_version_all_cells(
+                    context, ['nova-compute'])
+
+        if min_compute_version < MIN_COMPUTE_TRUSTED_CERTS:
+            raise exception.CertificateValidationNotYetAvailable()
+
+        return certs_to_return
+
     def _get_bdm_image_metadata(self, context, block_device_mapping,
                                 legacy_bdm=True):
         """If we are booting from a volume, we need to get the
@@ -1054,7 +1120,7 @@ class API(base.Base):
                block_device_mapping, auto_disk_config, filter_properties,
                reservation_id=None, legacy_bdm=True, shutdown_terminate=False,
                check_server_group_quota=False, tags=None,
-               supports_multiattach=False):
+               supports_multiattach=False, trusted_certs=None):
         """Verify all the input parameters regardless of the provisioning
         strategy being performed and schedule the instance(s) for
         creation.
@@ -1072,6 +1138,14 @@ class API(base.Base):
         if image_href:
             image_id, boot_meta = self._get_image(context, image_href)
         else:
+            # This is similar to the logic in _retrieve_trusted_certs_object.
+            if (trusted_certs or
+                (CONF.glance.verify_glance_signatures and
+                 CONF.glance.enable_certificate_validation and
+                 CONF.glance.default_trusted_certificate_ids)):
+                msg = _("Image certificate validation is not supported "
+                        "when booting from volume")
+                raise exception.CertificateValidationFailed(message=msg)
             image_id = None
             boot_meta = self._get_bdm_image_metadata(
                 context, block_device_mapping, legacy_bdm)
@@ -1080,8 +1154,8 @@ class API(base.Base):
                                      auto_disk_config=auto_disk_config)
 
         #选项校验
-        base_options, max_net_count, key_pair, security_groups = \
-                self._validate_and_build_base_options(
+        base_options, max_net_count, key_pair, security_groups, \
+            network_metadata = self._validate_and_build_base_options(
                     context, instance_type, boot_meta, image_href, image_id,
                     kernel_id, ramdisk_id, display_name, display_description,
                     key_name, key_data, security_groups, availability_zone,
@@ -1120,7 +1194,8 @@ class API(base.Base):
             context, instance_type, min_count, max_count, base_options,
             boot_meta, security_groups, block_device_mapping,
             shutdown_terminate, instance_group, check_server_group_quota,
-            filter_properties, key_pair, tags, supports_multiattach)
+            filter_properties, key_pair, tags, trusted_certs,
+            supports_multiattach, network_metadata)
 
         instances = []
         request_specs = []
@@ -1303,8 +1378,9 @@ class API(base.Base):
                                and bdm.boot_index >= 0])
 
         # Each device which is capable of being used as boot device should
-        # be given a unique boot index, starting from 0 in ascending order.
-        if any(i != v for i, v in enumerate(boot_indexes)):
+        # be given a unique boot index, starting from 0 in ascending order, and
+        # there needs to be at least one boot device.
+        if not boot_indexes or any(i != v for i, v in enumerate(boot_indexes)):
             # Convert the BlockDeviceMappingList to a list for repr details.
             LOG.debug('Invalid block device mapping boot sequence for '
                       'instance: %s', list(block_device_mappings),
@@ -1331,28 +1407,10 @@ class API(base.Base):
                         "destination_type 'volume' need to have a non-zero "
                         "size specified"))
             elif volume_id is not None:
-                # The instance is being created and we don't know which
-                # cell it's going to land in, so check all cells.
-                min_compute_version = \
-                    objects.service.get_minimum_version_all_cells(
-                        context, ['nova-compute'])
                 try:
-                    # NOTE(ildikov): The boot from volume operation did not
-                    # reserve the volume before Pike and as the older computes
-                    # are running 'check_attach' which will fail if the volume
-                    # is in 'attaching' state; if the compute service version
-                    # is not high enough we will just perform the old check as
-                    # opposed to reserving the volume here.
                     volume = self.volume_api.get(context, volume_id)
-                    if (min_compute_version >=
-                        BFV_RESERVE_MIN_COMPUTE_VERSION):
-                        self._check_attach_and_reserve_volume(
-                            context, volume, instance, bdm,
-                            supports_multiattach)
-                    else:
-                        # NOTE(ildikov): This call is here only for backward
-                        # compatibility can be removed after Ocata EOL.
-                        self._check_attach(context, volume, instance)
+                    self._check_attach_and_reserve_volume(
+                        context, volume, instance, bdm, supports_multiattach)
                     bdm.volume_size = volume.get('size')
 
                     # NOTE(mnaser): If we end up reserving the volume, it will
@@ -1409,52 +1467,38 @@ class API(base.Base):
             if num_local > max_local:
                 raise exception.InvalidBDMLocalsLimit()
 
-    def _check_attach(self, context, volume, instance):
-        # TODO(ildikov): This check_attach code is kept only for backward
-        # compatibility and should be removed after Ocata EOL.
-        if volume['status'] != 'available':
-            msg = _("volume '%(vol)s' status must be 'available'. Currently "
-                    "in '%(status)s'") % {'vol': volume['id'],
-                                          'status': volume['status']}
-            raise exception.InvalidVolume(reason=msg)
-        if volume['attach_status'] == 'attached':
-            msg = _("volume %s already attached") % volume['id']
-            raise exception.InvalidVolume(reason=msg)
-        self.volume_api.check_availability_zone(context, volume,
-                                                instance=instance)
+    def _populate_instance_names(self, instance, num_instances, index):
+        """Populate instance display_name and hostname.
 
-    def _populate_instance_names(self, instance, num_instances):
-        """Populate instance display_name and hostname."""
-        display_name = instance.get('display_name')
-        if instance.obj_attr_is_set('hostname'):
-            hostname = instance.get('hostname')
-        else:
-            hostname = None
-
+        :param instance: The instance to set the display_name, hostname for
+        :type instance: nova.objects.Instance
+        :param num_instances: Total number of instances being created in this
+            request
+        :param index: The 0-based index of this particular instance
+        """
         # NOTE(mriedem): This is only here for test simplicity since a server
         # name is required in the REST API.
-        if display_name is None:
-            display_name = self._default_display_name(instance.uuid)
-            instance.display_name = display_name
+        if 'display_name' not in instance or instance.display_name is None:
+            instance.display_name = 'Server %s' % instance.uuid
 
-        if hostname is None and num_instances == 1:
-            # NOTE(russellb) In the multi-instance case, we're going to
-            # overwrite the display_name using the
-            # multi_instance_display_name_template.  We need the default
-            # display_name set so that it can be used in the template, though.
-            # Only set the hostname here if we're only creating one instance.
-            # Otherwise, it will be built after the template based
-            # display_name.
-            hostname = display_name
-            default_hostname = self._default_host_name(instance.uuid)
-            instance.hostname = utils.sanitize_hostname(hostname,
-                                                        default_hostname)
+        # if we're booting multiple instances, we need to add an indexing
+        # suffix to both instance.hostname and instance.display_name. This is
+        # not necessary for a single instance.
+        if num_instances == 1:
+            default_hostname = 'Server-%s' % instance.uuid
+            instance.hostname = utils.sanitize_hostname(
+                instance.display_name, default_hostname)
+        elif num_instances > 1 and self.cell_type != 'api':
+            old_display_name = instance.display_name
+            new_display_name = '%s-%d' % (old_display_name, index + 1)
 
-    def _default_display_name(self, instance_uuid):
-        return "Server %s" % instance_uuid
+            if utils.sanitize_hostname(old_display_name) == "":
+                instance.hostname = 'Server-%s' % instance.uuid
+            else:
+                instance.hostname = utils.sanitize_hostname(
+                    new_display_name)
 
-    def _default_host_name(self, instance_uuid):
-        return "Server-%s" % instance_uuid
+            instance.display_name = new_display_name
 
     def _populate_instance_for_create(self, context, instance, image,
                                       index, security_groups, instance_type,
@@ -1513,11 +1557,8 @@ class API(base.Base):
         else:
             instance.security_groups = security_groups
 
-        self._populate_instance_names(instance, num_instances)
+        self._populate_instance_names(instance, num_instances, index)
         instance.shutdown_terminate = shutdown_terminate
-        if num_instances > 1 and self.cell_type != 'api':
-            instance = self._apply_instance_name_template(context, instance,
-                                                          index)
 
         return instance
 
@@ -1610,7 +1651,7 @@ class API(base.Base):
                config_drive=None, auto_disk_config=None, scheduler_hints=None,
                legacy_bdm=True, shutdown_terminate=False,
                check_server_group_quota=False, tags=None,
-               supports_multiattach=False):
+               supports_multiattach=False, trusted_certs=None):
         """Provision instances, sending instance information to the
         scheduler.  The scheduler will determine where the instance(s)
         go and will handle creating the DB entries.
@@ -1652,7 +1693,8 @@ class API(base.Base):
                        legacy_bdm=legacy_bdm,
                        shutdown_terminate=shutdown_terminate,
                        check_server_group_quota=check_server_group_quota,
-                       tags=tags, supports_multiattach=supports_multiattach)
+                       tags=tags, supports_multiattach=supports_multiattach,
+                       trusted_certs=trusted_certs)
 
     def _check_auto_disk_config(self, instance=None, image=None,
                                 **extra_instance_updates):
@@ -1774,7 +1816,7 @@ class API(base.Base):
                             # FIXME: When the instance context is targeted,
                             # we can remove this
                             with compute_utils.notify_about_instance_delete(
-                                    self.notifier, cctxt, instance):
+                                    self.notifier, cctxt, instance, CONF.host):
                                 instance.destroy()
                     else:
                         instance.destroy()
@@ -1814,7 +1856,8 @@ class API(base.Base):
         # in error state), the instance has been scheduled and sent to a
         # cell/compute which means it was pulled from the cell db.
         # Normal delete should be attempted.
-        may_have_ports_or_volumes = self._may_have_ports_or_volumes(instance)
+        may_have_ports_or_volumes = compute_utils.may_have_ports_or_volumes(
+            instance)
         if not instance.host and not may_have_ports_or_volumes:
             try:
                 if self._delete_while_booting(context, instance):
@@ -1831,7 +1874,7 @@ class API(base.Base):
                     try:
                         # Now destroy the instance from the cell it lives in.
                         with compute_utils.notify_about_instance_delete(
-                                self.notifier, context, instance):
+                                self.notifier, context, instance, CONF.host):
                             instance.destroy()
                     except exception.InstanceNotFound:
                         pass
@@ -1885,6 +1928,11 @@ class API(base.Base):
             # NOTE(dtp): cells.enable = False means "use cells v2".
             # Run everywhere except v1 compute cells.
             if not CONF.cells.enable or self.cell_type == 'api':
+                # TODO(melwitt): In Rocky, we store console authorizations
+                # in both the consoleauth service and the database while
+                # we convert to using the database. Remove the consoleauth
+                # line below when authorizations are no longer being
+                # stored in consoleauth, in Stein.
                 self.consoleauth_rpcapi.delete_tokens_for_instance(
                     context, instance.uuid)
 
@@ -1897,7 +1945,7 @@ class API(base.Base):
             if not instance.host and not may_have_ports_or_volumes:
                 try:
                     with compute_utils.notify_about_instance_delete(
-                            self.notifier, context, instance,
+                            self.notifier, context, instance, CONF.host,
                             delete_type
                             if delete_type != 'soft_delete'
                             else 'delete'):
@@ -1917,6 +1965,18 @@ class API(base.Base):
 
             if instance.vm_state == vm_states.RESIZED:
                 self._confirm_resize_on_deleting(context, instance)
+                # NOTE(neha_alhat): After confirm resize vm_state will become
+                # 'active' and task_state will be set to 'None'. But for soft
+                # deleting a vm, the _do_soft_delete callback requires
+                # task_state in 'SOFT_DELETING' status. So, we need to set
+                # task_state as 'SOFT_DELETING' again for soft_delete case.
+                # After confirm resize and before saving the task_state to
+                # "SOFT_DELETING", during the short window, user can submit
+                # soft delete vm request again and system will accept and
+                # process it without any errors.
+                if delete_type == 'soft_delete':
+                    instance.task_state = instance_attrs['task_state']
+                    instance.save()
 
             is_local_delete = True
             try:
@@ -1967,16 +2027,6 @@ class API(base.Base):
             # NOTE(comstud): Race condition. Instance already gone.
             pass
 
-    def _may_have_ports_or_volumes(self, instance):
-        # NOTE(melwitt): When an instance build fails in the compute manager,
-        # the instance host and node are set to None and the vm_state is set
-        # to ERROR. In the case, the instance with host = None has actually
-        # been scheduled and may have ports and/or volumes allocated on the
-        # compute node.
-        if instance.vm_state in (vm_states.SHELVED_OFFLOADED, vm_states.ERROR):
-            return True
-        return False
-
     def _confirm_resize_on_deleting(self, context, instance):
         # If in the middle of a resize, use confirm_resize to
         # ensure the original instance is cleaned up too
@@ -2007,40 +2057,6 @@ class API(base.Base):
         self.compute_rpcapi.confirm_resize(context,
                 instance, migration, src_host, cast=False)
 
-    def _get_stashed_volume_connector(self, bdm, instance):
-        """Lookup a connector dict from the bdm.connection_info if set
-
-        Gets the stashed connector dict out of the bdm.connection_info if set
-        and the connector host matches the instance host.
-
-        :param bdm: nova.objects.block_device.BlockDeviceMapping
-        :param instance: nova.objects.instance.Instance
-        :returns: volume connector dict or None
-        """
-        if 'connection_info' in bdm and bdm.connection_info is not None:
-            # NOTE(mriedem): We didn't start stashing the connector in the
-            # bdm.connection_info until Mitaka so it might not be there on old
-            # attachments. Also, if the volume was attached when the instance
-            # was in shelved_offloaded state and it hasn't been unshelved yet
-            # we don't have the attachment/connection information either.
-            connector = jsonutils.loads(bdm.connection_info).get('connector')
-            if connector:
-                if connector.get('host') == instance.host:
-                    return connector
-                LOG.debug('Found stashed volume connector for instance but '
-                          'connector host %(connector_host)s does not match '
-                          'the instance host %(instance_host)s.',
-                          {'connector_host': connector.get('host'),
-                           'instance_host': instance.host}, instance=instance)
-                if (instance.host is None and
-                        self._may_have_ports_or_volumes(instance)):
-                    LOG.debug('Allowing use of stashed volume connector with '
-                              'instance host None because instance with '
-                              'vm_state %(vm_state)s has been scheduled in '
-                              'the past.', {'vm_state': instance.vm_state},
-                              instance=instance)
-                    return connector
-
     def _local_cleanup_bdm_volumes(self, bdms, instance, context):
         """The method deletes the bdm records and, if a bdm is a volume, call
         the terminate connection and the detach volume via the Volume API.
@@ -2053,7 +2069,7 @@ class API(base.Base):
                         self.volume_api.attachment_delete(context,
                                                           bdm.attachment_id)
                     else:
-                        connector = self._get_stashed_volume_connector(
+                        connector = compute_utils.get_stashed_volume_connector(
                             bdm, instance)
                         if connector:
                             self.volume_api.terminate_connection(context,
@@ -2090,7 +2106,7 @@ class API(base.Base):
             LOG.warning("instance's host %s is down, deleting from "
                         "database", instance.host, instance=instance)
         with compute_utils.notify_about_instance_delete(
-                self.notifier, context, instance,
+                self.notifier, context, instance, CONF.host,
                 delete_type if delete_type != 'soft_delete' else 'delete'):
 
             elevated = context.elevated()
@@ -2118,8 +2134,26 @@ class API(base.Base):
 
             # cleanup volumes
             self._local_cleanup_bdm_volumes(bdms, instance, context)
+            # Cleanup allocations in Placement since we can't do it from the
+            # compute service.
+            self.placementclient.delete_allocation_for_instance(
+                context, instance.uuid)
             cb(context, instance, bdms, local=True)
             instance.destroy()
+
+    @staticmethod
+    def _update_queued_for_deletion(context, instance, qfd):
+        # NOTE(tssurya): We query the instance_mapping record of this instance
+        # and update the queued_for_delete flag to True (or False according to
+        # the state of the instance). This just means that the instance is
+        # queued for deletion (or is no longer queued for deletion). It does
+        # not guarantee its successful deletion (or restoration). Hence the
+        # value could be stale which is fine, considering its use is only
+        # during down cell (desperate) situation.
+        im = objects.InstanceMapping.get_by_instance_uuid(context,
+                                                          instance.uuid)
+        im.queued_for_delete = qfd
+        im.save()
 
     def _do_delete(self, context, instance, bdms, local=False):
         if local:
@@ -2130,6 +2164,7 @@ class API(base.Base):
         else:
             self.compute_rpcapi.terminate_instance(context, instance, bdms,
                                                    delete_type='delete')
+        self._update_queued_for_deletion(context, instance, True)
 
     def _do_force_delete(self, context, instance, bdms, local=False):
         if local:
@@ -2140,6 +2175,7 @@ class API(base.Base):
         else:
             self.compute_rpcapi.terminate_instance(context, instance, bdms,
                                                    delete_type='force_delete')
+        self._update_queued_for_deletion(context, instance, True)
 
     def _do_soft_delete(self, context, instance, bdms, local=False):
         if local:
@@ -2149,6 +2185,7 @@ class API(base.Base):
             instance.save()
         else:
             self.compute_rpcapi.soft_delete_instance(context, instance)
+        self._update_queued_for_deletion(context, instance, True)
 
     # NOTE(maoy): we allow delete to be called no matter what vm_state says.
     @check_instance_lock
@@ -2203,6 +2240,7 @@ class API(base.Base):
             instance.task_state = None
             instance.deleted_at = None
             instance.save(expected_task_state=[None])
+        self._update_queued_for_deletion(context, instance, False)
 
     @check_instance_lock
     @check_instance_state(task_state=None,
@@ -2285,6 +2323,22 @@ class API(base.Base):
         # merged replica instead of the cell directly, so fall through
         # here in that case as well.
         if service_version < 15 or CONF.cells.enable:
+            # If not using cells v1, we need to log a warning about the API
+            # service version being less than 15 (that check was added in
+            # newton), which indicates there is some lingering data during the
+            # transition to cells v2 which could cause an InstanceNotFound
+            # here. The warning message is a sort of breadcrumb.
+            # This can all go away once we drop cells v1 and assert that all
+            # deployments have upgraded from a base cells v2 setup with
+            # mappings.
+            if not CONF.cells.enable:
+                LOG.warning('The nova-osapi_compute service version is from '
+                            'before Ocata and may cause problems looking up '
+                            'instances in a cells v2 setup. Check your '
+                            'nova-api service configuration and cell '
+                            'mappings. You may need to remove stale '
+                            'nova-osapi_compute service records from the cell '
+                            'database.')
             return objects.Instance.get_by_uuid(context, instance_uuid,
                                                 expected_attrs=expected_attrs)
         inst_map = self._get_instance_map_or_none(context, instance_uuid)
@@ -2409,8 +2463,12 @@ class API(base.Base):
         # IP address filtering cannot be applied at the DB layer, remove any DB
         # limit so that it can be applied after the IP filter.
         filter_ip = 'ip6' in filters or 'ip' in filters
+        skip_build_request = False
         orig_limit = limit
         if filter_ip:
+            # We cannot skip build requests if there is a marker since the
+            # the marker could be a build request.
+            skip_build_request = marker is None
             if self.network_api.has_substr_port_filtering_extension(context):
                 # We're going to filter by IP using Neutron so set filter_ip
                 # to False so we don't attempt post-DB query filtering in
@@ -2441,21 +2499,27 @@ class API(base.Base):
                 LOG.debug('Removing limit for DB query due to IP filter')
                 limit = None
 
-        # The ordering of instances will be
-        # [sorted instances with no host] + [sorted instances with host].
-        # This means BuildRequest and cell0 instances first, then cell
-        # instances
-        try:
-            build_requests = objects.BuildRequestList.get_by_filters(
-                context, filters, limit=limit, marker=marker,
-                sort_keys=sort_keys, sort_dirs=sort_dirs)
-            # If we found the marker in we need to set it to None
-            # so we don't expect to find it in the cells below.
-            marker = None
-        except exception.MarkerNotFound:
-            # If we didn't find the marker in the build requests then keep
-            # looking for it in the cells.
+        # Skip get BuildRequest if filtering by IP address, as building
+        # instances will not have IP addresses.
+        if skip_build_request:
             build_requests = objects.BuildRequestList()
+        else:
+            # The ordering of instances will be
+            # [sorted instances with no host] + [sorted instances with host].
+            # This means BuildRequest and cell0 instances first, then cell
+            # instances
+            try:
+                build_requests = objects.BuildRequestList.get_by_filters(
+                    context, filters, limit=limit, marker=marker,
+                    sort_keys=sort_keys, sort_dirs=sort_dirs)
+                # If we found the marker in we need to set it to None
+                # so we don't expect to find it in the cells below.
+                marker = None
+            except exception.MarkerNotFound:
+                # If we didn't find the marker in the build requests then keep
+                # looking for it in the cells.
+                build_requests = objects.BuildRequestList()
+
         build_req_instances = objects.InstanceList(
             objects=[build_req.instance for build_req in build_requests])
         # Only subtract from limit if it is not None
@@ -2923,6 +2987,16 @@ class API(base.Base):
                     LOG.info('Skipping quiescing instance: %(reason)s.',
                              {'reason': err},
                              instance=instance)
+            # NOTE(tasker): discovered that an uncaught exception could occur
+            #               after the instance has been frozen. catch and thaw.
+            except Exception as ex:
+                with excutils.save_and_reraise_exception():
+                    LOG.error("An error occurred during quiesce of instance. "
+                              "Unquiescing to ensure instance is thawed. "
+                              "Error: %s", six.text_type(ex),
+                              instance=instance)
+                    self.compute_rpcapi.unquiesce_instance(context, instance,
+                                                           mapping=None)
 
         @wrap_instance_event(prefix='api')
         def snapshot_instance(self, context, instance, bdms):
@@ -2996,15 +3070,7 @@ class API(base.Base):
                           task_state=task_states.ALLOW_REBOOT)
     def _hard_reboot(self, context, instance):
         instance.task_state = task_states.REBOOTING_HARD
-        expected_task_state = [None,
-                               task_states.REBOOTING,
-                               task_states.REBOOT_PENDING,
-                               task_states.REBOOT_STARTED,
-                               task_states.REBOOTING_HARD,
-                               task_states.RESUMING,
-                               task_states.UNPAUSING,
-                               task_states.SUSPENDING]
-        instance.save(expected_task_state = expected_task_state)
+        instance.save(expected_task_state=task_states.ALLOW_REBOOT)
 
         self._record_action_start(context, instance, instance_actions.REBOOT)
 
@@ -3043,6 +3109,18 @@ class API(base.Base):
                 instance.key_data = None
                 instance.keypairs = objects.KeyPairList(objects=[])
 
+        # Use trusted_certs value from kwargs to create TrustedCerts object
+        trusted_certs = None
+        if 'trusted_certs' in kwargs:
+            # Note that the user can set, change, or unset / reset trusted
+            # certs. If they are explicitly specifying
+            # trusted_image_certificates=None, that means we'll either unset
+            # them on the instance *or* reset to use the defaults (if defaults
+            # are configured).
+            trusted_certs = kwargs.pop('trusted_certs')
+            instance.trusted_certs = self._retrieve_trusted_certs_object(
+                context, trusted_certs, rebuild=True)
+
         image_id, image = self._get_image(context, image_href)
         self._check_auto_disk_config(image=image, **kwargs)
 
@@ -3057,6 +3135,14 @@ class API(base.Base):
         is_volume_backed = compute_utils.is_volume_backed_instance(
             context, instance, bdms)
         if is_volume_backed:
+            if trusted_certs:
+                # The only way we can get here is if the user tried to set
+                # trusted certs or specified trusted_image_certificates=None
+                # and default_trusted_certificate_ids is configured.
+                msg = _("Image certificate validation is not supported "
+                        "for volume-backed servers.")
+                raise exception.CertificateValidationFailed(message=msg)
+
             # For boot from volume, instance.image_ref is empty, so we need to
             # query the image from the volume.
             if root_bdm is None:
@@ -3192,7 +3278,7 @@ class API(base.Base):
         project_id, user_id = quotas_obj.ids_from_instance(context,
                                                            instance)
         # Deltas will be empty if the resize is not an upsize.
-        deltas = compute_utils.upsize_quota_delta(context, new_flavor,
+        deltas = compute_utils.upsize_quota_delta(new_flavor,
                                                   current_flavor)
         if deltas:
             try:
@@ -3213,9 +3299,9 @@ class API(base.Base):
                                                               overs,
                                                               quotas,
                                                               deltas)
-                LOG.warning("%(overs)s quota exceeded for %(pid)s,"
-                            " tried to resize instance.",
-                            {'overs': overs, 'pid': context.project_id})
+                LOG.info("%(overs)s quota exceeded for %(pid)s,"
+                         " tried to resize instance.",
+                         {'overs': overs, 'pid': context.project_id})
                 raise exception.TooManyInstances(overs=overs,
                                                  req=reqs,
                                                  used=useds,
@@ -3242,6 +3328,21 @@ class API(base.Base):
 
         self._record_action_start(context, instance,
                                   instance_actions.REVERT_RESIZE)
+
+        # Conductor updated the RequestSpec.flavor during the initial resize
+        # operation to point at the new flavor, so we need to update the
+        # RequestSpec to point back at the original flavor, otherwise
+        # subsequent move operations through the scheduler will be using the
+        # wrong flavor.
+        try:
+            reqspec = objects.RequestSpec.get_by_instance_uuid(
+                context, instance.uuid)
+            reqspec.flavor = instance.old_flavor
+            reqspec.save()
+        except exception.RequestSpecNotFound:
+            # TODO(mriedem): Make this a failure in Stein when we drop
+            # compatibility for missing request specs.
+            pass
 
         # TODO(melwitt): We're not rechecking for strict quota here to guard
         # against going over quota during a race at this time because the
@@ -3421,10 +3522,6 @@ class API(base.Base):
             else:
                 # Set the host and the node so that the scheduler will
                 # validate them.
-                # TODO(takashin): It will be added to check whether
-                # the specified host is within the same cell as
-                # the instance or not. If not, raise specific error message
-                # that is clear to the caller.
                 request_spec.requested_destination = objects.Destination(
                     host=node.host, node=node.hypervisor_hostname)
 
@@ -3621,6 +3718,10 @@ class API(base.Base):
         connect_info = self.compute_rpcapi.get_vnc_console(context,
                 instance=instance, console_type=console_type)
 
+        # TODO(melwitt): In Rocky, the compute manager puts the
+        # console authorization in the database in the above method.
+        # The following will be removed when everything has been
+        # converted to use the database, in Stein.
         self.consoleauth_rpcapi.authorize_console(context,
                 connect_info['token'], console_type,
                 connect_info['host'], connect_info['port'],
@@ -3643,6 +3744,10 @@ class API(base.Base):
         """Get a url to an instance Console."""
         connect_info = self.compute_rpcapi.get_spice_console(context,
                 instance=instance, console_type=console_type)
+        # TODO(melwitt): In Rocky, the compute manager puts the
+        # console authorization in the database in the above method.
+        # The following will be removed when everything has been
+        # converted to use the database, in Stein.
         self.consoleauth_rpcapi.authorize_console(context,
                 connect_info['token'], console_type,
                 connect_info['host'], connect_info['port'],
@@ -3665,6 +3770,10 @@ class API(base.Base):
         """Get a url to an instance Console."""
         connect_info = self.compute_rpcapi.get_rdp_console(context,
                 instance=instance, console_type=console_type)
+        # TODO(melwitt): In Rocky, the compute manager puts the
+        # console authorization in the database in the above method.
+        # The following will be removed when everything has been
+        # converted to use the database, in Stein.
         self.consoleauth_rpcapi.authorize_console(context,
                 connect_info['token'], console_type,
                 connect_info['host'], connect_info['port'],
@@ -3688,6 +3797,10 @@ class API(base.Base):
         connect_info = self.compute_rpcapi.get_serial_console(context,
                 instance=instance, console_type=console_type)
 
+        # TODO(melwitt): In Rocky, the compute manager puts the
+        # console authorization in the database in the above method.
+        # The following will be removed when everything has been
+        # converted to use the database, in Stein.
         self.consoleauth_rpcapi.authorize_console(context,
                 connect_info['token'], console_type,
                 connect_info['host'], connect_info['port'],
@@ -3709,6 +3822,10 @@ class API(base.Base):
         """Get a url to a MKS console."""
         connect_info = self.compute_rpcapi.get_mks_console(context,
                 instance=instance, console_type=console_type)
+        # TODO(melwitt): In Rocky, the compute manager puts the
+        # console authorization in the database in the above method.
+        # The following will be removed when everything has been
+        # converted to use the database, in Stein.
         self.consoleauth_rpcapi.authorize_console(context,
                 connect_info['token'], console_type,
                 connect_info['host'], connect_info['port'],
@@ -3741,6 +3858,10 @@ class API(base.Base):
             instance.save()
 
         lock(self, context, instance)
+        compute_utils.notify_about_instance_action(
+            context, instance, CONF.host,
+            action=fields_obj.NotificationAction.LOCK,
+            source=fields_obj.NotificationSource.API)
 
     def is_expected_locked_by(self, context, instance):
         is_owner = instance.project_id == context.project_id
@@ -3764,6 +3885,10 @@ class API(base.Base):
             instance.save()
 
         unlock(self, context, instance)
+        compute_utils.notify_about_instance_action(
+            context, instance, CONF.host,
+            action=fields_obj.NotificationAction.UNLOCK,
+            source=fields_obj.NotificationSource.API)
 
     @check_instance_lock
     @check_instance_cell
@@ -3850,6 +3975,11 @@ class API(base.Base):
         else:
             # The instance is being created and we don't know which
             # cell it's going to land in, so check all cells.
+            # NOTE(danms): We don't require all cells to report here since
+            # we're really concerned about the new-ness of cells that the
+            # instance may be scheduled into. If a cell doesn't respond here,
+            # then it won't be a candidate for the instance and thus doesn't
+            # matter.
             min_compute_version = \
                 objects.service.get_minimum_version_all_cells(
                     context, ['nova-compute'])
@@ -4209,10 +4339,15 @@ class API(base.Base):
     @check_instance_cell
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.PAUSED])
     def live_migrate(self, context, instance, block_migration,
-                     disk_over_commit, host_name, force=None, async=False):
+                     disk_over_commit, host_name, force=None, async_=False):
         """Migrate a server lively to a new host."""
         LOG.debug("Going to try to live migrate instance to %s",
                   host_name or "another host", instance=instance)
+
+        if host_name:
+            # Validate the specified host before changing the instance task
+            # state.
+            nodes = objects.ComputeNodeList.get_all_by_host(context, host_name)
 
         instance.task_state = task_states.MIGRATING
         instance.save(expected_task_state=[None])
@@ -4220,6 +4355,11 @@ class API(base.Base):
         self._record_action_start(context, instance,
                                   instance_actions.LIVE_MIGRATION)
 
+        # TODO(melwitt): In Rocky, we store console authorizations
+        # in both the consoleauth service and the database while
+        # we convert to using the database. Remove the consoleauth
+        # line below when authorizations are no longer being
+        # stored in consoleauth, in Stein.
         self.consoleauth_rpcapi.delete_tokens_for_instance(
             context, instance.uuid)
 
@@ -4233,7 +4373,6 @@ class API(base.Base):
 
         # NOTE(sbauza): Force is a boolean by the new related API version
         if force is False and host_name:
-            nodes = objects.ComputeNodeList.get_all_by_host(context, host_name)
             # Unset the host to make sure we call the scheduler
             # from the conductor LiveMigrationTask. Yes this is tightly-coupled
             # to behavior in conductor and not great.
@@ -4260,7 +4399,7 @@ class API(base.Base):
             self.compute_task_api.live_migrate_instance(context, instance,
                 host_name, block_migration=block_migration,
                 disk_over_commit=disk_over_commit,
-                request_spec=request_spec, async=async)
+                request_spec=request_spec, async_=async_)
         except oslo_exceptions.MessagingTimeout as messaging_timeout:
             with excutils.save_and_reraise_exception():
                 # NOTE(pkoniszewski): It is possible that MessagingTimeout
@@ -4305,12 +4444,15 @@ class API(base.Base):
     @check_instance_lock
     @check_instance_cell
     @check_instance_state(task_state=[task_states.MIGRATING])
-    def live_migrate_abort(self, context, instance, migration_id):
+    def live_migrate_abort(self, context, instance, migration_id,
+                           support_abort_in_queue=False):
         """Abort an in-progress live migration.
 
         :param context: Security context
         :param instance: The instance that is being migrated
         :param migration_id: ID of in-progress live migration
+        :param support_abort_in_queue: Flag indicating whether we can support
+            abort migrations in "queued" or "preparing" status.
 
         """
         migration = objects.Migration.get_by_id_and_instance(context,
@@ -4318,7 +4460,30 @@ class API(base.Base):
         LOG.debug("Going to cancel live migration %s",
                   migration.id, instance=instance)
 
-        if migration.status != 'running':
+        # If the microversion does not support abort migration in queue,
+        # we are only be able to abort migrations with `running` status;
+        # if it is supported, we are able to also abort migrations in
+        # `queued` and `preparing` status.
+        allowed_states = ['running']
+        queued_states = ['queued', 'preparing']
+        if support_abort_in_queue:
+            # The user requested a microversion that supports aborting a queued
+            # or preparing live migration. But we need to check that the
+            # compute service hosting the instance is new enough to support
+            # aborting a queued/preparing live migration, so we check the
+            # service version here.
+            # TODO(Kevin_Zheng): This service version check can be removed in
+            # Stein (at the earliest) when the API only supports Rocky or
+            # newer computes.
+            if migration.status in queued_states:
+                service = objects.Service.get_by_compute_host(
+                    context, instance.host)
+                if service.version < MIN_COMPUTE_ABORT_QUEUED_LIVE_MIGRATION:
+                    raise exception.AbortQueuedLiveMigrationNotYetSupported(
+                        migration_id=migration_id, status=migration.status)
+            allowed_states.extend(queued_states)
+
+        if migration.status not in allowed_states:
             raise exception.InvalidMigrationState(migration_id=migration_id,
                     instance_uuid=instance.uuid,
                     state=migration.status,
@@ -4779,13 +4944,13 @@ class HostAPI(base.Base):
         # and we should always iterate over the cells. However, certain
         # callers need the legacy behavior for now.
         if all_cells:
-            load_cells()
             services = []
-            for cell in CELLS:
-                with nova_context.target_cell(context, cell) as cctxt:
-                    cell_services = objects.ServiceList.get_all(
-                        cctxt, disabled, set_zones=set_zones)
-                services.extend(cell_services)
+            service_dict = nova_context.scatter_gather_all_cells(context,
+                objects.ServiceList.get_all, disabled, set_zones=set_zones)
+            for service in service_dict.values():
+                if service not in (nova_context.did_not_respond_sentinel,
+                                   nova_context.raised_exception_sentinel):
+                    services.extend(service)
         else:
             services = objects.ServiceList.get_all(context, disabled,
                                                    set_zones=set_zones)
@@ -4836,6 +5001,8 @@ class HostAPI(base.Base):
             raise exception.ServiceNotFound(service_id=service_id)
         service.destroy()
 
+    # TODO(mriedem): Nothing outside of tests is using this now so we should
+    # be able to remove it.
     def service_delete(self, context, service_id):
         """Deletes the specified service found via id or uuid."""
         self._service_delete(context, service_id)
@@ -4977,6 +5144,7 @@ class AggregateAPI(base.Base):
     def __init__(self, **kwargs):
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
         self.scheduler_client = scheduler_client.SchedulerClient()
+        self.placement_client = self.scheduler_client.reportclient
         super(AggregateAPI, self).__init__(**kwargs)
 
     @wrap_exception()
@@ -5137,13 +5305,22 @@ class AggregateAPI(base.Base):
         try:
             mapping = objects.HostMapping.get_by_host(context, host_name)
             nova_context.set_target_cell(context, mapping.cell_mapping)
-            objects.Service.get_by_compute_host(context, host_name)
+            service = objects.Service.get_by_compute_host(context, host_name)
         except exception.HostMappingNotFound:
             try:
                 # NOTE(danms): This targets our cell
-                _find_service_in_cell(context, service_host=host_name)
+                service = _find_service_in_cell(context,
+                                                service_host=host_name)
             except exception.NotFound:
                 raise exception.ComputeHostNotFound(host=host_name)
+
+        if service.host != host_name:
+            # NOTE(danms): If we found a service but it is not an
+            # exact match, we may have a case-insensitive backend
+            # database (like mysql) which will end up with us
+            # adding the host-aggregate mapping with a
+            # non-matching hostname.
+            raise exception.ComputeHostNotFound(host=host_name)
 
         aggregate = objects.Aggregate.get_by_id(context, aggregate_id)
 
@@ -5158,6 +5335,33 @@ class AggregateAPI(base.Base):
 
         aggregate.add_host(host_name)
         self.scheduler_client.update_aggregates(context, [aggregate])
+        try:
+            self.placement_client.aggregate_add_host(
+                context, aggregate.uuid, host_name)
+        except exception.PlacementAPIConnectFailure:
+            # NOTE(jaypipes): Rocky should be able to tolerate the nova-api
+            # service not communicating with the Placement API, so just log a
+            # warning here.
+            # TODO(jaypipes): Remove this in Stein, when placement must be able
+            # to be contacted from the nova-api service.
+            LOG.warning("Failed to associate %s with a placement "
+                        "aggregate: %s. There was a failure to communicate "
+                        "with the placement service.",
+                        host_name, aggregate.uuid)
+        except (exception.ResourceProviderNotFound,
+                exception.ResourceProviderAggregateRetrievalFailed,
+                exception.ResourceProviderUpdateFailed,
+                exception.ResourceProviderUpdateConflict) as err:
+            # NOTE(jaypipes): We don't want a failure perform the mirroring
+            # action in the placement service to be returned to the user (they
+            # probably don't know anything about the placement service and
+            # would just be confused). So, we just log a warning here, noting
+            # that on the next run of nova-manage placement sync_aggregates
+            # things will go back to normal
+            LOG.warning("Failed to associate %s with a placement "
+                        "aggregate: %s. This may be corrected after running "
+                        "nova-manage placement sync_aggregates.",
+                        host_name, err)
         self._update_az_cache_for_host(context, host_name, aggregate.metadata)
         # NOTE(jogo): Send message to host to support resource pools
         self.compute_rpcapi.add_aggregate_host(context,
@@ -5197,6 +5401,33 @@ class AggregateAPI(base.Base):
 
         aggregate.delete_host(host_name)
         self.scheduler_client.update_aggregates(context, [aggregate])
+        try:
+            self.placement_client.aggregate_remove_host(
+                context, aggregate.uuid, host_name)
+        except exception.PlacementAPIConnectFailure:
+            # NOTE(jaypipes): Rocky should be able to tolerate the nova-api
+            # service not communicating with the Placement API, so just log a
+            # warning here.
+            # TODO(jaypipes): Remove this in Stein, when placement must be able
+            # to be contacted from the nova-api service.
+            LOG.warning("Failed to remove association of %s with a placement "
+                        "aggregate: %s. There was a failure to communicate "
+                        "with the placement service.",
+                        host_name, aggregate.uuid)
+        except (exception.ResourceProviderNotFound,
+                exception.ResourceProviderAggregateRetrievalFailed,
+                exception.ResourceProviderUpdateFailed,
+                exception.ResourceProviderUpdateConflict) as err:
+            # NOTE(jaypipes): We don't want a failure perform the mirroring
+            # action in the placement service to be returned to the user (they
+            # probably don't know anything about the placement service and
+            # would just be confused). So, we just log a warning here, noting
+            # that on the next run of nova-manage placement sync_aggregates
+            # things will go back to normal
+            LOG.warning("Failed to remove association of %s with a placement "
+                        "aggregate: %s. This may be corrected after running "
+                        "nova-manage placement sync_aggregates.",
+                        host_name, err)
         self._update_az_cache_for_host(context, host_name, aggregate.metadata)
         self.compute_rpcapi.remove_aggregate_host(context,
                 aggregate=aggregate, host_param=host_name, host=host_name)

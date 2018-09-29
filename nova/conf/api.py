@@ -254,73 +254,81 @@ Possible values:
 
 * Any string, including an empty string (the default).
 """),
-]
-
-allow_instance_snapshots_opts = [
-    cfg.BoolOpt("allow_instance_snapshots",
-        default=True,
-        deprecated_group="DEFAULT",
-        deprecated_for_removal=True,
-        deprecated_since="16.0.0",
-        deprecated_reason="This option disables the createImage server action "
-                          "API in a non-discoverable way and is thus a "
-                          "barrier to interoperability. Also, it is not used "
-                          "for other APIs that create snapshots like shelve "
-                          "or createBackup. Disabling snapshots should be "
-                          "done via policy if so desired.",
+    cfg.BoolOpt("instance_list_per_project_cells",
+        default=False,
         help="""
-Operators can turn off the ability for a user to take snapshots of their
-instances by setting this option to False. When disabled, any attempt to
-take a snapshot will result in a HTTP 400 response ("Bad Request").
-""")
-]
-
-# NOTE(edleafe): I would like to import the value directly from
-# nova.compute.vm_states, but that creates a circular import. Since this value
-# is not likely to be changed, I'm copy/pasting it here.
-BUILDING = "building"  # VM only exists in DB
-osapi_hide_opts = [
-    cfg.ListOpt("hide_server_address_states",
-        default=[BUILDING],
-        deprecated_group="DEFAULT",
-        deprecated_name="osapi_hide_server_address_states",
-        deprecated_for_removal=True,
-        deprecated_since="17.0.0",
-        deprecated_reason="This option hide the server address in server "
-                          "representation for configured server states. "
-                          "Which makes GET server API controlled by this "
-                          "config options. Due to this config options, user "
-                          "would not be able to discover the API behavior on "
-                          "different clouds which leads to the interop issue.",
+When enabled, this will cause the API to only query cell databases
+in which the tenant has mapped instances. This requires an additional
+(fast) query in the API database before each list, but also
+(potentially) limits the number of cell databases that must be queried
+to provide the result. If you have a small number of cells, or tenants
+are likely to have instances in all cells, then this should be
+False. If you have many cells, especially if you confine tenants to a
+small subset of those cells, this should be True.
+"""),
+    cfg.StrOpt("instance_list_cells_batch_strategy",
+        choices=("fixed", "distributed"),
+        default="distributed",
         help="""
-This option is a list of all instance states for which network address
-information should not be returned from the API.
+This controls the method by which the API queries cell databases in
+smaller batches during large instance list operations. If batching is
+performed, a large instance list operation will request some fraction
+of the overall API limit from each cell database initially, and will
+re-request that same batch size as records are consumed (returned)
+from each cell as necessary. Larger batches mean less chattiness
+between the API and the database, but potentially more wasted effort
+processing the results from the database which will not be returned to
+the user. Any strategy will yield a batch size of at least 100 records,
+to avoid a user causing many tiny database queries in their request.
+
+``distributed`` (the default) will attempt to divide the limit
+requested by the user by the number of cells in the system. This
+requires counting the cells in the system initially, which will not be
+refreshed until service restart or SIGHUP. The actual batch size will
+be increased by 10% over the result of ($limit / $num_cells).
+
+``fixed`` will simply request fixed-size batches from each cell, as
+defined by ``instance_list_cells_batch_fixed_size``. If the limit is
+smaller than the batch size, the limit will be used instead. If you do
+not wish batching to be used at all, setting the fixed size equal to
+the ``max_limit`` value will cause only one request per cell database
+to be issued.
 
 Possible values:
 
-  A list of strings, where each string is a valid VM state, as defined in
-  nova/compute/vm_states.py. As of the Newton release, they are:
+* distributed (default)
+* fixed
 
-* "active"
-* "building"
-* "paused"
-* "suspended"
-* "stopped"
-* "rescued"
-* "resized"
-* "soft-delete"
-* "deleted"
-* "error"
-* "shelved"
-* "shelved_offloaded"
-""")
-]
+Related options:
 
-fping_path_opts = [
-    cfg.StrOpt("fping_path",
-        default="/usr/sbin/fping",
-        deprecated_group="DEFAULT",
-        help="The full path to the fping binary.")
+* instance_list_cells_batch_fixed_size
+* max_limit
+"""),
+    cfg.IntOpt("instance_list_cells_batch_fixed_size",
+        min=100,
+        default=100,
+        help="""
+This controls the batch size of instances requested from each cell
+database if ``instance_list_cells_batch_strategy``` is set to ``fixed``.
+This integral value will define the limit issued to each cell every time
+a batch of instances is requested, regardless of the number of cells in
+the system or any other factors. Per the general logic called out in
+the documentation for ``instance_list_cells_batch_strategy``, the
+minimum value for this is 100 records per batch.
+
+Related options:
+
+* instance_list_cells_batch_strategy
+* max_limit
+"""),
+    cfg.BoolOpt("list_records_by_skipping_down_cells",
+        default=True,
+        help="""
+When set to False, this will cause the API to return a 500 error if there is an
+infrastructure failure like non-responsive cells. If you want the API to skip
+the down cells and return the results from the up cells set this option to
+True.
+"""),
 ]
 
 os_network_opts = [
@@ -364,9 +372,6 @@ API_OPTS = (auth_opts +
             metadata_opts +
             file_opts +
             osapi_opts +
-            allow_instance_snapshots_opts +
-            osapi_hide_opts +
-            fping_path_opts +
             os_network_opts +
             enable_inst_pw_opts)
 

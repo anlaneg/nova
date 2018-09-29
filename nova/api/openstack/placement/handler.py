@@ -28,18 +28,18 @@ import webob
 
 from oslo_log import log as logging
 
+from nova.api.openstack.placement import exception
 from nova.api.openstack.placement.handlers import aggregate
 from nova.api.openstack.placement.handlers import allocation
 from nova.api.openstack.placement.handlers import allocation_candidate
 from nova.api.openstack.placement.handlers import inventory
+from nova.api.openstack.placement.handlers import reshaper
 from nova.api.openstack.placement.handlers import resource_class
 from nova.api.openstack.placement.handlers import resource_provider
 from nova.api.openstack.placement.handlers import root
 from nova.api.openstack.placement.handlers import trait
 from nova.api.openstack.placement.handlers import usage
-from nova.api.openstack.placement import policy
 from nova.api.openstack.placement import util
-from nova import exception
 from nova.i18n import _
 
 LOG = logging.getLogger(__name__)
@@ -127,6 +127,9 @@ ROUTE_DECLARATIONS = {
     '/usages': {
         'GET': usage.get_total_usages,
     },
+    '/reshaper': {
+        'POST': reshaper.reshape,
+    },
 }
 
 
@@ -193,16 +196,6 @@ class PlacementHandler(object):
         self._map = make_map(ROUTE_DECLARATIONS)
 
     def __call__(self, environ, start_response):
-        # All requests but '/' require admin.
-        if environ['PATH_INFO'] != '/':
-            context = environ['placement.context']
-            # TODO(cdent): Using is_admin everywhere (except /) is
-            # insufficiently flexible for future use case but is
-            # convenient for initial exploration.
-            if not policy.placement_authorize(context, 'placement'):
-                raise webob.exc.HTTPForbidden(
-                    _('admin required'),
-                    json_formatter=util.json_error_formatter)
         # Check that an incoming request with a content-length header
         # that is an integer > 0 and not empty, also has a content-type
         # header that is not empty. If not raise a 400.
@@ -223,6 +216,10 @@ class PlacementHandler(object):
         except exception.NotFound as exc:
             raise webob.exc.HTTPNotFound(
                 exc, json_formatter=util.json_error_formatter)
+        except exception.PolicyNotAuthorized as exc:
+            raise webob.exc.HTTPForbidden(
+                exc.format_message(),
+                json_formatter=util.json_error_formatter)
         # Remaining uncaught exceptions will rise first to the Microversion
         # middleware, where any WebOb generated exceptions will be caught and
         # transformed into legit HTTP error responses (with microversion

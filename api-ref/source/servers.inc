@@ -1,7 +1,4 @@
 .. -*- rst -*-
-.. TODO(sdague) parameter microversions need to be gone through in the
-   response (request side should be good)
-.. needs:example_verification
 .. needs:body_verification
 
 ===================
@@ -172,6 +169,7 @@ whitelist will be silently ignored.
   - ``status``
   - ``tags`` (New in version 2.26)
   - ``tags-any`` (New in version 2.26)
+  - ``changes-before`` (New in version 2.66)
 
 
 - For admin user, whitelist includes all filter keys mentioned in
@@ -194,8 +192,8 @@ Request
   - all_tenants: all_tenants_query
   - auto_disk_config: disk_config_query_server
   - availability_zone: availability_zone_query_server
-  - config_drive: config_drive_query_server
   - changes-since: changes_since_server
+  - config_drive: config_drive_query_server
   - created_at: created_at_query_server
   - deleted: deleted_query
   - description: description_query_server
@@ -214,24 +212,26 @@ Request
   - marker: marker
   - name: server_name_query
   - node: node_query_server
-  - not-tags: not_tags_query
-  - not-tags-any: not_tags_any_query
   - power_state: power_state_query_server
   - progress: progress_query_server
   - project_id: project_id_query_server
   - ramdisk_id: ramdisk_id_query_server
   - reservation_id: reservation_id_query
   - root_device_name: server_root_device_name_query
+  - soft_deleted: soft_deleted_server
   - sort_dir: sort_dir_server
   - sort_key: sort_key_server
   - status: server_status_query
-  - tags: tags_query
-  - tags-any: tags_any_query
   - task_state: task_state_query_server
   - terminated_at: terminated_at_query_server
   - user_id: user_id_query_server
   - uuid: server_uuid_query
   - vm_state: vm_state_query_server
+  - not-tags: not_tags_query
+  - not-tags-any: not_tags_any_query
+  - tags: tags_query
+  - tags-any: tags_any_query
+  - changes-before: changes_before_server
 
 Response
 --------
@@ -242,6 +242,7 @@ Response
   - id: server_id
   - links: links
   - name: server_name
+  - servers_links: servers_links
 
 **Example List Servers**
 
@@ -338,42 +339,59 @@ Request
 
 
   - server: server
-  - name: server_name
   - flavorRef: flavorRef
-  - imageRef: imageRef
-  - security_groups: security_groups
-  - metadata: metadata
-  - accessIPv4: accessIPv4_in
-  - accessIPv6: accessIPv6_in
-  - adminPass: adminPass_request
-  - user_data: user_data
-  - availability_zone: os-availability-zone:availability_zone
+  - name: server_name
   - networks: networks
   - networks.uuid: network_uuid
   - networks.port: port
   - networks.fixed_ip: fixed_ip
   - networks.tag: device_tag_nic
-  - personality: personality
+  - accessIPv4: accessIPv4_in
+  - accessIPv6: accessIPv6_in
+  - adminPass: adminPass_request
+  - availability_zone: os-availability-zone:availability_zone
   - block_device_mapping_v2: block_device_mapping_v2
-  - block_device_mapping_v2.device_name: device_name
-  - block_device_mapping_v2.source_type: source_type
-  - block_device_mapping_v2.destination_type: destination_type
-  - block_device_mapping_v2.delete_on_termination: delete_on_termination
-  - block_device_mapping_v2.guest_format: guest_format
   - block_device_mapping_v2.boot_index: boot_index
-  - block_device_mapping_v2.uuid: block_device_uuid
-  - block_device_mapping_v2.tag: device_tag_bdm
+  - block_device_mapping_v2.delete_on_termination: delete_on_termination
+  - block_device_mapping_v2.destination_type: destination_type
+  - block_device_mapping_v2.device_name: device_name
+  - block_device_mapping_v2.device_type: device_type
   - block_device_mapping_v2.disk_bus: disk_bus
+  - block_device_mapping_v2.guest_format: guest_format
+  - block_device_mapping_v2.no_device: no_device
+  - block_device_mapping_v2.source_type: source_type
+  - block_device_mapping_v2.uuid: block_device_uuid
+  - block_device_mapping_v2.volume_size: volume_size
+  - block_device_mapping_v2.tag: device_tag_bdm
   - config_drive: config_drive
+  - imageRef: imageRef
   - key_name: key_name
-  - os:scheduler_hints: os:scheduler_hints
+  - metadata: metadata
   - OS-DCF:diskConfig: OS-DCF:diskConfig
+  - personality: personality
+  - security_groups: security_groups
+  - user_data: user_data
   - description: server_description
   - tags: server_tags_create
+  - trusted_image_certificates: server_trusted_image_certificates_create_req
+  - os:scheduler_hints: os:scheduler_hints
+  - os:scheduler_hints.build_near_host_ip: os:scheduler_hints_build_near_host_ip
+  - os:scheduler_hints.cidr: os:scheduler_hints_cidr
+  - os:scheduler_hints.different_cell: os:scheduler_hints_different_cell
+  - os:scheduler_hints.different_host: os:scheduler_hints_different_host
+  - os:scheduler_hints.group: os:scheduler_hints_group
+  - os:scheduler_hints.query: os:scheduler_hints_query
+  - os:scheduler_hints.same_host: os:scheduler_hints_same_host
+  - os:scheduler_hints.target_cell: os:scheduler_hints_target_cell
 
 **Example Create Server**
 
 .. literalinclude:: ../../doc/api_samples/servers/server-create-req.json
+   :language: javascript
+
+**Example Create Server With Networks(array) and Block Device Mapping V2 (v2.32)**
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.32/server-create-req.json
    :language: javascript
 
 **Example Create Server With Automatic Networking (v2.37)**
@@ -381,11 +399,17 @@ Request
 .. literalinclude:: ../../doc/api_samples/servers/v2.37/server-create-req.json
    :language: javascript
 
+**Example Create Server With Trusted Image Certificates (v2.63)**
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.63/server-create-req.json
+   :language: javascript
+
 Response
 --------
 
 .. rest_parameters:: parameters.yaml
 
+  - Location: server_location
   - server: server
   - id: server_id
   - links: links
@@ -470,10 +494,6 @@ OS-EXT-STS:power_state, and OS-EXT-STS:task_state attributes.
 The server usage information appears in the OS-SRV-USG:launched_at and
 OS-SRV-USG:terminated_at attributes.
 
-To hide addresses information for instances in a certain state, set
-the osapi_hide_server_address_states configuration option. Set this
-option to a valid VM state in the nova.conf configuration file.
-
 HostId is unique per account and is not globally unique.
 
 Normal response codes: 200
@@ -491,8 +511,8 @@ Request
   - all_tenants: all_tenants_query
   - auto_disk_config: disk_config_query_server
   - availability_zone: availability_zone_query_server
-  - config_drive: config_drive_query_server
   - changes-since: changes_since_server
+  - config_drive: config_drive_query_server
   - created_at: created_at_query_server
   - deleted: deleted_query
   - description: description_query_server
@@ -511,24 +531,26 @@ Request
   - marker: marker
   - name: server_name_query
   - node: node_query_server
-  - not-tags: not_tags_query
-  - not-tags-any: not_tags_any_query
   - power_state: power_state_query_server
   - progress: progress_query_server
   - project_id: project_id_query_server
   - ramdisk_id: ramdisk_id_query_server
   - reservation_id: reservation_id_query
   - root_device_name: server_root_device_name_query
+  - soft_deleted: soft_deleted_server
   - sort_dir: sort_dir_server
   - sort_key: sort_key_server
   - status: server_status_query
-  - tags: tags_query
-  - tags-any: tags_any_query
   - task_state: task_state_query_server
   - terminated_at: terminated_at_query_server
   - user_id: user_id_query_server
   - uuid: server_uuid_query
   - vm_state: vm_state_query_server
+  - not-tags: not_tags_query
+  - not-tags-any: not_tags_any_query
+  - tags: tags_query
+  - tags-any: tags_any_query
+  - changes-before: changes_before_server
 
 Response
 --------
@@ -536,7 +558,10 @@ Response
 .. rest_parameters:: parameters.yaml
 
   - server: server
+  - accessIPv4: accessIPv4
+  - accessIPv6: accessIPv6
   - addresses: addresses
+  - config_drive: config_drive_resp
   - created: created
   - flavor: flavor_server
   - flavor.id: flavor_id_body_2_46
@@ -557,9 +582,6 @@ Response
   - links: links
   - metadata: metadata_compat
   - name: server_name
-  - accessIPv4: accessIPv4
-  - accessIPv6: accessIPv6
-  - config_drive: config_drive_resp
   - OS-DCF:diskConfig: disk_config
   - OS-EXT-AZ:availability_zone: OS-EXT-AZ:availability_zone
   - OS-EXT-SRV-ATTR:host: OS-EXT-SRV-ATTR:host
@@ -573,14 +595,19 @@ Response
   - os-extended-volumes:volumes_attached.delete_on_termination: os-extended-volumes:volumes_attached.delete_on_termination
   - OS-SRV-USG:launched_at: OS-SRV-USG:launched_at
   - OS-SRV-USG:terminated_at: OS-SRV-USG:terminated_at
-  - progress: progress
   - security_groups: security_groups_obj
   - security_group.name: name
   - status: server_status
-  - host_status: host_status
   - tenant_id: tenant_id_body
   - updated: updated
   - user_id: user_id
+  - fault: fault
+  - fault.code: fault_code
+  - fault.created: fault_created
+  - fault.message: fault_message
+  - fault.details: fault_details
+  - progress: progress
+  - servers_links: servers_links
   - OS-EXT-SRV-ATTR:hostname: server_hostname
   - OS-EXT-SRV-ATTR:reservation_id: server_reservation_id
   - OS-EXT-SRV-ATTR:launch_index: server_launch_index
@@ -589,10 +616,14 @@ Response
   - OS-EXT-SRV-ATTR:root_device_name: server_root_device_name
   - OS-EXT-SRV-ATTR:user_data: server_user_data
   - locked: locked
+  - host_status: host_status
+  - description: server_description_resp
+  - tags: tags
+  - trusted_image_certificates: server_trusted_image_certificates_resp
 
-**Example List Servers Detailed (2.47)**
+**Example List Servers Detailed (2.63)**
 
-.. literalinclude:: /../../doc/api_samples/servers/v2.47/servers-details-resp.json
+.. literalinclude:: /../../doc/api_samples/servers/v2.63/servers-details-resp.json
    :language: javascript
 
 
@@ -608,8 +639,6 @@ Includes server details including configuration drive, extended status, and serv
 The extended status information appears in the ``OS-EXT-STS:vm_state``, ``OS-EXT-STS:power_state``, and ``OS-EXT-STS:task_state`` attributes.
 
 The server usage information appears in the ``OS-SRV-USG:launched_at`` and ``OS-SRV-USG:terminated_at`` attributes.
-
-To hide ``addresses`` information for instances in a certain state, set the ``osapi_hide_server_address_states`` configuration option. Set this option to a valid VM state in the ``nova.conf`` configuration file.
 
 HostId is unique per account and is not globally unique.
 
@@ -635,7 +664,10 @@ Response
 .. rest_parameters:: parameters.yaml
 
   - server: server
+  - accessIPv4: accessIPv4
+  - accessIPv6: accessIPv6
   - addresses: addresses
+  - config_drive: config_drive_resp
   - created: created
   - flavor: flavor_server
   - flavor.id: flavor_id_body_2_46
@@ -656,9 +688,6 @@ Response
   - links: links
   - metadata: metadata_compat
   - name: server_name
-  - accessIPv4: accessIPv4
-  - accessIPv6: accessIPv6
-  - config_drive: config_drive_resp
   - OS-DCF:diskConfig: disk_config
   - OS-EXT-AZ:availability_zone: OS-EXT-AZ:availability_zone
   - OS-EXT-SRV-ATTR:host: OS-EXT-SRV-ATTR:host
@@ -672,15 +701,18 @@ Response
   - os-extended-volumes:volumes_attached.delete_on_termination: os-extended-volumes:volumes_attached.delete_on_termination
   - OS-SRV-USG:launched_at: OS-SRV-USG:launched_at
   - OS-SRV-USG:terminated_at: OS-SRV-USG:terminated_at
-  - progress: progress
   - security_groups: security_groups_obj
   - security_group.name: name
   - status: server_status
-  - host_status: host_status
   - tenant_id: tenant_id_body
   - updated: updated
   - user_id: user_id
   - fault: fault
+  - fault.code: fault_code
+  - fault.created: fault_created
+  - fault.message: fault_message
+  - fault.details: fault_details
+  - progress: progress
   - OS-EXT-SRV-ATTR:hostname: server_hostname
   - OS-EXT-SRV-ATTR:reservation_id: server_reservation_id
   - OS-EXT-SRV-ATTR:launch_index: server_launch_index
@@ -689,10 +721,14 @@ Response
   - OS-EXT-SRV-ATTR:root_device_name: server_root_device_name
   - OS-EXT-SRV-ATTR:user_data: server_user_data
   - locked: locked
+  - host_status: host_status
+  - description: server_description_resp
+  - tags: tags
+  - trusted_image_certificates: server_trusted_image_certificates_resp
 
-**Example Show Server Details (2.47)**
+**Example Show Server Details (2.63)**
 
-.. literalinclude:: ../../doc/api_samples/servers/v2.47/server-get-resp.json
+.. literalinclude:: ../../doc/api_samples/servers/v2.63/server-get-resp.json
    :language: javascript
 
 Update Server
@@ -713,30 +749,20 @@ Request
 .. rest_parameters:: parameters.yaml
 
   - server_id: server_id_path
+  - server: server
   - accessIPv4: accessIPv4_in
   - accessIPv6: accessIPv6_in
   - name: server_name_optional
   - OS-DCF:diskConfig: OS-DCF:diskConfig
   - description: server_description
 
-**Example Update server name (2.47)**
+.. note:: You can specify parameters to update independently.
+  e.g. ``name`` only, ``description`` only, ``name`` and ``description``, etc.
 
-.. literalinclude:: ../../doc/api_samples/servers/v2.47/server-update-req.json
+**Example Update Server (2.63)**
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.63/server-update-req.json
    :language: javascript
-
-..
-   TODO(sdague): split up the update examples to show them being used
-   separately.
-
-   **Example Update server IP addresses: JSON request**
-
-   .. literalinclude:: ../../doc/api_samples/servers/server-update-address-req.json
-      :language: javascript
-
-   **Example Update server OS-DCF:diskConfig parameter: JSON request**
-
-   .. literalinclude:: ../../doc/api_samples/servers/server-update-diskconfig-req.json
-      :language: javascript
 
 Response
 --------
@@ -744,6 +770,8 @@ Response
 .. rest_parameters:: parameters.yaml
 
   - server: server
+  - accessIPv4: accessIPv4
+  - accessIPv6: accessIPv6
   - addresses: addresses
   - created: created
   - flavor: flavor_server
@@ -761,42 +789,28 @@ Response
   - hostId: hostId
   - id: server_id
   - image: image
-  - key_name: key_name
   - links: links
-  - metadata: metadata
+  - metadata: metadata_compat
   - name: server_name
-  - accessIPv4: accessIPv4
-  - accessIPv6: accessIPv6
-  - OS-DCF:diskConfig: OS-DCF:diskConfig
-  - OS-EXT-AZ:availability_zone: OS-EXT-AZ:availability_zone
-  - OS-EXT-SRV-ATTR:host: OS-EXT-SRV-ATTR:host
-  - OS-EXT-SRV-ATTR:hypervisor_hostname: OS-EXT-SRV-ATTR:hypervisor_hostname
-  - OS-EXT-SRV-ATTR:instance_name: OS-EXT-SRV-ATTR:instance_name
-  - OS-EXT-STS:power_state: OS-EXT-STS:power_state
-  - OS-EXT-STS:task_state: OS-EXT-STS:task_state
-  - OS-EXT-STS:vm_state: OS-EXT-STS:vm_state
-  - OS-SRV-USG:launched_at: OS-SRV-USG:launched_at
-  - OS-SRV-USG:terminated_at: OS-SRV-USG:terminated_at
-  - progress: progress
-  - security_groups: security_groups_obj
-  - security_group.name: name
+  - OS-DCF:diskConfig: disk_config
   - status: server_status
-  - host_status: host_status
   - tenant_id: tenant_id_body
   - updated: updated
   - user_id: user_id
-  - OS-EXT-SRV-ATTR:hostname: server_hostname
-  - OS-EXT-SRV-ATTR:reservation_id: server_reservation_id
-  - OS-EXT-SRV-ATTR:launch_index: server_launch_index
-  - OS-EXT-SRV-ATTR:kernel_id: server_kernel_id
-  - OS-EXT-SRV-ATTR:ramdisk_id: server_ramdisk_id
-  - OS-EXT-SRV-ATTR:root_device_name: server_root_device_name
-  - OS-EXT-SRV-ATTR:user_data: server_user_data
+  - fault: fault
+  - fault.code: fault_code
+  - fault.created: fault_created
+  - fault.message: fault_message
+  - fault.details: fault_details
+  - progress: progress
   - locked: locked
+  - description: server_description_resp
+  - tags: tags
+  - trusted_image_certificates: server_trusted_image_certificates_resp
 
-**Example Update server name (2.47)**
+**Example Update Server (2.63)**
 
-.. literalinclude:: ../../doc/api_samples/servers/v2.47/server-update-resp.json
+.. literalinclude:: ../../doc/api_samples/servers/v2.63/server-update-resp.json
    :language: javascript
 
 Delete Server

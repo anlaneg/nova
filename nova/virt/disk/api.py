@@ -50,84 +50,52 @@ LOG = logging.getLogger(__name__)
 
 CONF = nova.conf.CONF
 
-_MKFS_COMMAND = {}
-_DEFAULT_MKFS_COMMAND = None
 
-FS_FORMAT_EXT2 = "ext2"
-FS_FORMAT_EXT3 = "ext3"
-FS_FORMAT_EXT4 = "ext4"
-FS_FORMAT_XFS = "xfs"
-FS_FORMAT_NTFS = "ntfs"
-FS_FORMAT_VFAT = "vfat"
+# NOTE(mikal): Here as a transition step
+SUPPORTED_FS_TO_EXTEND = nova.privsep.fs.SUPPORTED_FS_TO_EXTEND
 
-SUPPORTED_FS_TO_EXTEND = (
-    FS_FORMAT_EXT2,
-    FS_FORMAT_EXT3,
-    FS_FORMAT_EXT4)
-
-_DEFAULT_FILE_SYSTEM = FS_FORMAT_VFAT
-_DEFAULT_FS_BY_OSTYPE = {'linux': FS_FORMAT_EXT4,
-                         'windows': FS_FORMAT_NTFS}
 
 for s in CONF.virt_mkfs:
     # NOTE(yamahata): mkfs command may includes '=' for its options.
     #                 So item.partition('=') doesn't work here
     os_type, mkfs_command = s.split('=', 1)
     if os_type:
-        _MKFS_COMMAND[os_type] = mkfs_command
-    if os_type == 'default':
-        _DEFAULT_MKFS_COMMAND = mkfs_command
-
-
-def get_fs_type_for_os_type(os_type):
-    return os_type if _MKFS_COMMAND.get(os_type) else 'default'
-
-
-def get_file_extension_for_os_type(os_type, specified_fs=None):
-    mkfs_command = _MKFS_COMMAND.get(os_type, _DEFAULT_MKFS_COMMAND)
-    if mkfs_command:
-        extension = mkfs_command
-    else:
-        if not specified_fs:
-            specified_fs = CONF.default_ephemeral_format
-            if not specified_fs:
-                specified_fs = _DEFAULT_FS_BY_OSTYPE.get(os_type,
-                                                         _DEFAULT_FILE_SYSTEM)
-        extension = specified_fs
-    return utils.get_hash_str(extension)[:7]
+        nova.privsep.fs.load_mkfs_command(os_type, mkfs_command)
 
 
 def mkfs(os_type, fs_label, target, run_as_root=True, specified_fs=None):
-    """Format a file or block device using
-       a user provided command for each os type.
-       If user has not provided any configuration,
-       format type will be used according to a
-       default_ephemeral_format configuration
-       or a system defaults.
-    """
-
-    mkfs_command = (_MKFS_COMMAND.get(os_type, _DEFAULT_MKFS_COMMAND) or
-                    '') % {'fs_label': fs_label, 'target': target}
-    if mkfs_command:
-        utils.execute(*mkfs_command.split(), run_as_root=run_as_root)
-    else:
-        if not specified_fs:
-            specified_fs = CONF.default_ephemeral_format
-            if not specified_fs:
-                specified_fs = _DEFAULT_FS_BY_OSTYPE.get(os_type,
-                                                         _DEFAULT_FILE_SYSTEM)
-
-        if run_as_root:
-            nova.privsep.fs.mkfs(specified_fs, target, fs_label)
-        else:
-            nova.privsep.fs.unprivileged_mkfs(specified_fs, target, fs_label)
+    nova.privsep.fs.configurable_mkfs(
+        os_type, fs_label, target, run_as_root,
+        CONF.default_ephemeral_format, specified_fs)
 
 
 def resize2fs(image, check_exit_code=False, run_as_root=False):
-    if run_as_root:
-        nova.privsep.fs.resize2fs(image, check_exit_code)
+    # NOTE(mikal): note that the check_exit_code kwarg here only refers to
+    # resize2fs, not the precursor e2fsck. Yes, I agree it's confusing.
+    try:
+        if run_as_root:
+            nova.privsep.fs.e2fsck(image)
+        else:
+            nova.privsep.fs.unprivileged_e2fsck(image)
+
+    except processutils.ProcessExecutionError as exc:
+        LOG.debug("Checking the file system with e2fsck has failed, "
+                  "the resize will be aborted. (%s)", exc)
+
     else:
-        nova.privsep.fs.unprivileged_resize2fs(image, check_exit_code)
+        if run_as_root:
+            nova.privsep.fs.resize2fs(image, check_exit_code)
+        else:
+            nova.privsep.fs.unprivileged_resize2fs(image, check_exit_code)
+
+
+def get_disk_info(path):
+    """Get QEMU info of a disk image
+
+    :param path: Path to the disk image
+    :returns: oslo_utils.imageutils.QemuImgInfo object for the image.
+    """
+    return images.qemu_img_info(path)
 
 
 def get_disk_size(path):
@@ -138,6 +106,16 @@ def get_disk_size(path):
               by a virtual machine.
     """
     return images.qemu_img_info(path).virtual_size
+
+
+def get_allocated_disk_size(path):
+    """Get the allocated size of a disk image
+
+    :param path: Path to the disk image
+    :returns: Size (in bytes) of the given disk image as allocated on the
+              filesystem
+    """
+    return images.qemu_img_info(path).disk_size
 
 
 def extend(image, size):

@@ -87,12 +87,6 @@ api_version:
   type: string
   description: >
     The API version as returned in the links from the ``GET /`` call.
-attachment_id:
-  description: |
-    The UUID of the attachment.
-  in: path
-  required: true
-  type: string
 before_timestamp:
   description: |
     Filters the response by the date and time before which to list usage
@@ -337,9 +331,27 @@ tenant_id:
   in: path
   required: true
   type: string
+volume_id_attached_path:
+  description: |
+    The UUID of the attached volume.
+  in: path
+  required: true
+  type: string
 volume_id_path:
   description: |
     The unique ID for a volume.
+  in: path
+  required: true
+  type: string
+volume_id_swap_src:
+  description: |
+    The UUID of the volume being replaced.
+  in: path
+  required: true
+  type: string
+volume_id_to_detach_path:
+  description: |
+    The UUID of the volume to detach.
   in: path
   required: true
   type: string
@@ -385,9 +397,12 @@ all_tenants:
 all_tenants_query:
   description: |
     Specify the ``all_tenants`` query parameter to list all instances
-    for all projects. A value of `all_tenants`` need not be specified.
-    If it is specified, it must be 'boolean'.
-    By default this is only allowed by admin users.
+    for all projects. By default this is only allowed by administrators.
+    If the value of this parameter is not specified, it is treated as
+    ``True``. If the value is specified, ``1``, ``t``, ``true``,
+    ``on``, ``y`` and ``yes`` are treated as ``True``. ``0``, ``f``,
+    ``false``, ``off``, ``n`` and ``no`` are treated as ``False``.
+    (They are case-insensitive.)
   in: query
   required: false
   type: boolean
@@ -403,6 +418,9 @@ all_tenants_sec_grp_query:
 availability_zone_query_server:
   description: |
     Filter the server list result by server availability zone.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -435,6 +453,61 @@ changes-since:
   in: query
   required: false
   type: string
+changes_before_instance_action:
+  description: |
+    Filters the response by a date and time stamp when the instance actions last changed.
+    Those instances that changed before or equal to the specified date and time stamp
+    are returned.
+
+    The date and time stamp format is `ISO 8601 <https://en.wikipedia.org/wiki/ISO_8601>`_:
+    ::
+
+       CCYY-MM-DDThh:mm:ss±hh:mm
+
+    The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
+    For example, ``2015-08-27T09:49:58-05:00``.
+    If you omit the time zone, the UTC time zone is assumed.
+  in: query
+  required: false
+  type: string
+  min_version: 2.66
+changes_before_migration:
+  description: |
+    Filters the response by a date and time stamp when the migration last
+    changed. Those migrations that changed before or equal to the specified date and time
+    stamp are returned.
+
+    The date and time stamp format is `ISO 8601 <https://en.wikipedia.org/wiki/ISO_8601>`_:
+    ::
+
+       CCYY-MM-DDThh:mm:ss±hh:mm
+
+    The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
+    For example, ``2015-08-27T09:49:58-05:00``.
+    If you omit the time zone, the UTC time zone is assumed.
+  in: query
+  required: false
+  type: string
+  min_version: 2.66
+changes_before_server:
+  description: |
+    Filters the response by a date and time stamp when the server last changed.
+    Those servers that changed before or equal to the specified date and time stamp
+    are returned. To help keep track of changes this may also return recently deleted
+    servers.
+
+    The date and time stamp format is `ISO 8601 <https://en.wikipedia.org/wiki/ISO_8601>`_:
+    ::
+
+       CCYY-MM-DDThh:mm:ss±hh:mm
+
+    The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
+    For example, ``2015-08-27T09:49:58-05:00``.
+    If you omit the time zone, the UTC time zone is assumed.
+  in: query
+  required: false
+  type: string
+  min_version: 2.66
 changes_since_instance_action:
   description: |
     Filters the response by a date and time stamp when the instance action last
@@ -489,9 +562,12 @@ changes_since_server:
 config_drive_query_server:
   description: |
     Filter the server list result by the config drive setting of the server.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
-  type: boolean
+  type: string
 created_at_query_server:
   description: |
     Filter the server list result by a date and time stamp when server was created.
@@ -504,6 +580,9 @@ created_at_query_server:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -523,13 +602,20 @@ deleted_query:
   required: false
   type: boolean
   description: |
-    Show deleted items. In some circumstances deleted items will still
+    Show deleted items only. In some circumstances deleted items will still
     be accessible via the backend database, however there is no
     contract on how long, so this parameter should be used with
-    caution. It is typically only available to administrators.
+    caution. ``1``, ``t``, ``true``, ``on``, ``y`` and ``yes`` are treated as
+    ``True`` (case-insensitive). Other than them are treated as ``False``.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
 description_query_server:
   description: |
     Filter the server list result by description.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
 
     .. note::
 
@@ -553,6 +639,9 @@ disk_config_query_server:
 
     - ``AUTO``
     - ``MANUAL``
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -592,11 +681,17 @@ exclude:
 flavor_is_public_query:
   in: query
   required: false
-  type: boolean
+  type: string
   description: |
-    Filters the flavor list by only public flavors. By default ``non
-    admin`` users only see public flavors, and ``admin`` users can see
-    additional non public flavors.
+    This parameter is only applicable to users with the administrative role.
+    For all other non-admin users, the parameter is ignored and only public
+    flavors will be returned. Filters the flavor list based on whether the
+    flavor is public or private. If the value of this parameter is not
+    specified, it is treated as ``True``. If the value is specified, ``1``,
+    ``t``, ``true``, ``on``, ``y`` and ``yes`` are treated as ``True``. ``0``,
+    ``f``, ``false``, ``off``, ``n`` and ``no`` are treated as ``False``
+    (they are case-insensitive). If the value is ``None`` (case-insensitive)
+    both public and private flavors will be listed in a single request.
 flavor_query:
   description: |
     Filters the response by a flavor, as a UUID. A flavor is a combination of memory,
@@ -606,7 +701,10 @@ flavor_query:
   type: string
 host_query_server:
   description: |
-    Filter the server list result by the host name of compute node. Only allowed for Admin.
+    Filter the server list result by the host name of compute node.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -619,6 +717,9 @@ host_query_service:
 hostname_query_server:
   description: |
     Filter the server list result by the host name of server.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -742,10 +843,15 @@ instance_action_marker:
 ip6_query:
   description: |
     An IPv6 address to filter results by.
+
+    Up to microversion 2.4, this parameter is only valid when specified
+    by administrators. If non-admin users specify this parameter,
+    it is ignored.
+    Starting from microversion 2.5, this parameter is valid for no-admin users
+    as well as administrators.
   in: query
   required: false
   type: string
-  min_version: 2.5
 ip_query:
   description: |
     An IPv4 address to filter results by.
@@ -759,9 +865,15 @@ kernel_id_query_server:
   description: |
     Filter the server list result by the UUID of the kernel image
     when using an AMI.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
 key_name_query_server:
   description: |
     Filter the server list result by keypair name.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -796,9 +908,12 @@ launch_index_query_server:
   description: |
     Filter the server list result by the sequence in which the
     servers were launched.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
-  type: string
+  type: integer
 launched_at_query_server:
   description: |
     Filter the server list result by a date and time stamp when the instance was launched.
@@ -810,6 +925,9 @@ launched_at_query_server:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -834,7 +952,10 @@ limit_simple:
 locked_by_query_server:
   description: |
     Filter the server list result by who locked the server, possible value
-    could be ``admin``, ``owner`` or ``none``.
+    could be ``admin`` or ``owner``.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -913,13 +1034,16 @@ minDisk:
   type: integer
 minRam:
   description: |
-    Filters the response by a minimum RAM, in MB. For example, ``512``.
+    Filters the response by a minimum RAM, in MiB. For example, ``512``.
   in: query
   required: false
   type: integer
 node_query_server:
   description: |
-    Filter the server list result by the node. Only allowed for Admin.
+    Filter the server list result by the node.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -951,12 +1075,41 @@ offset_simple:
 power_state_query_server:
   in: query
   required: false
-  type: string
+  type: integer
   description: |
     Filter the server list result by server power state.
+
+    Possible values are integer values that is mapped as::
+
+      0: NOSTATE
+      1: RUNNING
+      3: PAUSED
+      4: SHUTDOWN
+      6: CRASHED
+      7: SUSPENDED
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
 progress_query_server:
   description: |
     Filter the server list result by the progress of the server.
+    The value could be from 0 to 100 as integer.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
+  in: query
+  required: false
+  type: integer
+project_id_query_server:
+  description: |
+    Filter the list of servers by the given project ID.
+
+    This filter only works when the ``all_tenants`` filter is also specified.
+
+    .. note::
+
+       'tenant_id' can also be requested which is alias of 'project_id'
+       but that is not recommended to use as that will be removed in future.
   in: query
   required: false
   type: string
@@ -967,6 +1120,9 @@ ramdisk_id_query_server:
   description: |
     Filter the server list result by the UUID of the ramdisk image when
     using an AMI.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
 reservation_id_query:
   in: query
   required: false
@@ -1003,22 +1159,39 @@ server_name_query:
   type: string
 server_root_device_name_query:
   in: query
-  required: true
+  required: false
   type: string
   description: |
-    Filter the server list result by the root device name of the server
+    Filter the server list result by the root device name of the server.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
 server_status_query:
   description: |
     Filters the response by a server status, as a string. For example, ``ACTIVE``.
+
+    Up to microversion 2.37, an empty list is returned if an invalid status is
+    specified. Starting from microversion 2.38, a 400 error is returned
+    in that case.
   in: query
   required: false
   type: string
 server_uuid_query:
   description: |
     Filter the server list result by the UUID of the server.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
+soft_deleted_server:
+  description: |
+    Filter the server list by ``SOFT_DELETED`` status. This parameter is only valid
+    when the ``deleted=True`` filter parameter is specified.
+  in: query
+  required: false
+  type: boolean
 sort_dir_flavor:
   description: |
     Sort direction. A valid value is ``asc`` (ascending) or ``desc`` (descending).
@@ -1083,6 +1256,9 @@ sort_key_server:
     - ``user_id``
     - ``uuid``
     - ``vm_state``
+
+    ``host`` and ``node`` are only allowed for admin.
+    If non-admin users specify them, a 403 error is returned.
   in: query
   required: false
   type: string
@@ -1137,6 +1313,9 @@ task_state_query_server:
   type: string
   description: |
     Filter the server list result by task state.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
 tenant_id_query:
   description: |
     Specify the project ID (tenant ID) to show the rate and absolute limits.
@@ -1155,6 +1334,9 @@ terminated_at_query_server:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -1192,6 +1374,9 @@ user_id_query_quota_delete:
 user_id_query_server:
   description: |
     Filter the list of servers by the given user ID.
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -1204,6 +1389,24 @@ user_id_query_set_quota:
 vm_state_query_server:
   description: |
     Filter the server list result by vm state.
+
+    The value could be:
+
+    - ``ACTIVE``
+    - ``BUILDING``
+    - ``DELETED``
+    - ``ERROR``
+    - ``PAUSED``
+    - ``RESCUED``
+    - ``RESIZED``
+    - ``SHELVED``
+    - ``SHELVED_OFFLOADED``
+    - ``SOFT_DELETED``
+    - ``STOPPED``
+    - ``SUSPENDED``
+
+    This parameter is only valid when specified by administrators.
+    If non-admin users specify this parameter, it is ignored.
   in: query
   required: false
   type: string
@@ -1274,12 +1477,8 @@ address:
   type: string
 addresses:
   description: |
-    The addresses for the server.  Addresses information is hidden for any server
-    in a state set in the ``hide_server_address_states`` configuration option.
-    By default, servers in ``building`` state hide their addresses information.
-    See ``nova.conf`` `configuration options
-    <https://docs.openstack.org/nova/latest/configuration/config.html>`_
-    for more information.
+    The addresses for the server.  Servers with status ``BUILD`` hide their
+    addresses information.
   in: body
   required: true
   type: object
@@ -1649,10 +1848,13 @@ block_device_mapping_v2:
   type: array
 block_device_uuid:
   description: |
-    This is the uuid of source resource. The uuid is point to different resource
-    based on the source_type. For example, if source_type is ``image`` as the above
-    sample, the block device is created based on the specified image which is gotten
-    from the image service.
+    This is the uuid of source resource. The uuid points to different resources
+    based on the ``source_type``. For example, if ``source_type`` is ``image``,
+    the block device is created based on the specified image which is retrieved
+    from the image service. Similarly, if ``source_type`` is ``snapshot`` then
+    the uuid refers to a volume snapshot in the block storage service. If
+    ``source_type`` is ``volume`` then the uuid refers to a volume in the block
+    storage service.
   in: body
   required: false
   type: string
@@ -1690,7 +1892,7 @@ boot_index:
     of different types. For example, a disk and CD-ROM.
   in: body
   required: true
-  type: string
+  type: integer
 certificate:
   description: |
     The certificate object.
@@ -1754,9 +1956,11 @@ config_drive_diagnostics:
 config_drive_resp:
   description: |
     Indicates whether or not a config drive was used for this server.
+    The value is ``True`` or an empty string. An empty string stands for
+    ``False``.
   in: body
   required: true
-  type: boolean
+  type: string
 configure_project_cloudpipe:
   description: |
     VPN IP and Port information to configure the cloudpipe instance..
@@ -1944,7 +2148,7 @@ delete_on_termination:
     Otherwise, specify ``false``. Default: ``false``
   in: body
   required: false
-  type: string
+  type: boolean
 deleted:
   description: |
     A boolean indicates whether this aggregate is deleted or not, if it has
@@ -1976,7 +2180,11 @@ description:
   type: string
 destination_type:
   description: |
-    Defines where the volume comes from. A valid value is ``local`` or ``volume``.
+    Defines where the block device mapping will reside. Valid values are:
+
+    * ``local``: The ephemeral disk resides local to the compute host on
+      which the server runs
+    * ``volume``: The persistent volume is stored in the block storage service
   in: body
   required: false
   type: string
@@ -1997,7 +2205,7 @@ device_name:
     longer honors a user-supplied device name. This is the same behavior as if
     the device name parameter is not supplied on the request.
   in: body
-  required: true
+  required: false
   type: string
 device_resp:
   description: |
@@ -2055,6 +2263,12 @@ device_tag_nic_attachment:
   required: false
   type: string
   min_version: 2.49
+device_type:
+  description: |
+    The device type. For example, ``disk``, ``cdrom``.
+  in: body
+  required: false
+  type: string
 # Optional input parameter in the body for PUT /os-services/{service_id} added
 # in microversion 2.53.
 disabled_reason_2_53_in:
@@ -2072,7 +2286,13 @@ disabled_reason_body:
   type: string
 disk_available_least:
   description: |
-    The actual free disk on this hypervisor(in GB).
+    The actual free disk on this hypervisor(in GiB).
+  in: body
+  required: true
+  type: integer
+disk_available_least_total:
+  description: |
+    The actual free disk on all hypervisors(in GiB).
   in: body
   required: true
   type: integer
@@ -2226,6 +2446,29 @@ event_finish_time:
   in: body
   required: true
   type: string
+event_host:
+  min_version: 2.62
+  description: |
+    The name of the host on which the event occurred.
+
+    Policy defaults enable only users with the administrative role to see
+    an instance action event host. Cloud providers can change these
+    permissions through the ``policy.json`` file.
+  in: body
+  required: false
+  type: string
+event_hostId:
+  min_version: 2.62
+  description: |
+    An obfuscated hashed host ID string, or the empty string if there is no
+    host for the event. This is a hashed value so will not actually look like
+    a hostname, and is hashed with data from the project_id, so the same
+    physical host as seen by two different project_ids will be different.
+    This is useful when within the same project you need to determine if two
+    events occurred on the same or different physical hosts.
+  in: body
+  required: true
+  type: string
 event_name:
   description: |
     The event name. A valid value is ``network-changed``, ``network-vif-plugged``,
@@ -2332,16 +2575,56 @@ extra_specs_2_47:
   in: body
   required: false
   type: object
-fault:
+extra_specs_2_61:
+  min_version: 2.61
   description: |
-    A fault object. Only displayed in the failed response.
-    Default keys are ``code``, ``created``, and ``message``
-    (response code, created time, and message respectively).
-    In addition, the key ``details`` (stack trace) is available
-    if you have the administrator privilege.
+    A dictionary of the flavor's extra-specs key-and-value pairs.  This will
+    only be included if the user is allowed by policy to index flavor
+    extra_specs.
   in: body
   required: false
   type: object
+fault:
+  description: |
+    A fault object. Only displayed when the server status is ``ERROR`` or
+    ``DELETED`` and a fault occurred.
+  in: body
+  required: false
+  type: object
+fault_code:
+  description: |
+    The error response code.
+  in: body
+  required: true
+  type: integer
+fault_created:
+  description: |
+    The date and time when the exception was raised. The date and time
+    stamp format is `ISO 8601 <https://en.wikipedia.org/wiki/ISO_8601>`_
+
+    ::
+
+      CCYY-MM-DDThh:mm:ss±hh:mm
+
+    For example, ``2015-08-27T09:49:58-05:00``. The ``±hh:mm``
+    value, if included, is the time zone as an offset from UTC.  In
+    the previous example, the offset value is ``-05:00``.
+  in: body
+  required: true
+  type: string
+fault_details:
+  description: |
+    The stack trace. It is available if the response code is not 500 or
+    you have the administrator privilege
+  in: body
+  required: false
+  type: string
+fault_message:
+  description: |
+    The error message.
+  in: body
+  required: true
+  type: string
 fixed_address:
   description: |
     The fixed IP address with which you want to associate the floating IP address.
@@ -2494,7 +2777,9 @@ flavor_disk:
     deploy the instance. However, in this case filter scheduler cannot
     select the compute host based on the virtual image size. Therefore,
     0 should only be used for volume booted instances or for testing
-    purposes.
+    purposes. Volume-backed instances can be enforced for flavors with
+    zero root disk via the ``os_compute_api:servers:create:zero_disk_flavor``
+    policy rule.
 flavor_disk_2_47:
   min_version: 2.47
   in: body
@@ -2851,8 +3136,9 @@ force_snapshot:
 forced_down_2_11:
   description: |
     Whether or not this service was forced down manually by an
-    administrator. This value is useful to know that some 3rd party has
-    verified the service should be marked down.
+    administrator after the service was fenced. This value is useful
+    to know that some 3rd party has verified the service should be
+    marked down.
   in: body
   required: true
   type: boolean
@@ -2861,9 +3147,17 @@ forced_down_2_11:
 # PUT /os-services/{service_id} added in 2.53.
 forced_down_2_53_in:
   description: |
-    Whether or not this service was forced down manually by an
-    administrator. This value is useful to know that some 3rd party has
-    verified the service should be marked down.
+    ``forced_down`` is a manual override to tell nova that the service in
+    question has been fenced manually by the operations team (either hard
+    powered off, or network unplugged). That signals that it is safe to proceed
+    with ``evacuate`` or other operations that nova has safety checks to
+    prevent for hosts that are up.
+
+    .. warning::
+
+       Setting a service forced down without completely fencing it will likely
+       result in the corruption of VMs on that host.
+
   in: body
   required: false
   type: boolean
@@ -2872,8 +3166,9 @@ forced_down_2_53_in:
 forced_down_2_53_out:
   description: |
     Whether or not this service was forced down manually by an
-    administrator. This value is useful to know that some 3rd party has
-    verified the service should be marked down.
+    administrator after the service was fenced. This value is useful
+    to know that some 3rd party has verified the service should be
+    marked down.
   in: body
   required: true
   type: boolean
@@ -2885,7 +3180,13 @@ forceDelete:
   type: none
 free_ram_mb:
   description: |
-    The free RAM in this hypervisor(in MB).
+    The free RAM in this hypervisor(in MiB).
+  in: body
+  required: true
+  type: integer
+free_ram_mb_total:
+  description: |
+    The free RAM on all hypervisors(in MiB).
   in: body
   required: true
   type: integer
@@ -2911,8 +3212,15 @@ group_id:
 guest_format:
   description: |
     Specifies the guest server disk file system format, such as ``ext2``,
-    ``ext3``, ``ext4``, ``xfs`` or ``swap``. This parameter affects only
-    the libvirt virt driver.
+    ``ext3``, ``ext4``, ``xfs`` or ``swap``.
+
+    Swap block device mappings have the following restrictions:
+
+    * The ``source_type`` must be ``blank``
+    * The ``destination_type`` must be ``local``
+    * There can only be one swap disk per server
+    * The size of the swap disk must be less than or equal to the ``swap``
+      size of the flavor
   in: body
   required: false
   type: string
@@ -2938,7 +3246,7 @@ host_cpu:
   type: integer
 host_disk_gb:
   description: |
-    The disk size on the host (in GB).
+    The disk size on the host (in GiB).
   in: body
   required: true
   type: integer
@@ -2969,7 +3277,7 @@ host_maintenance_mode_in:
   type: string
 host_memory_mb:
   description: |
-    The memory size on the host (in MB).
+    The memory size on the host (in MiB).
   in: body
   required: true
   type: integer
@@ -3067,10 +3375,12 @@ host_status:
 
     - ``MAINTENANCE`` if nova-compute is disabled.
 
-    - Empty string indicates there is no host for server.  This attribute
-      appears in the response only if the policy permits.
+    - Empty string indicates there is no host for server.
+
+    This attribute appears in the response only if the policy permits.
+    By default, only administrators can get this parameter.
   in: body
-  required: true
+  required: false
   type: string
   min_version: 2.16
 host_status_body:
@@ -3155,7 +3465,13 @@ hypervisor_diagnostics:
   min_version: 2.48
 hypervisor_free_disk_gb:
   description: |
-    The free disk remaining on this hypervisor(in GB).
+    The free disk remaining on this hypervisor(in GiB).
+  in: body
+  required: true
+  type: integer
+hypervisor_free_disk_gb_total:
+  description: |
+    The free disk remaining on all hypervisors(in GiB).
   in: body
   required: true
   type: integer
@@ -3266,9 +3582,21 @@ hypervisor_vcpus:
   in: body
   required: true
   type: integer
+hypervisor_vcpus_total:
+  description: |
+    The number of vcpu on all hypervisors.
+  in: body
+  required: true
+  type: integer
 hypervisor_vcpus_used:
   description: |
     The number of vcpu used in this hypervisor.
+  in: body
+  required: true
+  type: integer
+hypervisor_vcpus_used_total:
+  description: |
+    The number of vcpu used on all hypervisors.
   in: body
   required: true
   type: integer
@@ -3359,12 +3687,19 @@ imageRef:
     In all other cases it is required and must be a valid UUID
     otherwise API will return 400.
   in: body
-  required: true
+  required: false
   type: string
 imageRef_rebuild:
   description: |
     The UUID of the image to rebuild for your server instance.
     It must be a valid UUID otherwise API will return 400.
+    If rebuilding a volume-backed server with a new image
+    (an image different from the image used when creating the volume),
+    the API will return 400.
+    For non-volume-backed servers, specifying a new image will result
+    in validating that the image is acceptable for the current compute host
+    on which the server exists. If the new image is not valid,
+    the server will go into ``ERROR`` status.
   in: body
   required: true
   type: string
@@ -3690,6 +4025,11 @@ key_pairs_quota_details:
   description: |
     The object of detailed key pairs quota, including in_use, limit and
     reserved number of key pairs.
+
+    .. note:: ``in_use`` field value for keypair quota details is always
+      zero. In Nova, key_pairs are a user-level resource, not a project-
+      level resource, so for legacy reasons, the keypair in-use information
+      is not counted.
   in: body
   required: true
   type: object
@@ -3852,7 +4192,7 @@ links:
   type: array
 local_gb:
   description: |
-    The disk in this hypervisor(in GB).
+    The disk in this hypervisor(in GiB).
   in: body
   required: true
   type: integer
@@ -3870,9 +4210,21 @@ local_gb_simple_tenant_usage_optional:
   in: body
   required: false
   type: integer
+local_gb_total:
+  description: |
+    The disk on all hypervisors(in GiB).
+  in: body
+  required: true
+  type: integer
 local_gb_used:
   description: |
-    The disk used in this hypervisor(in GB).
+    The disk used in this hypervisor(in GiB).
+  in: body
+  required: true
+  type: integer
+local_gb_used_total:
+  description: |
+    The disk used on all hypervisors(in GiB).
   in: body
   required: true
   type: integer
@@ -3930,35 +4282,47 @@ memory_details_diagnostics:
     The dictionary with information about VM memory usage.
     Following fields are presented in the dictionary:
 
-    - ``maximum`` - Amount of memory provisioned for the VM in MB (Integer)
+    - ``maximum`` - Amount of memory provisioned for the VM in MiB (Integer)
 
     - ``used`` - Amount of memory that is currently used by the guest operating
-      system and its applications in MB (Integer)
+      system and its applications in MiB (Integer)
   in: body
   required: true
   type: array
   min_version: 2.48
 memory_mb:
   description: |
-    The memory of this hypervisor(in MB).
+    The memory of this hypervisor(in MiB).
   in: body
   required: true
   type: integer
 memory_mb_simple_tenant_usage:
   description: |
-    The memory size of the server (in MB).
+    The memory size of the server (in MiB).
   in: body
   required: true
   type: integer
 memory_mb_simple_tenant_usage_optional:
   description: |
-    The memory size of the server (in MB).
+    The memory size of the server (in MiB).
   in: body
   required: false
   type: integer
+memory_mb_total:
+  description: |
+    The memory of all hypervisors(in MiB).
+  in: body
+  required: true
+  type: integer
 memory_mb_used:
   description: |
-    The memory used in this hypervisor(in MB).
+    The memory used in this hypervisor(in MiB).
+  in: body
+  required: true
+  type: integer
+memory_mb_used_total:
+  description: |
+    The memory used on all hypervisors(in MiB).
   in: body
   required: true
   type: integer
@@ -4014,6 +4378,14 @@ metadata_object:
   in: body
   required: true
   type: object
+metadata_server_group_max_2_63:
+  description: |
+    Metadata key and value pairs. The maximum size for each metadata key and value
+    pair is 255 bytes. It's always empty and only used for keeping compatibility.
+  in: body
+  required: true
+  type: object
+  max_version: 2.63
 migrate:
   description: |
     The action to cold migrate a server.
@@ -4123,9 +4495,13 @@ migration_new_flavor_id:
     In ``resize`` case, the flavor ID for resizing the server.
     In the other cases, this parameter is same as the flavor ID
     of the server when the migration was started.
+
+    .. note:: This is an internal ID and is not exposed in any other API.
+      In particular, this is not the ID specified or automatically generated
+      during flavor creation or returned via the ``GET /flavors`` API.
   in: body
   required: true
-  type: string
+  type: integer
 migration_next_links_2_59:
   description: |
     Links pertaining to the migration.
@@ -4140,9 +4516,13 @@ migration_next_links_2_59:
 migration_old_flavor_id:
   description: |
     The flavor ID of the server when the migration was started.
+
+    .. note:: This is an internal ID and is not exposed in any other API.
+      In particular, this is not the ID specified or automatically generated
+      during flavor creation or returned via the ``GET /flavors`` API.
   in: body
   required: true
-  type: string
+  type: integer
 migration_type_2_23:
   description: |
     The type of the server migration. This is one of ``live-migration``,
@@ -4172,7 +4552,7 @@ minDisk_body:
   type: integer
 minRam_body:
   description: |
-    The minimum amount of RAM an image requires to function, in MB. For example, ``512``.
+    The minimum amount of RAM an image requires to function, in MiB. For example, ``512``.
   in: body
   required: true
   type: integer
@@ -4181,6 +4561,12 @@ name:
     The security group name.
   in: body
   required: true
+  type: string
+name_sec_group_optional:
+  description: |
+    The security group name.
+  in: body
+  required: false
   type: string
 name_server_group:
   description: |
@@ -4237,14 +4623,16 @@ network_uuid:
   type: string
 networks:
   description: |
-    A ``networks`` object. Required parameter when there are multiple networks defined
-    for the tenant. When you do not specify the networks parameter, the server attaches
-    to the only network created for the current tenant.  Optionally, you can create
-    one or more NICs on the server.  To provision the server instance with a NIC for
-    a network, specify the UUID of the network in the ``uuid`` attribute in a ``networks``
-    object.  To provision the server instance with a NIC for an already existing port,
-    specify the port-id in the ``port`` attribute in a ``networks`` object.
-    
+    A list of ``network`` object. Required parameter when there are multiple
+    networks defined for the tenant. When you do not specify the networks
+    parameter, the server attaches to the only network created for the
+    current tenant.  Optionally, you can create one or more NICs on the server.
+    To provision the server instance with a NIC for a network, specify
+    the UUID of the network in the ``uuid`` attribute in a ``networks``
+    object.  To provision the server instance with a NIC for an already
+    existing port, specify the port-id in the ``port`` attribute in a
+    ``networks`` object.
+
     If multiple networks are defined, the order in which they appear in the
     guest operating system will not necessarily reflect the order in which they
     are given in the server boot request. Guests should therefore not depend
@@ -4263,18 +4651,18 @@ networks:
     attribute.
 
     Starting with microversion 2.37, this field is required and the special
-    values *auto* and *none* can be specified for networks. *auto* tells the
-    Compute service to use a network that is available to the project, if one
-    exists. If one does not exist, the Compute service will attempt to
-    automatically allocate a network for the project (if possible). *none*
-    tells the Compute service to not allocate a network for the instance. The
-    *auto* and *none* values cannot be used with any other network values,
-    including other network uuids, ports, fixed IPs or device tags. These are
-    requested as strings for the networks value, not in a list. See the
-    associated example.
+    string values *auto* and *none* can be specified for networks. *auto*
+    tells the Compute service to use a network that is available to the
+    project, if one exists. If one does not exist, the Compute service will
+    attempt to automatically allocate a network for the project (if possible).
+    *none* tells the Compute service to not allocate a network for the
+    instance. The *auto* and *none* values cannot be used with any other
+    network values, including other network uuids, ports, fixed IPs or device
+    tags. These are requested as strings for the networks value, not in a
+    list. See the associated example.
   in: body
   required: true
-  type: object
+  type: array
 networks_quota_optional: &networks_quota_optional
   description: |
     The number of private networks that can be created per project.
@@ -4322,6 +4710,12 @@ nic_details_diagnostics:
   required: true
   type: array
   min_version: 2.48
+no_device:
+  description: |
+    It is no device if ``True``.
+  in: body
+  required: false
+  type: boolean
 num_cpus_diagnostics:
   description: |
     The number of vCPUs.
@@ -4648,6 +5042,82 @@ os:scheduler_hints:
   in: body
   required: false
   type: object
+os:scheduler_hints_build_near_host_ip:
+  description: |
+    Schedule the server on a host in the network specified with this parameter
+    and a cidr (``os:scheduler_hints.cidr``).
+    It is available when ``SimpleCIDRAffinityFilter`` is available
+    on cloud side.
+  in: body
+  required: false
+  type: string
+os:scheduler_hints_cidr:
+  description: |
+    Schedule the server on a host in the network specified with an IP address
+    (``os:scheduler_hints:build_near_host_ip``) and this parameter.
+    If ``os:scheduler_hints:build_near_host_ip`` is specified and
+    this paramete is omitted, ``/24`` is used.
+    It is available when ``SimpleCIDRAffinityFilter`` is available
+    on cloud side.
+  in: body
+  required: false
+  type: string
+os:scheduler_hints_different_cell:
+  description: |
+    A list of cell routes or a cell route (string).
+    Schedule the server in a cell that is not specified.
+    It is available when ``DifferentCellFilter`` is available on cloud side
+    that is cell v1 environment.
+  in: body
+  required: false
+  type: array
+os:scheduler_hints_different_host:
+  description: |
+    A list of server UUIDs or a server UUID.
+    Schedule the server on a different host from a set of servers.
+    It is available when ``DifferentHostFilter`` is available on cloud side.
+  in: body
+  required: false
+  type: array
+os:scheduler_hints_group:
+  description: |
+    The server group UUID. Schedule the server according to a policy of
+    the server group (``anti-affinity``, ``affinity``, ``soft-anti-affinity``
+    or ``soft-affinity``).
+    It is available when ``ServerGroupAffinityFilter``,
+    ``ServerGroupAntiAffinityFilter``, ``ServerGroupSoftAntiAffinityWeigher``,
+    ``ServerGroupSoftAffinityWeigher`` are available on cloud side.
+  in: body
+  required: false
+  type: string
+os:scheduler_hints_query:
+  description: |
+    Schedule the server by using a custom filter in JSON format.
+    For example::
+
+      "query": "[&gt;=,$free_ram_mb,1024]"
+
+    It is available when ``JsonFilter`` is available on cloud side.
+  in: body
+  required: false
+  type: string
+os:scheduler_hints_same_host:
+  description: |
+    A list of server UUIDs or a server UUID.
+    Schedule the server on the same host as another server in a set of
+    servers.
+    It is available when ``SameHostFilter`` is available on cloud side.
+  in: body
+  required: false
+  type: array
+os:scheduler_hints_target_cell:
+  description: |
+    A target cell name. Schedule the server in a host in the cell specified.
+    It is available when ``TargetCellFilter`` is available on cloud side
+    that is cell v1 environment.
+  in: body
+  required: false
+  type: string
 overall_status:
   description: |
     The overall status of instance audit tasks.
@@ -4742,6 +5212,50 @@ policies:
   in: body
   required: true
   type: array
+  max_version: 2.63
+policy_name:
+  description: |
+    The ``policy`` field represents the name of the policy. The current
+    valid policy names are:
+
+    - ``anti-affinity`` - servers in this group must be scheduled to
+      different hosts.
+    - ``affinity`` - servers in this group must be scheduled to the same host.
+    - ``soft-anti-affinity`` - servers in this group should be scheduled to
+      different hosts if possible, but if not possible then they should still
+      be scheduled instead of resulting in a build failure.
+    - ``soft-affinity`` - servers in this group should be scheduled to the same
+      host if possible, but if not possible then they should still be scheduled
+      instead of resulting in a build failure.
+  in: body
+  required: true
+  type: object
+  min_version: 2.64
+policy_rules:
+  description: |
+    The ``rules`` field, which is a dict, can be applied to the policy.
+    Currently, only the ``max_server_per_host`` rule is supported for the
+    ``anti-affinity`` policy. The ``max_server_per_host`` rule allows
+    specifying how many members of the anti-affinity group can reside on the
+    same compute host. If not specified, only one member from the same
+    anti-affinity group can reside on a given host.
+  in: body
+  required: true
+  type: object
+  min_version: 2.64
+policy_rules_optional:
+  description: |
+    The ``rules`` field, which is a dict, can be applied to the policy.
+    Currently, only the ``max_server_per_host`` rule is supported for the
+    ``anti-affinity`` policy. The ``max_server_per_host`` rule allows
+    specifying how many members of the anti-affinity group can reside on the
+    same compute host. If not specified, only one member from the same
+    anti-affinity group can reside on a given host. Requesting policy rules
+    with any other policy than ``anti-affinity`` will be 400.
+  in: body
+  required: false
+  type: object
+  min_version: 2.64
 pool:
   description: |
     Pool from which to allocate the IP address. If you omit this parameter, the call
@@ -4817,9 +5331,11 @@ private_key:
   type: string
 progress:
   description: |
-    A percentage value of the build progress.
+    A percentage value of the operation progress.
+    This parameter only appears when the server status is ``ACTIVE``,
+    ``BUILD``, ``REBUILD``, ``RESIZE``, ``VERIFY_RESIZE`` or ``MIGRATING``.
   in: body
-  required: true
+  required: false
   type: integer
 project_id:
   description: |
@@ -4833,19 +5349,6 @@ project_id_instance_action:
     The UUID of the project that this server belongs to.
   in: body
   required: true
-  type: string
-project_id_query_server:
-  description: |
-    Filter the list of servers by the given project ID.
-
-    This filter only works when the ``all_tenants=1`` filter is also specified.
-
-    .. note::
-
-       'tenant_id' can also be requested which is alias of 'project_id'
-       but that is not recommended to use as that will be removed in future.
-  in: body
-  required: false
   type: string
 project_id_server_group:
   description: |
@@ -4883,14 +5386,14 @@ quota_tenant_or_user_id_body:
   type: string
 ram: &ram
   description: |
-    The amount of allowed server RAM, in MB, for each tenant.
+    The amount of allowed server RAM, in MiB, for each tenant.
   in: body
   required: true
   type: integer
 ram_quota_class: &ram_quota_class
   <<: *ram
   description: |
-    The amount of allowed instance RAM, in MB, for the quota class.
+    The amount of allowed instance RAM, in MiB, for the quota class.
 ram_quota_class_optional:
   <<: *ram_quota_class
   required: false
@@ -4903,7 +5406,7 @@ ram_quota_details:
   type: object
 ram_quota_optional:
   description: |
-    The amount of allowed server RAM, in MB, for each tenant.
+    The amount of allowed server RAM, in MiB, for each tenant.
   in: body
   required: false
   type: integer
@@ -5105,7 +5608,7 @@ secgroup_tenant_id_body:
   description: |
     The UUID of the tenant that owns this security group.
   in: body
-  required: true
+  required: false
   type: string
 security_group:
   description: |
@@ -5241,7 +5744,7 @@ server_description_resp:
   min_version: 2.19
 server_group:
   description: |
-    The server group obejct.
+    The server group object.
   in: body
   required: true
   type: object
@@ -5310,10 +5813,11 @@ server_groups_quota_optional:
   type: integer
 server_hostname:
   in: body
-  required: true
+  required: false
   type: string
   description: |
     The hostname set on the instance when it is booted.
+    By default, it appears in the response for administrative users only.
   min_version: 2.3
 server_id:
   description: |
@@ -5329,18 +5833,20 @@ server_id_optional:
   type: string
 server_kernel_id:
   in: body
-  required: true
+  required: false
   type: string
   description: |
     The UUID of the kernel image when using an AMI. Will be null if not.
+    By default, it appears in the response for administrative users only.
   min_version: 2.3
 server_launch_index:
   in: body
-  required: true
+  required: false
   type: integer
   description: |
     When servers are launched via multiple create, this is the
     sequence in which the servers were launched.
+    By default, it appears in the response for administrative users only.
   min_version: 2.3
 server_links:
   description: |
@@ -5365,26 +5871,29 @@ server_name_optional:
   type: string
 server_ramdisk_id:
   in: body
-  required: true
+  required: false
   type: string
   description: |
     The UUID of the ramdisk image when using an AMI. Will be null if not.
+    By default, it appears in the response for administrative users only.
   min_version: 2.3
 server_reservation_id:
   in: body
-  required: true
+  required: false
   type: string
   description: |
     The reservation id for the server. This is an id that can
     be useful in tracking groups of servers created with multiple
     create, that will all have the same reservation_id.
+    By default, it appears in the response for administrative users only.
   min_version: 2.3
 server_root_device_name:
   in: body
-  required: true
+  required: false
   type: string
   description: |
     The root device name for the instance
+    By default, it appears in the response for administrative users only.
   min_version: 2.3
 server_status:
   description: |
@@ -5412,6 +5921,41 @@ server_tags_create:
   required: false
   type: array
   min_version: 2.52
+server_trusted_image_certificates_create_req:
+  description: |
+    A list of trusted certificate IDs, which are used during image
+    signature verification to verify the signing certificate. The list is
+    restricted to a maximum of 50 IDs. This parameter is optional in server
+    create requests if allowed by policy, and is not supported for
+    volume-backed instances.
+  in: body
+  required: false
+  type: array
+  min_version: 2.63
+server_trusted_image_certificates_rebuild_req:
+  description: |
+    A list of trusted certificate IDs, which are used during image
+    signature verification to verify the signing certificate. The list is
+    restricted to a maximum of 50 IDs. This parameter is optional in server
+    rebuild requests if allowed by policy, and is not supported
+    for volume-backed instances.
+
+    If ``null`` is specified, the existing trusted certificate IDs are either
+    unset or reset to the configured defaults.
+  in: body
+  required: false
+  type: array
+  min_version: 2.63
+server_trusted_image_certificates_resp:
+  description: |
+    A list of trusted certificate IDs, that were used during image signature
+    verification to verify the signing certificate. The list is restricted
+    to a maximum of 50 IDs. The value is ``null`` if trusted certificate IDs
+    are not set.
+  in: body
+  required: true
+  type: array
+  min_version: 2.63
 server_usages:
   description: |
     A list of the server usage objects.
@@ -5426,10 +5970,11 @@ server_usages_optional:
   type: array
 server_user_data:
   in: body
-  required: true
+  required: false
   type: string
   description: |
     The user_data the instance was created with.
+    By default, it appears in the response for administrative users only.
   min_version: 2.3
 server_uuid:
   description: |
@@ -5445,16 +5990,26 @@ servers:
   in: body
   required: true
   type: array
+servers_links:
+  description: |
+    Links to the next server. It is available when the number of servers exceeds
+    ``limit`` parameter or ``[api]/max_limit`` in the configuration file.
+    See `API Guide / Links and References
+    <http://developer.openstack.org/api-guide/compute/links_and_references.html>`_
+    for more info.
+  in: body
+  type: array
+  required: false
 servers_max_count:
   in: body
   required: false
-  type: string
+  type: integer
   description: |
     The max number of servers to be created. Defaults to the value of ``min_count``.
 servers_min_count:
   in: body
   required: false
-  type: string
+  type: integer
   description: |
     The min number of servers to be created. Defaults to 1.
 servers_multiple_create_name:
@@ -5462,9 +6017,7 @@ servers_multiple_create_name:
   required: true
   type: string
   description: |
-    A base name for creating unique names during multiple create. A
-    unique string will be appended to the end of this base name for
-    every server created.
+    A base name for creating unique names during multiple create.
 service:
   description: |
     Object representing a compute service.
@@ -5623,10 +6176,28 @@ snapshots:
   type: array
 source_type:
   description: |
-    The source type of the volume. A valid value is ``blank``, ``snapshot``, ``volume``,
-    or ``image``.
+    The source type of the block device. Valid values are:
+
+    * ``blank``: Depending on the ``destination_type`` and ``guest_format``,
+      this will either be a blank persistent volume or an ephemeral (or swap)
+      disk local to the compute host on which the server resides
+    * ``image``: This is only valid with ``destination_type=volume``; creates
+      an image-backed volume in the block storage service and attaches it to
+      the server
+    * ``snapshot``: This is only valid with ``destination_type=volume``;
+      creates a volume backed by the given volume snapshot referenced via the
+      ``block_device_mapping_v2.uuid`` parameter and attaches it to the server
+    * ``volume``: This is only valid with ``destination_type=volume``; uses
+      the existing persistent volume referenced via the
+      ``block_device_mapping_v2.uuid`` parameter and attaches it to the server
+
+    This parameter is required unless ``block_device_mapping_v2.no_device`` is
+    specified.
+
+    See `Block Device Mapping in Nova <https://docs.openstack.org/nova/latest/user/block-device-mapping.html>`_
+    for more details on valid source and destination types.
   in: body
-  required: true
+  required: false
   type: string
 start_simple_tenant_usage_body:
   description: |
@@ -5798,7 +6369,7 @@ total_local_gb_usage:
   type: float
 total_memory_mb_usage:
   description: |
-    Multiplying the server memory size (in MB) by hours the server exists,
+    Multiplying the server memory size (in MiB) by hours the server exists,
     and then adding that all together for each server.
   in: body
   required: true
@@ -5974,7 +6545,8 @@ usage_links:
   min_version: 2.40
 user_data:
   description: |
-    Configuration information or scripts to use upon launch. Must be Base64 encoded.
+    Configuration information or scripts to use upon launch.
+    Must be Base64 encoded. Restricted to 65535 bytes.
 
     .. note::
 
@@ -5986,8 +6558,8 @@ user_data:
 user_data_rebuild_req:
   description: |
     Configuration information or scripts to use upon rebuild.
-    Must be Base64 encoded. If ``null`` is specified, the existing user_data
-    is unset.
+    Must be Base64 encoded. Restricted to 65535 bytes.
+    If ``null`` is specified, the existing user_data is unset.
   in: body
   required: false
   type: string
@@ -6137,6 +6709,14 @@ volume_id_resp:
   in: body
   required: true
   type: string
+volume_size:
+  description: |
+    The size of the volume (in GiB).
+    This is integer value from range 1 to 2147483647
+    which can be requested as integer and string.
+  in: body
+  required: false
+  type: integer
 volume_status:
   description: |
     The status of the volume.
@@ -6175,7 +6755,7 @@ volumeAttachment_post:
 volumeAttachment_put:
   description: |
     A dictionary representation of a volume attachment containing the field
-    ``volumeId``.
+    ``volumeId`` which is the UUID of the replacement volume.
   in: body
   required: true
   type: object

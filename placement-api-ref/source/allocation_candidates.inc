@@ -29,9 +29,14 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-  - resources: resources_query_required
+  - resources: resources_query_ac
+  - required: required_traits_unnumbered
+  - member_of: member_of_1_21
+  - resourcesN: resources_query_granular
+  - requiredN: required_traits_granular
+  - member_ofN: member_of_granular
+  - group_policy: allocation_candidates_group_policy
   - limit: allocation_candidates_limit
-  - required: allocation_candidates_required
 
 Response (microversions 1.12 - )
 --------------------------------
@@ -39,14 +44,29 @@ Response (microversions 1.12 - )
 .. rest_parameters:: parameters.yaml
 
   - allocation_requests: allocation_requests
-  - provider_summaries: provider_summaries
+  - provider_summaries: provider_summaries_1_12
   - allocations: allocations_by_resource_provider
   - resources: resources
   - capacity: capacity
   - used: used
+  - traits: traits_1_17
+  - parent_provider_uuid: resource_provider_parent_provider_uuid_response_1_29
+  - root_provider_uuid: resource_provider_root_provider_uuid_1_29
 
-Response Example (microversions 1.12 - )
+Response Example (microversions 1.29 - )
 ----------------------------------------
+
+.. literalinclude:: ./samples/allocation_candidates/get-allocation_candidates-1.29.json
+   :language: javascript
+
+Response Example (microversions 1.17 - 1.28)
+--------------------------------------------
+
+.. literalinclude:: ./samples/allocation_candidates/get-allocation_candidates-1.17.json
+   :language: javascript
+
+Response Example (microversions 1.12 - 1.16)
+--------------------------------------------
 
 .. literalinclude:: ./samples/allocation_candidates/get-allocation_candidates-1.12.json
    :language: javascript

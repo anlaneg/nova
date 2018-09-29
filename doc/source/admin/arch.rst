@@ -49,26 +49,32 @@ support across different hypervisors, see :doc:`/user/support-matrix`.
 You can also orchestrate clouds using multiple hypervisors in different
 availability zones. Compute supports the following hypervisors:
 
-- `Baremetal <https://docs.openstack.org/ironic/latest/>`__
-
-- `Docker <https://www.docker.io>`__
+- :ironic-doc:`Baremetal <>`
 
 - `Hyper-V
-  <http://www.microsoft.com/en-us/server-cloud/hyper-v-server/default.aspx>`__
+  <https://docs.microsoft.com/en-us/windows-server/virtualization/hyper-v/hyper-v-technology-overview>`__
 
 - `Kernel-based Virtual Machine (KVM)
-  <http://www.linux-kvm.org/page/Main_Page>`__
+  <https://www.linux-kvm.org/page/Main_Page>`__
 
-- `Linux Containers (LXC) <https://linuxcontainers.org/>`__
+- `Linux Containers (LXC) <https://linuxcontainers.org>`__
 
-- `Quick Emulator (QEMU) <http://wiki.qemu.org/Manual>`__
+- `PowerVM <https://www.ibm.com/us-en/marketplace/ibm-powervm>`__
 
-- `User Mode Linux (UML) <http://user-mode-linux.sourceforge.net/>`__
+- `Quick Emulator (QEMU) <https://wiki.qemu.org/Manual>`__
+
+- `User Mode Linux (UML) <http://user-mode-linux.sourceforge.net>`__
+
+- `Virtuozzo <https://www.virtuozzo.com/products/vz7.html>`__
 
 - `VMware vSphere
   <https://www.vmware.com/support/vsphere-hypervisor.html>`__
 
-- `Xen <http://www.xen.org/support/documentation.html>`__
+- `Xen (using libvirt) <https://www.xenproject.org>`__
+
+- `XenServer <https://xenserver.org>`__
+
+- `zVM <https://www.ibm.com/it-infrastructure/z/zvm>`__
 
 For more information about hypervisors, see
 :doc:`/admin/configuration/hypervisors`
@@ -173,9 +179,8 @@ virtualization system. It is still possible for the resulting instance to keep
 ephemeral storage, depending on the flavor selected. In this case, the root
 file system can be on the persistent volume, and its state is maintained, even
 if the instance is shut down. For more information about this type of
-configuration, see `Introduction to the Block Storage service
-<https://docs.openstack.org/cinder/latest/configuration/block-storage/block-storage-overview.html>`_
-in the OpenStack Configuration Reference.
+configuration, see :cinder-doc:`Introduction to the Block Storage service
+<configuration/block-storage/block-storage-overview.html>`.
 
 .. note::
 

@@ -17,6 +17,7 @@
 import eventlet
 from eventlet import greenthread
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 import six
 import testtools
@@ -27,7 +28,6 @@ from nova import objects
 from nova.objects import fields as obj_fields
 from nova import test
 from nova.tests.unit.virt.libvirt import fakelibvirt
-from nova.tests import uuidsentinel as uuids
 from nova.virt import event
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt import driver as libvirt_driver
@@ -191,6 +191,73 @@ class HostTestCase(test.NoDBTestCase):
                          "cef19ce0-0ca2-11df-855d-b19fbce37686")
         self.assertEqual(got_events[0].transition,
                          event.EVENT_LIFECYCLE_STOPPED)
+
+    def test_event_lifecycle_callback_suspended_old_libvirt(self):
+        """Tests the suspended lifecycle event with libvirt before post-copy
+        """
+        hostimpl = mock.MagicMock()
+        conn = mock.MagicMock()
+        fake_dom_xml = """
+                <domain type='kvm'>
+                  <uuid>cef19ce0-0ca2-11df-855d-b19fbce37686</uuid>
+                </domain>
+            """
+        dom = fakelibvirt.Domain(conn, fake_dom_xml, running=True)
+        VIR_DOMAIN_EVENT_SUSPENDED_PAUSED = 0
+        host.Host._event_lifecycle_callback(
+            conn, dom, fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED,
+            detail=VIR_DOMAIN_EVENT_SUSPENDED_PAUSED, opaque=hostimpl)
+        expected_event = hostimpl._queue_event.call_args[0][0]
+        self.assertEqual(event.EVENT_LIFECYCLE_PAUSED,
+                         expected_event.transition)
+
+    def test_event_lifecycle_callback_suspended_postcopy(self):
+        """Tests the suspended lifecycle event with libvirt with post-copy"""
+        hostimpl = mock.MagicMock()
+        conn = mock.MagicMock()
+        fake_dom_xml = """
+                <domain type='kvm'>
+                  <uuid>cef19ce0-0ca2-11df-855d-b19fbce37686</uuid>
+                </domain>
+            """
+        dom = fakelibvirt.Domain(conn, fake_dom_xml, running=True)
+        VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY = 7
+        with mock.patch.object(host.libvirt,
+                               'VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY', new=7,
+                               create=True):
+            host.Host._event_lifecycle_callback(
+                conn, dom, fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED,
+                detail=VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY, opaque=hostimpl)
+        expected_event = hostimpl._queue_event.call_args[0][0]
+        self.assertEqual(event.EVENT_LIFECYCLE_POSTCOPY_STARTED,
+                         expected_event.transition)
+
+    def test_event_lifecycle_callback_suspended_migrated(self):
+        """Tests the suspended lifecycle event with libvirt with migrated"""
+        hostimpl = mock.MagicMock()
+        conn = mock.MagicMock()
+        fake_dom_xml = """
+                <domain type='kvm'>
+                  <uuid>cef19ce0-0ca2-11df-855d-b19fbce37686</uuid>
+                </domain>
+            """
+        dom = fakelibvirt.Domain(conn, fake_dom_xml, running=True)
+        # See https://libvirt.org/html/libvirt-libvirt-domain.html for values.
+        VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED = 1
+        with mock.patch.object(host.libvirt,
+                               'VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED', new=1,
+                               create=True):
+            host.Host._event_lifecycle_callback(
+                conn, dom, fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED,
+                detail=VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED, opaque=hostimpl)
+        expected_event = hostimpl._queue_event.call_args[0][0]
+        # FIXME(mriedem): This should be EVENT_LIFECYCLE_MIGRATION_COMPLETED
+        # once bug 1788014 is fixed and we properly check job status for the
+        # VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED case.
+        # self.assertEqual(event.EVENT_LIFECYCLE_MIGRATION_COMPLETED,
+        #                  expected_event.transition)
+        self.assertEqual(event.EVENT_LIFECYCLE_PAUSED,
+                         expected_event.transition)
 
     def test_event_emit_delayed_call_delayed(self):
         ev = event.LifecycleEvent(
@@ -675,6 +742,10 @@ class HostTestCase(test.NoDBTestCase):
             mock_conn().getInfo.return_value = ['zero', 'one', 'two']
             self.assertEqual('one', self.host.get_memory_mb_total())
 
+    def test_get_memory_total_file_backed(self):
+        self.flags(file_backed_memory=1048576, group="libvirt")
+        self.assertEqual(1048576, self.host.get_memory_mb_total())
+
     def test_get_memory_used(self):
         m = mock.mock_open(read_data="""
 MemTotal:       16194180 kB
@@ -696,9 +767,7 @@ Active:          8381604 kB
 
             self.assertEqual(6866, self.host.get_memory_mb_used())
 
-    def test_get_memory_used_xen(self):
-        self.flags(virt_type='xen', group='libvirt')
-
+    def test_sum_domain_memory_mb_xen(self):
         class DiagFakeDomain(object):
             def __init__(self, id, memmb):
                 self.id = id
@@ -741,8 +810,62 @@ Active:          8381604 kB
             mock_conn.getInfo.return_value = [
                 obj_fields.Architecture.X86_64, 15814, 8, 1208, 1, 1, 4, 2]
 
-            self.assertEqual(8657, self.host.get_memory_mb_used())
+            self.assertEqual(8657, self.host._sum_domain_memory_mb())
             mock_list.assert_called_with(only_guests=False)
+
+    def test_get_memory_used_xen(self):
+        self.flags(virt_type='xen', group='libvirt')
+        with test.nested(
+                mock.patch.object(self.host, "_sum_domain_memory_mb"),
+                mock.patch('sys.platform', 'linux2')
+                ) as (mock_sumDomainMemory, mock_platform):
+            mock_sumDomainMemory.return_value = 8192
+            self.assertEqual(8192, self.host.get_memory_mb_used())
+            mock_sumDomainMemory.assert_called_once_with(include_host=True)
+
+    def test_sum_domain_memory_mb_file_backed(self):
+        class DiagFakeDomain(object):
+            def __init__(self, id, memmb):
+                self.id = id
+                self.memmb = memmb
+
+            def info(self):
+                return [0, 0, self.memmb * 1024]
+
+            def ID(self):
+                return self.id
+
+            def name(self):
+                return "instance000001"
+
+            def UUIDString(self):
+                return uuids.fake
+
+        with test.nested(
+                mock.patch.object(host.Host,
+                                  "list_guests"),
+                mock.patch('sys.platform', 'linux2'),
+        ) as (mock_list, mock_platform):
+            mock_list.return_value = [
+                libvirt_guest.Guest(DiagFakeDomain(0, 4096)),
+                libvirt_guest.Guest(DiagFakeDomain(1, 2048)),
+                libvirt_guest.Guest(DiagFakeDomain(2, 1024)),
+                libvirt_guest.Guest(DiagFakeDomain(3, 1024))]
+
+            self.assertEqual(8192,
+                    self.host._sum_domain_memory_mb(include_host=False))
+
+    def test_get_memory_used_file_backed(self):
+        self.flags(file_backed_memory=1048576,
+                   group='libvirt')
+
+        with test.nested(
+                mock.patch.object(self.host, "_sum_domain_memory_mb"),
+                mock.patch('sys.platform', 'linux2')
+                ) as (mock_sumDomainMemory, mock_platform):
+            mock_sumDomainMemory.return_value = 8192
+            self.assertEqual(8192, self.host.get_memory_mb_used())
+            mock_sumDomainMemory.assert_called_once_with(include_host=False)
 
     def test_get_cpu_stats(self):
         stats = self.host.get_cpu_stats()

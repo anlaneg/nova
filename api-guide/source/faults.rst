@@ -109,8 +109,24 @@ Instance Faults
 
 Nova often adds an instance fault DB entry for an exception that happens
 while processing an API request. This often includes more administrator
-focused information, such as a stack trace.
-However, there is currently no API to retrieve this information.
+focused information, such as a stack trace. For a server with status
+``ERROR`` or ``DELETED``, a ``GET /servers/{server_id}`` request will include
+a ``fault`` object in the response body for the ``server`` resource. For
+example::
+
+  GET https://10.211.2.122/compute/v2.1/servers/c76a7603-95be-4368-87e9-7b9b89fb1d7e
+  {
+     "server": {
+        "id": "c76a7603-95be-4368-87e9-7b9b89fb1d7e",
+        "fault": {
+           "created": "2018-04-10T13:49:40Z",
+           "message": "No valid host was found.",
+           "code": 500
+        },
+        "status": "ERROR",
+        ...
+     }
+  }
 
 Notifications
 -------------
@@ -128,7 +144,7 @@ API status code. The system also returns additional
 information about the fault in the body of the response.
 
 
-**Example: Fault: JSON response**
+**Example: Fault: JSON response**
 
 .. code::
 
@@ -142,7 +158,7 @@ information about the fault in the body of the response.
 The error ``code`` is returned in the body of the response for convenience.
 The ``message`` section returns a human-readable message that is appropriate
 for display to the end user. The ``details`` section is optional and may
-contain information—for example, a stack trace—to assist in tracking
+contain information--for example, a stack trace--to assist in tracking
 down an error. The ``details`` section might or might not be appropriate for
 display to an end user.
 
@@ -173,7 +189,7 @@ faults may also contain a ``created`` timestamp that specifies when the fault
 occurred.
 
 
-**Example: Server in error state: JSON response**
+**Example: Server in error state: JSON response**
 
 .. code::
 

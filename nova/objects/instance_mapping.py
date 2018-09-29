@@ -10,8 +10,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_utils import versionutils
 from sqlalchemy.orm import joinedload
 
+from nova import context as nova_context
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import api_models
 from nova import exception
@@ -24,14 +26,24 @@ from nova.objects import fields
 @base.NovaObjectRegistry.register
 class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
     # Version 1.0: Initial version
-    VERSION = '1.0'
+    # Version 1.1: Add queued_for_delete
+    VERSION = '1.1'
 
     fields = {
         'id': fields.IntegerField(read_only=True),
         'instance_uuid': fields.UUIDField(),
         'cell_mapping': fields.ObjectField('CellMapping', nullable=True),
         'project_id': fields.StringField(),
+        'queued_for_delete': fields.BooleanField(default=False),
         }
+
+    def obj_make_compatible(self, primitive, target_version):
+        super(InstanceMapping, self).obj_make_compatible(primitive,
+                                                         target_version)
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 1):
+            if 'queued_for_delete' in primitive:
+                del primitive['queued_for_delete']
 
     def _update_with_cell_id(self, updates):
         cell_mapping_obj = updates.pop("cell_mapping", None)
@@ -132,6 +144,48 @@ class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
         self._destroy_in_db(self._context, self.instance_uuid)
 
 
+@db_api.api_context_manager.writer
+def populate_queued_for_delete(context, max_count):
+    cells = objects.CellMappingList.get_all(context)
+    processed = 0
+    for cell in cells:
+        ims = (
+            # Get a direct list of instance mappings for this cell which
+            # have not yet received a defined value decision for
+            # queued_for_delete
+            context.session.query(api_models.InstanceMapping)
+            .options(joinedload('cell_mapping'))
+            .filter(
+                api_models.InstanceMapping.queued_for_delete == None)  # noqa
+            .filter(api_models.InstanceMapping.cell_id == cell.id)
+            .limit(max_count).all())
+        ims_by_inst = {im.instance_uuid: im for im in ims}
+        with nova_context.target_cell(context, cell) as cctxt:
+            filters = {'uuid': list(ims_by_inst.keys()),
+                       'deleted': True,
+                       'soft_deleted': True}
+            instances = objects.InstanceList.get_by_filters(
+                cctxt, filters, expected_attrs=[])
+        # Walk through every deleted instance that has a mapping needing
+        # to be updated and update it
+        for instance in instances:
+            im = ims_by_inst.pop(instance.uuid)
+            im.queued_for_delete = True
+            context.session.add(im)
+            processed += 1
+        # Any instances we did not just hit must be not-deleted, so
+        # update the remaining mappings
+        for non_deleted_im in ims_by_inst.values():
+            non_deleted_im.queued_for_delete = False
+            context.session.add(non_deleted_im)
+            processed += 1
+        max_count -= len(ims)
+        if max_count <= 0:
+            break
+
+    return processed, processed
+
+
 @base.NovaObjectRegistry.register
 class InstanceMappingList(base.ObjectListBase, base.NovaObject):
     # Version 1.0: Initial version
@@ -195,3 +249,19 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
     @classmethod
     def destroy_bulk(cls, context, instance_uuids):
         return cls._destroy_bulk_in_db(context, instance_uuids)
+
+    @staticmethod
+    @db_api.api_context_manager.reader
+    def _get_by_cell_and_project_from_db(context, cell_id, project_id):
+        return (context.session.query(api_models.InstanceMapping)
+                .options(joinedload('cell_mapping'))
+                .filter_by(cell_id=cell_id)
+                .filter_by(project_id=project_id)
+                .all())
+
+    @classmethod
+    def get_by_cell_and_project(cls, context, cell_id, project_id):
+        db_mappings = cls._get_by_cell_and_project_from_db(context, cell_id,
+                                                           project_id)
+        return base.obj_make_list(context, cls(), objects.InstanceMapping,
+                db_mappings)

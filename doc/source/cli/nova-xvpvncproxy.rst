@@ -7,9 +7,7 @@ XVP VNC Console Proxy Server
 ----------------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-09-27
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,9 +21,9 @@ Synopsis
 Description
 ===========
 
-`nova-xvpvncproxy` is a server daemon that serves the Nova XVP VNC Console
-Proxy service, which provides an XVP-based VNC Console Proxy for use with the
-Xen hypervisor.
+:program:`nova-xvpvncproxy` is a server daemon that serves the Nova XVP VNC
+Console Proxy service, which provides an XVP-based VNC Console Proxy for use
+with the Xen hypervisor.
 
 Options
 =======
@@ -43,7 +41,7 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

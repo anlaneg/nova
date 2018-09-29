@@ -15,7 +15,6 @@
 
 import mock
 from oslo_policy import policy as oslo_policy
-from oslo_serialization import jsonutils
 import webob
 
 from nova.api.openstack.compute import keypairs as keypairs_v21
@@ -29,7 +28,6 @@ from nova import quota
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit.objects import test_keypair
-from nova.tests import uuidsentinel as uuids
 
 
 QUOTAS = quota.QUOTAS
@@ -79,11 +77,11 @@ class KeypairsTestV21(test.TestCase):
         fakes.stub_out_networking(self)
         fakes.stub_out_secgroup_api(self)
 
-        self.stub_out("nova.db.key_pair_get_all_by_user",
+        self.stub_out("nova.db.api.key_pair_get_all_by_user",
                       db_key_pair_get_all_by_user)
-        self.stub_out("nova.db.key_pair_create",
+        self.stub_out("nova.db.api.key_pair_create",
                       db_key_pair_create)
-        self.stub_out("nova.db.key_pair_destroy",
+        self.stub_out("nova.db.api.key_pair_destroy",
                       db_key_pair_destroy)
         self._setup_app_and_controller()
 
@@ -287,7 +285,7 @@ class KeypairsTestV21(test.TestCase):
         def db_key_pair_get_not_found(context, user_id, name):
             raise exception.KeypairNotFound(user_id=user_id, name=name)
 
-        self.stub_out("nova.db.key_pair_destroy",
+        self.stub_out("nova.db.api.key_pair_destroy",
                       db_key_pair_get_not_found)
         self.assertRaises(webob.exc.HTTPNotFound,
                           self.controller.delete, self.req, 'FAKE')
@@ -299,7 +297,7 @@ class KeypairsTestV21(test.TestCase):
                         name='foo', public_key='XXX', fingerprint='YYY',
                         type='ssh')
 
-        self.stub_out("nova.db.key_pair_get", _db_key_pair_get)
+        self.stub_out("nova.db.api.key_pair_get", _db_key_pair_get)
 
         res_dict = self.controller.show(self.req, 'FAKE')
         self.assertEqual('foo', res_dict['keypair']['name'])
@@ -312,81 +310,13 @@ class KeypairsTestV21(test.TestCase):
         def _db_key_pair_get(context, user_id, name):
             raise exception.KeypairNotFound(user_id=user_id, name=name)
 
-        self.stub_out("nova.db.key_pair_get", _db_key_pair_get)
+        self.stub_out("nova.db.api.key_pair_get", _db_key_pair_get)
 
         self.assertRaises(webob.exc.HTTPNotFound,
                           self.controller.show, self.req, 'FAKE')
 
-    def test_show_server(self):
-        self.stub_out('nova.db.instance_get',
-                      fakes.fake_instance_get())
-        self.stub_out('nova.db.instance_get_by_uuid',
-                      fakes.fake_instance_get())
-        # NOTE(sdague): because of the way extensions work, we have to
-        # also stub out the Request compute cache with a real compute
-        # object. Delete this once we remove all the gorp of
-        # extensions modifying the server objects.
-        self.stub_out('nova.api.openstack.wsgi.Request.get_db_instance',
-                      fakes.fake_compute_get())
-
-        req = fakes.HTTPRequest.blank(
-            self.base_url + '/servers/' + uuids.server)
-        req.headers['Content-Type'] = 'application/json'
-        response = req.get_response(self.app_server)
-        self.assertEqual(response.status_int, 200)
-        res_dict = jsonutils.loads(response.body)
-        self.assertIn('key_name', res_dict['server'])
-        self.assertEqual(res_dict['server']['key_name'], '')
-
-    @mock.patch('nova.compute.api.API.get_all')
-    def test_detail_servers(self, mock_get_all):
-        # NOTE(danms): Orphan these fakes (no context) so that we
-        # are sure that the API is requesting what it needs without
-        # having to lazy-load.
-        mock_get_all.return_value = objects.InstanceList(
-            objects=[fakes.stub_instance_obj(ctxt=None, id=1),
-                     fakes.stub_instance_obj(ctxt=None, id=2)])
-        req = fakes.HTTPRequest.blank(self.base_url + '/servers/detail')
-        res = req.get_response(self.app_server)
-        server_dicts = jsonutils.loads(res.body)['servers']
-        self.assertEqual(len(server_dicts), 2)
-
-        for server_dict in server_dicts:
-            self.assertIn('key_name', server_dict)
-            self.assertEqual(server_dict['key_name'], '')
-
     def _assert_keypair_type(self, res_dict):
         self.assertNotIn('type', res_dict['keypair'])
-
-    def test_create_server_keypair_name_with_leading_trailing(self):
-        req = fakes.HTTPRequest.blank(self.base_url + '/servers')
-        req.method = 'POST'
-        req.headers["content-type"] = "application/json"
-        req.body = jsonutils.dump_as_bytes({'server': {'name': 'test',
-                                               'flavorRef': 1,
-                                               'keypair_name': '  abc  ',
-                                               'imageRef': FAKE_UUID}})
-        res = req.get_response(self.app_server)
-        self.assertEqual(400, res.status_code)
-        self.assertIn(b'keypair_name', res.body)
-
-    @mock.patch.object(compute_api.API, 'create')
-    def test_create_server_keypair_name_with_leading_trailing_compat_mode(
-            self, mock_create):
-        mock_create.return_value = (
-            objects.InstanceList(objects=[
-                fakes.stub_instance_obj(ctxt=None, id=1)]),
-            None)
-        req = fakes.HTTPRequest.blank(self.base_url + '/servers')
-        req.method = 'POST'
-        req.headers["content-type"] = "application/json"
-        req.body = jsonutils.dump_as_bytes({'server': {'name': 'test',
-                                               'flavorRef': 1,
-                                               'keypair_name': '  abc  ',
-                                               'imageRef': FAKE_UUID}})
-        req.set_legacy_v2()
-        res = req.get_response(self.app_server)
-        self.assertEqual(202, res.status_code)
 
 
 class KeypairPolicyTestV21(test.NoDBTestCase):
@@ -626,7 +556,7 @@ class KeypairsTestV235(test.TestCase):
         super(KeypairsTestV235, self).setUp()
         self._setup_app_and_controller()
 
-    @mock.patch("nova.db.key_pair_get_all_by_user")
+    @mock.patch("nova.db.api.key_pair_get_all_by_user")
     def test_keypair_list_limit_and_marker(self, mock_kp_get):
         mock_kp_get.side_effect = db_key_pair_get_all_by_user
 
@@ -661,7 +591,7 @@ class KeypairsTestV235(test.TestCase):
         self.assertRaises(exception.ValidationError, self.controller.index,
                           req)
 
-    @mock.patch("nova.db.key_pair_get_all_by_user")
+    @mock.patch("nova.db.api.key_pair_get_all_by_user")
     def test_keypair_list_limit_and_marker_invalid_in_old_microversion(
             self, mock_kp_get):
         mock_kp_get.side_effect = db_key_pair_get_all_by_user

@@ -27,6 +27,7 @@ import testtools
 from nova import exception
 from nova import manager
 from nova import objects
+from nova.objects import base as obj_base
 from nova import rpc
 from nova import service
 from nova import test
@@ -138,6 +139,20 @@ class ServiceTestCase(test.NoDBTestCase):
         # post_start_hook is called after RPC consumer is created.
         serv.manager.post_start_hook.assert_called_once_with()
 
+    @mock.patch('nova.conductor.api.API.wait_until_ready')
+    def test_init_with_indirection_api_waits(self, mock_wait):
+        obj_base.NovaObject.indirection_api = mock.MagicMock()
+
+        with mock.patch.object(FakeManager, '__init__') as init:
+            def check(*a, **k):
+                self.assertTrue(mock_wait.called)
+
+            init.side_effect = check
+            service.Service(self.host, self.binary, self.topic,
+                            'nova.tests.unit.test_service.FakeManager')
+            self.assertTrue(init.called)
+        mock_wait.assert_called_once_with(mock.ANY)
+
     @mock.patch('nova.objects.service.Service.get_by_host_and_binary')
     def test_start_updates_version(self, mock_get_by_host_and_binary):
         # test that the service version gets updated on services startup
@@ -167,13 +182,11 @@ class ServiceTestCase(test.NoDBTestCase):
                                self.topic,
                                'nova.tests.unit.test_service.FakeManager')
 
-        class TestException(Exception):
-            pass
-
-        mock_get_by_host_and_binary.side_effect = [None, TestException()]
+        mock_get_by_host_and_binary.side_effect = [None,
+                                                   test.TestingException()]
         mock_create.side_effect = ex
         serv.manager = mock_manager
-        self.assertRaises(TestException, serv.start)
+        self.assertRaises(test.TestingException, serv.start)
         serv.manager.init_host.assert_called_with()
         mock_get_by_host_and_binary.assert_has_calls([
                 mock.call(mock.ANY, self.host, self.binary),

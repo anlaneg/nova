@@ -13,10 +13,11 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.cells import rpcapi as cells_rpcapi
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import models as db_models
 from nova import exception
@@ -26,7 +27,6 @@ from nova import test
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_instance
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 class _TestBlockDeviceMappingObject(object):
@@ -395,10 +395,14 @@ class _TestBlockDeviceMappingObject(object):
     def test_obj_make_compatible_pre_1_17(self):
         values = {'source_type': 'volume', 'volume_id': 'fake-vol-id',
                   'destination_type': 'volume',
-                  'instance_uuid': uuids.instance}
+                  'instance_uuid': uuids.instance, 'tag': 'fake-tag'}
         bdm = objects.BlockDeviceMapping(context=self.context, **values)
-        primitive = bdm.obj_to_primitive(target_version='1.16')
+        data = lambda x: x['nova_object.data']
+        primitive = data(bdm.obj_to_primitive(target_version='1.17'))
+        self.assertIn('tag', primitive)
+        primitive = data(bdm.obj_to_primitive(target_version='1.16'))
         self.assertNotIn('tag', primitive)
+        self.assertIn('volume_id', primitive)
 
     def test_obj_make_compatible_pre_1_18(self):
         values = {'source_type': 'volume', 'volume_id': 'fake-vol-id',
@@ -406,16 +410,20 @@ class _TestBlockDeviceMappingObject(object):
                   'instance_uuid': uuids.instance,
                   'attachment_id': uuids.attachment_id}
         bdm = objects.BlockDeviceMapping(context=self.context, **values)
-        primitive = bdm.obj_to_primitive(target_version='1.17')
+        data = lambda x: x['nova_object.data']
+        primitive = data(bdm.obj_to_primitive(target_version='1.17'))
         self.assertNotIn('attachment_id', primitive)
+        self.assertIn('volume_id', primitive)
 
     def test_obj_make_compatible_pre_1_19(self):
         values = {'source_type': 'volume', 'volume_id': 'fake-vol-id',
                   'destination_type': 'volume',
                   'instance_uuid': uuids.instance, 'uuid': uuids.bdm}
         bdm = objects.BlockDeviceMapping(context=self.context, **values)
-        primitive = bdm.obj_to_primitive(target_version='1.18')
+        data = lambda x: x['nova_object.data']
+        primitive = data(bdm.obj_to_primitive(target_version='1.18'))
         self.assertNotIn('uuid', primitive)
+        self.assertIn('volume_id', primitive)
 
 
 class TestBlockDeviceMappingUUIDMigration(test.TestCase):

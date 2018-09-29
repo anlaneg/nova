@@ -18,7 +18,8 @@ from oslo_utils import uuidutils
 from oslo_utils import versionutils
 
 import nova.conf
-from nova import db
+from nova.db import api as db
+from nova.db.sqlalchemy import api as sa_api
 from nova.db.sqlalchemy import models
 from nova import exception
 from nova import objects
@@ -269,7 +270,7 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
     def get_first_node_by_host_for_old_compat(cls, context, host,
                                               use_slave=False):
         computes = ComputeNodeList.get_all_by_host(context, host, use_slave)
-        # FIXME(sbauza): Some hypervisors (VMware, Ironic) can return multiple
+        # FIXME(sbauza): Ironic deployments can return multiple
         # nodes per host, we should return all the nodes and modify the callers
         # instead.
         # Arbitrarily returning the first node.
@@ -347,7 +348,7 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
                 "vcpus_used", "memory_mb_used", "local_gb_used",
                 "numa_topology", "hypervisor_type",
                 "hypervisor_version", "hypervisor_hostname",
-                "disk_available_least", "host_ip"]
+                "disk_available_least", "host_ip", "uuid"]
         for key in keys:
             if key in resources:
                 setattr(self, key, resources[key])
@@ -441,7 +442,7 @@ class ComputeNodeList(base.ObjectListBase, base.NovaObject):
     @staticmethod
     @db.select_db_reader_mode
     def _db_compute_node_get_all_by_uuids(context, compute_uuids):
-        db_computes = context.session.query(models.ComputeNode).filter(
+        db_computes = sa_api.model_query(context, models.ComputeNode).filter(
             models.ComputeNode.uuid.in_(compute_uuids)).all()
         return db_computes
 

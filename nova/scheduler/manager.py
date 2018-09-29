@@ -29,12 +29,12 @@ from stevedore import driver
 
 import nova.conf
 from nova import exception
-from nova.i18n import _LI
 from nova import manager
 from nova import objects
 from nova.objects import host_mapping as host_mapping_obj
 from nova import quota
 from nova.scheduler import client as scheduler_client
+from nova.scheduler import request_filter
 from nova.scheduler import utils
 
 
@@ -70,7 +70,7 @@ class SchedulerManager(manager.Manager):
     def _discover_hosts_in_cells(self, context):
         host_mappings = host_mapping_obj.discover_hosts(context)
         if host_mappings:
-            LOG.info(_LI('Discovered %(count)i new hosts: %(hosts)s'),
+            LOG.info('Discovered %(count)i new hosts: %(hosts)s',
                      {'count': len(host_mappings),
                       'hosts': ','.join(['%s:%s' % (hm.cell_mapping.name,
                                                     hm.host)
@@ -80,6 +80,13 @@ class SchedulerManager(manager.Manager):
                                  run_immediately=True)
     def _run_periodic_tasks(self, context):
         self.driver.run_periodic_tasks(context)
+
+    def reset(self):
+        # NOTE(tssurya): This is a SIGHUP handler which will reset the cells
+        # and enabled cells caches in the host manager. So every time an
+        # existing cell is disabled or enabled or a new cell is created, a
+        # SIGHUP signal has to be sent to the scheduler for proper scheduling.
+        self.driver.host_manager.refresh_cells_caches()
 
     @messaging.expected_exceptions(exception.NoValidHost)
     def select_destinations(self, ctxt, request_spec=None,
@@ -115,10 +122,19 @@ class SchedulerManager(manager.Manager):
             spec_obj = objects.RequestSpec.from_primitives(ctxt,
                                                            request_spec,
                                                            filter_properties)
-        resources = utils.resources_from_request_spec(spec_obj)
+
+        is_rebuild = utils.request_is_rebuild(spec_obj)
         alloc_reqs_by_rp_uuid, provider_summaries, allocation_request_version \
             = None, None, None
-        if self.driver.USES_ALLOCATION_CANDIDATES:
+        if self.driver.USES_ALLOCATION_CANDIDATES and not is_rebuild:
+            # Only process the Placement request spec filters when Placement
+            # is used.
+            try:
+                request_filter.process_reqspec(ctxt, spec_obj)
+            except exception.RequestFilterFailed as e:
+                raise exception.NoValidHost(reason=e.message)
+
+            resources = utils.resources_from_request_spec(spec_obj)
             res = self.placement_client.get_allocation_candidates(ctxt,
                                                                   resources)
             if res is None:
@@ -132,9 +148,9 @@ class SchedulerManager(manager.Manager):
                             allocation_request_version) = res
             if not alloc_reqs:
                 LOG.debug("Got no allocation candidates from the Placement "
-                          "API. This may be a temporary occurrence as compute "
-                          "nodes start up and begin reporting inventory to "
-                          "the Placement service.")
+                          "API. This could be due to insufficient resources "
+                          "or a temporary occurrence as compute nodes start "
+                          "up.")
                 raise exception.NoValidHost(reason="")
             else:
                 # Build a dict of lists of allocation requests, keyed by

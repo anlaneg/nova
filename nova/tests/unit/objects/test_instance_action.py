@@ -16,14 +16,14 @@ import traceback
 
 import mock
 from oslo_utils import fixture as utils_fixture
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 import six
 
-from nova import db
+from nova.db import api as db
 from nova.objects import instance_action
 from nova import test
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 NOW = timeutils.utcnow().replace(microsecond=0)
@@ -54,6 +54,7 @@ fake_event = {
     'finish_time': None,
     'result': 'fake-result',
     'traceback': 'fake-tb',
+    'host': 'fake-host',
 }
 
 

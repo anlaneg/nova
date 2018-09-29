@@ -7,9 +7,7 @@ Nova Network Server
 -------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-09-27
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,13 +21,13 @@ Synopsis
 Description
 ===========
 
-`nova-network` is a server daemon that serves the Nova Network service, which
-is responsible for allocating IPs and setting up the network
+:program:`nova-network` is a server daemon that serves the Nova Network
+service, which is responsible for allocating IPs and setting up the network
 
-.. warning::
+.. deprecated:: 14.0.0
 
-   `nova-network` is deprecated and will be removed in an upcoming release. Use
-   `neutron` or another networking solution instead.
+   :program:`nova-network` is deprecated and will be removed in an upcoming
+   release. Use *neutron* or another networking solution instead.
 
 Options
 =======
@@ -47,7 +45,7 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

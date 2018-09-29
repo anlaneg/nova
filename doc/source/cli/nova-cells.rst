@@ -7,9 +7,7 @@ Server for the Nova Cells
 -------------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-09-27
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,12 +21,11 @@ Synopsis
 Description
 ===========
 
-Starts the `nova-cells` service.
+:program:`nova-cells` is a server daemon that serves the Nova Cells service,
+which handles communication between cells and selects cells for new instances.
 
-The `nova-cells` service handles communication between cells and selects cells
-for new instances.
-
-.. warning:: Everything in this document is referring to Cells v1, which is
+.. deprecated:: 16.0.0
+    Everything in this document is referring to Cells v1, which is
     not recommended for new deployments and is deprecated in favor of Cells v2
     as of the 16.0.0 Pike release. For information about commands to use
     with Cells v2, see the man page for :ref:`man-page-cells-v2`.
@@ -49,7 +46,7 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

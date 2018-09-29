@@ -40,9 +40,6 @@ responsibilities of services and drivers are:
   routes and authenticates requests. Supports the OpenStack Compute APIs. A
   ``nova.conf`` configuration file is created when Compute is installed.
 
-``nova-cert``
-  Manages certificates.
-
 ``nova-compute``
   Manages virtual machines. Loads a Service object, and exposes the public
   methods on ComputeManager through a Remote Procedure Call (RPC).
@@ -53,6 +50,11 @@ responsibilities of services and drivers are:
 
 ``nova-consoleauth``
   Manages console authentication.
+
+  .. deprecated:: 18.0.0
+
+    ``nova-consoleauth`` is deprecated since 18.0.0 (Rocky) and will be removed
+    in an upcoming release.
 
 ``nova-objectstore``
   A simple file-based storage system for images that replicates most of the S3
@@ -67,6 +69,10 @@ responsibilities of services and drivers are:
   ``network_manager`` configuration option to ``FlatManager``,
   ``FlatDHCPManager``, or ``VLANManager`` (defaults to ``VLANManager`` if
   nothing is specified).
+
+  .. deprecated:: 14.0.0
+
+   ``nova-network`` was deprecated in the OpenStack Newton release.
 
 ``nova-scheduler``
   Dispatches requests for new virtual machines to the correct node.

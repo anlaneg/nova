@@ -18,18 +18,14 @@
 
 from oslo_log import log as logging
 
-
-import nova.conf
 from nova import exception
 from nova import profiler
 from nova.virt import block_device as driver_block_device
 from nova.virt.libvirt import config as vconfig
-import nova.virt.libvirt.driver
 from nova.virt.libvirt import utils as libvirt_utils
 
-LOG = logging.getLogger(__name__)
 
-CONF = nova.conf.CONF
+LOG = logging.getLogger(__name__)
 
 
 @profiler.trace_cls("volume_api")
@@ -67,7 +63,11 @@ class LibvirtBaseVolumeDriver(object):
         if 'qos_specs' in data and data['qos_specs']:
             tune_opts = ['total_bytes_sec', 'read_bytes_sec',
                          'write_bytes_sec', 'total_iops_sec',
-                         'read_iops_sec', 'write_iops_sec']
+                         'read_iops_sec', 'write_iops_sec',
+                         'read_bytes_sec_max', 'read_iops_sec_max',
+                         'write_bytes_sec_max', 'write_iops_sec_max',
+                         'total_bytes_sec_max', 'total_iops_sec_max',
+                         'size_iops_sec']
             specs = data['qos_specs']
             if isinstance(specs, dict):
                 for k, v in specs.items():

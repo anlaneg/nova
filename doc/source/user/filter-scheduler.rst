@@ -95,8 +95,8 @@ There are many standard filter classes which may be used
   use a comma. E.g., "value1,value2". All hosts are passed if no extra_specs
   are specified.
 * |ComputeFilter| - passes all hosts that are operational and enabled.
-* |CoreFilter| - filters based on CPU core utilization. It passes hosts with
-  sufficient number of CPU cores.
+* |CoreFilter| - DEPRECATED; filters based on CPU core utilization. It passes
+  hosts with sufficient number of CPU cores.
 * |AggregateCoreFilter| - filters hosts by CPU core number with per-aggregate
   ``cpu_allocation_ratio`` setting. If no per-aggregate value is found, it will
   fall back to the global default ``cpu_allocation_ratio``. If more than one value
@@ -105,15 +105,15 @@ There are many standard filter classes which may be used
 * |IsolatedHostsFilter| - filter based on ``isolated_images``, ``isolated_hosts``
   and ``restrict_isolated_hosts_to_isolated_images`` flags.
 * |JsonFilter| - allows simple JSON-based grammar for selecting hosts.
-* |RamFilter| - filters hosts by their RAM. Only hosts with sufficient RAM
-  to host the instance are passed.
+* |RamFilter| - DEPRECATED; filters hosts by their RAM. Only hosts with
+  sufficient RAM to host the instance are passed.
 * |AggregateRamFilter| - filters hosts by RAM with per-aggregate
   ``ram_allocation_ratio`` setting. If no per-aggregate value is found, it will
   fall back to the global default ``ram_allocation_ratio``. If more than one value
   is found for a host (meaning the host is in two different aggregates with
   different ratio settings), the minimum value will be used.
-* |DiskFilter| - filters hosts by their disk allocation. Only hosts with sufficient
-  disk space to host the instance are passed.
+* |DiskFilter| - DEPRECATED; filters hosts by their disk allocation. Only
+  hosts with sufficient disk space to host the instance are passed.
   ``disk_allocation_ratio`` setting. The virtual disk to physical disk
   allocation ratio, 1.0 by default. The total allowed allocated disk size will
   be physical disk multiplied this ratio.
@@ -335,6 +335,8 @@ resource calculating filters like RamFilter, CoreFilter.
 In medium/large environments having AvailabilityZoneFilter before any
 capability or resource calculating filters can be useful.
 
+.. _custom-scheduler-filters:
+
 Writing Your Own Filter
 -----------------------
 
@@ -397,8 +399,14 @@ The Filter Scheduler weighs hosts based on the config option
 `nova.scheduler.weights.all_weighers`, which selects the following weighers:
 
 * |RAMWeigher| Compute weight based on available RAM on the compute node.
-  Sort with the largest weight winning. If the multiplier is negative, the
+  Sort with the largest weight winning. If the multiplier,
+  :oslo.config:option:`filter_scheduler.ram_weight_multiplier`, is negative, the
   host with least RAM available will win (useful for stacking hosts, instead
+  of spreading).
+* |CPUWeigher| Compute weight based on available vCPUs on the compute node.
+  Sort with the largest weight winning. If the multiplier,
+  :oslo.config:option:`filter_scheduler.cpu_weight_multiplier`, is negative, the
+  host with least CPUs available will win (useful for stacking hosts, instead
   of spreading).
 * |DiskWeigher| Hosts are weighted and sorted by free disk space with the largest
   weight winning.  If the multiplier is negative, the host with less disk space available
@@ -445,6 +453,10 @@ The Filter Scheduler weighs hosts based on the config option
   a negative value would mean that the anti-affinity weigher would prefer
   collocating placement.
 
+* |BuildFailureWeigher| Weigh hosts by the number of recent failed boot attempts.
+  It considers the build failure counter and can negatively weigh hosts with
+  recent failures. This avoids taking computes fully out of rotation.
+
 Filter Scheduler makes a local list of acceptable hosts by repeated filtering and
 weighing. Each time it chooses a host, it virtually consumes resources on it,
 so subsequent selections can adjust accordingly. It is useful if the customer
@@ -489,6 +501,7 @@ in :mod:`nova.tests.scheduler`.
 .. |AggregateMultiTenancyIsolation| replace:: :class:`AggregateMultiTenancyIsolation <nova.scheduler.filters.aggregate_multitenancy_isolation.AggregateMultiTenancyIsolation>`
 .. |NUMATopologyFilter| replace:: :class:`NUMATopologyFilter <nova.scheduler.filters.numa_topology_filter.NUMATopologyFilter>`
 .. |RAMWeigher| replace:: :class:`RAMWeigher <nova.scheduler.weights.ram.RAMWeigher>`
+.. |CPUWeigher| replace:: :class:`CPUWeigher <nova.scheduler.weights.cpu.CPUWeigher>`
 .. |AggregateImagePropertiesIsolation| replace:: :class:`AggregateImagePropertiesIsolation <nova.scheduler.filters.aggregate_image_properties_isolation.AggregateImagePropertiesIsolation>`
 .. |MetricsFilter| replace:: :class:`MetricsFilter <nova.scheduler.filters.metrics_filter.MetricsFilter>`
 .. |MetricsWeigher| replace:: :class:`MetricsWeigher <nova.scheduler.weights.metrics.MetricsWeigher>`
@@ -497,3 +510,4 @@ in :mod:`nova.tests.scheduler`.
 .. |ServerGroupSoftAffinityWeigher| replace:: :class:`ServerGroupSoftAffinityWeigher <nova.scheduler.weights.affinity.ServerGroupSoftAffinityWeigher>`
 .. |ServerGroupSoftAntiAffinityWeigher| replace:: :class:`ServerGroupSoftAntiAffinityWeigher <nova.scheduler.weights.affinity.ServerGroupSoftAntiAffinityWeigher>`
 .. |DiskWeigher| replace:: :class:`DiskWeigher <nova.scheduler.weights.disk.DiskWeigher>`
+.. |BuildFailureWeigher| replace:: :class:`BuildFailureWeigher <nova.scheduler.weights.compute.BuildFailureWeigher>`

@@ -12,10 +12,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
+from oslo_versionedobjects import base as ovo_base
+
+from nova import exception
+from nova.network import model as network_model
 from nova import objects
 from nova.objects import migrate_data
+from nova import test
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 class _TestLiveMigrateData(object):
@@ -75,11 +81,15 @@ class _TestLiveMigrateData(object):
         props = {
             'serial_listen_addr': '127.0.0.1',
             'serial_listen_ports': [1000, 10001, 10002, 10003],
+            'wait_for_vif_plugged': True
         }
 
         obj = migrate_data.LibvirtLiveMigrateData(**props)
         primitive = obj.obj_to_primitive()
         self.assertIn('serial_listen_ports', primitive['nova_object.data'])
+        self.assertIn('wait_for_vif_plugged', primitive['nova_object.data'])
+        obj.obj_make_compatible(primitive['nova_object.data'], '1.5')
+        self.assertNotIn('wait_for_vif_plugged', primitive['nova_object.data'])
         obj.obj_make_compatible(primitive['nova_object.data'], '1.1')
         self.assertNotIn('serial_listen_ports', primitive['nova_object.data'])
 
@@ -216,7 +226,9 @@ class _TestLibvirtLiveMigrateData(object):
             instance_relative_path='foo/bar',
             graphics_listen_addrs={'vnc': '127.0.0.1'},
             serial_listen_addr='127.0.0.1',
-            bdms=[test_bdmi])
+            bdms=[test_bdmi],
+            dst_wants_file_backed_memory=True,
+            file_backed_memory_discard=True)
         obj2 = migrate_data.LibvirtLiveMigrateData()
         obj2.from_legacy_dict(obj.to_legacy_dict(pre_migration_result=True))
         self.assertEqual(obj.to_legacy_dict(),
@@ -229,27 +241,72 @@ class _TestLibvirtLiveMigrateData(object):
             old_vol_attachment_ids={uuids.volume: uuids.attachment},
             supported_perf_events=[],
             serial_listen_addr='127.0.0.1',
-            target_connect_addr='127.0.0.1')
-        primitive = obj.obj_to_primitive(target_version='1.0')
+            target_connect_addr='127.0.0.1',
+            dst_wants_file_backed_memory=False,
+            file_backed_memory_discard=False)
+
+        data = lambda x: x['nova_object.data']
+
+        primitive = data(obj.obj_to_primitive())
+        self.assertIn('file_backed_memory_discard', primitive)
+        primitive = data(obj.obj_to_primitive(target_version='1.0'))
         self.assertNotIn('target_connect_addr', primitive)
-        self.assertNotIn('serial_listen_addr=', primitive)
         self.assertNotIn('supported_perf_events', primitive)
         self.assertNotIn('old_vol_attachment_ids', primitive)
         self.assertNotIn('src_supports_native_luks', primitive)
-        primitive = obj.obj_to_primitive(target_version='1.1')
-        self.assertNotIn('serial_listen_addr=', primitive)
-        primitive = obj.obj_to_primitive(target_version='1.2')
+        self.assertNotIn('dst_wants_file_backed_memory', primitive)
+        primitive = data(obj.obj_to_primitive(target_version='1.1'))
+        self.assertNotIn('serial_listen_ports', primitive)
+        primitive = data(obj.obj_to_primitive(target_version='1.2'))
         self.assertNotIn('supported_perf_events', primitive)
-        primitive = obj.obj_to_primitive(target_version='1.3')
+        primitive = data(obj.obj_to_primitive(target_version='1.3'))
         self.assertNotIn('old_vol_attachment_ids', primitive)
-        primitive = obj.obj_to_primitive(target_version='1.4')
+        primitive = data(obj.obj_to_primitive(target_version='1.4'))
         self.assertNotIn('src_supports_native_luks', primitive)
+        primitive = data(obj.obj_to_primitive(target_version='1.6'))
+        self.assertNotIn('dst_wants_file_backed_memory', primitive)
+        primitive = data(obj.obj_to_primitive(target_version='1.7'))
+        self.assertNotIn('file_backed_memory_discard', primitive)
 
     def test_bdm_obj_make_compatible(self):
         obj = migrate_data.LibvirtLiveMigrateBDMInfo(
             encryption_secret_uuid=uuids.encryption_secret_uuid)
         primitive = obj.obj_to_primitive(target_version='1.0')
         self.assertNotIn('encryption_secret_uuid', primitive)
+
+    def test_vif_migrate_data(self):
+        source_vif = network_model.VIF(
+            id=uuids.port_id,
+            network=network_model.Network(id=uuids.network_id),
+            type=network_model.VIF_TYPE_OVS,
+            vnic_type=network_model.VNIC_TYPE_NORMAL,
+            active=True,
+            profile={'migrating_to': 'dest-host'})
+        vif_details_dict = {'port_filter': True}
+        profile_dict = {'trusted': False}
+        vif_data = objects.VIFMigrateData(
+            port_id=uuids.port_id,
+            vnic_type=network_model.VNIC_TYPE_NORMAL,
+            vif_type=network_model.VIF_TYPE_BRIDGE,
+            vif_details=vif_details_dict, profile=profile_dict,
+            host='dest-host', source_vif=source_vif)
+        # Make sure the vif_details and profile fields are converted and
+        # stored properly.
+        self.assertEqual(
+            jsonutils.dumps(vif_details_dict), vif_data.vif_details_json)
+        self.assertEqual(
+            jsonutils.dumps(profile_dict), vif_data.profile_json)
+        self.assertDictEqual(vif_details_dict, vif_data.vif_details)
+        self.assertDictEqual(profile_dict, vif_data.profile)
+        obj = migrate_data.LibvirtLiveMigrateData(
+            file_backed_memory_discard=False)
+        obj.vifs = [vif_data]
+        manifest = ovo_base.obj_tree_get_versions(obj.obj_name())
+        primitive = obj.obj_to_primitive(target_version='1.8',
+                                         version_manifest=manifest)
+        self.assertIn(
+            'file_backed_memory_discard', primitive['nova_object.data'])
+        self.assertNotIn('vifs', primitive['nova_object.data'])
 
 
 class TestLibvirtLiveMigrateData(test_objects._LocalTest,
@@ -358,12 +415,15 @@ class _TestXenapiLiveMigrateData(object):
             migrate_send_data={'key': 'val'},
             sr_uuid_map={'apple': 'banana'},
             vif_uuid_map={'orange': 'lemon'},
-            old_vol_attachment_ids={uuids.volume: uuids.attachment})
+            old_vol_attachment_ids={uuids.volume: uuids.attachment},
+            wait_for_vif_plugged=True)
         primitive = obj.obj_to_primitive('1.0')
         self.assertNotIn('vif_uuid_map', primitive['nova_object.data'])
         primitive2 = obj.obj_to_primitive('1.1')
         self.assertIn('vif_uuid_map', primitive2['nova_object.data'])
         self.assertNotIn('old_vol_attachment_ids', primitive2)
+        primitive3 = obj.obj_to_primitive('1.2')['nova_object.data']
+        self.assertNotIn('wait_for_vif_plugged', primitive3)
 
 
 class TestXenapiLiveMigrateData(test_objects._LocalTest,
@@ -380,11 +440,19 @@ class _TestHyperVLiveMigrateData(object):
     def test_obj_make_compatible(self):
         obj = migrate_data.HyperVLiveMigrateData(
             is_shared_instance_path=True,
-            old_vol_attachment_ids={'yes': 'no'})
-        primitive = obj.obj_to_primitive(target_version='1.0')
+            old_vol_attachment_ids={'yes': 'no'},
+            wait_for_vif_plugged=True)
+
+        data = lambda x: x['nova_object.data']
+
+        primitive = data(obj.obj_to_primitive())
+        self.assertIn('is_shared_instance_path', primitive)
+        primitive = data(obj.obj_to_primitive(target_version='1.0'))
         self.assertNotIn('is_shared_instance_path', primitive)
-        primitive = obj.obj_to_primitive(target_version='1.1')
+        primitive = data(obj.obj_to_primitive(target_version='1.1'))
         self.assertNotIn('old_vol_attachment_ids', primitive)
+        primitive = data(obj.obj_to_primitive(target_version='1.2'))
+        self.assertNotIn('wait_for_vif_plugged', primitive)
 
     def test_to_legacy_dict(self):
         obj = migrate_data.HyperVLiveMigrateData(
@@ -426,7 +494,8 @@ class _TestPowerVMLiveMigrateData(object):
             dest_proc_compat='POWER7',
             vol_data=dict(three=4),
             vea_vlan_mappings=dict(five=6),
-            old_vol_attachment_ids=dict(seven=8))
+            old_vol_attachment_ids=dict(seven=8),
+            wait_for_vif_plugged=True)
 
     @staticmethod
     def _mk_leg():
@@ -440,6 +509,7 @@ class _TestPowerVMLiveMigrateData(object):
             'vol_data': {'three': '4'},
             'vea_vlan_mappings': {'five': '6'},
             'old_vol_attachment_ids': {'seven': '8'},
+            'wait_for_vif_plugged': True
         }
 
     def test_migrate_data(self):
@@ -450,10 +520,17 @@ class _TestPowerVMLiveMigrateData(object):
 
     def test_obj_make_compatible(self):
         obj = self._mk_obj()
-        primitive = obj.obj_to_primitive(target_version='1.0')
+
+        data = lambda x: x['nova_object.data']
+
+        primitive = data(obj.obj_to_primitive())
+        self.assertIn('vea_vlan_mappings', primitive)
+        primitive = data(obj.obj_to_primitive(target_version='1.0'))
         self.assertNotIn('vea_vlan_mappings', primitive)
-        primitive = obj.obj_to_primitive(target_version='1.1')
+        primitive = data(obj.obj_to_primitive(target_version='1.1'))
         self.assertNotIn('old_vol_attachment_ids', primitive)
+        primitive = data(obj.obj_to_primitive(target_version='1.2'))
+        self.assertNotIn('wait_for_vif_plugged', primitive)
 
     def test_to_legacy_dict(self):
         self.assertEqual(self._mk_leg(), self._mk_obj().to_legacy_dict())
@@ -475,3 +552,31 @@ class TestPowerVMLiveMigrateData(test_objects._LocalTest,
 class TestRemotePowerVMLiveMigrateData(test_objects._RemoteTest,
                                       _TestPowerVMLiveMigrateData):
     pass
+
+
+class TestVIFMigrateData(test.NoDBTestCase):
+
+    def test_get_dest_vif_source_vif_not_set(self):
+        migrate_vif = objects.VIFMigrateData(
+            port_id=uuids.port_id, vnic_type=network_model.VNIC_TYPE_NORMAL,
+            vif_type=network_model.VIF_TYPE_OVS, vif_details={},
+            profile={}, host='fake-dest-host')
+        self.assertRaises(
+            exception.ObjectActionError, migrate_vif.get_dest_vif)
+
+    def test_get_dest_vif(self):
+        source_vif = network_model.VIF(
+            id=uuids.port_id, type=network_model.VIF_TYPE_OVS, details={},
+            vnic_type=network_model.VNIC_TYPE_DIRECT, profile={'foo': 'bar'},
+            ovs_interfaceid=uuids.ovs_interfaceid)
+        migrate_vif = objects.VIFMigrateData(
+            port_id=uuids.port_id, vnic_type=network_model.VNIC_TYPE_NORMAL,
+            vif_type=network_model.VIF_TYPE_BRIDGE, vif_details={'bar': 'baz'},
+            profile={}, host='fake-dest-host', source_vif=source_vif)
+        dest_vif = migrate_vif.get_dest_vif()
+        self.assertEqual(migrate_vif.port_id, dest_vif['id'])
+        self.assertEqual(migrate_vif.vnic_type, dest_vif['vnic_type'])
+        self.assertEqual(migrate_vif.vif_type, dest_vif['type'])
+        self.assertEqual(migrate_vif.vif_details, dest_vif['details'])
+        self.assertEqual(migrate_vif.profile, dest_vif['profile'])
+        self.assertEqual(uuids.ovs_interfaceid, dest_vif['ovs_interfaceid'])

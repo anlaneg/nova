@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import mock
 import os
 import time
 
@@ -84,6 +85,12 @@ class NotificationSampleTestBase(test.TestCase,
         self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
         self.useFixture(nova_fixtures.PlacementFixture())
 
+        context_patcher = self.mock_gen_request_id = mock.patch(
+            'oslo_context.context.generate_request_id',
+            return_value='req-5b6c791d-5709-4f36-8fbe-c3e02869e35d')
+        self.mock_gen_request_id = context_patcher.start()
+        self.addCleanup(context_patcher.stop)
+
         self.start_service('conductor')
         self.start_service('scheduler')
         self.start_service('network', manager=CONF.network_manager)
@@ -149,7 +156,8 @@ class NotificationSampleTestBase(test.TestCase,
 
         self.assertJsonEqual(sample_obj, notification)
 
-    def _boot_a_server(self, expected_status='ACTIVE', extra_params=None):
+    def _boot_a_server(self, expected_status='ACTIVE', extra_params=None,
+                       scheduler_hints=None):
 
         # We have to depend on a specific image and flavor to fix the content
         # of the notification that will be emitted
@@ -201,6 +209,9 @@ class NotificationSampleTestBase(test.TestCase,
             server.update(extra_params)
 
         post = {'server': server}
+        if scheduler_hints:
+            post.update({"os:scheduler_hints": scheduler_hints})
+
         created_server = self.api.post_server(post)
         reservation_id = created_server['reservation_id']
         created_server = self.api.get_servers(

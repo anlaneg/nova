@@ -25,6 +25,7 @@ from glanceclient.v1 import images
 from glanceclient.v2 import schemas
 from keystoneauth1 import loading as ks_loading
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 import six
 from six.moves import StringIO
 import testtools
@@ -33,9 +34,10 @@ import nova.conf
 from nova import context
 from nova import exception
 from nova.image import glance
+from nova import objects
 from nova import service_auth
 from nova import test
-from nova.tests import uuidsentinel as uuids
+
 
 CONF = nova.conf.CONF
 NOW_GLANCE_FORMAT = "2010-10-11T10:30:22.000000"
@@ -680,12 +682,11 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
                                                   mock.sentinel.dst_path,
                                                   mock.sentinel.loc_meta)
 
-    @mock.patch.object(six.moves.builtins, 'open')
     @mock.patch('nova.image.glance.GlanceImageServiceV2._get_transfer_module')
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
     @mock.patch('nova.image.glance.GlanceImageServiceV2._safe_fsync')
     def test_download_direct_exception_fallback_v2(
-            self, fsync_mock, show_mock, get_tran_mock, open_mock):
+            self, fsync_mock, show_mock, get_tran_mock):
         # Test that we fall back to downloading to the dst_path
         # if the download method of the transfer module raised
         # an exception.
@@ -705,10 +706,12 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
         client.call.return_value = fake_glance_response([1, 2, 3])
         ctx = mock.sentinel.ctx
         writer = mock.MagicMock()
-        open_mock.return_value = writer
-        service = glance.GlanceImageServiceV2(client)
-        res = service.download(ctx, mock.sentinel.image_id,
-                               dst_path=mock.sentinel.dst_path)
+
+        with mock.patch.object(six.moves.builtins, 'open') as open_mock:
+            open_mock.return_value = writer
+            service = glance.GlanceImageServiceV2(client)
+            res = service.download(ctx, mock.sentinel.image_id,
+                                   dst_path=mock.sentinel.dst_path)
 
         self.assertIsNone(res)
         show_mock.assert_called_once_with(ctx,
@@ -734,12 +737,11 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
                 ]
         )
 
-    @mock.patch.object(six.moves.builtins, 'open')
     @mock.patch('nova.image.glance.GlanceImageServiceV2._get_transfer_module')
     @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
     @mock.patch('nova.image.glance.GlanceImageServiceV2._safe_fsync')
     def test_download_direct_no_mod_fallback(
-            self, fsync_mock, show_mock, get_tran_mock, open_mock):
+            self, fsync_mock, show_mock, get_tran_mock):
         # Test that we fall back to downloading to the dst_path
         # if no appropriate transfer module is found...
         # an exception.
@@ -757,10 +759,12 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
         client.call.return_value = fake_glance_response([1, 2, 3])
         ctx = mock.sentinel.ctx
         writer = mock.MagicMock()
-        open_mock.return_value = writer
-        service = glance.GlanceImageServiceV2(client)
-        res = service.download(ctx, mock.sentinel.image_id,
-                               dst_path=mock.sentinel.dst_path)
+
+        with mock.patch.object(six.moves.builtins, 'open') as open_mock:
+            open_mock.return_value = writer
+            service = glance.GlanceImageServiceV2(client)
+            res = service.download(ctx, mock.sentinel.image_id,
+                                   dst_path=mock.sentinel.dst_path)
 
         self.assertIsNone(res)
         show_mock.assert_called_once_with(ctx,
@@ -829,7 +833,8 @@ class TestDownloadSignatureVerification(test.NoDBTestCase):
         service = glance.GlanceImageServiceV2(self.client)
         mock_get_verifier.return_value = self.MockVerifier()
         mock_show.return_value = self.fake_img_props
-        res = service.download(context=None, image_id=None,
+        image_id = None
+        res = service.download(context=None, image_id=image_id,
                                data=None, dst_path=None)
         self.assertEqual(self.fake_img_data, res)
         mock_get_verifier.assert_called_once_with(
@@ -839,7 +844,14 @@ class TestDownloadSignatureVerification(test.NoDBTestCase):
             img_signature='signature',
             img_signature_key_type='RSA-PSS'
         )
-        mock_log.info.assert_called_once_with(mock.ANY, mock.ANY)
+        # trusted_certs is None and enable_certificate_validation is
+        # false, which causes the below debug message to occur
+        msg = ('Certificate validation was not performed. A list of '
+               'trusted image certificate IDs must be provided in '
+               'order to validate an image certificate.')
+        mock_log.debug.assert_called_once_with(msg)
+        msg = ('Image signature verification succeeded for image: %s')
+        mock_log.info.assert_called_once_with(msg, image_id)
 
     @mock.patch.object(six.moves.builtins, 'open')
     @mock.patch('nova.image.glance.LOG')
@@ -867,7 +879,12 @@ class TestDownloadSignatureVerification(test.NoDBTestCase):
             img_signature='signature',
             img_signature_key_type='RSA-PSS'
         )
-        mock_log.info.assert_called_once_with(mock.ANY, mock.ANY)
+        msg = ('Certificate validation was not performed. A list of '
+               'trusted image certificate IDs must be provided in '
+               'order to validate an image certificate.')
+        mock_log.debug.assert_called_once_with(msg)
+        msg = ('Image signature verification succeeded for image %s')
+        mock_log.info.assert_called_once_with(msg, None)
         self.assertEqual(len(self.fake_img_data), mock_dest.write.call_count)
         self.assertTrue(mock_dest.close.called)
         mock_fsync.assert_called_once_with(mock_dest)
@@ -945,6 +962,174 @@ class TestDownloadSignatureVerification(test.NoDBTestCase):
         mock_fsync.assert_called_once_with(mock_dest)
         mock_dest.truncate.assert_called_once_with(0)
         self.assertTrue(mock_dest.close.called)
+
+
+class TestDownloadCertificateValidation(test.NoDBTestCase):
+    """Tests the download method of the GlanceImageServiceV2 when
+    certificate validation is enabled.
+    """
+
+    def setUp(self):
+        super(TestDownloadCertificateValidation, self).setUp()
+        self.flags(enable_certificate_validation=True, group='glance')
+        self.fake_img_props = {
+            'properties': {
+                'img_signature': 'signature',
+                'img_signature_hash_method': 'SHA-224',
+                'img_signature_certificate_uuid': uuids.img_sig_cert_uuid,
+                'img_signature_key_type': 'RSA-PSS',
+            }
+        }
+        self.fake_img_data = ['A' * 256, 'B' * 256]
+        self.client = mock.MagicMock()
+        self.client.call.return_value = fake_glance_response(
+            self.fake_img_data)
+
+    @mock.patch('nova.image.glance.LOG')
+    @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
+    @mock.patch('cursive.certificate_utils.verify_certificate')
+    @mock.patch('cursive.signature_utils.get_verifier')
+    def test_download_with_certificate_validation_v2(self,
+                                                     mock_get_verifier,
+                                                     mock_verify_certificate,
+                                                     mock_show,
+                                                     mock_log):
+        service = glance.GlanceImageServiceV2(self.client)
+        mock_show.return_value = self.fake_img_props
+        fake_cert = uuids.img_sig_cert_uuid
+        fake_trusted_certs = objects.TrustedCerts(ids=[fake_cert])
+        res = service.download(context=None, image_id=None,
+                               data=None, dst_path=None,
+                               trusted_certs=fake_trusted_certs)
+        self.assertEqual(self.fake_img_data, res)
+        mock_get_verifier.assert_called_once_with(
+            context=None,
+            img_signature_certificate_uuid=uuids.img_sig_cert_uuid,
+            img_signature_hash_method='SHA-224',
+            img_signature='signature',
+            img_signature_key_type='RSA-PSS'
+        )
+        mock_verify_certificate.assert_called_once_with(
+            context=None,
+            certificate_uuid=uuids.img_sig_cert_uuid,
+            trusted_certificate_uuids=[fake_cert]
+        )
+        msg = ('Image signature certificate validation succeeded '
+               'for certificate: %s')
+        mock_log.debug.assert_called_once_with(msg, uuids.img_sig_cert_uuid)
+
+    @mock.patch('nova.image.glance.LOG')
+    @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
+    @mock.patch('cursive.certificate_utils.verify_certificate')
+    @mock.patch('cursive.signature_utils.get_verifier')
+    def test_download_with_trusted_certs_and_disabled_cert_validation_v2(
+                                                self,
+                                                mock_get_verifier,
+                                                mock_verify_certificate,
+                                                mock_show,
+                                                mock_log):
+        self.flags(enable_certificate_validation=False, group='glance')
+        service = glance.GlanceImageServiceV2(self.client)
+        mock_show.return_value = self.fake_img_props
+        fake_cert = uuids.img_sig_cert_uuid
+        fake_trusted_certs = objects.TrustedCerts(ids=[fake_cert])
+        res = service.download(context=None, image_id=None,
+                               data=None, dst_path=None,
+                               trusted_certs=fake_trusted_certs)
+        self.assertEqual(self.fake_img_data, res)
+        mock_get_verifier.assert_called_once_with(
+            context=None,
+            img_signature_certificate_uuid=uuids.img_sig_cert_uuid,
+            img_signature_hash_method='SHA-224',
+            img_signature='signature',
+            img_signature_key_type='RSA-PSS'
+        )
+        mock_verify_certificate.assert_called_once_with(
+            context=None,
+            certificate_uuid=uuids.img_sig_cert_uuid,
+            trusted_certificate_uuids=[fake_cert]
+        )
+        msg = ('Image signature certificate validation succeeded '
+               'for certificate: %s')
+        mock_log.debug.assert_called_once_with(msg, uuids.img_sig_cert_uuid)
+
+    @mock.patch('nova.image.glance.LOG')
+    @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
+    @mock.patch('cursive.certificate_utils.verify_certificate')
+    @mock.patch('cursive.signature_utils.get_verifier')
+    def test_download_with_certificate_validation_failure_v2(
+                                                self,
+                                                mock_get_verifier,
+                                                mock_verify_certificate,
+                                                mock_show,
+                                                mock_log):
+        service = glance.GlanceImageServiceV2(self.client)
+        mock_verify_certificate.side_effect = \
+            cursive_exception.SignatureVerificationError(
+                reason='Invalid certificate.'
+            )
+        mock_show.return_value = self.fake_img_props
+        bad_trusted_certs = objects.TrustedCerts(ids=['bad_cert_id',
+                                                      'other_bad_cert_id'])
+        self.assertRaises(exception.CertificateValidationFailed,
+                          service.download,
+                          context=None, image_id=None,
+                          data=None, dst_path=None,
+                          trusted_certs=bad_trusted_certs)
+        msg = ('Image signature certificate validation failed for '
+               'certificate: %s')
+        mock_log.warning.assert_called_once_with(msg,
+            uuids.img_sig_cert_uuid)
+
+    @mock.patch('nova.image.glance.LOG')
+    @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
+    @mock.patch('cursive.signature_utils.get_verifier')
+    def test_download_without_trusted_certs_failure_v2(self,
+                                                       mock_get_verifier,
+                                                       mock_show,
+                                                       mock_log):
+        # Signature verification needs to be enabled in order to reach the
+        # checkpoint for trusted_certs. Otherwise, all image signature
+        # validation will be skipped.
+        self.flags(verify_glance_signatures=True, group='glance')
+        service = glance.GlanceImageServiceV2(self.client)
+        mock_show.return_value = self.fake_img_props
+        self.assertRaises(exception.CertificateValidationFailed,
+                          service.download,
+                          context=None, image_id=None,
+                          data=None, dst_path=None)
+        msg = ('Image signature certificate validation enabled, but no '
+               'trusted certificate IDs were provided. Unable to '
+               'validate the certificate used to verify the image '
+               'signature.')
+        mock_log.warning.assert_called_once_with(msg)
+
+    @mock.patch('nova.image.glance.LOG')
+    @mock.patch('nova.image.glance.GlanceImageServiceV2.show')
+    @mock.patch('cursive.signature_utils.get_verifier')
+    @mock.patch('cursive.certificate_utils.verify_certificate')
+    def test_get_verifier_without_trusted_certs_use_default_certs(
+            self, mock_verify_certificate, mock_get_verifier, mock_show,
+            mock_log):
+        """Tests the scenario that trusted_certs is not provided, but
+        signature and cert verification are enabled, and there are default
+        certs to use.
+        """
+        self.flags(verify_glance_signatures=True, group='glance')
+        self.flags(default_trusted_certificate_ids=[uuids.img_sig_cert_uuid],
+                   group='glance')
+        service = glance.GlanceImageServiceV2(self.client)
+        mock_show.return_value = self.fake_img_props
+        service._get_verifier(
+            mock.sentinel.context, mock.sentinel.image_id, trusted_certs=None)
+        mock_verify_certificate.assert_called_once_with(
+            context=mock.sentinel.context,
+            certificate_uuid=uuids.img_sig_cert_uuid,
+            trusted_certificate_uuids=[uuids.img_sig_cert_uuid]
+        )
+        msg = ('Image signature certificate validation succeeded '
+               'for certificate: %s')
+        mock_log.debug.assert_called_once_with(msg, uuids.img_sig_cert_uuid)
 
 
 class TestIsImageAvailable(test.NoDBTestCase):

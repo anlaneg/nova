@@ -11,13 +11,16 @@
 #    under the License.
 
 import os
+from oslotest import output
 
 import wsgi_intercept
 
 from gabbi import driver
 
-from nova.tests import fixtures as nova_fixtures
-from nova.tests.functional.api.openstack.placement import fixtures
+from nova.tests.functional.api.openstack.placement.fixtures import capture
+# TODO(cdent): This whitespace blight will go away post extraction.
+from nova.tests.functional.api.openstack.placement.fixtures \
+        import gabbits as fixtures
 
 # Check that wsgi application response headers are always
 # native str.
@@ -31,8 +34,8 @@ def load_tests(loader, tests, pattern):
     # These inner fixtures provide per test request output and log
     # capture, for cleaner results reporting.
     inner_fixtures = [
-        nova_fixtures.OutputStreamCapture,
-        nova_fixtures.StandardLogging,
+        output.CaptureOutput,
+        capture.Logging,
     ]
     return driver.build_tests(test_dir, loader, host=None,
                               test_loader_name=__name__,

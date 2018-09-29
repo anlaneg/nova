@@ -285,30 +285,31 @@ Notifications
 
 With a multi-cell environment with multiple message queues, it is
 likely that operators will want to configure a separate connection to
-a unified queue for notifications. This can be done in the
-configuration file of all nodes. See the `oslo.messaging configuration
-<https://docs.openstack.org/oslo.messaging/latest/configuration/opts.html#oslo_messaging_notifications.transport_url>`_
-documentation for more details.
+a unified queue for notifications. This can be done in the configuration file
+of all nodes. Refer to the :oslo.messaging-doc:`oslo.messaging configuration
+documentation
+<configuration/opts.html#oslo_messaging_notifications.transport_url>` for more
+details.
 
-Neutron Metadata API proxy
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Nova Metadata API service
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The Neutron metadata API proxy should be global across all cells, and
+The Nova metadata API service should be global across all cells, and
 thus be configured as an API-level service with access to the
-``[api_database]/connection`` information.
+``[api_database]/connection`` information. The nova metadata API service must
+not be run as a standalone service (e.g. must not be run via the
+nova-api-metadata script).
 
 Consoleauth service and console proxies
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The consoleauth service should be global across all cells and thus be
-configured as an API-level service with access to the
-``[api_database]/connection`` information. The various console proxies
-should also be global across all cells but they don't need access to the
-API database.
+`As of Rocky`__, the ``nova-consoleauth`` service has been deprecated and cell
+databases are used for storing token authorizations. All new consoles will be
+supported by the database backend and existing consoles will be reset. Console
+proxies must be run per cell because the new console token authorizations are
+stored in cell databases.
 
-Future work will deprecate the consoleauth service, store token
-authorizations in the cell databases, and require console proxies running
-per cell instead of globally.
+.. __: https://specs.openstack.org/openstack/nova-specs/specs/rocky/approved/convert-consoles-to-objects.html
 
 Operations Requiring upcalls
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -321,14 +322,18 @@ implement some features without such connectivity. Thus, anything that
 requires a so-called "upcall" will not function. This impacts the
 following:
 
-#. Instance reschedules during boot and resize
+#. Instance reschedules during boot and resize (part 1)
 
    .. note:: This has been resolved in the Queens release [#]_.
 
 #. Instance affinity reporting from the compute nodes to scheduler
 #. The late anti-affinity check during server create and evacuate
 #. Querying host aggregates from the cell
+
+   .. note:: This has been resolved in the Rocky release [#]_.
+
 #. Attaching a volume and ``[cinder]/cross_az_attach=False``
+#. Instance reschedules during boot and resize (part 2)
 
 The first is simple: if you boot an instance, it gets scheduled to a
 compute node, fails, it would normally be re-scheduled to another
@@ -367,5 +372,14 @@ volume and must tell Cinder in which availability zone to create the volume.
 Long-term, volume creation during boot from volume should be moved to the
 top-level superconductor which would eliminate this AZ up-call check problem.
 
+The sixth is detailed in `bug 1781286`_ and similar to the first issue.
+The issue is that servers created without a specific availability zone
+will have their AZ calculated during a reschedule based on the alternate host
+selected. Determining the AZ for the alternate host requires an "up call" to
+the API DB.
+
+.. _bug 1781286: https://bugs.launchpad.net/nova/+bug/1781286
+
 .. [#] https://blueprints.launchpad.net/nova/+spec/efficient-multi-cell-instance-list-and-sort
 .. [#] https://specs.openstack.org/openstack/nova-specs/specs/queens/approved/return-alternate-hosts.html
+.. [#] https://blueprints.launchpad.net/nova/+spec/live-migration-in-xapi-pool

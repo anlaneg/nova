@@ -13,11 +13,15 @@
 import copy
 
 from nova.compute import multi_cell_list
+import nova.conf
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import objects
 from nova.objects import instance as instance_obj
+
+
+CONF = nova.conf.CONF
 
 
 class InstanceSortContext(multi_cell_list.RecordSortContext):
@@ -41,9 +45,10 @@ class InstanceSortContext(multi_cell_list.RecordSortContext):
 
 
 class InstanceLister(multi_cell_list.CrossCellLister):
-    def __init__(self, sort_keys, sort_dirs):
+    def __init__(self, sort_keys, sort_dirs, cells=None, batch_size=None):
         super(InstanceLister, self).__init__(
-            InstanceSortContext(sort_keys, sort_dirs))
+            InstanceSortContext(sort_keys, sort_dirs), cells=cells,
+            batch_size=batch_size)
 
     @property
     def marker_identifier(self):
@@ -66,7 +71,7 @@ class InstanceLister(multi_cell_list.CrossCellLister):
                                                   columns_to_join=[])
             except exception.InstanceNotFound:
                 raise exception.MarkerNotFound(marker=marker)
-        return db_inst
+        return im.cell_mapping.uuid, db_inst
 
     def get_marker_by_values(self, ctx, values):
         return db.instance_get_by_sort_filters(ctx,
@@ -85,18 +90,71 @@ class InstanceLister(multi_cell_list.CrossCellLister):
 # NOTE(danms): These methods are here for legacy glue reasons. We should not
 # replicate these for every data type we implement.
 def get_instances_sorted(ctx, filters, limit, marker, columns_to_join,
-                         sort_keys, sort_dirs):
-    return InstanceLister(sort_keys, sort_dirs).get_records_sorted(
+                         sort_keys, sort_dirs, cell_mappings=None,
+                         batch_size=None):
+    return InstanceLister(sort_keys, sort_dirs,
+                          cells=cell_mappings,
+                          batch_size=batch_size).get_records_sorted(
         ctx, filters, limit, marker, columns_to_join=columns_to_join)
+
+
+def get_instance_list_cells_batch_size(limit, cells):
+    """Calculate the proper batch size for a list request.
+
+    This will consider config, request limit, and cells being queried and
+    return an appropriate batch size to use for querying said cells.
+
+    :param limit: The overall limit specified in the request
+    :param cells: The list of CellMapping objects being queried
+    :returns: An integer batch size
+    """
+    strategy = CONF.api.instance_list_cells_batch_strategy
+    limit = limit or CONF.api.max_limit
+
+    if len(cells) <= 1:
+        # If we're limited to one (or no) cell for whatever reason, do
+        # not do any batching and just pull the desired limit from the
+        # single cell in one shot.
+        return limit
+
+    if strategy == 'fixed':
+        # Fixed strategy, always a static batch size
+        batch_size = CONF.api.instance_list_cells_batch_fixed_size
+    elif strategy == 'distributed':
+        # Distributed strategy, 10% more than even partitioning
+        batch_size = int((limit / len(cells)) * 1.10)
+
+    # We never query a larger batch than the total requested, and never
+    # smaller than the lower limit of 100.
+    return max(min(batch_size, limit), 100)
 
 
 def get_instance_objects_sorted(ctx, filters, limit, marker, expected_attrs,
                                 sort_keys, sort_dirs):
     """Same as above, but return an InstanceList."""
+    query_cell_subset = CONF.api.instance_list_per_project_cells
+    # NOTE(danms): Replicated in part from instance_get_all_by_sort_filters(),
+    # where if we're not admin we're restricted to our context's project
+    if query_cell_subset and not ctx.is_admin:
+        # We are not admin, and configured to only query the subset of cells
+        # we could possibly have instances in.
+        cell_mappings = objects.CellMappingList.get_by_project_id(
+            ctx, ctx.project_id)
+    else:
+        # Either we are admin, or configured to always hit all cells,
+        # so don't limit the list to a subset.
+        context.load_cells()
+        cell_mappings = context.CELLS
+
+    batch_size = get_instance_list_cells_batch_size(limit, cell_mappings)
+
     columns_to_join = instance_obj._expected_cols(expected_attrs)
     instance_generator = get_instances_sorted(ctx, filters, limit, marker,
                                               columns_to_join, sort_keys,
-                                              sort_dirs)
+                                              sort_dirs,
+                                              cell_mappings=cell_mappings,
+                                              batch_size=batch_size)
+
     if 'fault' in expected_attrs:
         # We join fault above, so we need to make sure we don't ask
         # make_instance_list to do it again for us

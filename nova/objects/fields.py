@@ -16,12 +16,14 @@ import os
 import re
 
 from cursive import signature_utils
+from oslo_serialization import jsonutils
 from oslo_versionedobjects import fields
 import six
 
 from nova import exception
 from nova.i18n import _
 from nova.network import model as network_model
+from nova.virt import arch
 
 
 # Import field errors from oslo.versionedobjects
@@ -88,6 +90,10 @@ IPV4Network = fields.IPV4Network
 IPV6Network = fields.IPV6Network
 
 
+class SetOfStringsField(AutoTypedField):
+    AUTO_TYPE = Set(fields.String())
+
+
 class BaseNovaEnum(Enum):
     def __init__(self, **kwargs):
         super(BaseNovaEnum, self).__init__(valid_values=self.__class__.ALL)
@@ -103,56 +109,48 @@ class Architecture(BaseNovaEnum):
     ever adding new ones then ensure it matches libvirt's expectation.
     """
 
-    ALPHA = 'alpha'
-    ARMV6 = 'armv6'
-    ARMV7 = 'armv7l'
-    ARMV7B = 'armv7b'
+    ALPHA = arch.ALPHA
+    ARMV6 = arch.ARMV6
+    ARMV7 = arch.ARMV7
+    ARMV7B = arch.ARMV7B
 
-    AARCH64 = 'aarch64'
-    CRIS = 'cris'
-    I686 = 'i686'
-    IA64 = 'ia64'
-    LM32 = 'lm32'
+    AARCH64 = arch.AARCH64
+    CRIS = arch.CRIS
+    I686 = arch.I686
+    IA64 = arch.IA64
+    LM32 = arch.LM32
 
-    M68K = 'm68k'
-    MICROBLAZE = 'microblaze'
-    MICROBLAZEEL = 'microblazeel'
-    MIPS = 'mips'
-    MIPSEL = 'mipsel'
+    M68K = arch.M68K
+    MICROBLAZE = arch.MICROBLAZE
+    MICROBLAZEEL = arch.MICROBLAZEEL
+    MIPS = arch.MIPS
+    MIPSEL = arch.MIPSEL
 
-    MIPS64 = 'mips64'
-    MIPS64EL = 'mips64el'
-    OPENRISC = 'openrisc'
-    PARISC = 'parisc'
-    PARISC64 = 'parisc64'
+    MIPS64 = arch.MIPS64
+    MIPS64EL = arch.MIPS64EL
+    OPENRISC = arch.OPENRISC
+    PARISC = arch.PARISC
+    PARISC64 = arch.PARISC64
 
-    PPC = 'ppc'
-    PPCLE = 'ppcle'
-    PPC64 = 'ppc64'
-    PPC64LE = 'ppc64le'
-    PPCEMB = 'ppcemb'
+    PPC = arch.PPC
+    PPCLE = arch.PPCLE
+    PPC64 = arch.PPC64
+    PPC64LE = arch.PPC64LE
+    PPCEMB = arch.PPCEMB
 
-    S390 = 's390'
-    S390X = 's390x'
-    SH4 = 'sh4'
-    SH4EB = 'sh4eb'
-    SPARC = 'sparc'
+    S390 = arch.S390
+    S390X = arch.S390X
+    SH4 = arch.SH4
+    SH4EB = arch.SH4EB
+    SPARC = arch.SPARC
 
-    SPARC64 = 'sparc64'
-    UNICORE32 = 'unicore32'
-    X86_64 = 'x86_64'
-    XTENSA = 'xtensa'
-    XTENSAEB = 'xtensaeb'
+    SPARC64 = arch.SPARC64
+    UNICORE32 = arch.UNICORE32
+    X86_64 = arch.X86_64
+    XTENSA = arch.XTENSA
+    XTENSAEB = arch.XTENSAEB
 
-    ALL = (
-        ALPHA, ARMV6, ARMV7, ARMV7B,
-        AARCH64, CRIS, I686, IA64, LM32,
-        M68K, MICROBLAZE, MICROBLAZEEL, MIPS, MIPSEL,
-        MIPS64, MIPS64EL, OPENRISC, PARISC, PARISC64,
-        PPC, PPCLE, PPC64, PPC64LE, PPCEMB,
-        S390, S390X, SH4, SH4EB, SPARC,
-        SPARC64, UNICORE32, X86_64, XTENSA, XTENSAEB,
-    )
+    ALL = arch.ALL
 
     @classmethod
     def from_host(cls):
@@ -457,49 +455,6 @@ class OSType(BaseNovaEnum):
         # so canonicalize to all lower case
         value = value.lower()
         return super(OSType, self).coerce(obj, attr, value)
-
-
-class ResourceClass(StringField):
-    """Classes of resources provided to consumers."""
-
-    CUSTOM_NAMESPACE = 'CUSTOM_'
-    """All non-standard resource classes must begin with this string."""
-
-    VCPU = 'VCPU'
-    MEMORY_MB = 'MEMORY_MB'
-    DISK_GB = 'DISK_GB'
-    PCI_DEVICE = 'PCI_DEVICE'
-    SRIOV_NET_VF = 'SRIOV_NET_VF'
-    NUMA_SOCKET = 'NUMA_SOCKET'
-    NUMA_CORE = 'NUMA_CORE'
-    NUMA_THREAD = 'NUMA_THREAD'
-    NUMA_MEMORY_MB = 'NUMA_MEMORY_MB'
-    IPV4_ADDRESS = 'IPV4_ADDRESS'
-    VGPU = 'VGPU'
-    VGPU_DISPLAY_HEAD = 'VGPU_DISPLAY_HEAD'
-
-    # The ordering here is relevant. If you must add a value, only
-    # append.
-    STANDARD = (VCPU, MEMORY_MB, DISK_GB, PCI_DEVICE, SRIOV_NET_VF,
-                NUMA_SOCKET, NUMA_CORE, NUMA_THREAD, NUMA_MEMORY_MB,
-                IPV4_ADDRESS, VGPU, VGPU_DISPLAY_HEAD)
-
-    # This is the set of standard resource classes that existed before
-    # we opened up for custom resource classes in version 1.1 of various
-    # objects in nova/objects/resource_provider.py
-    V1_0 = (VCPU, MEMORY_MB, DISK_GB, PCI_DEVICE, SRIOV_NET_VF, NUMA_SOCKET,
-            NUMA_CORE, NUMA_THREAD, NUMA_MEMORY_MB, IPV4_ADDRESS)
-
-    @classmethod
-    def normalize_name(cls, rc_name):
-        if rc_name is None:
-            return None
-        norm_name = rc_name.upper()
-        cust_prefix = cls.CUSTOM_NAMESPACE
-        norm_name = cust_prefix + norm_name
-        # Replace some punctuation characters with underscores
-        norm_name = re.sub('[^0-9A-Z]+', '_', norm_name)
-        return norm_name
 
 
 class RNGModel(BaseNovaEnum):
@@ -857,7 +812,9 @@ class NotificationAction(BaseNovaEnum):
     LIVE_MIGRATION_PRE = 'live_migration_pre'
     LIVE_MIGRATION_ROLLBACK_DEST = 'live_migration_rollback_dest'
     LIVE_MIGRATION_ROLLBACK = 'live_migration_rollback'
+    LIVE_MIGRATION_FORCE_COMPLETE = 'live_migration_force_complete'
     REBUILD = 'rebuild'
+    REBUILD_SCHEDULED = 'rebuild_scheduled'
     INTERFACE_DETACH = 'interface_detach'
     RESIZE_CONFIRM = 'resize_confirm'
     RESIZE_PREP = 'resize_prep'
@@ -869,6 +826,12 @@ class NotificationAction(BaseNovaEnum):
     UNSHELVE = 'unshelve'
     ADD_HOST = 'add_host'
     REMOVE_HOST = 'remove_host'
+    ADD_MEMBER = 'add_member'
+    UPDATE_METADATA = 'update_metadata'
+    LOCK = 'lock'
+    UNLOCK = 'unlock'
+    UPDATE_PROP = 'update_prop'
+    CONNECT = 'connect'
 
     ALL = (UPDATE, EXCEPTION, DELETE, PAUSE, UNPAUSE, RESIZE, VOLUME_SWAP,
            SUSPEND, POWER_ON, REBOOT, SHUTDOWN, SNAPSHOT, INTERFACE_ATTACH,
@@ -879,7 +842,9 @@ class NotificationAction(BaseNovaEnum):
            LIVE_MIGRATION_ROLLBACK_DEST, REBUILD, INTERFACE_DETACH,
            RESIZE_CONFIRM, RESIZE_PREP, RESIZE_REVERT, SHELVE_OFFLOAD,
            SOFT_DELETE, TRIGGER_CRASH_DUMP, UNRESCUE, UNSHELVE, ADD_HOST,
-           REMOVE_HOST)
+           REMOVE_HOST, ADD_MEMBER, UPDATE_METADATA, LOCK, UNLOCK,
+           REBUILD_SCHEDULED, UPDATE_PROP, LIVE_MIGRATION_FORCE_COMPLETE,
+           CONNECT)
 
 
 # TODO(rlrossit): These should be changed over to be a StateMachine enum from
@@ -1035,6 +1000,31 @@ class NetworkModel(FieldType):
         return {'type': ['string']}
 
 
+class NetworkVIFModel(FieldType):
+    """Represents a nova.network.model.VIF object, which is a dict of stuff."""
+
+    @staticmethod
+    def coerce(obj, attr, value):
+        if isinstance(value, network_model.VIF):
+            return value
+        elif isinstance(value, six.string_types):
+            return NetworkVIFModel.from_primitive(obj, attr, value)
+        else:
+            raise ValueError(_('A nova.network.model.VIF object is required '
+                               'in field %s') % attr)
+
+    @staticmethod
+    def to_primitive(obj, attr, value):
+        return jsonutils.dumps(value)
+
+    @staticmethod
+    def from_primitive(obj, attr, value):
+        return network_model.VIF.hydrate(jsonutils.loads(value))
+
+    def get_schema(self):
+        return {'type': ['string']}
+
+
 class AddressBase(FieldType):
     @staticmethod
     def coerce(obj, attr, value):
@@ -1165,10 +1155,6 @@ class ImageSignatureKeyTypeField(BaseEnumField):
 
 class OSTypeField(BaseEnumField):
     AUTO_TYPE = OSType()
-
-
-class ResourceClassField(AutoTypedField):
-    AUTO_TYPE = ResourceClass()
 
 
 class RNGModelField(BaseEnumField):

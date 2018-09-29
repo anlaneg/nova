@@ -21,6 +21,7 @@ no remoteable methods nor is there any interaction with the nova.db modules.
 import collections
 import copy
 
+import os_traits
 from oslo_concurrency import lockutils
 from oslo_log import log as logging
 from oslo_utils import uuidutils
@@ -128,12 +129,17 @@ class _Provider(object):
             return True
         for key, cur_rec in cur.items():
             new_rec = new[key]
+            # If the new record contains new fields (e.g. we're adding on
+            # `reserved` or `allocation_ratio`) we want to make sure to pick
+            # them up
+            if set(new_rec) - set(cur_rec):
+                return True
             for rec_key, cur_val in cur_rec.items():
                 if rec_key not in new_rec:
                     # Deliberately don't want to compare missing keys in the
-                    # inventory record. For instance, we will be passing in
-                    # fields like allocation_ratio in the current dict but the
-                    # resource tracker may only pass in the total field. We
+                    # *new* inventory record. For instance, we will be passing
+                    # in fields like allocation_ratio in the current dict but
+                    # the resource tracker may only pass in the total field. We
                     # want to return that inventory didn't change when the
                     # total field values are the same even if the
                     # allocation_ratio field is missing from the new record.
@@ -249,7 +255,9 @@ class ProviderTree(object):
         providers that do not exist in the tree already and will REPLACE
         providers in the tree if provider_dicts contains providers that are
         already in the tree. This method will NOT remove providers from the
-        tree that are not in provider_dicts.
+        tree that are not in provider_dicts.  But if a parent provider is in
+        provider_dicts and the descendents are not, this method will remove the
+        descendents from the tree.
 
         :param provider_dicts: An iterable of dicts of resource provider
                                information.  If a provider is present in
@@ -344,8 +352,16 @@ class ProviderTree(object):
         with self.lock:
             self._remove_with_lock(name_or_uuid)
 
-    def new_root(self, name, uuid, generation):
-        """Adds a new root provider to the tree, returning its UUID."""
+    def new_root(self, name, uuid, generation=None):
+        """Adds a new root provider to the tree, returning its UUID.
+
+        :param name: The name of the new root provider
+        :param uuid: The UUID of the new root provider
+        :param generation: Generation to set for the new root provider
+        :returns: the UUID of the new provider
+        :raises: ValueError if a provider with the specified uuid already
+                 exists in the tree.
+        """
 
         with self.lock:
             exists = True
@@ -355,7 +371,7 @@ class ProviderTree(object):
                 exists = False
 
             if exists:
-                err = _("Provider %s already exists as a root.")
+                err = _("Provider %s already exists.")
                 raise ValueError(err % uuid)
 
             p = _Provider(name, uuid=uuid, generation=generation)
@@ -402,9 +418,19 @@ class ProviderTree(object):
         :param generation: Generation to set for the new child provider
         :returns: the UUID of the new provider
 
-        :raises ValueError if parent_uuid points to a non-existing provider.
+        :raises ValueError if a provider with the specified uuid or name
+                already exists; or if parent_uuid points to a nonexistent
+                provider.
         """
         with self.lock:
+            try:
+                self._find_with_lock(uuid or name)
+            except ValueError:
+                pass
+            else:
+                err = _("Provider %s already exists.")
+                raise ValueError(err % (uuid or name))
+
             parent_node = self._find_with_lock(parent)
             p = _Provider(name, uuid, generation, parent_node.uuid)
             parent_node.add_child(p)
@@ -436,7 +462,7 @@ class ProviderTree(object):
             provider = self._find_with_lock(name_or_uuid)
             return provider.has_inventory_changed(inventory)
 
-    def update_inventory(self, name_or_uuid, inventory, generation):
+    def update_inventory(self, name_or_uuid, inventory, generation=None):
         """Given a name or UUID of a provider and a dict of inventory resource
         records, update the provider's inventory and set the provider's
         generation.
@@ -452,11 +478,24 @@ class ProviderTree(object):
                              update inventory for.
         :param inventory: dict, keyed by resource class, of inventory
                           information.
-        :param generation: The resource provider generation to set
+        :param generation: The resource provider generation to set.  If not
+                           specified, the provider's generation is not changed.
         """
         with self.lock:
             provider = self._find_with_lock(name_or_uuid)
             return provider.update_inventory(inventory, generation)
+
+    def has_sharing_provider(self, resource_class):
+        """Returns whether the specified provider_tree contains any sharing
+        providers of inventory of the specified resource_class.
+        """
+        for rp_uuid in self.get_provider_uuids():
+            pdata = self.data(rp_uuid)
+            has_rc = resource_class in pdata.inventory
+            is_sharing = os_traits.MISC_SHARES_VIA_AGGREGATE in pdata.traits
+            if has_rc and is_sharing:
+                return True
+        return False
 
     def has_traits(self, name_or_uuid, traits):
         """Given a name or UUID of a provider, query whether that provider has
@@ -511,6 +550,34 @@ class ProviderTree(object):
         with self.lock:
             provider = self._find_with_lock(name_or_uuid)
             return provider.update_traits(traits, generation=generation)
+
+    def add_traits(self, name_or_uuid, *traits):
+        """Set traits on a provider, without affecting existing traits.
+
+        :param name_or_uuid: The name or UUID of the provider whose traits are
+                             to be affected.
+        :param traits: String names of traits to be added.
+        """
+        if not traits:
+            return
+        with self.lock:
+            provider = self._find_with_lock(name_or_uuid)
+            final_traits = provider.traits | set(traits)
+            provider.update_traits(final_traits)
+
+    def remove_traits(self, name_or_uuid, *traits):
+        """Unset traits on a provider, without affecting other existing traits.
+
+        :param name_or_uuid: The name or UUID of the provider whose traits are
+                             to be affected.
+        :param traits: String names of traits to be removed.
+        """
+        if not traits:
+            return
+        with self.lock:
+            provider = self._find_with_lock(name_or_uuid)
+            final_traits = provider.traits - set(traits)
+            provider.update_traits(final_traits)
 
     def in_aggregates(self, name_or_uuid, aggregates):
         """Given a name or UUID of a provider, query whether that provider is a
@@ -567,3 +634,28 @@ class ProviderTree(object):
             provider = self._find_with_lock(name_or_uuid)
             return provider.update_aggregates(aggregates,
                                               generation=generation)
+
+    def add_aggregates(self, name_or_uuid, *aggregates):
+        """Set aggregates on a provider, without affecting existing aggregates.
+
+        :param name_or_uuid: The name or UUID of the provider whose aggregates
+                             are to be affected.
+        :param aggregates: String UUIDs of aggregates to be added.
+        """
+        with self.lock:
+            provider = self._find_with_lock(name_or_uuid)
+            final_aggs = provider.aggregates | set(aggregates)
+            provider.update_aggregates(final_aggs)
+
+    def remove_aggregates(self, name_or_uuid, *aggregates):
+        """Unset aggregates on a provider, without affecting other existing
+        aggregates.
+
+        :param name_or_uuid: The name or UUID of the provider whose aggregates
+                             are to be affected.
+        :param aggregates: String UUIDs of aggregates to be removed.
+        """
+        with self.lock:
+            provider = self._find_with_lock(name_or_uuid)
+            final_aggs = provider.aggregates - set(aggregates)
+            provider.update_aggregates(final_aggs)

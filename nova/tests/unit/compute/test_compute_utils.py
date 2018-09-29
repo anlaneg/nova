@@ -18,8 +18,11 @@
 
 import copy
 import string
+import traceback
 
 import mock
+from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 import six
 
@@ -28,7 +31,7 @@ from nova.compute import manager
 from nova.compute import power_state
 from nova.compute import task_states
 from nova.compute import utils as compute_utils
-import nova.conf
+from nova.compute import vm_states
 from nova import context
 from nova import exception
 from nova.image import glance
@@ -45,12 +48,8 @@ from nova.tests.unit import fake_instance
 from nova.tests.unit import fake_network
 from nova.tests.unit import fake_notifier
 from nova.tests.unit import fake_server_actions
-import nova.tests.unit.image.fake
 from nova.tests.unit.objects import test_flavor
-from nova.tests import uuidsentinel as uuids
 
-
-CONF = nova.conf.CONF
 
 FAKE_IMAGE_REF = uuids.image_ref
 
@@ -427,7 +426,7 @@ class UsageInfoTestCase(test.TestCase):
         instance.system_metadata.update(sys_metadata)
         instance.save()
         compute_utils.notify_usage_exists(
-            rpc.get_notifier('compute'), self.context, instance)
+            rpc.get_notifier('compute'), self.context, instance, 'fake-host')
         self.assertEqual(len(fake_notifier.NOTIFICATIONS), 1)
         msg = fake_notifier.NOTIFICATIONS[0]
         self.assertEqual(msg.priority, 'INFO')
@@ -448,10 +447,37 @@ class UsageInfoTestCase(test.TestCase):
             self.assertIn(attr, payload,
                           "Key %s not in payload" % attr)
         self.assertEqual(payload['image_meta'],
-                {'md_key1': 'val1', 'md_key2': 'val2'})
+                         {'md_key1': 'val1', 'md_key2': 'val2'})
         image_ref_url = "%s/images/%s" % (
             glance.generate_glance_url(self.context), uuids.fake_image_ref)
         self.assertEqual(payload['image_ref_url'], image_ref_url)
+        self.compute.terminate_instance(self.context, instance, [])
+
+    def test_notify_usage_exists_emits_versioned(self):
+        # Ensure 'exists' notification generates appropriate usage data.
+        instance = create_instance(self.context)
+
+        compute_utils.notify_usage_exists(
+            rpc.get_notifier('compute'), self.context, instance, 'fake-host')
+        self.assertEqual(len(fake_notifier.VERSIONED_NOTIFICATIONS), 1)
+        msg = fake_notifier.VERSIONED_NOTIFICATIONS[0]
+        self.assertEqual(msg['priority'], 'INFO')
+        self.assertEqual(msg['event_type'], 'instance.exists')
+        payload = msg['payload']['nova_object.data']
+        self.assertEqual(payload['tenant_id'], self.project_id)
+        self.assertEqual(payload['user_id'], self.user_id)
+        self.assertEqual(payload['uuid'], instance['uuid'])
+        flavor = payload['flavor']['nova_object.data']
+        self.assertEqual(flavor['name'], 'm1.tiny')
+        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        self.assertEqual(str(flavor['flavorid']), str(flavorid))
+
+        for attr in ('display_name', 'created_at', 'launched_at',
+                     'state', 'bandwidth', 'audit_period'):
+            self.assertIn(attr, payload,
+                          "Key %s not in payload" % attr)
+
+        self.assertEqual(payload['image_uuid'], uuids.fake_image_ref)
         self.compute.terminate_instance(self.context, instance, [])
 
     def test_notify_usage_exists_deleted_instance(self):
@@ -465,7 +491,7 @@ class UsageInfoTestCase(test.TestCase):
         instance.save()
         self.compute.terminate_instance(self.context, instance, [])
         compute_utils.notify_usage_exists(
-            rpc.get_notifier('compute'), self.context, instance)
+            rpc.get_notifier('compute'), self.context, instance, 'fake-host')
         msg = fake_notifier.NOTIFICATIONS[-1]
         self.assertEqual(msg.priority, 'INFO')
         self.assertEqual(msg.event_type, 'compute.instance.exists')
@@ -708,10 +734,11 @@ class UsageInfoTestCase(test.TestCase):
             # To get exception trace, raise and catch an exception
             raise test.TestingException('Volume swap error.')
         except Exception as ex:
+            tb = traceback.format_exc()
             compute_utils.notify_about_volume_swap(
                 self.context, instance, 'fake-compute',
                 fields.NotificationPhase.ERROR,
-                uuids.old_volume_id, uuids.new_volume_id, ex)
+                uuids.old_volume_id, uuids.new_volume_id, ex, tb)
 
         self.assertEqual(len(fake_notifier.VERSIONED_NOTIFICATIONS), 1)
         notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
@@ -751,6 +778,8 @@ class UsageInfoTestCase(test.TestCase):
                          exception_payload['function_name'])
         self.assertEqual('nova.tests.unit.compute.test_compute_utils',
                          exception_payload['module_name'])
+        self.assertIn('test_notify_about_volume_swap_with_error',
+                      exception_payload['traceback'])
 
     def test_notify_about_instance_rescue_action(self):
         instance = create_instance(self.context)
@@ -827,7 +856,7 @@ class UsageInfoTestCase(test.TestCase):
         instance = create_instance(self.context)
         self.compute.terminate_instance(self.context, instance, [])
         compute_utils.notify_usage_exists(
-            rpc.get_notifier('compute'), self.context, instance)
+            rpc.get_notifier('compute'), self.context, instance, 'fake-host')
         msg = fake_notifier.NOTIFICATIONS[-1]
         self.assertEqual(msg.priority, 'INFO')
         self.assertEqual(msg.event_type, 'compute.instance.exists')
@@ -995,6 +1024,19 @@ class ComputeUtilsTestCase(test.NoDBTestCase):
         self.context = context.RequestContext(self.user_id,
                                               self.project_id)
 
+    @mock.patch.object(compute_utils, 'EventReporter')
+    def test_wrap_instance_event_without_host(self, mock_event):
+        inst = objects.Instance(uuid=uuids.instance)
+
+        @compute_utils.wrap_instance_event(prefix='compute')
+        def fake_event(self, context, instance):
+            pass
+
+        fake_event(self.compute, self.context, instance=inst)
+        # if the class doesn't include a self.host, the default host is None
+        mock_event.assert_called_once_with(self.context, 'compute_fake_event',
+                                           None, uuids.instance)
+
     @mock.patch.object(objects.InstanceActionEvent, 'event_start')
     @mock.patch.object(objects.InstanceActionEvent,
                        'event_finish_with_failure')
@@ -1056,22 +1098,79 @@ class ComputeUtilsTestCase(test.NoDBTestCase):
             self.assertEqual([], addresses)
         mock_ifaddresses.assert_called_once_with(iface)
 
+    @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch('nova.compute.utils.notify_about_instance_usage')
     @mock.patch('nova.objects.Instance.destroy')
     def test_notify_about_instance_delete(self, mock_instance_destroy,
-                                          mock_notify_usage):
+                                          mock_notify_usage,
+                                          mock_notify_action):
         instance = fake_instance.fake_instance_obj(
             self.context, expected_attrs=('system_metadata',))
         with compute_utils.notify_about_instance_delete(
-            mock.sentinel.notifier, self.context, instance):
+            mock.sentinel.notifier, self.context, instance, "fake-mini"):
             instance.destroy()
         expected_notify_calls = [
             mock.call(mock.sentinel.notifier, self.context, instance,
                       'delete.start'),
             mock.call(mock.sentinel.notifier, self.context, instance,
-                      'delete.end', system_metadata=instance.system_metadata)
+                      'delete.end')
         ]
         mock_notify_usage.assert_has_calls(expected_notify_calls)
+        mock_notify_action.assert_has_calls([
+            mock.call(self.context, instance,
+                      host='fake-mini', source='nova-api',
+                      action='delete', phase='start'),
+            mock.call(self.context, instance,
+                      host='fake-mini', source='nova-api',
+                      action='delete', phase='end'),
+        ])
+
+    def test_get_stashed_volume_connector_none(self):
+        inst = fake_instance.fake_instance_obj(self.context)
+        # connection_info isn't set
+        bdm = objects.BlockDeviceMapping(self.context)
+        self.assertIsNone(
+            compute_utils.get_stashed_volume_connector(bdm, inst))
+        # connection_info is None
+        bdm.connection_info = None
+        self.assertIsNone(
+            compute_utils.get_stashed_volume_connector(bdm, inst))
+        # connector is not set in connection_info
+        bdm.connection_info = jsonutils.dumps({})
+        self.assertIsNone(
+            compute_utils.get_stashed_volume_connector(bdm, inst))
+        # connector is set but different host
+        conn_info = {'connector': {'host': 'other_host'}}
+        bdm.connection_info = jsonutils.dumps(conn_info)
+        self.assertIsNone(
+            compute_utils.get_stashed_volume_connector(bdm, inst))
+
+    def test_may_have_ports_or_volumes(self):
+        inst = objects.Instance()
+        for vm_state, expected_result in ((vm_states.ERROR, True),
+                                          (vm_states.SHELVED_OFFLOADED, True),
+                                          (vm_states.BUILDING, False)):
+            inst.vm_state = vm_state
+            self.assertEqual(
+                expected_result, compute_utils.may_have_ports_or_volumes(inst),
+                vm_state)
+
+    def test_heal_reqspec_is_bfv_no_update(self):
+        reqspec = objects.RequestSpec(is_bfv=False)
+        with mock.patch.object(compute_utils, 'is_volume_backed_instance',
+                               new_callable=mock.NonCallableMock):
+            compute_utils.heal_reqspec_is_bfv(
+                self.context, reqspec, mock.sentinel.instance)
+
+    @mock.patch('nova.objects.RequestSpec.save')
+    def test_heal_reqspec_is_bfv_with_update(self, mock_save):
+        reqspec = objects.RequestSpec()
+        with mock.patch.object(compute_utils, 'is_volume_backed_instance',
+                               return_value=True):
+            compute_utils.heal_reqspec_is_bfv(
+                self.context, reqspec, mock.sentinel.instance)
+        self.assertTrue(reqspec.is_bfv)
+        mock_save.assert_called_once_with()
 
 
 class ServerGroupTestCase(test.TestCase):
@@ -1082,18 +1181,19 @@ class ServerGroupTestCase(test.TestCase):
         self.user_id = 'fake'
         self.project_id = 'fake'
         self.context = context.RequestContext(self.user_id, self.project_id)
+        self.group = objects.InstanceGroup(context=self.context,
+                                           id=1,
+                                           uuid=uuids.server_group,
+                                           user_id=self.user_id,
+                                           project_id=self.project_id,
+                                           name="test-server-group",
+                                           policy="anti-affinity",
+                                           policies=["anti-affinity"],
+                                           rules={"max_server_per_host": 3})
 
     def test_notify_about_server_group_action(self):
-        uuid = uuids.instance
-        group = objects.InstanceGroup(context=self.context,
-                                      id=1,
-                                      uuid=uuid,
-                                      user_id=self.user_id,
-                                      project_id=self.project_id,
-                                      name="test-server-group",
-                                      policies=["anti-affinity"])
         compute_utils.notify_about_server_group_action(self.context,
-                                                       group, 'create')
+                                                       self.group, 'create')
         self.assertEqual(len(fake_notifier.VERSIONED_NOTIFICATIONS), 1)
         notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
         expected = {'priority': 'INFO',
@@ -1103,15 +1203,49 @@ class ServerGroupTestCase(test.TestCase):
                         'nova_object.data': {
                             'name': u'test-server-group',
                             'policies': [u'anti-affinity'],
+                            'policy': u'anti-affinity',
+                            'rules': {"max_server_per_host": "3"},
                             'project_id': u'fake',
                             'user_id': u'fake',
-                            'uuid': uuid,
+                            'uuid': uuids.server_group,
                             'hosts': None,
                             'members': None
                         },
                         'nova_object.name': 'ServerGroupPayload',
                         'nova_object.namespace': 'nova',
-                        'nova_object.version': '1.0'
+                        'nova_object.version': '1.1'
+                   }
+            }
+        self.assertEqual(notification, expected)
+
+    @mock.patch.object(objects.InstanceGroup, 'get_by_uuid')
+    def test_notify_about_server_group_add_member(self, mock_get_by_uuid):
+        self.group.members = [uuids.instance]
+        mock_get_by_uuid.return_value = self.group
+        compute_utils.notify_about_server_group_add_member(
+            self.context, uuids.server_group)
+        mock_get_by_uuid.assert_called_once_with(self.context,
+                                                 uuids.server_group)
+        self.assertEqual(len(fake_notifier.VERSIONED_NOTIFICATIONS), 1)
+        notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
+        expected = {'priority': 'INFO',
+                    'event_type': u'server_group.add_member',
+                    'publisher_id': u'nova-api:fake-mini',
+                    'payload': {
+                        'nova_object.data': {
+                            'name': u'test-server-group',
+                            'policies': [u'anti-affinity'],
+                            'policy': u'anti-affinity',
+                            'rules': {"max_server_per_host": "3"},
+                            'project_id': u'fake',
+                            'user_id': u'fake',
+                            'uuid': uuids.server_group,
+                            'hosts': None,
+                            'members': [uuids.instance]
+                        },
+                        'nova_object.name': 'ServerGroupPayload',
+                        'nova_object.namespace': 'nova',
+                        'nova_object.version': '1.1'
                    }
             }
         self.assertEqual(notification, expected)
@@ -1131,38 +1265,7 @@ class ComputeUtilsQuotaTestCase(test.TestCase):
             'ram': new_flavor['memory_mb'] - old_flavor['memory_mb']
         }
 
-        deltas = compute_utils.upsize_quota_delta(self.context, new_flavor,
-                                                  old_flavor)
-        self.assertEqual(expected_deltas, deltas)
-
-    def test_downsize_quota_delta(self):
-        inst = create_instance(self.context, params=None)
-        inst.old_flavor = flavors.get_flavor_by_name('m1.medium')
-        inst.new_flavor = flavors.get_flavor_by_name('m1.tiny')
-
-        expected_deltas = {
-            'cores': (inst.new_flavor['vcpus'] -
-                      inst.old_flavor['vcpus']),
-            'ram': (inst.new_flavor['memory_mb'] -
-                    inst.old_flavor['memory_mb'])
-        }
-
-        deltas = compute_utils.downsize_quota_delta(self.context, inst)
-        self.assertEqual(expected_deltas, deltas)
-
-    def test_reverse_quota_delta(self):
-        inst = create_instance(self.context, params=None)
-        inst.old_flavor = flavors.get_flavor_by_name('m1.tiny')
-        inst.new_flavor = flavors.get_flavor_by_name('m1.medium')
-
-        expected_deltas = {
-            'cores': -1 * (inst.new_flavor['vcpus'] -
-                           inst.old_flavor['vcpus']),
-            'ram': -1 * (inst.new_flavor['memory_mb'] -
-                         inst.old_flavor['memory_mb'])
-        }
-
-        deltas = compute_utils.reverse_upsize_quota_delta(self.context, inst)
+        deltas = compute_utils.upsize_quota_delta(new_flavor, old_flavor)
         self.assertEqual(expected_deltas, deltas)
 
     @mock.patch('nova.objects.Quotas.count_as_dict')

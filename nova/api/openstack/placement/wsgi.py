@@ -19,13 +19,23 @@ import os
 import os.path
 
 from oslo_log import log as logging
-from oslo_service import _options as service_opts
+from oslo_middleware import cors
+from oslo_policy import opts as policy_opts
+from oslo_utils import importutils
+import pbr.version
 
+from nova.api.openstack.placement import db_api
 from nova.api.openstack.placement import deploy
 from nova import conf
-from nova import config
+
+
+profiler = importutils.try_import('osprofiler.opts')
+
 
 CONFIG_FILE = 'nova.conf'
+
+
+version_info = pbr.version.VersionInfo('nova')
 
 
 def setup_logging(config):
@@ -48,19 +58,59 @@ def _get_config_file(env=None):
     return os.path.join(dirname, CONFIG_FILE)
 
 
+def _parse_args(argv, default_config_files):
+    logging.register_options(conf.CONF)
+
+    if profiler:
+        profiler.set_defaults(conf.CONF)
+
+    _set_middleware_defaults()
+
+    # This is needed so we can check [oslo_policy]/enforce_scope in the
+    # deploy module.
+    policy_opts.set_defaults(conf.CONF)
+
+    conf.CONF(argv[1:], project='nova', version=version_info.version_string(),
+              default_config_files=default_config_files)
+
+
+def _set_middleware_defaults():
+    """Update default configuration options for oslo.middleware."""
+    cors.set_defaults(
+        allow_headers=['X-Auth-Token',
+                       'X-Openstack-Request-Id',
+                       'X-Identity-Status',
+                       'X-Roles',
+                       'X-Service-Catalog',
+                       'X-User-Id',
+                       'X-Tenant-Id'],
+        expose_headers=['X-Auth-Token',
+                        'X-Openstack-Request-Id',
+                        'X-Subject-Token',
+                        'X-Service-Token'],
+        allow_methods=['GET',
+                       'PUT',
+                       'POST',
+                       'DELETE',
+                       'PATCH']
+    )
+
+
 def init_application():
     # initialize the config system
     conffile = _get_config_file()
-    config.parse_args([], default_config_files=[conffile])
+
+    # NOTE(lyarwood): Call reset to ensure the ConfigOpts object doesn't
+    # already contain registered options if the app is reloaded.
+    conf.CONF.reset()
+
+    _parse_args([], default_config_files=[conffile])
+    db_api.configure(conf.CONF)
 
     # initialize the logging system
     setup_logging(conf.CONF)
 
-    # dump conf at debug (log_options option comes from oslo.service)
-    # FIXME(mriedem): This is gross but we don't have a public hook into
-    # oslo.service to register these options, so we are doing it manually for
-    # now; remove this when we have a hook method into oslo.service.
-    conf.CONF.register_opts(service_opts.service_opts)
+    # dump conf at debug if log_options
     if conf.CONF.log_options:
         conf.CONF.log_opt_values(
             logging.getLogger(__name__),

@@ -34,7 +34,7 @@ Response
   - uuid: resource_provider_uuid
   - links: resource_provider_links
   - name: resource_provider_name
-  - parent_provider_uuid: resource_provider_parent_provider_uuid_required
+  - parent_provider_uuid: resource_provider_parent_provider_uuid_response_1_14
   - root_provider_uuid: resource_provider_root_provider_uuid_required
 
 Response Example
@@ -64,7 +64,7 @@ Request
 
   - uuid: resource_provider_uuid_path
   - name: resource_provider_name
-  - parent_provider_uuid: resource_provider_parent_provider_uuid
+  - parent_provider_uuid: resource_provider_parent_provider_uuid_request
 
 Request example
 ---------------
@@ -81,7 +81,7 @@ Response
   - uuid: resource_provider_uuid
   - links: resource_provider_links
   - name: resource_provider_name
-  - parent_provider_uuid: resource_provider_parent_provider_uuid_required
+  - parent_provider_uuid: resource_provider_parent_provider_uuid_response_1_14
   - root_provider_uuid: resource_provider_root_provider_uuid_required
 
 Response Example
@@ -105,6 +105,9 @@ Error response codes: itemNotFound(404), conflict(409)
 A `409 Conflict` response code will be returned if there exist
 allocations records for any of the inventories that would be deleted
 as a result of removing the resource provider.
+
+This error code will be also returned if there are existing child resource
+providers under the parent resource provider being deleted.
 
 Request
 -------

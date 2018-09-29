@@ -14,6 +14,7 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 
 from nova import availability_zones
+from nova.compute import utils as compute_utils
 from nova.conductor.tasks import base
 from nova import exception
 from nova.i18n import _
@@ -56,9 +57,8 @@ def replace_allocation_with_migration(context, instance, migration):
     # FIXME(danms): This method is flawed in that it asssumes allocations
     # against only one provider. So, this may overwite allocations against
     # a shared provider, if we had one.
-    success = reportclient.set_and_clear_allocations(
-        context, source_cn.uuid, migration.uuid, orig_alloc,
-        instance.project_id, instance.user_id, consumer_to_clear=instance.uuid)
+    success = reportclient.move_allocations(context, instance.uuid,
+                                            migration.uuid)
     if not success:
         LOG.error('Unable to replace resource claim on source '
                   'host %(host)s node %(node)s for instance',
@@ -77,8 +77,7 @@ def replace_allocation_with_migration(context, instance, migration):
     return source_cn, orig_alloc
 
 
-def revert_allocation_for_migration(context, source_cn, instance, migration,
-                                    orig_alloc):
+def revert_allocation_for_migration(context, source_cn, instance, migration):
     """Revert an allocation made for a migration back to the instance."""
 
     schedclient = scheduler_client.SchedulerClient()
@@ -87,10 +86,8 @@ def revert_allocation_for_migration(context, source_cn, instance, migration,
     # FIXME(danms): This method is flawed in that it asssumes allocations
     # against only one provider. So, this may overwite allocations against
     # a shared provider, if we had one.
-    success = reportclient.set_and_clear_allocations(
-        context, source_cn.uuid, instance.uuid, orig_alloc,
-        instance.project_id, instance.user_id,
-        consumer_to_clear=migration.uuid)
+    success = reportclient.move_allocations(context, migration.uuid,
+                                            instance.uuid)
     if not success:
         LOG.error('Unable to replace resource claim on source '
                   'host %(host)s node %(node)s for instance',
@@ -219,7 +216,10 @@ class MigrationTask(base.TaskBase):
         # instance record.
         migration = self._preallocate_migration()
 
-        self.request_spec.ensure_project_id(self.instance)
+        self.request_spec.ensure_project_and_user_id(self.instance)
+        self.request_spec.ensure_network_metadata(self.instance)
+        compute_utils.heal_reqspec_is_bfv(
+            self.context, self.request_spec, self.instance)
         # On an initial call to migrate, 'self.host_list' will be None, so we
         # have to call the scheduler to get a list of acceptable hosts to
         # migrate to. That list will consist of a selected host, along with
@@ -316,5 +316,4 @@ class MigrationTask(base.TaskBase):
         # now.
 
         revert_allocation_for_migration(self.context, self._source_cn,
-                                        self.instance, self._migration,
-                                        self._held_allocations)
+                                        self.instance, self._migration)

@@ -7,9 +7,7 @@ Nova Console Authentication Server
 ----------------------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-09-27
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,8 +21,13 @@ Synopsis
 Description
 ===========
 
-`nova-consoleauth` is a server daemon that serves the Nova Console Auth
-service, which provides authentication for Nova consoles.
+:program:`nova-consoleauth` is a server daemon that serves the Nova Console
+Auth service, which provides authentication for Nova consoles.
+
+.. deprecated:: 18.0.0
+
+   `nova-consoleauth` is deprecated since 18.0.0 (Rocky) and will be removed in
+   an upcoming release.
 
 Options
 =======
@@ -42,7 +45,7 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

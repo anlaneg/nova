@@ -18,9 +18,9 @@ Unit Tests for nova.compute.rpcapi
 
 import mock
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.compute import rpcapi as compute_rpcapi
-import nova.conf
 from nova import context
 from nova import exception
 from nova.objects import block_device as objects_block_dev
@@ -30,9 +30,6 @@ from nova import test
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
-from nova.tests import uuidsentinel as uuids
-
-CONF = nova.conf.CONF
 
 
 class ComputeRpcAPITestCase(test.NoDBTestCase):
@@ -125,6 +122,14 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
         base_version = rpcapi.router.target.version
         expected_version = kwargs.pop('version', base_version)
 
+        prepare_extra_kwargs = {}
+        cm_timeout = kwargs.pop('call_monitor_timeout', None)
+        timeout = kwargs.pop('timeout', None)
+        if cm_timeout:
+            prepare_extra_kwargs['call_monitor_timeout'] = cm_timeout
+        if timeout:
+            prepare_extra_kwargs['timeout'] = timeout
+
         expected_kwargs = kwargs.copy()
         if expected_args:
             expected_kwargs.update(expected_args)
@@ -145,6 +150,8 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
             host = kwargs['host']
         elif 'instances' in kwargs:
             host = kwargs['instances'][0]['host']
+        elif 'destination' in kwargs:
+            host = expected_kwargs.pop('destination')
         else:
             host = kwargs['instance']['host']
 
@@ -173,7 +180,8 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
             self.assertEqual(retval, rpc_mock.return_value)
 
             prepare_mock.assert_called_once_with(version=expected_version,
-                                                 server=host)
+                                                 server=host,
+                                                 **prepare_extra_kwargs)
             rpc_mock.assert_called_once_with(ctxt, method, **expected_kwargs)
 
     def test_add_aggregate_host(self):
@@ -334,9 +342,11 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
                 migration_id='1', version='5.0')
 
     def test_post_live_migration_at_destination(self):
+        self.flags(long_rpc_timeout=1234)
         self._test_compute_api('post_live_migration_at_destination', 'call',
                 instance=self.fake_instance_obj,
-                block_migration='block_migration', host='host', version='5.0')
+                block_migration='block_migration', host='host', version='5.0',
+                timeout=1234, call_monitor_timeout=60)
 
     def test_pause_instance(self):
         self._test_compute_api('pause_instance', 'cast',
@@ -357,10 +367,22 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
                 instance=self.fake_instance_obj, version='5.0')
 
     def test_pre_live_migration(self):
+        self.flags(long_rpc_timeout=1234)
         self._test_compute_api('pre_live_migration', 'call',
                 instance=self.fake_instance_obj,
                 block_migration='block_migration', disk='disk', host='host',
-                migrate_data=None, version='5.0')
+                migrate_data=None, version='5.0',
+                call_monitor_timeout=60, timeout=1234)
+
+    def test_check_can_live_migrate_destination(self):
+        self.flags(long_rpc_timeout=1234)
+        self._test_compute_api('check_can_live_migrate_destination', 'call',
+                               instance=self.fake_instance_obj,
+                               destination='dest',
+                               block_migration=False,
+                               disk_over_commit=False,
+                               version='5.0', call_monitor_timeout=60,
+                               timeout=1234)
 
     def test_prep_resize(self):
         expected_args = {'migration': 'migration'}

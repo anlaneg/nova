@@ -20,8 +20,8 @@ import datetime
 
 import mock
 from oslo_config import cfg
-from oslo_context import context as o_context
 from oslo_context import fixture as o_fixture
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
 from nova.compute import flavors
@@ -35,7 +35,7 @@ from nova.objects import base as obj_base
 from nova import test
 from nova.tests.unit import fake_network
 from nova.tests.unit import fake_notifier
-from nova.tests import uuidsentinel as uuids
+
 
 CONF = cfg.CONF
 
@@ -55,13 +55,11 @@ class NotificationsTestCase(test.TestCase):
 
         self.stub_out('nova.network.api.API.get_instance_nw_info',
                 fake_get_nw_info)
-        fake_network.set_stub_network_methods(self)
 
         fake_notifier.stub_notifier(self)
         self.addCleanup(fake_notifier.reset)
 
-        self.flags(network_manager='nova.network.manager.FlatManager',
-                   host='testhost')
+        self.flags(host='testhost')
         self.flags(notify_on_state_change="vm_and_task_state",
                    group='notifications')
 
@@ -356,20 +354,20 @@ class NotificationsTestCase(test.TestCase):
 
     def test_payload_has_fixed_ip_labels(self):
         info = notifications.info_from_instance(self.context, self.instance,
-                                                  self.net_info, None)
+                                                  self.net_info)
         self.assertIn("fixed_ips", info)
         self.assertEqual(info["fixed_ips"][0]["label"], "test1")
 
     def test_payload_has_vif_mac_address(self):
         info = notifications.info_from_instance(self.context, self.instance,
-                                                  self.net_info, None)
+                                                  self.net_info)
         self.assertIn("fixed_ips", info)
         self.assertEqual(self.net_info[0]['address'],
                          info["fixed_ips"][0]["vif_mac"])
 
     def test_payload_has_cell_name_empty(self):
         info = notifications.info_from_instance(self.context, self.instance,
-                                                  self.net_info, None)
+                                                  self.net_info)
         self.assertIn("cell_name", info)
         self.assertIsNone(self.instance.cell_name)
         self.assertEqual("", info["cell_name"])
@@ -377,13 +375,13 @@ class NotificationsTestCase(test.TestCase):
     def test_payload_has_cell_name(self):
         self.instance.cell_name = "cell1"
         info = notifications.info_from_instance(self.context, self.instance,
-                                                  self.net_info, None)
+                                                  self.net_info)
         self.assertIn("cell_name", info)
         self.assertEqual("cell1", info["cell_name"])
 
     def test_payload_has_progress_empty(self):
         info = notifications.info_from_instance(self.context, self.instance,
-                                                  self.net_info, None)
+                                                  self.net_info)
         self.assertIn("progress", info)
         self.assertIsNone(self.instance.progress)
         self.assertEqual("", info["progress"])
@@ -391,7 +389,7 @@ class NotificationsTestCase(test.TestCase):
     def test_payload_has_progress(self):
         self.instance.progress = 50
         info = notifications.info_from_instance(self.context, self.instance,
-                                                  self.net_info, None)
+                                                  self.net_info)
         self.assertIn("progress", info)
         self.assertEqual(50, info["progress"])
 
@@ -406,7 +404,7 @@ class NotificationsTestCase(test.TestCase):
         self.instance.flavor.memory_mb = 30
         self.instance.flavor.ephemeral_gb = 40
         info = notifications.info_from_instance(self.context, self.instance,
-                                                self.net_info, None)
+                                                self.net_info)
         self.assertEqual(10, info['vcpus'])
         self.assertEqual(20, info['root_gb'])
         self.assertEqual(30, info['memory_mb'])
@@ -421,7 +419,7 @@ class NotificationsTestCase(test.TestCase):
         self.instance.launched_at = time
 
         info = notifications.info_from_instance(self.context, self.instance,
-                                                self.net_info, None)
+                                                self.net_info)
 
         self.assertEqual('2017-02-02T16:45:00.000000', info['terminated_at'])
         self.assertEqual('2017-02-02T16:45:00.000000', info['launched_at'])
@@ -465,6 +463,21 @@ class NotificationsTestCase(test.TestCase):
         self.assertEqual([u'tag1', u'tag2'],
                          fake_notifier.VERSIONED_NOTIFICATIONS[0]
                          ['payload']['nova_object.data']['tags'])
+
+    def test_send_versioned_action_initiator_update(self):
+        notifications.send_update(self.context, self.instance, self.instance)
+        action_initiator_user = self.context.user_id
+        action_initiator_project = self.context.project_id
+        self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+
+        self.assertEqual(action_initiator_user,
+                         fake_notifier.VERSIONED_NOTIFICATIONS[0]
+                         ['payload']['nova_object.data']
+                         ['action_initiator_user'])
+        self.assertEqual(action_initiator_project,
+                         fake_notifier.VERSIONED_NOTIFICATIONS[0]
+                         ['payload']['nova_object.data']
+                         ['action_initiator_project'])
 
     def test_send_no_state_change(self):
         called = [False]
@@ -518,26 +531,6 @@ class NotificationsTestCase(test.TestCase):
 
     def _decorated_function(self, arg1, arg2):
         self.decorated_function_called = True
-
-    def test_notify_decorator(self):
-        func_name = self._decorated_function.__name__
-
-        # Decorated with notify_decorator like monkey_patch
-        self._decorated_function = notifications.notify_decorator(
-            func_name,
-            self._decorated_function)
-
-        ctxt = o_context.RequestContext()
-
-        self._decorated_function(1, ctxt)
-
-        self.assertEqual(1, len(fake_notifier.NOTIFICATIONS))
-        n = fake_notifier.NOTIFICATIONS[0]
-        self.assertEqual(n.priority, 'INFO')
-        self.assertEqual(n.event_type, func_name)
-        self.assertEqual(n.context, ctxt)
-        self.assertTrue(self.decorated_function_called)
-        self.assertEqual(CONF.host, n.publisher_id)
 
 
 class NotificationsFormatTestCase(test.NoDBTestCase):

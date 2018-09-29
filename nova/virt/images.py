@@ -32,6 +32,7 @@ import nova.conf
 from nova import exception
 from nova.i18n import _
 from nova import image
+import nova.privsep.qemu
 from nova import utils
 
 LOG = logging.getLogger(__name__)
@@ -72,10 +73,15 @@ def qemu_img_info(path, format=None):
             cmd = cmd + ('--force-share',)
         out, err = utils.execute(*cmd, prlimit=QEMU_IMG_LIMITS)
     except processutils.ProcessExecutionError as exp:
-        # this means we hit prlimits, make the exception more specific
         if exp.exit_code == -9:
+            # this means we hit prlimits, make the exception more specific
             msg = (_("qemu-img aborted by prlimits when inspecting "
                     "%(path)s : %(exp)s") % {'path': path, 'exp': exp})
+        elif exp.exit_code == 1 and 'No such file or directory' in exp.stderr:
+            # The os.path.exists check above can race so this is a simple
+            # best effort at catching that type of failure and raising a more
+            # specific error.
+            raise exception.DiskNotFound(location=path)
         else:
             msg = (_("qemu-img failed to execute on %(path)s : %(exp)s") %
                    {'path': path, 'exp': exp})
@@ -111,30 +117,14 @@ def convert_image_unsafe(source, dest, out_format, run_as_root=False):
 
 
 def _convert_image(source, dest, in_format, out_format, run_as_root):
-    # NOTE(mdbooth): qemu-img convert defaults to cache=unsafe, which means
-    # that data is not synced to disk at completion. We explicitly use
-    # cache=none here to (1) ensure that we don't interfere with other
-    # applications using the host's io cache, and (2) ensure that the data is
-    # on persistent storage when the command exits. Without (2), a host crash
-    # may leave a corrupt image in the image cache, which Nova cannot recover
-    # automatically.
-    # NOTE(zigo): we cannot use -t none if the instances dir is mounted on a
-    # filesystem that doesn't have support for O_DIRECT, which is the case
-    # for example with tmpfs. This simply crashes "openstack server create"
-    # in environments like live distributions. In such case, the best choice
-    # is writethrough, which is power-failure safe, but still faster than
-    # writeback.
-    if utils.supports_direct_io(CONF.instances_path):
-        cache_mode = 'none'
-    else:
-        cache_mode = 'writethrough'
-    cmd = ('qemu-img', 'convert', '-t', cache_mode, '-O', out_format)
-
-    if in_format is not None:
-        cmd = cmd + ('-f', in_format)
-    cmd = cmd + (source, dest)
     try:
-        utils.execute(*cmd, run_as_root=run_as_root)
+        if not run_as_root:
+            nova.privsep.qemu.unprivileged_convert_image(
+                source, dest, in_format, out_format, CONF.instances_path)
+        else:
+            nova.privsep.qemu.convert_image(
+                source, dest, in_format, out_format, CONF.instances_path)
+
     except processutils.ProcessExecutionError as exp:
         msg = (_("Unable to convert image to %(format)s: %(exp)s") %
                {'format': out_format, 'exp': exp})
@@ -142,18 +132,19 @@ def _convert_image(source, dest, in_format, out_format, run_as_root):
 
 
 #下载image到path
-def fetch(context, image_href, path):
+def fetch(context, image_href, path, trusted_certs=None):
     with fileutils.remove_path_on_error(path):
-        IMAGE_API.download(context, image_href, dest_path=path)
+        IMAGE_API.download(context, image_href, dest_path=path,
+                           trusted_certs=trusted_certs)
 
 
 def get_info(context, image_href):
     return IMAGE_API.get(context, image_href)
 
 
-def fetch_to_raw(context, image_href, path):
+def fetch_to_raw(context, image_href, path, trusted_certs=None):
     path_tmp = "%s.part" % path
-    fetch(context, image_href, path_tmp)
+    fetch(context, image_href, path_tmp, trusted_certs)
 
     with fileutils.remove_path_on_error(path_tmp):
         data = qemu_img_info(path_tmp)

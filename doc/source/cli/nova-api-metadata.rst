@@ -7,9 +7,7 @@ Server for the Nova Metadata API
 --------------------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-09-27
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -18,12 +16,13 @@ Synopsis
 
 ::
 
-  nova-api-metadata  [options]
+  nova-api-metadata [options]
 
 Description
 ===========
 
-`nova-api-metadata` is a server daemon that serves the Nova Metadata API
+:program:`nova-api-metadata` is a server daemon that serves the Nova Metadata
+API.
 
 Options
 =======
@@ -42,8 +41,8 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
-* `Using WSGI with Nova <https://docs.openstack.org/nova/latest/wsgi.html>`__
+* :nova-doc:`OpenStack Nova <>`
+* :nova-doc:`Using WSGI with Nova <wsgi.html>`
 
 Bugs
 ====

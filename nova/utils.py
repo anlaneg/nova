@@ -20,17 +20,13 @@
 import contextlib
 import copy
 import datetime
-import errno
 import functools
 import hashlib
 import inspect
-import mmap
 import os
-import pyclbr
 import random
 import re
 import shutil
-import sys
 import tempfile
 import time
 
@@ -52,8 +48,10 @@ from oslo_utils import timeutils
 from oslo_utils import units
 import six
 from six.moves import range
+from six.moves import reload_module
 
 import nova.conf
+from nova import debugger
 from nova import exception
 from nova.i18n import _, _LE, _LI, _LW
 import nova.network
@@ -93,6 +91,12 @@ VIM_IMAGE_ATTRIBUTES = (
 _FILE_CACHE = {}
 
 _SERVICE_TYPES = service_types.ServiceTypes()
+
+
+if hasattr(inspect, 'getfullargspec'):
+    getargspec = inspect.getfullargspec
+else:
+    getargspec = inspect.getargspec
 
 
 def get_root_helper():
@@ -237,17 +241,6 @@ def ssh_execute(dest, *cmd, **kwargs):
     ssh_cmd.append(dest)
     ssh_cmd.extend(cmd)
     return execute(*ssh_cmd, **kwargs)
-
-
-def trycmd(*args, **kwargs):
-    """Convenience wrapper around oslo's trycmd() method."""
-    if kwargs.get('run_as_root', False):
-        if CONF.use_rootwrap_daemon:
-            return RootwrapDaemonHelper(CONF.rootwrap_config).trycmd(
-                *args, **kwargs)
-        else:
-            return RootwrapProcessHelper().trycmd(*args, **kwargs)
-    return processutils.trycmd(*args, **kwargs)
 
 
 def generate_uid(topic, size=8):
@@ -476,55 +469,6 @@ def format_remote_path(host, path):
     return "%s:%s" % (safe_ip_format(host), path)
 
 
-# TODO(mriedem): Remove this in Rocky.
-def monkey_patch():
-    """DEPRECATED: If the CONF.monkey_patch set as True,
-    this function patches a decorator
-    for all functions in specified modules.
-    You can set decorators for each modules
-    using CONF.monkey_patch_modules.
-    The format is "Module path:Decorator function".
-    Example:
-    'nova.api.ec2.cloud:nova.notifications.notify_decorator'
-
-    Parameters of the decorator is as follows.
-    (See nova.notifications.notify_decorator)
-
-    name - name of the function
-    function - object of the function
-    """
-    # If CONF.monkey_patch is not True, this function do nothing.
-    if not CONF.monkey_patch:
-        return
-    LOG.warning('Monkey patching nova is deprecated for removal.')
-    if six.PY2:
-        is_method = inspect.ismethod
-    else:
-        def is_method(obj):
-            # Unbound methods became regular functions on Python 3
-            return inspect.ismethod(obj) or inspect.isfunction(obj)
-    # Get list of modules and decorators
-    for module_and_decorator in CONF.monkey_patch_modules:
-        module, decorator_name = module_and_decorator.split(':')
-        # import decorator function
-        decorator = importutils.import_class(decorator_name)
-        __import__(module)
-        # Retrieve module information using pyclbr
-        module_data = pyclbr.readmodule_ex(module)
-        for key, value in module_data.items():
-            # set the decorator for the class methods
-            if isinstance(value, pyclbr.Class):
-                clz = importutils.import_class("%s.%s" % (module, key))
-                for method, func in inspect.getmembers(clz, is_method):
-                    setattr(clz, method,
-                        decorator("%s.%s.%s" % (module, key, method), func))
-            # set the decorator for the function
-            if isinstance(value, pyclbr.Function):
-                func = importutils.import_class("%s.%s" % (module, key))
-                setattr(sys.modules[module], key,
-                    decorator("%s.%s" % (module, key), func))
-
-
 def make_dev_path(dev, partition=None, base='/dev'):
     """Return a path to a particular device.
 
@@ -748,8 +692,8 @@ def expects_func_args(*args):
         @functools.wraps(dec)
         def _decorator(f):
             base_f = safe_utils.get_wrapped_function(f)
-            arg_names, a, kw, _default = inspect.getargspec(base_f)
-            if a or kw or set(args) <= set(arg_names):
+            argspec = getargspec(base_f)
+            if argspec[1] or argspec[2] or set(args) <= set(argspec[0]):
                 # NOTE (ndipanov): We can't really tell if correct stuff will
                 # be passed if it's a function with *args or **kwargs so
                 # we still carry on and hope for the best
@@ -791,25 +735,12 @@ def check_string_length(value, name=None, min_length=0, max_length=None):
     :param min_length: the min_length of the string
     :param max_length: the max_length of the string
     """
-    if not isinstance(value, six.string_types):
-        if name is None:
-            msg = _("The input is not a string or unicode")
-        else:
-            msg = _("%s is not a string or unicode") % name
-        raise exception.InvalidInput(message=msg)
-
-    if name is None:
-        name = value
-
-    if len(value) < min_length:
-        msg = _("%(name)s has a minimum character requirement of "
-                "%(min_length)s.") % {'name': name, 'min_length': min_length}
-        raise exception.InvalidInput(message=msg)
-
-    if max_length and len(value) > max_length:
-        msg = _("%(name)s has more than %(max_length)s "
-                "characters.") % {'name': name, 'max_length': max_length}
-        raise exception.InvalidInput(message=msg)
+    try:
+        strutils.check_string_length(value, name=name,
+                                     min_length=min_length,
+                                     max_length=max_length)
+    except (ValueError, TypeError) as exc:
+        raise exception.InvalidInput(message=exc.args[0])
 
 
 def validate_integer(value, name, min_value=None, max_value=None):
@@ -1009,9 +940,12 @@ def get_image_metadata_from_volume(volume):
         val = properties.pop(attr, None)
         if attr in ('min_ram', 'min_disk'):
             image_meta[attr] = int(val or 0)
-    # NOTE(yjiang5): Always set the image status as 'active'
-    # and depends on followed volume_api.check_attach() to
-    # verify it. This hack should be harmless with that check.
+    # NOTE(mriedem): Set the status to 'active' as a really old hack
+    # from when this method was in the compute API class and is
+    # needed for _check_requested_image which makes sure the image
+    # is 'active'. For volume-backed servers, if the volume is not
+    # available because the image backing the volume is not active,
+    # then the compute API trying to reserve the volume should fail.
     image_meta['status'] = 'active'
     return image_meta
 
@@ -1098,7 +1032,7 @@ def filter_and_format_resource_metadata(resource_type, resource_list,
             return resource.get('uuid')
 
     def _match_any(pattern_list, string):
-        if isinstance(pattern_list, str):
+        if isinstance(pattern_list, six.string_types):
             pattern_list = [pattern_list]
         return any([re.match(pattern, string)
                     for pattern in pattern_list])
@@ -1233,6 +1167,10 @@ def get_ksa_adapter(service_type, ksa_auth=None, ksa_session=None,
     used, ksa auth and/or session options may also be required, or the relevant
     parameter supplied.
 
+    A raise_exc=False adapter is returned, meaning responses >=400 return the
+    Response object rather than raising an exception.  This behavior can be
+    overridden on a per-request basis by setting raise_exc=True.
+
     :param service_type: String name of the service type for which the Adapter
                          is to be constructed.
     :param ksa_auth: A keystoneauth1 auth plugin. If not specified, we attempt
@@ -1279,7 +1217,7 @@ def get_ksa_adapter(service_type, ksa_auth=None, ksa_session=None,
 
     return ks_loading.load_adapter_from_conf_options(
         CONF, confgrp, session=ksa_session, auth=ksa_auth,
-        min_version=min_version, max_version=max_version)
+        min_version=min_version, max_version=max_version, raise_exc=False)
 
 
 def get_endpoint(ksa_adapter):
@@ -1335,48 +1273,33 @@ def get_endpoint(ksa_adapter):
         "interfaces: %s" % interfaces)
 
 
-def supports_direct_io(dirpath):
+def generate_hostid(host, project_id):
+    """Generate an obfuscated host id representing the host.
 
-    if not hasattr(os, 'O_DIRECT'):
-        LOG.debug("This python runtime does not support direct I/O")
-        return False
+    This is a hashed value so will not actually look like a hostname, and is
+    hashed with data from the project_id.
 
-    testfile = os.path.join(dirpath, ".directio.test")
+    :param host: The name of the compute host.
+    :param project_id: The UUID of the project.
+    :return: An obfuscated hashed host id string, return "" if host is empty
+    """
+    if host:
+        data = (project_id + host).encode('utf-8')
+        sha_hash = hashlib.sha224(data)
+        return sha_hash.hexdigest()
+    return ""
 
-    hasDirectIO = True
-    fd = None
-    try:
-        fd = os.open(testfile, os.O_CREAT | os.O_WRONLY | os.O_DIRECT)
-        # Check is the write allowed with 512 byte alignment
-        align_size = 512
-        m = mmap.mmap(-1, align_size)
-        m.write(b"x" * align_size)
-        os.write(fd, m)
-        LOG.debug("Path '%(path)s' supports direct I/O",
-                  {'path': dirpath})
-    except OSError as e:
-        if e.errno == errno.EINVAL:
-            LOG.debug("Path '%(path)s' does not support direct I/O: "
-                      "'%(ex)s'", {'path': dirpath, 'ex': e})
-            hasDirectIO = False
-        else:
-            with excutils.save_and_reraise_exception():
-                LOG.error("Error on '%(path)s' while checking "
-                          "direct I/O: '%(ex)s'",
-                          {'path': dirpath, 'ex': e})
-    except Exception as e:
-        with excutils.save_and_reraise_exception():
-            LOG.error("Error on '%(path)s' while checking direct I/O: "
-                      "'%(ex)s'", {'path': dirpath, 'ex': e})
-    finally:
-        # ensure unlink(filepath) will actually remove the file by deleting
-        # the remaining link to it in close(fd)
-        if fd is not None:
-            os.close(fd)
 
-        try:
-            os.unlink(testfile)
-        except Exception:
-            pass
+def monkey_patch():
+    if debugger.enabled():
+        # turn off thread patching to enable the remote debugger
+        eventlet.monkey_patch(os=False, thread=False)
+    else:
+        eventlet.monkey_patch(os=False)
 
-    return hasDirectIO
+    # NOTE(rgerganov): oslo.context is storing a global thread-local variable
+    # which keeps the request context for the current thread. If oslo.context
+    # is imported before calling monkey_patch(), then this thread-local won't
+    # be green. To workaround this, reload the module after calling
+    # monkey_patch()
+    reload_module(importutils.import_module('oslo_context.context'))

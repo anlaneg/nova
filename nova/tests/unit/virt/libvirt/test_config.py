@@ -13,12 +13,12 @@
 #    under the License.
 
 from lxml import etree
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import units
 
 from nova.objects import fields as obj_fields
 from nova import test
 from nova.tests.unit import matchers
-from nova.tests import uuidsentinel as uuids
 from nova.virt.libvirt import config
 
 
@@ -268,6 +268,15 @@ class LibvirtConfigGuestCPUFeatureTest(LibvirtConfigBaseTest):
         xml = obj.to_xml()
         self.assertXmlEqual(xml, """
             <feature name="mtrr" policy="force"/>
+        """)
+
+    def test_config_simple_pcid(self):
+        obj = config.LibvirtConfigGuestCPUFeature("pcid")
+        obj.policy = "require"
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <feature name="pcid" policy="require"/>
         """)
 
 
@@ -1007,12 +1016,22 @@ class LibvirtConfigGuestDiskTest(LibvirtConfigBaseTest):
         obj.source_path = "/tmp/hello"
         obj.target_dev = "/dev/hda"
         obj.target_bus = "ide"
+        # Note that read/write iops/bytes values cannot be used with
+        # total values. These are only here for illustrative purposes.
         obj.disk_read_bytes_sec = 1024000
         obj.disk_read_iops_sec = 1000
         obj.disk_total_bytes_sec = 2048000
         obj.disk_write_bytes_sec = 1024000
         obj.disk_write_iops_sec = 1000
         obj.disk_total_iops_sec = 2000
+        obj.disk_write_bytes_sec_max = 1536000
+        obj.disk_write_iops_sec_max = 1500
+        obj.disk_total_iops_sec_max = 3072000
+        obj.disk_read_bytes_sec_max = 1536000
+        obj.disk_read_iops_sec_max = 1500
+        obj.disk_total_iops_sec_max = 2000
+        obj.disk_total_bytes_sec_max = 3072000
+        obj.disk_size_iops_sec = 16
 
         xml = obj.to_xml()
         self.assertXmlEqual(xml, """
@@ -1026,6 +1045,13 @@ class LibvirtConfigGuestDiskTest(LibvirtConfigBaseTest):
                 <write_iops_sec>1000</write_iops_sec>
                 <total_bytes_sec>2048000</total_bytes_sec>
                 <total_iops_sec>2000</total_iops_sec>
+                <read_bytes_sec_max>1536000</read_bytes_sec_max>
+                <write_bytes_sec_max>1536000</write_bytes_sec_max>
+                <total_bytes_sec_max>3072000</total_bytes_sec_max>
+                <read_iops_sec_max>1500</read_iops_sec_max>
+                <write_iops_sec_max>1500</write_iops_sec_max>
+                <total_iops_sec_max>2000</total_iops_sec_max>
+                <size_iops_sec>16</size_iops_sec>
               </iotune>
             </disk>""")
 
@@ -1691,6 +1717,41 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
         obj2.parse_str(xml)
         self.assertXmlEqual(xml, obj2.to_xml())
 
+    def test_config_ethernet_with_mtu(self):
+        obj = config.LibvirtConfigGuestInterface()
+        obj.net_type = "ethernet"
+        obj.mac_addr = "DE:AD:BE:EF:CA:FE"
+        obj.model = "virtio"
+        obj.target_dev = "vnet0"
+        obj.driver_name = "vhost"
+        obj.vif_inbound_average = 16384
+        obj.vif_inbound_peak = 32768
+        obj.vif_inbound_burst = 3276
+        obj.vif_outbound_average = 32768
+        obj.vif_outbound_peak = 65536
+        obj.vif_outbound_burst = 6553
+        obj.mtu = 9000
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <interface type="ethernet">
+              <mac address="DE:AD:BE:EF:CA:FE"/>
+              <model type="virtio"/>
+              <driver name="vhost"/>
+              <mtu size="9000"/>
+              <target dev="vnet0"/>
+              <bandwidth>
+                <inbound average="16384" peak="32768" burst="3276"/>
+                <outbound average="32768" peak="65536" burst="6553"/>
+              </bandwidth>
+            </interface>""")
+
+        # parse the xml from the first object into a new object and make sure
+        # they are the same
+        obj2 = config.LibvirtConfigGuestInterface()
+        obj2.parse_str(xml)
+        self.assertXmlEqual(xml, obj2.to_xml())
+
     def test_config_driver_options(self):
         obj = config.LibvirtConfigGuestInterface()
         obj.net_type = "ethernet"
@@ -1753,6 +1814,46 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
         obj2.parse_str(xml)
         self.assertXmlEqual(xml, obj2.to_xml())
 
+    def test_config_bridge_with_mtu(self):
+        obj = config.LibvirtConfigGuestInterface()
+        obj.net_type = "bridge"
+        obj.source_dev = "br0"
+        obj.mac_addr = "DE:AD:BE:EF:CA:FE"
+        obj.model = "virtio"
+        obj.target_dev = "tap12345678"
+        obj.filtername = "clean-traffic"
+        obj.filterparams.append({"key": "IP", "value": "192.168.122.1"})
+        obj.vif_inbound_average = 16384
+        obj.vif_inbound_peak = 32768
+        obj.vif_inbound_burst = 3276
+        obj.vif_outbound_average = 32768
+        obj.vif_outbound_peak = 65536
+        obj.vif_outbound_burst = 6553
+        obj.mtu = 9000
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <interface type="bridge">
+              <mac address="DE:AD:BE:EF:CA:FE"/>
+              <model type="virtio"/>
+              <source bridge="br0"/>
+              <mtu size="9000"/>
+              <target dev="tap12345678"/>
+              <filterref filter="clean-traffic">
+                <parameter name="IP" value="192.168.122.1"/>
+              </filterref>
+              <bandwidth>
+                <inbound average="16384" peak="32768" burst="3276"/>
+                <outbound average="32768" peak="65536" burst="6553"/>
+              </bandwidth>
+            </interface>""")
+
+        # parse the xml from the first object into a new object and make sure
+        # they are the same
+        obj2 = config.LibvirtConfigGuestInterface()
+        obj2.parse_str(xml)
+        self.assertXmlEqual(xml, obj2.to_xml())
+
     def test_config_bridge_ovs(self):
         obj = config.LibvirtConfigGuestInterface()
         obj.net_type = "bridge"
@@ -1769,6 +1870,36 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
               <mac address="DE:AD:BE:EF:CA:FE"/>
               <model type="virtio"/>
               <source bridge="br0"/>
+              <target dev="tap12345678"/>
+              <virtualport type="openvswitch">
+                <parameters instanceid="foobar"/>
+              </virtualport>
+            </interface>""")
+
+        # parse the xml from the first object into a new object and make sure
+        # they are the same
+        obj2 = config.LibvirtConfigGuestInterface()
+        obj2.parse_str(xml)
+        self.assertXmlEqual(xml, obj2.to_xml())
+
+    def test_config_bridge_ovs_with_mtu(self):
+        obj = config.LibvirtConfigGuestInterface()
+        obj.net_type = "bridge"
+        obj.source_dev = "br0"
+        obj.mac_addr = "DE:AD:BE:EF:CA:FE"
+        obj.model = "virtio"
+        obj.target_dev = "tap12345678"
+        obj.vporttype = "openvswitch"
+        obj.vportparams.append({"key": "instanceid", "value": "foobar"})
+        obj.mtu = 9000
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <interface type="bridge">
+              <mac address="DE:AD:BE:EF:CA:FE"/>
+              <model type="virtio"/>
+              <source bridge="br0"/>
+              <mtu size="9000"/>
               <target dev="tap12345678"/>
               <virtualport type="openvswitch">
                 <parameters instanceid="foobar"/>
@@ -1915,6 +2046,57 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
             <interface type="vhostuser">
               <mac address="DE:AD:BE:EF:CA:FE"/>
               <model type="virtio"/>
+              <source type="unix" mode="server" path="/vhost-user/test.sock"/>
+            </interface>""")
+
+        # parse the xml from the first object into a new object and make sure
+        # they are the same
+        obj2 = config.LibvirtConfigGuestInterface()
+        obj2.parse_str(xml)
+        self.assertXmlEqual(xml, obj2.to_xml())
+
+    def test_config_vhostuser_ensure_driver_never_set(self):
+        obj = config.LibvirtConfigGuestInterface()
+        # Even if 'driver_name' attribute is set we should never set
+        # it in the domain XML for vhostuser interface.
+        obj.driver_name = "vhost-user"
+
+        obj.net_type = "vhostuser"
+        obj.vhostuser_type = "unix"
+        obj.vhostuser_mode = "server"
+        obj.mac_addr = "DE:AD:BE:EF:CA:FE"
+        obj.vhostuser_path = "/vhost-user/test.sock"
+        obj.model = "virtio"
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <interface type="vhostuser">
+              <mac address="DE:AD:BE:EF:CA:FE"/>
+              <model type="virtio"/>
+              <source type="unix" mode="server" path="/vhost-user/test.sock"/>
+            </interface>""")
+
+        # parse the xml from the first object into a new object and make sure
+        # they are the same
+        obj2 = config.LibvirtConfigGuestInterface()
+        obj2.parse_str(xml)
+        self.assertXmlEqual(xml, obj2.to_xml())
+
+    def test_config_vhostuser_queue_size(self):
+        obj = config.LibvirtConfigGuestInterface()
+        obj.net_type = "vhostuser"
+        obj.vhostuser_type = "unix"
+        obj.vhostuser_mode = "server"
+        obj.mac_addr = "DE:AD:BE:EF:CA:FE"
+        obj.vhostuser_path = "/vhost-user/test.sock"
+        obj.vhost_rx_queue_size = 512
+        obj.vhost_tx_queue_size = 1024
+        obj.model = "virtio"
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <interface type="vhostuser">
+              <mac address="DE:AD:BE:EF:CA:FE"/>
+              <model type="virtio"/>
+              <driver rx_queue_size="512" tx_queue_size="1024"/>
               <source type="unix" mode="server" path="/vhost-user/test.sock"/>
             </interface>""")
 
@@ -3089,7 +3271,7 @@ class LibvirtConfigGuestRngTest(LibvirtConfigBaseTest):
 
     def test_config_rng_driver_with_rate(self):
         obj = config.LibvirtConfigGuestRng()
-        obj.backend = '/dev/random'
+        obj.backend = '/dev/urandom'
         obj.rate_period = '12'
         obj.rate_bytes = '34'
 
@@ -3097,7 +3279,7 @@ class LibvirtConfigGuestRngTest(LibvirtConfigBaseTest):
         self.assertXmlEqual(xml, """
 <rng model='virtio'>
     <rate period='12' bytes='34'/>
-    <backend model='random'>/dev/random</backend>
+    <backend model='random'>/dev/urandom</backend>
 </rng>""")
 
 
@@ -3222,6 +3404,21 @@ class LibvirtConfigGuestMemoryBackingTest(LibvirtConfigBaseTest):
             <nosharepages/>
             <locked/>
           </memoryBacking>""")
+
+    def test_config_memory_backing_source_all(self):
+        obj = config.LibvirtConfigGuestMemoryBacking()
+        obj.sharedaccess = True
+        obj.allocateimmediate = True
+        obj.filesource = True
+        obj.discard = True
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <memoryBacking>
+              <source type="file"/>
+              <access mode="shared"/>
+              <allocation mode="immediate"/>
+              <discard />
+            </memoryBacking>""")
 
 
 class LibvirtConfigGuestMemoryTuneTest(LibvirtConfigBaseTest):

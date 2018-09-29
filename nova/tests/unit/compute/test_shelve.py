@@ -12,22 +12,24 @@
 
 import mock
 from oslo_utils import fixture as utils_fixture
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
 from nova.compute import claims
 from nova.compute import instance_actions
+from nova.compute import power_state
 from nova.compute import task_states
 from nova.compute import utils as compute_utils
 from nova.compute import vm_states
 import nova.conf
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova.network.neutronv2 import api as neutron_api
 from nova import objects
 from nova import test
 from nova.tests.unit.compute import test_compute
 from nova.tests.unit.image import fake as fake_image
-from nova.tests import uuidsentinel as uuids
+
 
 CONF = nova.conf.CONF
 
@@ -59,12 +61,14 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
     def _shelve_instance(self, shelved_offload_time, mock_notify,
                          mock_notify_instance_usage, mock_get_power_state,
                          mock_snapshot, mock_power_off, mock_terminate,
-                         mock_get_bdms, clean_shutdown=True):
+                         mock_get_bdms, clean_shutdown=True,
+                         guest_power_state=power_state.RUNNING):
         mock_get_power_state.return_value = 123
 
         CONF.set_override('shelved_offload_time', shelved_offload_time)
         host = 'fake-mini'
-        instance = self._create_fake_instance_obj(params={'host': host})
+        instance = self._create_fake_instance_obj(
+            params={'host': host, 'power_state': guest_power_state})
         image_id = 'fake_image_id'
         host = 'fake-mini'
         self.useFixture(utils_fixture.TimeFixture())
@@ -139,9 +143,12 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         mock_cleanup_call_list = []
 
         if clean_shutdown:
-            mock_power_off_call_list.append(
-                mock.call(instance, CONF.shutdown_timeout,
-                          self.compute.SHUTDOWN_RETRY_INTERVAL))
+            if guest_power_state == power_state.PAUSED:
+                mock_power_off_call_list.append(mock.call(instance, 0, 0))
+            else:
+                mock_power_off_call_list.append(
+                    mock.call(instance, CONF.shutdown_timeout,
+                              CONF.compute.shutdown_retry_interval))
         else:
             mock_power_off_call_list.append(mock.call(instance, 0, 0))
 
@@ -179,11 +186,14 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
     def test_shelve_and_offload(self):
         self._shelve_instance(0)
 
+    def test_shelve_paused_instance(self):
+        self._shelve_instance(-1, guest_power_state=power_state.PAUSED)
+
     @mock.patch.object(nova.virt.fake.SmallFakeDriver, 'power_off')
     def test_shelve_offload(self, mock_power_off):
         instance = self._shelve_offload()
         mock_power_off.assert_called_once_with(instance,
-            CONF.shutdown_timeout, self.compute.SHUTDOWN_RETRY_INTERVAL)
+            CONF.shutdown_timeout, CONF.compute.shutdown_retry_interval)
 
     @mock.patch.object(nova.virt.fake.SmallFakeDriver, 'power_off')
     def test_shelve_offload_forced_shutdown(self, mock_power_off):
@@ -247,6 +257,7 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         mock_delete_alloc.assert_called_once_with(self.context, instance)
         mock_event.assert_called_once_with(self.context,
                                            'compute_shelve_offload_instance',
+                                           CONF.host,
                                            instance.uuid)
 
         return instance

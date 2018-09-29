@@ -37,12 +37,21 @@ Request
 .. rest_parameters:: parameters.yaml
 
   - consumer_uuid: consumer_uuid_body
+  - consumer_generation: consumer_generation_min
   - project_id: project_id_body
   - user_id: user_id_body
   - allocations: allocations_dict_empty
+  - generation: resource_provider_generation_optional
   - resources: resources
 
-Request Example
+Request example (microversions 1.28 - )
+---------------------------------------
+
+.. literalinclude:: ./samples/allocations/manage-allocations-request-1.28.json
+   :language: javascript
+
+Request example (microversions 1.13 - 1.27)
+-------------------------------------------
 
 .. literalinclude:: ./samples/allocations/manage-allocations-request.json
    :language: javascript
@@ -81,11 +90,18 @@ Response
   - allocations: allocations_by_resource_provider
   - generation: resource_provider_generation
   - resources: resources
+  - consumer_generation: consumer_generation_min
   - project_id: project_id_body_1_12
   - user_id: user_id_body_1_12
 
-Response Example
-----------------
+Response Example (1.28 - )
+--------------------------
+
+.. literalinclude:: ./samples/allocations/get-allocations-1.28.json
+   :language: javascript
+
+Response Example (1.12 - 1.27)
+------------------------------
 
 .. literalinclude:: ./samples/allocations/get-allocations.json
    :language: javascript
@@ -116,12 +132,19 @@ Request (microversions 1.12 - )
   - consumer_uuid: consumer_uuid
   - allocations: allocations_dict
   - resources: resources
+  - consumer_generation: consumer_generation_min
   - project_id: project_id_body
   - user_id: user_id_body
   - generation: resource_provider_generation_optional
 
-Request example (microversions 1.12 - )
+Request example (microversions 1.28 - )
 ---------------------------------------
+
+.. literalinclude:: ./samples/allocations/update-allocations-request-1.28.json
+   :language: javascript
+
+Request example (microversions 1.12 - 1.27)
+-------------------------------------------
 
 .. literalinclude:: ./samples/allocations/update-allocations-request-1.12.json
    :language: javascript

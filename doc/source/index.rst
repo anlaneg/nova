@@ -30,13 +30,12 @@ servers to provide that service.
 
 It requires the following additional OpenStack services for basic function:
 
-* `Keystone <https://docs.openstack.org/keystone/latest/>`__: This provides
-  identity and authentication for all OpenStack services.
-* `Glance <https://docs.openstack.org/glance/latest/>`__: This provides the
-  compute image repository. All compute instances launch from glance images.
-* `Neutron <https://docs.openstack.org/neutron/latest/>`__: This is
-  responsible for provisioning the virtual or physical networks that compute
-  instances connect to on boot.
+* :keystone-doc:`Keystone <>`: This provides identity and authentication for
+  all OpenStack services.
+* :glance-doc:`Glance <>`: This provides the compute image repository. All
+  compute instances launch from glance images.
+* :neutron-doc:`Neutron <>`: This is responsible for provisioning the virtual
+  or physical networks that compute instances connect to on boot.
 
 It can also integrate with other services to include: persistent block
 storage, encrypted disks, and baremetal compute instances.
@@ -50,19 +49,15 @@ either tools or the API directly.
 Tools for using Nova
 --------------------
 
-* `Horizon
-  <https://docs.openstack.org/horizon/latest/user/launch-instances.html>`_: The
-  official web ui for the OpenStack Project.
-* `OpenStack Client
-  <https://docs.openstack.org/python-openstackclient/latest/>`_: The official
-  CLI for OpenStack Projects. You should use this as your CLI for most things,
-  it includes not just nova commands but also commands for most of the projects
-  in OpenStack.
-* `Nova Client
-  <https://docs.openstack.org/python-novaclient/latest/user/shell.html>`_: For
-  some very advanced features (or administrative commands) of nova you may need
-  to use nova client. It is still supported, but the ``openstack`` cli is
-  recommended.
+* :horizon-doc:`Horizon <user/launch-instances.html>`: The official web UI for
+  the OpenStack Project.
+* :python-openstackclient-doc:`OpenStack Client <>`: The official CLI for
+  OpenStack Projects. You should use this as your CLI for most things, it
+  includes not just nova commands but also commands for most of the projects in
+  OpenStack.
+* :python-novaclient-doc:`Nova Client <user/shell.html>`: For some very
+  advanced features (or administrative commands) of nova you may need to use
+  nova client. It is still supported, but the ``openstack`` cli is recommended.
 
 Writing to the API
 ------------------
@@ -117,11 +112,9 @@ Installation
 .. TODO(sdague): links to all the rest of the install guide pieces.
 
 The detailed install guide for nova. A functioning nova will also require
-having installed `keystone
-<https://docs.openstack.org/keystone/latest/install/>`__, `glance
-<https://docs.openstack.org/glance/latest/install/>`__, and `neutron
-<https://docs.openstack.org/neutron/latest/install/>`__. Please ensure that you
-follow their install guides first.
+having installed :keystone-doc:`keystone <install/>`, :glance-doc:`glance
+<install/>`, and :neutron-doc:`neutron <install/>`. Ensure that you follow
+their install guides first.
 
 .. toctree::
    :maxdepth: 2
@@ -161,12 +154,6 @@ Once you are running nova, the following information is extremely useful.
 
 * :doc:`Admin Guide </admin/index>`: A collection of guides for administrating
   nova.
-
-  .. warning::
-
-     This guide was imported during the Pike cycle and is a bit out of
-     date. It will be updated during Queens to be more accurate.
-
 * :doc:`Flavors </user/flavors>`: What flavors are and why they are used.
 * :doc:`Upgrades </user/upgrade>`: How nova is designed to be upgraded for minimal
   service impact, and the order you should do them in.
@@ -186,27 +173,8 @@ Reference Material
 
 * :doc:`Nova CLI Command References </cli/index>`: the complete command reference
   for all the daemons and admin tools that come with nova.
-
-* **Configuration**:
-
-  * :doc:`Configuration Guide </admin/configuration/index>`: detailed
-    configuration guides for various parts of you Nova system. Helpful
-    reference for setting up specific hypervisor backends.
-
-  * :doc:`Config Reference </configuration/config>`: a complete reference of all
-    configuration options available in the nova.conf file.
-
-  * :doc:`Sample Config File </configuration/sample-config>`: a sample config file
-    with inline documentation.
-
-* **Policy**: nova, like most OpenStack projects, uses a policy language to
-  restrict permissions on REST API actions.
-
-  * :doc:`Policy Reference </configuration/policy>`: a complete reference of all
-    policy points in nova and what they impact.
-
-  * :doc:`Sample Policy File </configuration/sample-policy>`: a sample policy file
-    with inline documentation.
+* :doc:`Configuration Guide <configuration/index>`: Information on configuring
+  the system, including role-based access control policy rules.
 
 For Contributors
 ================
@@ -239,13 +207,10 @@ looking parts of our architecture. These are collected below.
    admin/configuration/index
    cli/index
    configuration/index
-   configuration/config
-   configuration/sample-config
-   configuration/policy
-   configuration/sample-policy
    contributor/development-environment
    contributor/api
    contributor/api-2
+   contributor/api-ref-guideline
    contributor/blueprints
    contributor/code-review
    contributor/documentation
@@ -272,13 +237,17 @@ looking parts of our architecture. These are collected below.
    reference/services
    reference/stable-api
    reference/threading
+   reference/update-provider-tree
+   reference/upgrade-checks
    reference/vm-states
+   reference/scheduler-hints-vs-flavor-extra-specs
    user/index
    user/aggregates
    user/architecture
    user/block-device-mapping
    user/cells
    user/cellsv2-layout
+   user/certificate-validation
    user/conductor
    user/config-drive
    user/feature-classification

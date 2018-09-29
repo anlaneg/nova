@@ -231,18 +231,6 @@ memory-intensive instances succeed.
    example, shared-storage live migration of an instance with 8GiB memory will
    time out after 6400 seconds.
 
-#. **Live migration progress timeout**
-
-   The Compute service also aborts a live migration when it detects that memory
-   copy is not making progress for a certain time. You can set this time, in
-   seconds, through the configurable parameter
-   ``live_migration_progress_timeout``.
-
-   In Ocata, the default value of ``live_migration_progress_timeout`` is 0,
-   which disables progress timeouts. You should not change this value, since
-   the algorithm that detects memory copy progress has been determined to be
-   unreliable. It may be re-enabled in future releases.
-
 #. **Instance downtime**
 
    Near the end of the memory copy, the instance is paused for a short time so
@@ -334,7 +322,7 @@ Shared storage
 - **Compatible XenServer hypervisors**.
 
   For more information, see the `Requirements for Creating Resource Pools
-  <http://docs.vmd.citrix.com/XenServer/6.0.0/1.0/en_gb/reference.html#pooling_homogeneity_requirements>`_
+  <https://docs.citrix.com/en-us/xenserver/7-1.html#pooling_homogeneity_requirements>`_
   section of the XenServer Administrator's Guide.
 
 - **Shared storage**.
@@ -343,14 +331,12 @@ Shared storage
 
   .. note::
 
-     For the supported NFS versions, see the `NFS VHD
-     <http://docs.vmd.citrix.com/XenServer/6.0.0/1.0/en_gb/reference.html#id1002701>`_
+     For the supported NFS versions, see the `NFS and SMB
+     <https://docs.citrix.com/en-us/xenserver/7-1.html#id1002701>`_
      section of the XenServer Administrator's Guide.
 
 To use shared storage live migration with XenServer hypervisors, the hosts must
-be joined to a XenServer pool. To create that pool, a host aggregate must be
-created with specific metadata. This metadata is used by the XAPI plug-ins to
-establish the pool.
+be joined to a XenServer pool.
 
 .. rubric:: Using shared storage live migrations with XenServer Hypervisors
 
@@ -366,34 +352,12 @@ establish the pool.
 
       sr_matching_filter=default-sr:true
 
-#. Create a host aggregate. This command creates the aggregate, and then
-   displays a table that contains the ID of the new aggregate
+#. To add a host to a pool, you need to know the pool master ip address,
+   user name and password. Run below command on the XenServer host:
 
    .. code-block:: console
 
-      $ openstack aggregate create --zone AVAILABILITY_ZONE POOL_NAME
-
-   Add metadata to the aggregate, to mark it as a hypervisor pool
-
-   .. code-block:: console
-
-      $ openstack aggregate set --property hypervisor_pool=true AGGREGATE_ID
-
-      $ openstack aggregate set --property operational_state=created AGGREGATE_ID
-
-   Make the first compute node part of that aggregate
-
-   .. code-block:: console
-
-      $ openstack aggregate add host AGGREGATE_ID MASTER_COMPUTE_NAME
-
-   The host is now part of a XenServer pool.
-
-#. Add hosts to the pool
-
-   .. code-block:: console
-
-      $ openstack aggregate add host AGGREGATE_ID COMPUTE_HOST_NAME
+      $ xe pool-join master-address=MASTER_IP master-username=root master-password=MASTER_PASSWORD
 
    .. note::
 

@@ -31,7 +31,7 @@ class API(object):
 
     def __init__(self):
         self.conductor_rpcapi = rpcapi.ConductorAPI()
-        self.base_rpcapi = baserpc.BaseAPI(topic=CONF.conductor.topic)
+        self.base_rpcapi = baserpc.BaseAPI(topic=rpcapi.RPC_TOPIC)
 
     def object_backport_versions(self, context, objinst, object_versions):
         return self.conductor_rpcapi.object_backport_versions(context, objinst,
@@ -99,9 +99,9 @@ class ComputeTaskAPI(object):
 
     def live_migrate_instance(self, context, instance, host_name,
                               block_migration, disk_over_commit,
-                              request_spec=None, async=False):
+                              request_spec=None, async_=False):
         scheduler_hint = {'host': host_name}
-        if async:
+        if async_:
             self.conductor_compute_rpcapi.live_migrate_instance(
                 context, instance, scheduler_hint, block_migration,
                 disk_over_commit, request_spec)

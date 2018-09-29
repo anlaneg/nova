@@ -40,10 +40,11 @@ increasing the number of WSGI application instances and scaling the RDBMS using
 traditional database scaling techniques.
 
 For sake of consistency and because there was initially intent to make the
-entities in the placement service available over RPC, `versioned objects`_ are
-used to provide the interface between the HTTP application layer and the
-SQLAlchemy-driven persistence layer. Even without RPC, these objects provide
-useful structuring and separation of the code.
+entities in the placement service available over RPC,
+:oslo.versionedobjects-doc:`versioned objects <>` are used to provide the
+interface between the HTTP application layer and the SQLAlchemy-driven
+persistence layer. Even without RPC, these objects provide useful structuring
+and separation of the code.
 
 Though the placement service doesn't aspire to be a `microservice` it does
 aspire to continue to be small and minimally complex. This means a relatively
@@ -54,11 +55,11 @@ additional resources should be considered a significant change requiring robust
 review from many stakeholders.
 
 The set of HTTP resources represents a concise and constrained grammar for
-expressing the management of resource providers, inventories, resource classes
-and allocations. If a solution is initially designed to need more resources or
-a more complex grammar that may be a sign that we need to give our goals
-greater scrutiny. Is there a way to do what we want with what we have already?
-Can some other service help? Is a new collaborating service required?
+expressing the management of resource providers, inventories, resource classes,
+traits, and allocations. If a solution is initially designed to need more
+resources or a more complex grammar that may be a sign that we need to give our
+goals greater scrutiny. Is there a way to do what we want with what we have
+already?  Can some other service help? Is a new collaborating service required?
 
 Minimal Framework
 =================
@@ -145,8 +146,8 @@ there are a few bits of required housekeeping that must be done in the code:
   microversion and give a very brief summary of the added feature.
 * Update ``nova/api/openstack/placement/rest_api_version_history.rst``
   to add a more detailed section describing the new microversion.
-* Add a `release note`_ with a ``features`` section announcing the new or
-  changed feature and the microversion.
+* Add a :reno-doc:`release note <>` with a ``features`` section announcing the
+  new or changed feature and the microversion.
 * If the ``version_handler`` decorator (see below) has been used,
   increment ``TOTAL_VERSIONED_METHODS`` in
   ``nova/tests/unit/api/openstack/placement/test_microversion.py``.
@@ -172,18 +173,12 @@ granular way to have different behavior per microversion. A
 ``Version`` instance can be treated as a tuple of two ints and
 compared as such or there is a ``matches`` method.
 
-In other cases there are some helper methods in the microversion
-package:
-
-* The ``raise_http_status_code_if_not_version`` utility will raise a
-  http status code if the requested microversion is not within a
-  described version window.
-* The ``version_handler`` decorator makes it possible to have
-  multiple different handler methods of the same (fully-qualified by
-  package) name, each available for a different microversion window.
-  If a request wants a microversion that's not available, a 404
-  response is returned. There is a unit test in place which will
-  fail if there are version intersections.
+A ``version_handler`` decorator is also available. It makes it possible to have
+multiple different handler methods of the same (fully-qualified by package)
+name, each available for a different microversion window.  If a request wants a
+microversion that's not available, a defined status code is returned (usually
+``404`` or ``405``). There is a unit test in place which will fail if there are
+version intersections.
 
 Adding a New Handler
 ====================
@@ -245,7 +240,8 @@ request, the caller is responsible for selecting the right one before calling
 ``extract_json``.
 
 When a handler needs to read or write the data store it should use methods on
-the objects found in the `nova.objects.resource_provider` package. Doing so
+the objects found in the
+`nova.api.openstack.placement.objects.resource_provider` package. Doing so
 requires a context which is provided to the handler method via the WSGI
 environment. It can be retrieved as follows::
 
@@ -257,6 +253,24 @@ environment. It can be retrieved as follows::
           changes in a patch that is separate from and prior to the HTTP API
           change.
 
+If a handler needs to return an error response, with the advent of `Placement
+API Error Handling`_, it is possible to include a code in the JSON error
+response.  This can be used to distinguish different errors with the same HTTP
+response status code (a common case is a generation conflict versus an
+inventory in use conflict). Error codes are simple namespaced strings (e.g.,
+``placement.inventory.inuse``) for which symbols are maintained in
+``nova.api.openstack.placement.errors``. Adding a symbol to a response is done
+by using the ``comment`` kwarg to a WebOb exception, like this::
+
+    except exception.InventoryInUse as exc:
+        raise webob.exc.HTTPConflict(
+            _('update conflict: %(error)s') % {'error': exc},
+            comment=errors.INVENTORY_INUSE)
+
+Code that adds newly raised exceptions should include an error code. Find
+additional guidelines on use in the docs for
+``nova.api.openstack.placement.errors``.
+
 Testing of handler code is described in the next section.
 
 Testing
@@ -266,9 +280,22 @@ Most of the handler code in the placement API is tested using `gabbi`_. Some
 utility code is tested with unit tests found in
 `nova/tests/unit/api/openstack/placement/`. The back-end objects are tested
 with a combination of unit and functional tests found in
-``nova/tests/unit/objects/test_resource_provider.py`` and
-`nova/tests/functional/db`. Adding unit and non-gabbi functional tests is done
-in the same way as other aspects of nova.
+``nova/tests/unit/api/openstack/placement/objects/test_resource_provider.py``
+and `nova/tests/functional/api/openstack/placement/db`. Adding unit and
+non-gabbi functional tests is done in the same way as other aspects of nova.
+
+When writing tests for handler code (that is, the code found in
+``nova/api/openstack/placement/handlers``) a good rule of thumb is that if you
+feel like there needs to be a unit test for some of the code in the handler,
+that is a good sign that the piece of code should be extracted to a separate
+method. That method should be independent of the handler method itself (the one
+decorated by the ``wsgify`` method) and testable as a unit, without mocks if
+possible. If the extracted method is useful for multiple resources consider
+putting it in the ``util`` package.
+
+As a general guide, handler code should be relatively short and where there are
+conditionals and branching, they should be reachable via the gabbi functional
+tests. This is merely a design goal, not a strict constraint.
 
 Using Gabbi
 -----------
@@ -283,12 +310,12 @@ application is run via `wsgi-intercept`_, meaning that real HTTP requests are
 being made over a file handle that appears to Python to be a socket.
 
 In the placement API the YAML files (aka "gabbits") can be found in
-``nova/tests/functional/api/openstack/placement/gabbits``. Fixture definitions are
-in ``fixtures.py`` in the parent directory. Tests are currently grouped by handlers
-(e.g., ``resource-provider.yaml`` and ``inventory.yaml``). This is not a
-requirement and as we increase the number of tests it makes sense to have more
-YAML files with fewer tests, divided up by the arc of API interaction that they
-test.
+``nova/tests/functional/api/openstack/placement/gabbits``. Fixture definitions
+are in ``nova/tests/functional/api/openstack/placement/fixtures/gabbits.py``.
+Tests are frequently grouped by handler name (e.g., ``resource-provider.yaml``
+and ``inventory.yaml``). This is not a requirement and as we increase the
+number of tests it makes sense to have more YAML files with fewer tests,
+divided up by the arc of API interaction that they test.
 
 The gabbi tests are integrated into the functional tox target, loaded via
 ``nova/tests/functional/api/openstack/placement/test_placement_api.py``. If you
@@ -307,10 +334,10 @@ the name in the yaml file, replacing space with ``_``::
 
     tox -efunctional placement_api.inventory_post_new_ipv4_address_inventory
 
-.. note:: `.testr.conf` in the nova repository is configured such that each
-          gabbi YAML is considered a group. Thus, all tests in the file will
-          be run in the same process when running testr concurrently (the
-          default).
+.. note:: ``tox.ini`` in the nova repository is configured by a ``group_regex``
+          so that each gabbi YAML is considered a group. Thus, all tests in the
+          file will be run in the same process when running stestr concurrently
+          (the default).
 
 Writing More Gabbi Tests
 ------------------------
@@ -365,20 +392,21 @@ To lessen the pain of the eventual extraction of placement the service has been
 developed in a way to limit dependency on the rest of the nova codebase and be
 self-contained:
 
-* Most code is in `nova/api/openstack/placement` except for oslo versioned
-  object code in ``nova/objects/resource_provider.py``.
-* Database query code is kept within the objects.
+* Most code is in `nova/api/openstack/placement`.
+* Database query code is kept within the objects in
+  `nova/api/openstack/placement/objects`.
 * The methods on the objects are not remotable, as the only intended caller is
   the placement API code.
 
-There are some exceptions to the self-contained rule (which will have to be
-addressed if the extraction ever happens):
+There are some exceptions to the self-contained rule (which are actively being
+addressed to prepare for the extraction):
 
-* Exceptions unique to the placement API are still within the `nova.exceptions`
-  package.
-* Code related to a resource class cache is within the `nova.db` package.
-* Database models, migrations and tables use the nova api database.
-* The nova `FaultWrapper` middleware is being used.
+* Some of the code related to a resource class cache is within the `nova.db`
+  package, while other parts are in ``nova/rc_fields.py``.
+* Database models, migrations and tables are described as part of the nova api
+  database. An optional configuration option,
+  :oslo.config:option:`placement_database.connection`, can be set to use a
+  database just for placement (based on the api database schema).
 * `nova.i18n` package provides the ``_`` and related functions.
 * ``nova.conf`` is used for configuration.
 * Unit and functional tests depend on fixtures and other functionality in base
@@ -388,13 +416,11 @@ When creating new code for the placement service, please be aware of the plan
 for an eventual extraction and avoid creating unnecessary interdependencies.
 
 .. _WSGI: https://www.python.org/dev/peps/pep-3333/
-.. _versioned objects: http://docs.openstack.org/developer/oslo.versionedobjects/
 .. _wsgify: http://docs.webob.org/en/latest/api/dec.html
 .. _WebOb: http://docs.webob.org/en/latest/
 .. _Request: http://docs.webob.org/en/latest/reference.html#request
 .. _Response: http://docs.webob.org/en/latest/#response
 .. _microversions: http://specs.openstack.org/openstack/api-wg/guidelines/microversion_specification.html
-.. _release note: https://docs.openstack.org/reno/latest/user/usage.html
 .. _gabbi: https://gabbi.readthedocs.io/
 .. _telemetry: http://specs.openstack.org/openstack/telemetry-specs/specs/kilo/declarative-http-tests.html
 .. _wsgi-intercept: http://wsgi-intercept.readthedocs.io/
@@ -405,3 +431,4 @@ for an eventual extraction and avoid creating unnecessary interdependencies.
 .. _gabbi-run: http://gabbi.readthedocs.io/en/latest/runner.html
 .. _errors: http://specs.openstack.org/openstack/api-wg/guidelines/errors.html
 .. _API Reference: https://developer.openstack.org/api-ref/placement/
+.. _Placement API Error Handling: http://specs.openstack.org/openstack/nova-specs/specs/rocky/approved/placement-api-error-handling.html

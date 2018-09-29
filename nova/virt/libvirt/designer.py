@@ -25,9 +25,12 @@ from nova.pci import utils as pci_utils
 MIN_LIBVIRT_ETHERNET_SCRIPT_PATH_NONE = (1, 3, 3)
 
 
-def set_vif_guest_frontend_config(conf, mac, model, driver, queues=None):
+def set_vif_guest_frontend_config(conf, mac, model, driver, queues,
+                                  rx_queue_size):
     """Populate a LibvirtConfigGuestInterface instance
     with guest frontend details.
+
+    NOTE: @model, @driver, @queues and @rx_queue_size can be None.
     """
     conf.mac_addr = mac
     if model is not None:
@@ -36,16 +39,8 @@ def set_vif_guest_frontend_config(conf, mac, model, driver, queues=None):
         conf.driver_name = driver
     if queues is not None:
         conf.vhost_queues = queues
-
-
-def set_vif_host_backend_bridge_config(conf, brname, tapname=None):
-    """Populate a LibvirtConfigGuestInterface instance
-    with host backend details for a software bridge.
-    """
-    conf.net_type = "bridge"
-    conf.source_dev = brname
-    if tapname:
-        conf.target_dev = tapname
+    if rx_queue_size:
+        conf.vhost_rx_queue_size = rx_queue_size
 
 
 def set_vif_host_backend_ethernet_config(conf, tapname, host):
@@ -148,14 +143,28 @@ def set_vif_host_backend_direct_config(conf, devname, mode="passthrough"):
     conf.model = "virtio"
 
 
-def set_vif_host_backend_vhostuser_config(conf, mode, path):
+def set_vif_host_backend_vhostuser_config(conf, mode, path, rx_queue_size,
+                                          tx_queue_size):
     """Populate a LibvirtConfigGuestInterface instance
     with host backend details for vhostuser socket.
+
+    NOTE: @rx_queue_size and @tx_queue_size can be None
     """
     conf.net_type = "vhostuser"
     conf.vhostuser_type = "unix"
     conf.vhostuser_mode = mode
     conf.vhostuser_path = path
+    if rx_queue_size:
+        conf.vhost_rx_queue_size = rx_queue_size
+    if tx_queue_size:
+        conf.vhost_tx_queue_size = tx_queue_size
+
+
+def set_vif_mtu_config(conf, mtu):
+    """Populate a LibvirtConfigGuestInterface instance
+    with network mtu.
+    """
+    conf.mtu = mtu
 
 
 def set_vif_bandwidth_config(conf, inst_type):
@@ -172,3 +181,18 @@ def set_vif_bandwidth_config(conf, inst_type):
         if len(scope) > 1 and scope[0] == 'quota':
             if scope[1] in bandwidth_items:
                 setattr(conf, scope[1], value)
+
+
+def set_numa_memnode(conf, guest_node_id, host_cell_id):
+    """Prepares numa memory node config for the guest.
+    """
+    conf.cellid = guest_node_id
+    conf.nodeset = [host_cell_id]
+    conf.mode = "strict"
+
+
+def set_vcpu_realtime_scheduler(conf, vcpus_rt, priority):
+    """Prepares realtime config for the guest."""
+    conf.vcpus = vcpus_rt
+    conf.scheduler = "fifo"
+    conf.priority = priority

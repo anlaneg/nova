@@ -9,6 +9,10 @@ End user guide
    :maxdepth: 1
 
    launch-instances
+   config-drive
+   metadata-service
+   certificate-validation
+   resize
 
 .. todo:: The rest of this document should probably move to the admin guide.
 
@@ -61,11 +65,6 @@ Once you are running nova, the following information is extremely useful.
 
 * :doc:`Admin Guide </admin/index>`: A collection of guides for administrating
   nova.
-
-  .. warning::
-
-     This guide was imported during the Pike cycle and is a bit out of
-     date. It will be updated during Queens to be more accurate.
 
 * :doc:`Upgrades </user/upgrade>`: How nova is designed to be upgraded for minimal
   service impact, and the order you should do them in.

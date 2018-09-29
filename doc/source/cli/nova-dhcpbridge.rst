@@ -7,9 +7,7 @@ Handles Lease Database updates from DHCP servers
 ------------------------------------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-09-27
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,12 +21,15 @@ Synopsis
 Description
 ===========
 
-`nova-dhcpbridge` is an application that handles lease database updates from
-DHCP servers. `nova-dhcpbridge` is used whenever nova is managing DHCP (vlan
-and flatDHCP). `nova-dhcpbridge` should not be run as a daemon.
+:program:`nova-dhcpbridge` is an application that handles lease database
+updates from DHCP servers. :program:`nova-dhcpbridge` is used whenever nova is
+managing DHCP (vlan and flatDHCP). :program:`nova-dhcpbridge` should not be run
+as a daemon.
 
-.. warning:: This application is only for use with nova-network, which is
-    not recommended for new deployments.
+.. warning::
+
+   This application is only for use with ``nova-network``, which is not
+   recommended for new deployments.
 
 Options
 =======
@@ -47,7 +48,7 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

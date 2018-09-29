@@ -1,4 +1,4 @@
-# Copyright 2014, 2017 IBM Corp.
+# Copyright 2014, 2018 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -15,6 +15,7 @@
 
 from oslo_log import log as logging
 from oslo_utils import excutils
+from oslo_utils import importutils
 from pypowervm import adapter as pvm_apt
 from pypowervm import const as pvm_const
 from pypowervm import exceptions as pvm_exc
@@ -27,22 +28,32 @@ from pypowervm.wrappers import managed_system as pvm_ms
 import six
 from taskflow.patterns import linear_flow as tf_lf
 
+from nova.compute import task_states
 from nova import conf as cfg
 from nova.console import type as console_type
 from nova import exception as exc
+from nova.i18n import _
 from nova import image
 from nova.virt import configdrive
 from nova.virt import driver
-from nova.virt.powervm.disk import ssp
 from nova.virt.powervm import host as pvm_host
 from nova.virt.powervm.tasks import base as tf_base
+from nova.virt.powervm.tasks import image as tf_img
 from nova.virt.powervm.tasks import network as tf_net
 from nova.virt.powervm.tasks import storage as tf_stg
 from nova.virt.powervm.tasks import vm as tf_vm
 from nova.virt.powervm import vm
+from nova.virt.powervm import volume
+from nova.virt.powervm.volume import fcvscsi
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+
+DISK_ADPT_NS = 'nova.virt.powervm.disk'
+DISK_ADPT_MAPPINGS = {
+    'localdisk': 'localdisk.LocalStorage',
+    'ssp': 'ssp.SSPDiskAdapter'
+}
 
 
 class PowerVMDriver(driver.ComputeDriver):
@@ -52,6 +63,20 @@ class PowerVMDriver(driver.ComputeDriver):
     """
 
     def __init__(self, virtapi):
+        # NOTE(edmondsw) some of these will be dynamic in future, so putting
+        # capabilities on the instance rather than on the class.
+        self.capabilities = {
+            'has_imagecache': False,
+            'supports_evacuate': False,
+            'supports_migrate_to_same_host': False,
+            'supports_attach_interface': True,
+            'supports_device_tagging': False,
+            'supports_tagged_attach_interface': False,
+            'supports_tagged_attach_volume': False,
+            'supports_extend_volume': True,
+            'supports_multiattach': False,
+            'supports_trusted_certs': False,
+        }
         super(PowerVMDriver, self).__init__(virtapi)
 
     def init_host(self, host):
@@ -75,9 +100,9 @@ class PowerVMDriver(driver.ComputeDriver):
         pvm_stor.ComprehensiveScrub(self.adapter).execute()
 
         # Initialize the disk adapter
-        # TODO(efried): Other disk adapters (localdisk), by conf selection.
-        self.disk_dvr = ssp.SSPDiskAdapter(self.adapter,
-                                           self.host_wrapper.uuid)
+        self.disk_dvr = importutils.import_object_ns(
+            DISK_ADPT_NS, DISK_ADPT_MAPPINGS[CONF.powervm.disk_driver.lower()],
+            self.adapter, self.host_wrapper.uuid)
         self.image_api = image.API()
 
         LOG.info("The PowerVM compute driver has been initialized.")
@@ -193,6 +218,16 @@ class PowerVMDriver(driver.ComputeDriver):
         flow_spawn.add(tf_stg.AttachDisk(
             self.disk_dvr, instance, stg_ftsk=stg_ftsk))
 
+        # Extract the block devices.
+        bdms = driver.block_device_info_get_mapping(block_device_info)
+
+        # Determine if there are volumes to connect.  If so, add a connection
+        # for each type.
+        for bdm, vol_drv in self._vol_drv_iter(context, instance, bdms,
+                                               stg_ftsk=stg_ftsk):
+            # Connect the volume.  This will update the connection_info.
+            flow_spawn.add(tf_stg.AttachVolume(vol_drv))
+
         # If the config drive is needed, add those steps.  Should be done
         # after all the other I/O.
         if configdrive.required_by(instance):
@@ -253,7 +288,14 @@ class PowerVMDriver(driver.ComputeDriver):
                 flow.add(tf_stg.DeleteVOpt(
                     self.adapter, instance, stg_ftsk=stg_ftsk))
 
-            # TODO(thorst, efried) Add volume disconnect tasks
+            # Extract the block devices.
+            bdms = driver.block_device_info_get_mapping(block_device_info)
+
+            # Determine if there are volumes to detach.  If so, remove each
+            # volume (within the transaction manager)
+            for bdm, vol_drv in self._vol_drv_iter(
+                     context, instance, bdms, stg_ftsk=stg_ftsk):
+                flow.add(tf_stg.DetachVolume(vol_drv))
 
             # Detach the disk storage adapters
             flow.add(tf_stg.DetachDisk(self.disk_dvr, instance))
@@ -281,6 +323,56 @@ class PowerVMDriver(driver.ComputeDriver):
             LOG.exception("PowerVM error during destroy.", instance=instance)
             # Convert to a Nova exception
             raise exc.InstanceTerminationFailure(reason=six.text_type(e))
+
+    def snapshot(self, context, instance, image_id, update_task_state):
+        """Snapshots the specified instance.
+
+        :param context: security context
+        :param instance: nova.objects.instance.Instance
+        :param image_id: Reference to a pre-created image that will hold the
+                         snapshot.
+        :param update_task_state: Callback function to update the task_state
+            on the instance while the snapshot operation progresses. The
+            function takes a task_state argument and an optional
+            expected_task_state kwarg which defaults to
+            nova.compute.task_states.IMAGE_SNAPSHOT. See
+            nova.objects.instance.Instance.save for expected_task_state usage.
+        """
+
+        if not self.disk_dvr.capabilities.get('snapshot'):
+            raise exc.NotSupportedWithOption(
+                message=_("The snapshot operation is not supported in "
+                          "conjunction with a [powervm]/disk_driver setting "
+                          "of %s.") % CONF.powervm.disk_driver)
+
+        self._log_operation('snapshot', instance)
+
+        # Define the flow.
+        flow = tf_lf.Flow("snapshot")
+
+        # Notify that we're starting the process.
+        flow.add(tf_img.UpdateTaskState(update_task_state,
+                                        task_states.IMAGE_PENDING_UPLOAD))
+
+        # Connect the instance's boot disk to the management partition, and
+        # scan the scsi bus and bring the device into the management partition.
+        flow.add(tf_stg.InstanceDiskToMgmt(self.disk_dvr, instance))
+
+        # Notify that the upload is in progress.
+        flow.add(tf_img.UpdateTaskState(
+            update_task_state, task_states.IMAGE_UPLOADING,
+            expected_state=task_states.IMAGE_PENDING_UPLOAD))
+
+        # Stream the disk to glance.
+        flow.add(tf_img.StreamToGlance(context, self.image_api, image_id,
+                                       instance))
+
+        # Disconnect the boot disk from the management partition and delete the
+        # device.
+        flow.add(tf_stg.RemoveInstanceDiskFromMgmt(self.disk_dvr, instance))
+
+        # Run the flow.
+        tf_base.run(flow, instance=instance)
 
     def power_off(self, instance, timeout=0, retry_interval=0):
         """Power off the specified instance.
@@ -328,6 +420,61 @@ class PowerVMDriver(driver.ComputeDriver):
         # pypowervm exceptions are sufficient to indicate real failure.
         # Otherwise, pypowervm thinks the instance is up.
 
+    def attach_interface(self, context, instance, image_meta, vif):
+        """Attach an interface to the instance."""
+        self.plug_vifs(instance, [vif])
+
+    def detach_interface(self, context, instance, vif):
+        """Detach an interface from the instance."""
+        self.unplug_vifs(instance, [vif])
+
+    def plug_vifs(self, instance, network_info):
+        """Plug VIFs into networks."""
+        self._log_operation('plug_vifs', instance)
+
+        # Define the flow
+        flow = tf_lf.Flow("plug_vifs")
+
+        # Get the LPAR Wrapper
+        flow.add(tf_vm.Get(self.adapter, instance))
+
+        # Run the attach
+        flow.add(tf_net.PlugVifs(self.virtapi, self.adapter, instance,
+                                 network_info))
+
+        # Run the flow
+        try:
+            tf_base.run(flow, instance=instance)
+        except exc.InstanceNotFound:
+            raise exc.VirtualInterfacePlugException(
+                _("Plug vif failed because instance %s was not found.")
+                % instance.name)
+        except Exception:
+            LOG.exception("PowerVM error plugging vifs.", instance=instance)
+            raise exc.VirtualInterfacePlugException(
+                _("Plug vif failed because of an unexpected error."))
+
+    def unplug_vifs(self, instance, network_info):
+        """Unplug VIFs from networks."""
+        self._log_operation('unplug_vifs', instance)
+
+        # Define the flow
+        flow = tf_lf.Flow("unplug_vifs")
+
+        # Run the detach
+        flow.add(tf_net.UnplugVifs(self.adapter, instance, network_info))
+
+        # Run the flow
+        try:
+            tf_base.run(flow, instance=instance)
+        except exc.InstanceNotFound:
+            LOG.warning('VM was not found during unplug operation as it is '
+                        'already possibly deleted.', instance=instance)
+        except Exception:
+            LOG.exception("PowerVM error trying to unplug vifs.",
+                          instance=instance)
+            raise exc.InterfaceDetachFailed(instance_uuid=instance.uuid)
+
     def get_vnc_console(self, context, instance):
         """Get connection info for a vnc console.
 
@@ -365,3 +512,112 @@ class PowerVMDriver(driver.ComputeDriver):
         :returns: Boolean value. If True deallocate networks on reschedule.
         """
         return True
+
+    def attach_volume(self, context, connection_info, instance, mountpoint,
+                      disk_bus=None, device_type=None, encryption=None):
+        """Attach the volume to the instance using the connection_info.
+
+        :param context: security context
+        :param connection_info: Volume connection information from the block
+                                device mapping
+        :param instance: nova.objects.instance.Instance
+        :param mountpoint: Unused
+        :param disk_bus: Unused
+        :param device_type: Unused
+        :param encryption: Unused
+        """
+        self._log_operation('attach_volume', instance)
+
+        # Define the flow
+        flow = tf_lf.Flow("attach_volume")
+
+        # Build the driver
+        vol_drv = volume.build_volume_driver(self.adapter, instance,
+                                             connection_info)
+
+        # Add the volume attach to the flow.
+        flow.add(tf_stg.AttachVolume(vol_drv))
+
+        # Run the flow
+        tf_base.run(flow, instance=instance)
+
+        # The volume connector may have updated the system metadata.  Save
+        # the instance to persist the data.  Spawn/destroy auto saves instance,
+        # but the attach does not.  Detach does not need this save - as the
+        # detach flows do not (currently) modify system metadata.  May need
+        # to revise in the future as volume connectors evolve.
+        instance.save()
+
+    def detach_volume(self, context, connection_info, instance, mountpoint,
+                      encryption=None):
+        """Detach the volume attached to the instance.
+
+        :param context: security context
+        :param connection_info: Volume connection information from the block
+                                device mapping
+        :param instance: nova.objects.instance.Instance
+        :param mountpoint: Unused
+        :param encryption: Unused
+        """
+        self._log_operation('detach_volume', instance)
+
+        # Define the flow
+        flow = tf_lf.Flow("detach_volume")
+
+        # Get a volume adapter for this volume
+        vol_drv = volume.build_volume_driver(self.adapter, instance,
+                                             connection_info)
+
+        # Add a task to detach the volume
+        flow.add(tf_stg.DetachVolume(vol_drv))
+
+        # Run the flow
+        tf_base.run(flow, instance=instance)
+
+    def extend_volume(self, connection_info, instance):
+        """Extend the disk attached to the instance.
+
+        :param dict connection_info: The connection for the extended volume.
+        :param nova.objects.instance.Instance instance:
+            The instance whose volume gets extended.
+        :return: None
+        """
+
+        vol_drv = volume.build_volume_driver(
+            self.adapter, instance, connection_info)
+        vol_drv.extend_volume()
+
+    def _vol_drv_iter(self, context, instance, bdms, stg_ftsk=None):
+        """Yields a bdm and volume driver.
+
+        :param context: security context
+        :param instance: nova.objects.instance.Instance
+        :param bdms: block device mappings
+        :param stg_ftsk: storage FeedTask
+        """
+        # Get a volume driver for each volume
+        for bdm in bdms or []:
+            conn_info = bdm.get('connection_info')
+            vol_drv = volume.build_volume_driver(self.adapter, instance,
+                                                 conn_info, stg_ftsk=stg_ftsk)
+            yield bdm, vol_drv
+
+    def get_volume_connector(self, instance):
+        """Get connector information for the instance for attaching to volumes.
+
+        Connector information is a dictionary representing information about
+        the system that will be making the connection.
+
+        :param instance: nova.objects.instance.Instance
+        """
+        # Put the values in the connector
+        connector = {}
+        wwpn_list = fcvscsi.wwpns(self.adapter)
+
+        if wwpn_list is not None:
+            connector["wwpns"] = wwpn_list
+        connector["multipath"] = False
+        connector['host'] = CONF.host
+        connector['initiator'] = None
+
+        return connector

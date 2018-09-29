@@ -13,13 +13,14 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel
 from oslo_utils import timeutils
 
 from nova import exception
 from nova.objects import aggregate
+from nova import test
 from nova.tests.unit import fake_notifier
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel
 
 
 NOW = timeutils.utcnow().replace(microsecond=0)
@@ -96,8 +97,9 @@ class _TestAggregateObject(object):
         agg.destroy()
         api_delete_mock.assert_called_with(self.context, 123)
 
+    @mock.patch('nova.compute.utils.notify_about_aggregate_action')
     @mock.patch('nova.objects.aggregate._aggregate_update_to_db')
-    def test_save_to_api(self, api_update_mock):
+    def test_save_to_api(self, api_update_mock, mock_notify):
         api_update_mock.return_value = fake_aggregate
         agg = aggregate.Aggregate(context=self.context)
         agg.id = 123
@@ -111,6 +113,15 @@ class _TestAggregateObject(object):
         api_update_mock.assert_called_once_with(self.context,
             123, {'name': 'fake-api-aggregate'})
 
+        mock_notify.assert_has_calls([
+            mock.call(context=self.context,
+                      aggregate=test.MatchType(aggregate.Aggregate),
+                      action='update_prop', phase='start'),
+            mock.call(context=self.context,
+                      aggregate=test.MatchType(aggregate.Aggregate),
+                      action='update_prop', phase='end')])
+        self.assertEqual(2, mock_notify.call_count)
+
     def test_save_and_create_no_hosts(self):
         agg = aggregate.Aggregate(context=self.context)
         agg.id = 123
@@ -122,7 +133,13 @@ class _TestAggregateObject(object):
 
     @mock.patch('nova.objects.aggregate._metadata_delete_from_db')
     @mock.patch('nova.objects.aggregate._metadata_add_to_db')
-    def test_update_metadata_api(self, mock_api_metadata_add,
+    @mock.patch('nova.compute.utils.notify_about_aggregate_action')
+    @mock.patch('oslo_versionedobjects.base.VersionedObject.'
+                'obj_from_primitive')
+    def test_update_metadata_api(self,
+                                 mock_obj_from_primitive,
+                                 mock_notify,
+                                 mock_api_metadata_add,
                                  mock_api_metadata_delete):
         fake_notifier.NOTIFICATIONS = []
         agg = aggregate.Aggregate()
@@ -130,6 +147,8 @@ class _TestAggregateObject(object):
         agg.id = 123
         agg.metadata = {'foo': 'bar'}
         agg.obj_reset_changes()
+        mock_obj_from_primitive.return_value = agg
+
         agg.update_metadata({'todelete': None, 'toadd': 'myval'})
         self.assertEqual(2, len(fake_notifier.NOTIFICATIONS))
         msg = fake_notifier.NOTIFICATIONS[0]
@@ -138,6 +157,11 @@ class _TestAggregateObject(object):
                          msg.payload['meta_data'])
         msg = fake_notifier.NOTIFICATIONS[1]
         self.assertEqual('aggregate.updatemetadata.end', msg.event_type)
+        mock_notify.assert_has_calls([
+            mock.call(context=self.context, aggregate=agg,
+                      action='update_metadata', phase='start'),
+            mock.call(context=self.context, aggregate=agg,
+                      action='update_metadata', phase='end')])
         self.assertEqual({'todelete': None, 'toadd': 'myval'},
                          msg.payload['meta_data'])
         self.assertEqual({'foo': 'bar', 'toadd': 'myval'}, agg.metadata)
@@ -192,7 +216,7 @@ class _TestAggregateObject(object):
         self.assertEqual(1, len(aggs))
         self.compare_obj(aggs[0], fake_aggregate, subs=SUBS)
 
-    @mock.patch('nova.objects.aggregate._get_by_metadata_key_from_db')
+    @mock.patch('nova.objects.aggregate._get_by_metadata_from_db')
     def test_get_by_metadata_key(self, mock_api_get_by_metadata_key):
         mock_api_get_by_metadata_key.return_value = [fake_aggregate]
         aggs = aggregate.AggregateList.get_by_metadata_key(
@@ -200,14 +224,14 @@ class _TestAggregateObject(object):
         self.assertEqual(1, len(aggs))
         self.compare_obj(aggs[0], fake_aggregate, subs=SUBS)
 
-    @mock.patch('nova.objects.aggregate._get_by_metadata_key_from_db')
+    @mock.patch('nova.objects.aggregate._get_by_metadata_from_db')
     def test_get_by_metadata_key_and_hosts_no_match(self, get_by_metadata_key):
         get_by_metadata_key.return_value = [fake_aggregate]
         aggs = aggregate.AggregateList.get_by_metadata_key(
             self.context, 'this', hosts=['baz'])
         self.assertEqual(0, len(aggs))
 
-    @mock.patch('nova.objects.aggregate._get_by_metadata_key_from_db')
+    @mock.patch('nova.objects.aggregate._get_by_metadata_from_db')
     def test_get_by_metadata_key_and_hosts_match(self, get_by_metadata_key):
         get_by_metadata_key.return_value = [fake_aggregate]
         aggs = aggregate.AggregateList.get_by_metadata_key(

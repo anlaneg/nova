@@ -15,6 +15,7 @@
 import io
 import os
 
+from nova import objects
 from nova.virt.libvirt import utils as libvirt_utils
 
 
@@ -24,6 +25,7 @@ disk_backing_files = {}
 disk_type = "qcow2"
 
 RESIZE_SNAPSHOT_NAME = libvirt_utils.RESIZE_SNAPSHOT_NAME
+CPU_TRAITS_MAPPING = libvirt_utils.CPU_TRAITS_MAPPING
 
 
 def create_image(disk_format, path, size):
@@ -134,12 +136,14 @@ def get_fs_info(path):
             'free': 84 * (1024 ** 3)}
 
 
-def fetch_image(context, target, image_id, max_size=0):
-    pass
+def fetch_image(context, target, image_id, trusted_certs=None):
+    if trusted_certs is not None:
+        assert isinstance(trusted_certs, objects.TrustedCerts)
 
 
-def fetch_raw_image(context, target, image_id, max_size=0):
-    pass
+def fetch_raw_image(context, target, image_id, trusted_certs=None):
+    if trusted_certs is not None:
+        assert isinstance(trusted_certs, objects.TrustedCerts)
 
 
 def get_instance_path(instance, relative=False):
@@ -165,3 +169,11 @@ def chown_for_id_maps(path, id_maps):
 
 def get_arch(image_meta):
     return libvirt_utils.get_arch(image_meta)
+
+
+def version_to_string(version):
+    return libvirt_utils.version_to_string(version)
+
+
+def cpu_features_to_traits(features):
+    return libvirt_utils.cpu_features_to_traits(features)

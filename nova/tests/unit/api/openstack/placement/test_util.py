@@ -16,23 +16,31 @@
 import datetime
 
 import fixtures
+import microversion_parse
 import mock
+from oslo_config import cfg
 from oslo_middleware import request_id
+from oslo_utils.fixture import uuidsentinel
 from oslo_utils import timeutils
+import testtools
 import webob
 
 import six
-import six.moves.urllib.parse as urlparse
 
+from nova.api.openstack.placement import exception
 from nova.api.openstack.placement import lib as pl
 from nova.api.openstack.placement import microversion
+from nova.api.openstack.placement.objects import consumer as consumer_obj
+from nova.api.openstack.placement.objects import project as project_obj
+from nova.api.openstack.placement.objects import resource_provider as rp_obj
+from nova.api.openstack.placement.objects import user as user_obj
 from nova.api.openstack.placement import util
-from nova.objects import resource_provider as rp_obj
-from nova import test
-from nova.tests import uuidsentinel
 
 
-class TestCheckAccept(test.NoDBTestCase):
+CONF = cfg.CONF
+
+
+class TestCheckAccept(testtools.TestCase):
     """Confirm behavior of util.check_accept."""
 
     @staticmethod
@@ -81,7 +89,7 @@ class TestCheckAccept(test.NoDBTestCase):
         self.assertTrue(self.handler(req))
 
 
-class TestExtractJSON(test.NoDBTestCase):
+class TestExtractJSON(testtools.TestCase):
 
     # Although the intent of this test class is not to test that
     # schemas work, we may as well use a real one to ensure that
@@ -147,7 +155,7 @@ class TestExtractJSON(test.NoDBTestCase):
         self.assertEqual(uuidsentinel.rp_uuid, data['uuid'])
 
 
-class QueryParamsSchemaTestCase(test.NoDBTestCase):
+class QueryParamsSchemaTestCase(testtools.TestCase):
 
     def test_validate_request(self):
         schema = {
@@ -163,7 +171,7 @@ class QueryParamsSchemaTestCase(test.NoDBTestCase):
         self.assertIn('Invalid query string parameters', six.text_type(error))
 
 
-class TestJSONErrorFormatter(test.NoDBTestCase):
+class TestJSONErrorFormatter(testtools.TestCase):
 
     def setUp(self):
         super(TestJSONErrorFormatter, self).setUp()
@@ -228,7 +236,7 @@ class TestJSONErrorFormatter(test.NoDBTestCase):
         # parsing was successful), no version info
         # required.
         status = '406 Not Acceptable'
-        version_obj = microversion.parse_version_string('2.3')
+        version_obj = microversion_parse.parse_version_string('2.3')
         self.environ[microversion.MICROVERSION_ENVIRON] = version_obj
 
         result = util.json_error_formatter(
@@ -247,7 +255,7 @@ class TestJSONErrorFormatter(test.NoDBTestCase):
                          result['errors'][0]['min_version'])
 
 
-class TestRequireContent(test.NoDBTestCase):
+class TestRequireContent(testtools.TestCase):
     """Confirm behavior of util.require_accept."""
 
     @staticmethod
@@ -281,7 +289,7 @@ class TestRequireContent(test.NoDBTestCase):
         self.assertTrue(self.handler(req))
 
 
-class TestPlacementURLs(test.NoDBTestCase):
+class TestPlacementURLs(testtools.TestCase):
 
     def setUp(self):
         super(TestPlacementURLs, self).setUp()
@@ -337,7 +345,7 @@ class TestPlacementURLs(test.NoDBTestCase):
             environ, self.resource_class))
 
 
-class TestNormalizeResourceQsParam(test.NoDBTestCase):
+class TestNormalizeResourceQsParam(testtools.TestCase):
 
     def test_success(self):
         qs = "VCPU:1"
@@ -389,7 +397,7 @@ class TestNormalizeResourceQsParam(test.NoDBTestCase):
         )
 
 
-class TestNormalizeTraitsQsParam(test.NoDBTestCase):
+class TestNormalizeTraitsQsParam(testtools.TestCase):
 
     def test_one(self):
         trait = 'HW_CPU_X86_VMX'
@@ -426,23 +434,32 @@ class TestNormalizeTraitsQsParam(test.NoDBTestCase):
                               util.normalize_traits_qs_param, fmt % traits)
 
 
-class TestParseQsResourcesAndTraits(test.NoDBTestCase):
+class TestParseQsRequestGroups(testtools.TestCase):
 
     @staticmethod
-    def do_parse(qstring):
+    def do_parse(qstring, version=(1, 18)):
         """Converts a querystring to a MultiDict, mimicking request.GET, and
         runs parse_qs_request_groups on it.
         """
-        return util.parse_qs_request_groups(webob.multidict.MultiDict(
-            urlparse.parse_qsl(qstring)))
+        req = webob.Request.blank('?' + qstring)
+        mv_parsed = microversion_parse.Version(*version)
+        mv_parsed.max_version = microversion_parse.parse_version_string(
+            microversion.max_version_string())
+        mv_parsed.min_version = microversion_parse.parse_version_string(
+            microversion.min_version_string())
+        req.environ['placement.microversion'] = mv_parsed
+        d = util.parse_qs_request_groups(req)
+        # Sort for easier testing
+        return [d[suff] for suff in sorted(d)]
 
     def assertRequestGroupsEqual(self, expected, observed):
         self.assertEqual(len(expected), len(observed))
         for exp, obs in zip(expected, observed):
             self.assertEqual(vars(exp), vars(obs))
 
-    def test_empty(self):
-        self.assertRequestGroupsEqual([], self.do_parse(''))
+    def test_empty_raises(self):
+        # TODO(efried): Check the specific error code
+        self.assertRaises(webob.exc.HTTPBadRequest, self.do_parse, '')
 
     def test_unnumbered_only(self):
         """Unnumbered resources & traits - no numbered groupings."""
@@ -462,6 +479,59 @@ class TestParseQsResourcesAndTraits(test.NoDBTestCase):
             ),
         ]
         self.assertRequestGroupsEqual(expected, self.do_parse(qs))
+
+    def test_member_of_single_agg(self):
+        """Unnumbered resources with one member_of query param."""
+        agg1_uuid = uuidsentinel.agg1
+        qs = ('resources=VCPU:2,MEMORY_MB:2048'
+              '&member_of=%s' % agg1_uuid)
+        expected = [
+            pl.RequestGroup(
+                use_same_provider=False,
+                resources={
+                    'VCPU': 2,
+                    'MEMORY_MB': 2048,
+                },
+                member_of=[
+                    set([agg1_uuid])
+                ]
+            ),
+        ]
+        self.assertRequestGroupsEqual(expected, self.do_parse(qs))
+
+    def test_member_of_multiple_aggs_prior_microversion(self):
+        """Unnumbered resources with multiple member_of query params before the
+        supported microversion should raise a 400.
+        """
+        agg1_uuid = uuidsentinel.agg1
+        agg2_uuid = uuidsentinel.agg2
+        qs = ('resources=VCPU:2,MEMORY_MB:2048'
+              '&member_of=%s'
+              '&member_of=%s' % (agg1_uuid, agg2_uuid))
+        self.assertRaises(webob.exc.HTTPBadRequest, self.do_parse, qs)
+
+    def test_member_of_multiple_aggs(self):
+        """Unnumbered resources with multiple member_of query params."""
+        agg1_uuid = uuidsentinel.agg1
+        agg2_uuid = uuidsentinel.agg2
+        qs = ('resources=VCPU:2,MEMORY_MB:2048'
+              '&member_of=%s'
+              '&member_of=%s' % (agg1_uuid, agg2_uuid))
+        expected = [
+            pl.RequestGroup(
+                use_same_provider=False,
+                resources={
+                    'VCPU': 2,
+                    'MEMORY_MB': 2048,
+                },
+                member_of=[
+                    set([agg1_uuid]),
+                    set([agg2_uuid])
+                ]
+            ),
+        ]
+        self.assertRequestGroupsEqual(
+            expected, self.do_parse(qs, version=(1, 24)))
 
     def test_unnumbered_resources_only(self):
         """Validate the bit that can be used for 1.10 and earlier."""
@@ -565,6 +635,40 @@ class TestParseQsResourcesAndTraits(test.NoDBTestCase):
         ]
         self.assertRequestGroupsEqual(expected, self.do_parse(qs))
 
+    def test_member_of_multiple_aggs_numbered(self):
+        """Numbered resources with multiple member_of query params."""
+        agg1_uuid = uuidsentinel.agg1
+        agg2_uuid = uuidsentinel.agg2
+        agg3_uuid = uuidsentinel.agg3
+        agg4_uuid = uuidsentinel.agg4
+        qs = ('resources1=VCPU:2'
+              '&member_of1=%s'
+              '&member_of1=%s'
+              '&resources2=VCPU:2'
+              '&member_of2=in:%s,%s' % (
+                  agg1_uuid, agg2_uuid, agg3_uuid, agg4_uuid))
+        expected = [
+            pl.RequestGroup(
+                resources={
+                    'VCPU': 2,
+                },
+                member_of=[
+                    set([agg1_uuid]),
+                    set([agg2_uuid])
+                ]
+            ),
+            pl.RequestGroup(
+                resources={
+                    'VCPU': 2,
+                },
+                member_of=[
+                    set([agg3_uuid, agg4_uuid]),
+                ]
+            ),
+        ]
+        self.assertRequestGroupsEqual(
+            expected, self.do_parse(qs, version=(1, 24)))
+
     def test_400_malformed_resources(self):
         # Somewhat duplicates TestNormalizeResourceQsParam.test_400*.
         qs = ('resources=VCPU:0,MEMORY_MB:4096,DISK_GB:10'
@@ -616,8 +720,111 @@ class TestParseQsResourcesAndTraits(test.NoDBTestCase):
               '&resources3=CUSTOM_MAGIC:123')
         self.assertRaises(webob.exc.HTTPBadRequest, self.do_parse, qs)
 
+    def test_400_member_of_no_resources_numbered(self):
+        agg1_uuid = uuidsentinel.agg1
+        qs = ('resources=VCPU:7,MEMORY_MB:4096,DISK_GB:10'
+              '&required=HW_CPU_X86_VMX,CUSTOM_MEM_FLASH,STORAGE_DISK_SSD'
+              '&member_of2=%s' % agg1_uuid)
+        self.assertRaises(webob.exc.HTTPBadRequest, self.do_parse, qs)
 
-class TestPickLastModified(test.NoDBTestCase):
+    def test_forbidden_one_group(self):
+        """When forbidden are allowed this will parse, but otherwise will
+        indicate an invalid trait.
+        """
+        qs = ('resources=VCPU:2,MEMORY_MB:2048'
+              '&required=CUSTOM_PHYSNET1,!CUSTOM_SWITCH_BIG')
+        expected_forbidden = [
+            pl.RequestGroup(
+                use_same_provider=False,
+                resources={
+                    'VCPU': 2,
+                    'MEMORY_MB': 2048,
+                },
+                required_traits={
+                    'CUSTOM_PHYSNET1',
+                },
+                forbidden_traits={
+                    'CUSTOM_SWITCH_BIG',
+                }
+            ),
+        ]
+        expected_message = (
+            "Invalid query string parameters: Expected 'required' parameter "
+            "value of the form: HW_CPU_X86_VMX,CUSTOM_MAGIC. Got: "
+            "CUSTOM_PHYSNET1,!CUSTOM_SWITCH_BIG")
+        exc = self.assertRaises(webob.exc.HTTPBadRequest, self.do_parse, qs)
+        self.assertEqual(expected_message, six.text_type(exc))
+        self.assertRequestGroupsEqual(
+            expected_forbidden, self.do_parse(qs, version=(1, 22)))
+
+    def test_forbidden_conflict(self):
+        qs = ('resources=VCPU:2,MEMORY_MB:2048'
+              '&required=CUSTOM_PHYSNET1,!CUSTOM_PHYSNET1')
+
+        expected_message = (
+            'Conflicting required and forbidden traits found '
+            'in the following traits keys: required: (CUSTOM_PHYSNET1)')
+
+        exc = self.assertRaises(webob.exc.HTTPBadRequest, self.do_parse, qs,
+            version=(1, 22))
+        self.assertEqual(expected_message, six.text_type(exc))
+
+    def test_forbidden_two_groups(self):
+        qs = ('resources=VCPU:2,MEMORY_MB:2048&resources1=CUSTOM_MAGIC:1'
+              '&required1=CUSTOM_PHYSNET1,!CUSTOM_PHYSNET2')
+        expected = [
+            pl.RequestGroup(
+                use_same_provider=False,
+                resources={
+                    'VCPU': 2,
+                    'MEMORY_MB': 2048,
+                },
+            ),
+            pl.RequestGroup(
+                resources={
+                    'CUSTOM_MAGIC': 1,
+                },
+                required_traits={
+                    'CUSTOM_PHYSNET1',
+                },
+                forbidden_traits={
+                    'CUSTOM_PHYSNET2',
+                }
+            ),
+        ]
+
+        self.assertRequestGroupsEqual(
+            expected, self.do_parse(qs, version=(1, 22)))
+
+    def test_forbidden_separate_groups_no_conflict(self):
+        qs = ('resources1=CUSTOM_MAGIC:1&required1=CUSTOM_PHYSNET1'
+              '&resources2=CUSTOM_MAGIC:1&required2=!CUSTOM_PHYSNET1')
+        expected = [
+            pl.RequestGroup(
+                use_same_provider=True,
+                resources={
+                    'CUSTOM_MAGIC': 1,
+                },
+                required_traits={
+                    'CUSTOM_PHYSNET1',
+                }
+            ),
+            pl.RequestGroup(
+                use_same_provider=True,
+                resources={
+                    'CUSTOM_MAGIC': 1,
+                },
+                forbidden_traits={
+                    'CUSTOM_PHYSNET1',
+                }
+            ),
+        ]
+
+        self.assertRequestGroupsEqual(
+            expected, self.do_parse(qs, version=(1, 22)))
+
+
+class TestPickLastModified(testtools.TestCase):
 
     def setUp(self):
         super(TestPickLastModified, self).setUp()
@@ -695,3 +902,189 @@ class TestPickLastModified(test.NoDBTestCase):
                 None, self.resource_provider)
             self.assertEqual(now, chosen_time)
             mock_utc.assert_called_once_with(with_timezone=True)
+
+
+class TestEnsureConsumer(testtools.TestCase):
+    def setUp(self):
+        super(TestEnsureConsumer, self).setUp()
+        self.mock_project_get = self.useFixture(fixtures.MockPatch(
+            'nova.api.openstack.placement.objects.project.'
+            'Project.get_by_external_id')).mock
+        self.mock_user_get = self.useFixture(fixtures.MockPatch(
+            'nova.api.openstack.placement.objects.user.'
+            'User.get_by_external_id')).mock
+        self.mock_consumer_get = self.useFixture(fixtures.MockPatch(
+            'nova.api.openstack.placement.objects.consumer.'
+            'Consumer.get_by_uuid')).mock
+        self.mock_project_create = self.useFixture(fixtures.MockPatch(
+            'nova.api.openstack.placement.objects.project.'
+            'Project.create')).mock
+        self.mock_user_create = self.useFixture(fixtures.MockPatch(
+            'nova.api.openstack.placement.objects.user.'
+            'User.create')).mock
+        self.mock_consumer_create = self.useFixture(fixtures.MockPatch(
+            'nova.api.openstack.placement.objects.consumer.'
+            'Consumer.create')).mock
+        self.ctx = mock.sentinel.ctx
+        self.consumer_id = uuidsentinel.consumer
+        self.project_id = uuidsentinel.project
+        self.user_id = uuidsentinel.user
+        mv_parsed = microversion_parse.Version(1, 27)
+        mv_parsed.max_version = microversion_parse.parse_version_string(
+            microversion.max_version_string())
+        mv_parsed.min_version = microversion_parse.parse_version_string(
+            microversion.min_version_string())
+        self.before_version = mv_parsed
+        mv_parsed = microversion_parse.Version(1, 28)
+        mv_parsed.max_version = microversion_parse.parse_version_string(
+            microversion.max_version_string())
+        mv_parsed.min_version = microversion_parse.parse_version_string(
+            microversion.min_version_string())
+        self.after_version = mv_parsed
+
+    def test_no_existing_project_user_consumer_before_gen_success(self):
+        """Tests that we don't require a consumer_generation=None before the
+        appropriate microversion.
+        """
+        self.mock_project_get.side_effect = exception.NotFound
+        self.mock_user_get.side_effect = exception.NotFound
+        self.mock_consumer_get.side_effect = exception.NotFound
+
+        consumer_gen = 1  # should be ignored
+        util.ensure_consumer(
+            self.ctx, self.consumer_id, self.project_id, self.user_id,
+            consumer_gen, self.before_version)
+
+        self.mock_project_get.assert_called_once_with(
+            self.ctx, self.project_id)
+        self.mock_user_get.assert_called_once_with(
+            self.ctx, self.user_id)
+        self.mock_consumer_get.assert_called_once_with(
+            self.ctx, self.consumer_id)
+        self.mock_project_create.assert_called_once()
+        self.mock_user_create.assert_called_once()
+        self.mock_consumer_create.assert_called_once()
+
+    def test_no_existing_project_user_consumer_after_gen_success(self):
+        """Tests that we require a consumer_generation=None after the
+        appropriate microversion.
+        """
+        self.mock_project_get.side_effect = exception.NotFound
+        self.mock_user_get.side_effect = exception.NotFound
+        self.mock_consumer_get.side_effect = exception.NotFound
+
+        consumer_gen = None  # should NOT be ignored (and None is expected)
+        util.ensure_consumer(
+            self.ctx, self.consumer_id, self.project_id, self.user_id,
+            consumer_gen, self.after_version)
+
+        self.mock_project_get.assert_called_once_with(
+            self.ctx, self.project_id)
+        self.mock_user_get.assert_called_once_with(
+            self.ctx, self.user_id)
+        self.mock_consumer_get.assert_called_once_with(
+            self.ctx, self.consumer_id)
+        self.mock_project_create.assert_called_once()
+        self.mock_user_create.assert_called_once()
+        self.mock_consumer_create.assert_called_once()
+
+    def test_no_existing_project_user_consumer_after_gen_fail(self):
+        """Tests that we require a consumer_generation=None after the
+        appropriate microversion and that None is the expected value.
+        """
+        self.mock_project_get.side_effect = exception.NotFound
+        self.mock_user_get.side_effect = exception.NotFound
+        self.mock_consumer_get.side_effect = exception.NotFound
+
+        consumer_gen = 1  # should NOT be ignored (and 1 is not expected)
+        self.assertRaises(
+            webob.exc.HTTPConflict,
+            util.ensure_consumer,
+            self.ctx, self.consumer_id, self.project_id, self.user_id,
+            consumer_gen, self.after_version)
+
+    def test_no_existing_project_user_consumer_use_incomplete(self):
+        """Verify that if the project_id arg is None, that we fall back to the
+        CONF options for incomplete project and user ID.
+        """
+        self.mock_project_get.side_effect = exception.NotFound
+        self.mock_user_get.side_effect = exception.NotFound
+        self.mock_consumer_get.side_effect = exception.NotFound
+
+        consumer_gen = None  # should NOT be ignored (and None is expected)
+        util.ensure_consumer(
+            self.ctx, self.consumer_id, None, None,
+            consumer_gen, self.before_version)
+
+        self.mock_project_get.assert_called_once_with(
+            self.ctx, CONF.placement.incomplete_consumer_project_id)
+        self.mock_user_get.assert_called_once_with(
+            self.ctx, CONF.placement.incomplete_consumer_user_id)
+        self.mock_consumer_get.assert_called_once_with(
+            self.ctx, self.consumer_id)
+        self.mock_project_create.assert_called_once()
+        self.mock_user_create.assert_called_once()
+        self.mock_consumer_create.assert_called_once()
+
+    def test_existing_project_no_existing_consumer_before_gen_success(self):
+        """Check that if we find an existing project and user, that we use
+        those found objects in creating the consumer. Do not require a consumer
+        generation before the appropriate microversion.
+        """
+        proj = project_obj.Project(self.ctx, id=1, external_id=self.project_id)
+        self.mock_project_get.return_value = proj
+        user = user_obj.User(self.ctx, id=1, external_id=self.user_id)
+        self.mock_user_get.return_value = user
+        self.mock_consumer_get.side_effect = exception.NotFound
+
+        consumer_gen = None  # should be ignored
+        util.ensure_consumer(
+            self.ctx, self.consumer_id, self.project_id, self.user_id,
+            consumer_gen, self.before_version)
+
+        self.mock_project_create.assert_not_called()
+        self.mock_user_create.assert_not_called()
+        self.mock_consumer_create.assert_called_once()
+
+    def test_existing_consumer_after_gen_matches_supplied_gen(self):
+        """Tests that we require a consumer_generation after the
+        appropriate microversion and that when the consumer already exists,
+        then we ensure a matching generation is supplied
+        """
+        proj = project_obj.Project(self.ctx, id=1, external_id=self.project_id)
+        self.mock_project_get.return_value = proj
+        user = user_obj.User(self.ctx, id=1, external_id=self.user_id)
+        self.mock_user_get.return_value = user
+        consumer = consumer_obj.Consumer(
+            self.ctx, id=1, project=proj, user=user, generation=2)
+        self.mock_consumer_get.return_value = consumer
+
+        consumer_gen = 2  # should NOT be ignored (and 2 is expected)
+        util.ensure_consumer(
+            self.ctx, self.consumer_id, self.project_id, self.user_id,
+            consumer_gen, self.after_version)
+
+        self.mock_project_create.assert_not_called()
+        self.mock_user_create.assert_not_called()
+        self.mock_consumer_create.assert_not_called()
+
+    def test_existing_consumer_after_gen_fail(self):
+        """Tests that we require a consumer_generation after the
+        appropriate microversion and that when the consumer already exists,
+        then we raise a 400 when there is a mismatch on the existing
+        generation.
+        """
+        proj = project_obj.Project(self.ctx, id=1, external_id=self.project_id)
+        self.mock_project_get.return_value = proj
+        user = user_obj.User(self.ctx, id=1, external_id=self.user_id)
+        self.mock_user_get.return_value = user
+        consumer = consumer_obj.Consumer(
+            self.ctx, id=1, project=proj, user=user, generation=42)
+        self.mock_consumer_get.return_value = consumer
+
+        consumer_gen = 2  # should NOT be ignored (and 2 is NOT expected)
+        self.assertRaises(
+            webob.exc.HTTPConflict,
+            util.ensure_consumer,
+            self.ctx, self.consumer_id, self.project_id, self.user_id,
+            consumer_gen, self.after_version)

@@ -7,9 +7,7 @@ Nova Scheduler
 --------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-09-27
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,8 +21,9 @@ Synopsis
 Description
 ===========
 
-`nova-scheduler` is a server daemon that serves the Nova Scheduler service,
-which is responsible for picking a compute node to run a given instance on.
+:program:`nova-scheduler` is a server daemon that serves the Nova Scheduler
+service, which is responsible for picking a compute node to run a given
+instance on.
 
 Options
 =======
@@ -42,7 +41,7 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

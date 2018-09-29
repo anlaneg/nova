@@ -17,21 +17,21 @@ import mock
 from oslo_config import cfg
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
+from oslo_utils.fixture import uuidsentinel as uuids
 import webob
 
 from nova.api.openstack.compute import security_groups as \
     secgroups_v21
-from nova.api.openstack import wsgi
 from nova import compute
 from nova.compute import power_state
 from nova import context as context_maker
-import nova.db
+import nova.db.api
 from nova import exception
 from nova import objects
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_instance
-from nova.tests import uuidsentinel as uuids
+
 
 CONF = cfg.CONF
 FAKE_UUID1 = 'a47ae74e-ab08-447f-8eee-ffd43fc46c16'
@@ -192,8 +192,8 @@ class TestSecurityGroupsV21(test.TestCase):
             self.controller.create(self.req, {'security_group': sg})
             self.fail('Should have raised BadRequest exception')
         except webob.exc.HTTPBadRequest as exc:
-            self.assertEqual('description has a minimum character requirement'
-                             ' of 1.', exc.explanation)
+            self.assertEqual('description has 0 characters, '
+                             'less than 1.', exc.explanation)
         except exception.InvalidInput:
             self.fail('Should have raised BadRequest exception instead of')
 
@@ -335,7 +335,7 @@ class TestSecurityGroupsV21(test.TestCase):
         def return_security_groups(context, project_id):
             return [security_group_db(sg) for sg in groups]
 
-        self.stub_out('nova.db.security_group_get_by_project',
+        self.stub_out('nova.db.api.security_group_get_by_project',
                       return_security_groups)
 
         path = '/v2/fake/os-security-groups'
@@ -377,15 +377,16 @@ class TestSecurityGroupsV21(test.TestCase):
 
         expected = {'security_groups': [expected]}
 
-        def return_security_groups(context, project, search_opts):
-            return [security_group_db(sg) for sg in groups]
-
-        self.stubs.Set(self.controller.security_group_api, 'list',
-                       return_security_groups)
-
-        res_dict = self.controller.index(self.req)
+        with mock.patch.object(
+                self.controller.security_group_api, 'list',
+                return_value=[
+                    security_group_db(
+                        secgroup) for secgroup in groups]) as mock_list:
+            res_dict = self.controller.index(self.req)
 
         self.assertEqual(res_dict, expected)
+        mock_list.assert_called_once_with(self.req.environ['nova.context'],
+                                          project='fake', search_opts={})
 
     def test_get_security_group_list_all_tenants(self):
         all_groups = []
@@ -406,13 +407,13 @@ class TestSecurityGroupsV21(test.TestCase):
         def return_all_security_groups(context):
             return [security_group_db(sg) for sg in all_groups]
 
-        self.stub_out('nova.db.security_group_get_all',
+        self.stub_out('nova.db.api.security_group_get_all',
                       return_all_security_groups)
 
         def return_tenant_security_groups(context, project_id):
             return [security_group_db(sg) for sg in tenant_groups]
 
-        self.stub_out('nova.db.security_group_get_by_project',
+        self.stub_out('nova.db.api.security_group_get_by_project',
                       return_tenant_security_groups)
 
         path = '/v2/fake/os-security-groups'
@@ -468,14 +469,14 @@ class TestSecurityGroupsV21(test.TestCase):
             self.assertEqual(server_id, FAKE_UUID1)
             return return_server_by_uuid(context, server_id)
 
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       return_instance)
 
         def return_security_groups(context, instance_uuid):
             self.assertEqual(instance_uuid, FAKE_UUID1)
             return [security_group_db(sg) for sg in groups]
 
-        self.stub_out('nova.db.security_group_get_by_instance',
+        self.stub_out('nova.db.api.security_group_get_by_instance',
                       return_security_groups)
 
         # Stub out the security group API get() method to assert that we only
@@ -497,8 +498,8 @@ class TestSecurityGroupsV21(test.TestCase):
 
         self.assertEqual(expected, res_dict)
 
-    @mock.patch('nova.db.instance_get_by_uuid')
-    @mock.patch('nova.db.security_group_get_by_instance', return_value=[])
+    @mock.patch('nova.db.api.instance_get_by_uuid')
+    @mock.patch('nova.db.api.security_group_get_by_instance', return_value=[])
     def test_get_security_group_empty_for_instance(self, mock_sec_group,
                                                    mock_db_get_ins):
         expected = {'security_groups': []}
@@ -514,8 +515,8 @@ class TestSecurityGroupsV21(test.TestCase):
             self.req.environ['nova.context'], FAKE_UUID1)
 
     def test_get_security_group_by_instance_non_existing(self):
-        self.stub_out('nova.db.instance_get', return_server_nonexistent)
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get', return_server_nonexistent)
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       return_server_nonexistent)
         self.assertRaises(webob.exc.HTTPNotFound,
                           self.server_controller.index, self.req, '1')
@@ -531,7 +532,7 @@ class TestSecurityGroupsV21(test.TestCase):
             self.assertEqual(sg['id'], group_id)
             return security_group_db(sg)
 
-        self.stub_out('nova.db.security_group_get',
+        self.stub_out('nova.db.api.security_group_get',
                       return_security_group)
 
         res_dict = self.controller.show(self.req, '2')
@@ -563,9 +564,9 @@ class TestSecurityGroupsV21(test.TestCase):
             self.assertEqual(sg_update['description'], values['description'])
             return security_group_db(sg_update)
 
-        self.stub_out('nova.db.security_group_update',
+        self.stub_out('nova.db.api.security_group_update',
                       return_update_security_group)
-        self.stub_out('nova.db.security_group_get',
+        self.stub_out('nova.db.api.security_group_get',
                       return_security_group)
 
         res_dict = self.controller.update(self.req, '2',
@@ -581,7 +582,7 @@ class TestSecurityGroupsV21(test.TestCase):
             self.assertEqual(sg['id'], group_id)
             return security_group_db(sg)
 
-        self.stub_out('nova.db.security_group_get',
+        self.stub_out('nova.db.api.security_group_get',
                       return_security_group)
 
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
@@ -606,9 +607,9 @@ class TestSecurityGroupsV21(test.TestCase):
             self.assertEqual(sg['id'], group_id)
             return security_group_db(sg)
 
-        self.stub_out('nova.db.security_group_destroy',
+        self.stub_out('nova.db.api.security_group_destroy',
                       security_group_destroy)
-        self.stub_out('nova.db.security_group_get',
+        self.stub_out('nova.db.api.security_group_get',
                       return_security_group)
 
         self.controller.delete(self.req, '1')
@@ -650,9 +651,9 @@ class TestSecurityGroupsV21(test.TestCase):
             self.assertEqual(sg['id'], group_id)
             return security_group_db(sg)
 
-        self.stub_out('nova.db.security_group_in_use',
+        self.stub_out('nova.db.api.security_group_in_use',
                       security_group_in_use)
-        self.stub_out('nova.db.security_group_get',
+        self.stub_out('nova.db.api.security_group_get',
                       return_security_group)
 
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.delete,
@@ -719,9 +720,9 @@ class TestSecurityGroupsV21(test.TestCase):
         self.controller.index(req)
 
     def test_associate_by_non_existing_security_group_name(self):
-        self.stub_out('nova.db.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get', return_server)
         self.assertEqual(return_server(None, '1'),
-                         nova.db.instance_get(None, '1'))
+                         nova.db.api.instance_get(None, '1'))
         body = dict(addSecurityGroup=dict(name='non-existing'))
 
         self.assertRaises(webob.exc.HTTPNotFound,
@@ -735,29 +736,29 @@ class TestSecurityGroupsV21(test.TestCase):
                           'invalid', body)
 
     def test_associate_without_body(self):
-        self.stub_out('nova.db.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get', return_server)
         body = dict(addSecurityGroup=None)
 
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.manager._addSecurityGroup, self.req, '1', body)
 
     def test_associate_no_security_group_name(self):
-        self.stub_out('nova.db.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get', return_server)
         body = dict(addSecurityGroup=dict())
 
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.manager._addSecurityGroup, self.req, '1', body)
 
     def test_associate_security_group_name_with_whitespaces(self):
-        self.stub_out('nova.db.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get', return_server)
         body = dict(addSecurityGroup=dict(name="   "))
 
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.manager._addSecurityGroup, self.req, '1', body)
 
     def test_associate_non_existing_instance(self):
-        self.stub_out('nova.db.instance_get', return_server_nonexistent)
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get', return_server_nonexistent)
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                        return_server_nonexistent)
         body = dict(addSecurityGroup=dict(name="test"))
 
@@ -765,20 +766,20 @@ class TestSecurityGroupsV21(test.TestCase):
                           self.manager._addSecurityGroup, self.req, '1', body)
 
     def test_associate_non_running_instance(self):
-        self.stub_out('nova.db.instance_get', return_non_running_server)
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get', return_non_running_server)
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       return_non_running_server)
-        self.stub_out('nova.db.security_group_get_by_name',
+        self.stub_out('nova.db.api.security_group_get_by_name',
                        return_security_group_without_instances)
         body = dict(addSecurityGroup=dict(name="test"))
 
         self.manager._addSecurityGroup(self.req, UUID_SERVER, body)
 
     def test_associate_already_associated_security_group_to_instance(self):
-        self.stub_out('nova.db.instance_get', return_server)
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       return_server_by_uuid)
-        self.stub_out('nova.db.security_group_get_by_name',
+        self.stub_out('nova.db.api.security_group_get_by_name',
                        return_security_group_by_name)
         body = dict(addSecurityGroup=dict(name="test"))
 
@@ -786,13 +787,13 @@ class TestSecurityGroupsV21(test.TestCase):
                           self.manager._addSecurityGroup, self.req,
                           UUID_SERVER, body)
 
-    @mock.patch.object(nova.db, 'instance_add_security_group')
+    @mock.patch.object(nova.db.api, 'instance_add_security_group')
     def test_associate(self, mock_add_security_group):
-        self.stub_out('nova.db.instance_get', return_server)
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                        return_server_by_uuid)
 
-        self.stub_out('nova.db.security_group_get_by_name',
+        self.stub_out('nova.db.api.security_group_get_by_name',
                        return_security_group_without_instances)
 
         body = dict(addSecurityGroup=dict(name="test"))
@@ -803,9 +804,9 @@ class TestSecurityGroupsV21(test.TestCase):
                                                         mock.ANY)
 
     def test_disassociate_by_non_existing_security_group_name(self):
-        self.stub_out('nova.db.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get', return_server)
         self.assertEqual(return_server(None, '1'),
-                         nova.db.instance_get(None, '1'))
+                         nova.db.api.instance_get(None, '1'))
         body = dict(removeSecurityGroup=dict(name='non-existing'))
 
         self.assertRaises(webob.exc.HTTPNotFound,
@@ -813,7 +814,7 @@ class TestSecurityGroupsV21(test.TestCase):
                           UUID_SERVER, body)
 
     def test_disassociate_by_invalid_server_id(self):
-        self.stub_out('nova.db.security_group_get_by_name',
+        self.stub_out('nova.db.api.security_group_get_by_name',
                       return_security_group_by_name)
         body = dict(removeSecurityGroup=dict(name='test'))
 
@@ -822,7 +823,7 @@ class TestSecurityGroupsV21(test.TestCase):
                           'invalid', body)
 
     def test_disassociate_without_body(self):
-        self.stub_out('nova.db.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get', return_server)
         body = dict(removeSecurityGroup=None)
 
         self.assertRaises(webob.exc.HTTPBadRequest,
@@ -830,7 +831,7 @@ class TestSecurityGroupsV21(test.TestCase):
                           '1', body)
 
     def test_disassociate_no_security_group_name(self):
-        self.stub_out('nova.db.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get', return_server)
         body = dict(removeSecurityGroup=dict())
 
         self.assertRaises(webob.exc.HTTPBadRequest,
@@ -838,7 +839,7 @@ class TestSecurityGroupsV21(test.TestCase):
                           '1', body)
 
     def test_disassociate_security_group_name_with_whitespaces(self):
-        self.stub_out('nova.db.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get', return_server)
         body = dict(removeSecurityGroup=dict(name="   "))
 
         self.assertRaises(webob.exc.HTTPBadRequest,
@@ -846,8 +847,8 @@ class TestSecurityGroupsV21(test.TestCase):
                           '1', body)
 
     def test_disassociate_non_existing_instance(self):
-        self.stub_out('nova.db.instance_get', return_server_nonexistent)
-        self.stub_out('nova.db.security_group_get_by_name',
+        self.stub_out('nova.db.api.instance_get', return_server_nonexistent)
+        self.stub_out('nova.db.api.security_group_get_by_name',
                       return_security_group_by_name)
         body = dict(removeSecurityGroup=dict(name="test"))
 
@@ -856,20 +857,20 @@ class TestSecurityGroupsV21(test.TestCase):
                           self.req, '1', body)
 
     def test_disassociate_non_running_instance(self):
-        self.stub_out('nova.db.instance_get', return_non_running_server)
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get', return_non_running_server)
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       return_non_running_server)
-        self.stub_out('nova.db.security_group_get_by_name',
+        self.stub_out('nova.db.api.security_group_get_by_name',
                        return_security_group_by_name)
         body = dict(removeSecurityGroup=dict(name="test"))
 
         self.manager._removeSecurityGroup(self.req, UUID_SERVER, body)
 
     def test_disassociate_already_associated_security_group_to_instance(self):
-        self.stub_out('nova.db.instance_get', return_server)
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       return_server_by_uuid)
-        self.stub_out('nova.db.security_group_get_by_name',
+        self.stub_out('nova.db.api.security_group_get_by_name',
                        return_security_group_without_instances)
         body = dict(removeSecurityGroup=dict(name="test"))
 
@@ -877,12 +878,12 @@ class TestSecurityGroupsV21(test.TestCase):
                           self.manager._removeSecurityGroup, self.req,
                           UUID_SERVER, body)
 
-    @mock.patch.object(nova.db, 'instance_remove_security_group')
+    @mock.patch.object(nova.db.api, 'instance_remove_security_group')
     def test_disassociate(self, mock_remove_sec_group):
-        self.stub_out('nova.db.instance_get', return_server)
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get', return_server)
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       return_server_by_uuid)
-        self.stub_out('nova.db.security_group_get_by_name',
+        self.stub_out('nova.db.api.security_group_get_by_name',
                       return_security_group_by_name)
 
         body = dict(removeSecurityGroup=dict(name="test"))
@@ -928,7 +929,7 @@ class TestSecurityGroupRulesV21(test.TestCase):
                 return db2
             raise exception.SecurityGroupNotFound(security_group_id=group_id)
 
-        self.stub_out('nova.db.security_group_get',
+        self.stub_out('nova.db.api.security_group_get',
                       return_security_group)
 
         self.parent_security_group = db2
@@ -1293,9 +1294,9 @@ class TestSecurityGroupRulesV21(test.TestCase):
         def security_group_rule_destroy(context, id):
             pass
 
-        self.stub_out('nova.db.security_group_rule_get',
+        self.stub_out('nova.db.api.security_group_rule_get',
                       security_group_rule_get)
-        self.stub_out('nova.db.security_group_rule_destroy',
+        self.stub_out('nova.db.api.security_group_rule_destroy',
                       security_group_rule_destroy)
 
         self.controller.delete(self.req, self.sg2['id'])
@@ -1455,16 +1456,6 @@ def fake_compute_create(*args, **kwargs):
     return ([fake_compute_get(*args, **kwargs)], '')
 
 
-def fake_get_instances_security_groups_bindings(inst, context, servers):
-    groups = {UUID1: [{'name': 'fake-0-0'}, {'name': 'fake-0-1'}],
-              UUID2: [{'name': 'fake-1-0'}, {'name': 'fake-1-1'}],
-              UUID3: [{'name': 'fake-2-0'}, {'name': 'fake-2-1'}]}
-    result = {}
-    for server in servers:
-        result[server['id']] = groups.get(server['id'])
-    return result
-
-
 class SecurityGroupsOutputTestV21(test.TestCase):
     base_url = '/v2/fake/servers'
     content_type = 'application/json'
@@ -1544,56 +1535,6 @@ class SecurityGroupsOutputTestV21(test.TestCase):
         res = self._make_request(url)
 
         self.assertEqual(res.status_int, 404)
-
-
-class SecurityGroupsOutputPolicyEnforcementV21(test.NoDBTestCase):
-
-    def setUp(self):
-        super(SecurityGroupsOutputPolicyEnforcementV21, self).setUp()
-        self.controller = secgroups_v21.SecurityGroupsOutputController()
-        self.req = fakes.HTTPRequest.blank('')
-        self.rule_name = "os_compute_api:os-security-groups"
-        self.rule = {self.rule_name: "project:non_fake"}
-        self.policy.set_rules(self.rule)
-        self.fake_res = wsgi.ResponseObject({
-            'server': {'id': '0'},
-            'servers': [{'id': '0'}, {'id': '2'}]})
-
-    @mock.patch('nova.policy.authorize')
-    def test_show_policy_softauth_is_called(self, mock_authorize):
-        mock_authorize.return_value = False
-        self.controller.show(self.req, self.fake_res, FAKE_UUID1)
-        self.assertTrue(mock_authorize.called)
-
-    @mock.patch.object(nova.network.security_group.openstack_driver,
-        "is_neutron_security_groups")
-    def test_show_policy_failed(self, is_neutron_security_groups):
-        self.controller.show(self.req, self.fake_res, FAKE_UUID1)
-        self.assertFalse(is_neutron_security_groups.called)
-
-    @mock.patch('nova.policy.authorize')
-    def test_create_policy_softauth_is_called(self, mock_authorize):
-        mock_authorize.return_value = False
-        self.controller.show(self.req, self.fake_res, {})
-        self.assertTrue(mock_authorize.called)
-
-    @mock.patch.object(nova.network.security_group.openstack_driver,
-        "is_neutron_security_groups")
-    def test_create_policy_failed(self, is_neutron_security_groups):
-        self.controller.create(self.req, self.fake_res, {})
-        self.assertFalse(is_neutron_security_groups.called)
-
-    @mock.patch('nova.policy.authorize')
-    def test_detail_policy_softauth_is_called(self, mock_authorize):
-        mock_authorize.return_value = False
-        self.controller.detail(self.req, self.fake_res)
-        self.assertTrue(mock_authorize.called)
-
-    @mock.patch.object(nova.network.security_group.openstack_driver,
-        "is_neutron_security_groups")
-    def test_detail_policy_failed(self, is_neutron_security_groups):
-        self.controller.detail(self.req, self.fake_res)
-        self.assertFalse(is_neutron_security_groups.called)
 
 
 class PolicyEnforcementV21(test.NoDBTestCase):

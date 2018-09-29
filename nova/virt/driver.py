@@ -124,17 +124,16 @@ class ComputeDriver(object):
 
     capabilities = {
         "has_imagecache": False,
-        "supports_recreate": False,
+        "supports_evacuate": False,
         "supports_migrate_to_same_host": False,
         "supports_attach_interface": False,
         "supports_device_tagging": False,
         "supports_tagged_attach_interface": False,
         "supports_tagged_attach_volume": False,
         "supports_extend_volume": False,
-        "supports_multiattach": False
+        "supports_multiattach": False,
+        "supports_trusted_certs": False,
     }
-
-    requires_allocation_refresh = False
 
     # Indicates if this driver will rebalance nodes among compute service
     # hosts. This is really here for ironic and should not be used by any
@@ -232,7 +231,7 @@ class ComputeDriver(object):
     def rebuild(self, context, instance, image_meta, injected_files,
                 admin_password, allocations, bdms, detach_block_devices,
                 attach_block_devices, network_info=None,
-                recreate=False, block_device_info=None,
+                evacuate=False, block_device_info=None,
                 preserve_ephemeral=False):
         """Destroy and re-make this instance.
 
@@ -264,7 +263,7 @@ class ComputeDriver(object):
             nova.compute.manager.ComputeManager:_rebuild_default_impl for
             usage.
         :param network_info: instance network information
-        :param recreate: True if the instance is being recreated on a new
+        :param evacuate: True if the instance is being recreated on a new
             hypervisor - all the cleanup of old state is skipped.
         :param block_device_info: Information about block devices to be
                                   attached to the instance.
@@ -272,6 +271,34 @@ class ComputeDriver(object):
                                    partition must be preserved on rebuild
         """
         raise NotImplementedError()
+
+    def prepare_for_spawn(self, instance):
+        """Prepare to spawn instance.
+
+        Perform any pre-flight checks, tagging, etc. that the virt driver
+        must perform before executing the spawn process for a new instance.
+
+        :param instance: nova.objects.instance.Instance
+                         This function should use the data there to guide
+                         the creation of the new instance.
+        """
+        pass
+
+    def failed_spawn_cleanup(self, instance):
+        """Cleanup from the instance spawn.
+
+        Perform any hypervisor clean-up required should the spawn operation
+        fail, such as the removal of tags that were added during the
+        prepare_for_spawn method.
+
+        This method should be idempotent.
+
+        :param instance: nova.objects.instance.Instance
+                         This function should use the data there to guide
+                         the creation of the new instance.
+
+        """
+        pass
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
@@ -831,7 +858,7 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def update_provider_tree(self, provider_tree, nodename):
+    def update_provider_tree(self, provider_tree, nodename, allocations=None):
         """Update a ProviderTree object with current resource provider and
         inventory information.
 
@@ -843,44 +870,77 @@ class ComputeDriver(object):
         This method supersedes get_inventory(): if this method is implemented,
         get_inventory() is not used.
 
-        :note: Renaming a provider (by deleting it from provider_tree and
-        re-adding it with a different name) is not supported at this time.
+        :note: Renaming the root provider (by deleting it from provider_tree
+        and re-adding it with a different name) is not supported at this time.
+
+        See the developer reference documentation for more details:
+
+        https://docs.openstack.org/nova/latest/reference/update-provider-tree.html   # noqa
 
         :param nova.compute.provider_tree.ProviderTree provider_tree:
-            A ProviderTree object representing all the providers associated
-            with the compute node, and any sharing providers (those with the
-            ``MISC_SHARES_VIA_AGGREGATE`` trait) associated via aggregate with
-            any of those providers (but not *their* tree- or aggregate-
-            associated providers), as currently known by placement.  This
-            object is fully owned by the ``update_provider_tree`` method, and
-            can therefore be modified without locking/concurrency
-            considerations.  Note, however, that it may contain providers not
-            directly owned/controlled by the compute host.  Care must be taken
-            not to remove or modify such providers inadvertently.
+            A nova.compute.provider_tree.ProviderTree object representing all
+            the providers in the tree associated with the compute node, and any
+            sharing providers (those with the ``MISC_SHARES_VIA_AGGREGATE``
+            trait) associated via aggregate with any of those providers (but
+            not *their* tree- or aggregate-associated providers), as currently
+            known by placement. This object is fully owned by the
+            update_provider_tree method, and can therefore be modified without
+            locking/concurrency considerations. In other words, the parameter
+            is passed *by reference* with the expectation that the virt driver
+            will modify the object. Note, however, that it may contain
+            providers not directly owned/controlled by the compute host. Care
+            must be taken not to remove or modify such providers inadvertently.
+            In addition, providers may be associated with traits and/or
+            aggregates maintained by outside agents. The
+            `update_provider_tree`` method must therefore also be careful only
+            to add/remove traits/aggregates it explicitly controls.
         :param nodename:
-            Name of the compute node for which the caller is updating providers
-            and inventory.  Drivers managing more than one node may use this in
-            an advisory capacity to restrict changes to only the providers
-            associated with that one node, but this is not a requirement: the
-            caller always subsumes all changes regardless.
-        :return: True if the provider_tree was changed; False otherwise.
+            String name of the compute node (i.e.
+            ComputeNode.hypervisor_hostname) for which the caller is requesting
+            updated provider information. Drivers may use this to help identify
+            the compute node provider in the ProviderTree. Drivers managing
+            more than one node (e.g. ironic) may also use it as a cue to
+            indicate which node is being processed by the caller.
+        :param allocations:
+            Dict of allocation data of the form:
+              { $CONSUMER_UUID: {
+                    # The shape of each "allocations" dict below is identical
+                    # to the return from GET /allocations/{consumer_uuid}
+                    "allocations": {
+                        $RP_UUID: {
+                            "generation": $RP_GEN,
+                            "resources": {
+                                $RESOURCE_CLASS: $AMOUNT,
+                                ...
+                            },
+                        },
+                        ...
+                    },
+                    "project_id": $PROJ_ID,
+                    "user_id": $USER_ID,
+                    "consumer_generation": $CONSUMER_GEN,
+                },
+                ...
+              }
+            If None, and the method determines that any inventory needs to be
+            moved (from one provider to another and/or to a different resource
+            class), the ReshapeNeeded exception must be raised. Otherwise, this
+            dict must be edited in place to indicate the desired final state of
+            allocations. Drivers should *only* edit allocation records for
+            providers whose inventories are being affected by the reshape
+            operation.
+            TODO(efried): Doc reshaper in reference/update-provider-tree.html
+            Meanwhile, please refer to the spec for more details on reshaping:
+            http://specs.openstack.org/openstack/nova-specs/specs/stein/approved/reshape-provider-tree.html  # noqa
+        :raises ReshapeNeeded: If allocations is None and any inventory needs
+            to be moved from one provider to another and/or to a different
+            resource class.
         """
         raise NotImplementedError()
 
     def get_inventory(self, nodename):
         """Return a dict, keyed by resource class, of inventory information for
         the supplied node.
-        """
-        raise NotImplementedError()
-
-    def get_traits(self, nodename):
-        """Get the traits for a given node.
-
-        Any custom traits returned are not required to exist in the placement
-        service - the caller will ensure their existence.
-
-        :param nodename: the name of the node.
-        :returns: an iterable of string trait names for the supplied node.
         """
         raise NotImplementedError()
 
@@ -1130,10 +1190,6 @@ class ComputeDriver(object):
         Concretely, the below method must be called.
         - setup_basic_filtering (for nova-basic, etc.)
         - prepare_instance_filter(for nova-instance-instance-xxx, etc.)
-
-        to_xml may have to be called since it defines PROJNET, PROJMASK.
-        but libvirt migrates those value through migrateToURI(),
-        so , no need to be called.
 
         Don't use thread for this method since migration should
         not be started when setting-up filtering rules operations

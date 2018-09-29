@@ -2,6 +2,11 @@
 Migrate instances
 =================
 
+.. note::
+
+   This documentation is about cold-migration. For live-migration usage, see
+   :doc:`live-migration-usage`.
+
 When you want to move an instance from one compute host to another, you can use
 the :command:`openstack server migrate` command. The scheduler chooses the
 destination compute host based on its settings. This process does not assume
@@ -20,7 +25,7 @@ nodes. For more information, see :ref:`cli-os-migrate-cfg-ssh`.
 
    .. code-block:: console
 
-      $ openstack server migrate --live TARGET_HOST VM_INSTANCE
+      $ openstack server migrate VM_INSTANCE
 
 #. To migrate an instance and watch the status, use this example script:
 
@@ -30,31 +35,30 @@ nodes. For more information, see :ref:`cli-os-migrate-cfg-ssh`.
 
       # Provide usage
       usage() {
-      echo "Usage: $0 VM_ID"
-      exit 1
+          echo "Usage: $0 VM_ID"
+          exit 1
       }
 
       [[ $# -eq 0 ]] && usage
-
-      # Migrate the VM to an alternate hypervisor
-      echo -n "Migrating instance to alternate host"
       VM_ID=$1
-      openstack server migrate $VM_ID
-      VM_OUTPUT=$(openstack server show $VM_ID)
-      VM_STATUS=$(echo "$VM_OUTPUT" | grep status | awk '{print $4}')
-      while [[ "$VM_STATUS" != "VERIFY_RESIZE" ]]; do
-      echo -n "."
-      sleep 2
-      VM_OUTPUT=$(openstack server show $VM_ID)
-      VM_STATUS=$(echo "$VM_OUTPUT" | grep status | awk '{print $4}')
-      done
-      nova resize-confirm $VM_ID
-      echo " instance migrated and resized."
-      echo;
 
       # Show the details for the VM
-      echo "Updated instance details:"
-      openstack server show $VM_ID
+      echo "Instance details:"
+      openstack server show ${VM_ID}
+
+      # Migrate the VM to an alternate hypervisor
+      echo -n "Migrating instance to alternate host "
+      openstack server migrate ${VM_ID}
+      while [[ "$(openstack server show ${VM_ID} -f value -c status)" != "VERIFY_RESIZE" ]]; do
+          echo -n "."
+          sleep 2
+      done
+      openstack server resize --confirm ${VM_ID}
+      echo " instance migrated and resized."
+
+      # Show the details for the migrated VM
+      echo "Migrated instance details:"
+      openstack server show ${VM_ID}
 
       # Pause to allow users to examine VM details
       read -p "Pausing, press <enter> to exit."
@@ -65,7 +69,7 @@ nodes. For more information, see :ref:`cli-os-migrate-cfg-ssh`.
    with the wrong credentials, such as a non-admin user, or the ``policy.json``
    file prevents migration for your user::
 
-     ERROR (Forbidden): Policy doesn't allow compute_extension:admin_actions:migrate to be performed. (HTTP 403)``
+     Policy doesn't allow os_compute_api:os-migrate-server:migrate to be performed. (HTTP 403)
 
 .. note::
 

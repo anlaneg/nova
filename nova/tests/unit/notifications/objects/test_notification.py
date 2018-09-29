@@ -14,21 +14,17 @@
 import collections
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_versionedobjects import fixture
 
 from nova import exception
-from nova.network import model as network_model
-from nova.notifications import base as notification_base
 from nova.notifications.objects import base as notification
-from nova.notifications.objects import instance as instance_notification
 from nova import objects
 from nova.objects import base
 from nova.objects import fields
-from nova.objects import instance as instance_obj
 from nova import test
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 class TestNotificationBase(test.NoDBTestCase):
@@ -140,7 +136,8 @@ class TestNotificationBase(test.NoDBTestCase):
 
     def setUp(self):
         super(TestNotificationBase, self).setUp()
-        with mock.patch('nova.db.service_update') as mock_db_service_update:
+        with mock.patch(
+                'nova.db.api.service_update') as mock_db_service_update:
             self.service_obj = objects.Service(context=mock.sentinel.context,
                                                id=self.fake_service['id'])
             self.service_obj.obj_reset_changes(['version'])
@@ -373,38 +370,48 @@ notification_object_data = {
     'AuditPeriodPayload': '1.0-2b429dd307b8374636703b843fa3f9cb',
     'BandwidthPayload': '1.0-ee2616a7690ab78406842a2b68e34130',
     'BlockDevicePayload': '1.0-29751e1b6d41b1454e36768a1e764df8',
-    'EventType': '1.8-0f8fb2dbc76f10c7c56d1680c65ad0cf',
+    'EventType': '1.16-0da423d66218567962410921f2542c41',
     'ExceptionNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
-    'ExceptionPayload': '1.0-27db46ee34cd97e39f2643ed92ad0cc5',
+    'ExceptionPayload': '1.1-6c43008bd81885a63bc7f7c629f0793b',
     'FlavorNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'FlavorPayload': '1.4-2e7011b8b4e59167fe8b7a0a81f0d452',
     'InstanceActionNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
-    'InstanceActionPayload': '1.5-fb2804ce9b681bfb217e729153c22611',
+    'InstanceActionPayload': '1.7-8c77f0c85a83d325fded152376ca809a',
+    'InstanceActionRebuildNotification':
+        '1.0-a73147b93b520ff0061865849d3dfa56',
+    'InstanceActionRebuildPayload': '1.8-ab76ecbf73b82bc010ab82bdc2792e1d',
     'InstanceActionRescueNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
-    'InstanceActionRescuePayload': '1.0-a29f3339d0b8c3bcc997ab5d19d898d5',
+    'InstanceActionRescuePayload': '1.2-b82aa24a966713dce26de3126716e8ef',
     'InstanceActionResizePrepNotification':
         '1.0-a73147b93b520ff0061865849d3dfa56',
-    'InstanceActionResizePrepPayload': '1.0-3a23d3dd6516964a51c256b2f8b4646c',
+    'InstanceActionResizePrepPayload': '1.2-1b41bec00f2b679e77a906b1df0c1d5a',
     'InstanceActionVolumeNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
-    'InstanceActionVolumePayload': '1.3-f175b22ac6d6d0aea2bac21e12156e77',
+    'InstanceActionVolumePayload': '1.5-3027aae42ee85155b2c378fad1f3b678',
     'InstanceActionVolumeSwapNotification':
     '1.0-a73147b93b520ff0061865849d3dfa56',
-    'InstanceActionVolumeSwapPayload': '1.5-bccb88cda36276d20a9b3e427b999929',
+    'InstanceActionVolumeSwapPayload': '1.7-d3252403a9437bcdc80f1075214f8b45',
     'InstanceCreateNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
-    'InstanceCreatePayload': '1.7-a35b2f3aa64dcc262ebb830e78939bdb',
-    'InstancePayload': '1.5-201d852973dbcb5caab89082a3140487',
+    'InstanceCreatePayload': '1.10-291b44932569b8ff864d911814293cfc',
+    'InstancePayload': '1.7-78354572f699b9a6ad9996b199d03375',
     'InstanceActionSnapshotNotification':
         '1.0-a73147b93b520ff0061865849d3dfa56',
-    'InstanceActionSnapshotPayload': '1.6-6f96ad137957d802aac94c90337fd950',
+    'InstanceActionSnapshotPayload': '1.8-6a3a66f823b56268ea4b759c83e38c31',
+    'InstanceExistsNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
+    'InstanceExistsPayload': '1.1-b7095abb18f5b75f39dc1aa59942535d',
     'InstanceStateUpdatePayload': '1.0-07e111c0fa0f6db0f79b0726d593e3da',
     'InstanceUpdateNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
-    'InstanceUpdatePayload': '1.6-9145c7cac4208eb841ceaaa9c10b2d9b',
+    'InstanceUpdatePayload': '1.8-375131acb12e612a460f68211a2b3a35',
     'IpPayload': '1.0-8ecf567a99e516d4af094439a7632d34',
     'KeypairNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'KeypairPayload': '1.0-6daebbbde0e1bf35c1556b1ecd9385c1',
+    'LibvirtErrorNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
+    'LibvirtErrorPayload': '1.0-9e7a8f0b895dd15531d5a6f3aa95d58e',
+    'MetricPayload': '1.0-bcdbe85048f335132e4c82a1b8fa3da8',
+    'MetricsNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
+    'MetricsPayload': '1.0-65c69b15b4de5a8c01971cb5bb9ab650',
     'NotificationPublisher': '2.2-b6ad48126247e10b46b6b0240e52e614',
     'ServerGroupNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
-    'ServerGroupPayload': '1.0-eb4bd1738b4670cfe1b7c30344c143c3',
+    'ServerGroupPayload': '1.1-4ded2997ea1b07038f7af33ef5c45f7f',
     'ServiceStatusNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'ServiceStatusPayload': '1.1-7b6856bd879db7f3ecbcd0ca9f35f92f',
 }
@@ -465,132 +472,3 @@ def get_extra_data(obj_class):
         extra_data += (schema_data,)
 
     return extra_data
-
-
-class TestInstanceNotification(test.NoDBTestCase):
-    def setUp(self):
-        super(TestInstanceNotification, self).setUp()
-        self.test_keys = ['memory_mb', 'vcpus', 'root_gb', 'ephemeral_gb',
-                          'swap']
-        self.flavor_values = {k: 123 for k in self.test_keys}
-        instance_values = {k: 456 for k in self.test_keys}
-        flavor = objects.Flavor(flavorid='test-flavor', name='test-flavor',
-                                disabled=False, projects=[], is_public=True,
-                                extra_specs={}, **self.flavor_values)
-        info_cache = objects.InstanceInfoCache(
-            network_info=network_model.NetworkInfo())
-        self.instance = objects.Instance(
-            flavor=flavor,
-            info_cache=info_cache,
-            metadata={},
-            uuid=uuids.instance1,
-            locked=False,
-            auto_disk_config=False,
-            **instance_values)
-        self.payload = {
-            'bandwidth': {},
-            'audit_period_ending': timeutils.utcnow(),
-            'audit_period_beginning': timeutils.utcnow(),
-        }
-
-    @mock.patch('nova.notifications.objects.instance.'
-                'InstanceUpdateNotification._emit')
-    def test_send_version_instance_update_uses_flavor(self, mock_emit):
-        # instance.update notification needs some tags value to avoid lazy-load
-        self.instance.tags = objects.TagList()
-        # Make sure that the notification payload chooses the values in
-        # instance.flavor.$value instead of instance.$value
-        notification_base._send_versioned_instance_update(
-            mock.MagicMock(),
-            self.instance,
-            self.payload,
-            'host',
-            'compute')
-        payload = mock_emit.call_args_list[0][1]['payload']['nova_object.data']
-        flavor_payload = payload['flavor']['nova_object.data']
-        data = {k: flavor_payload[k] for k in self.test_keys}
-        self.assertEqual(self.flavor_values, data)
-
-    @mock.patch('nova.rpc.NOTIFIER')
-    @mock.patch('nova.notifications.objects.instance.'
-                'InstanceUpdatePayload.__init__', return_value=None)
-    @mock.patch('nova.notifications.objects.instance.'
-                'InstanceUpdateNotification.__init__', return_value=None)
-    def test_send_versioned_instance_notification_is_not_called_disabled(
-            self, mock_notification, mock_payload, mock_notifier):
-        mock_notifier.is_enabled.return_value = False
-
-        notification_base._send_versioned_instance_update(
-            mock.MagicMock(),
-            self.instance,
-            self.payload,
-            'host',
-            'compute')
-
-        self.assertFalse(mock_payload.called)
-        self.assertFalse(mock_notification.called)
-
-    @mock.patch('nova.notifications.objects.instance.'
-                'InstanceUpdatePayload.__init__', return_value=None)
-    @mock.patch('nova.notifications.objects.instance.'
-                'InstanceUpdateNotification.__init__', return_value=None)
-    def test_send_versioned_instance_notification_is_not_called_unversioned(
-            self, mock_notification, mock_payload):
-        self.flags(notification_format='unversioned', group='notifications')
-
-        notification_base._send_versioned_instance_update(
-            mock.MagicMock(),
-            self.instance,
-            self.payload,
-            'host',
-            'compute')
-
-        self.assertFalse(mock_payload.called)
-        self.assertFalse(mock_notification.called)
-
-
-class TestBlockDevicePayload(test.NoDBTestCase):
-    @mock.patch('nova.objects.instance.Instance.get_bdms')
-    def test_payload_contains_volume_bdms_if_requested(self, mock_get_bdms):
-        self.flags(bdms_in_notifications='True', group='notifications')
-        context = mock.Mock()
-        instance = instance_obj.Instance(uuid=uuids.instance_uuid)
-        image_bdm = objects.BlockDeviceMapping(
-            **{'context': context, 'source_type': 'image',
-               'destination_type': 'local',
-               'image_id': uuids.image_id,
-               'volume_id': None,
-               'device_name': '/dev/vda',
-               'instance_uuid': instance.uuid})
-
-        volume_bdm = objects.BlockDeviceMapping(
-            **{'context': context, 'source_type': 'volume',
-               'destination_type': 'volume',
-               'volume_id': uuids.volume_id,
-               'device_name': '/dev/vdb',
-               'instance_uuid': instance.uuid,
-               'boot_index': 0,
-               'delete_on_termination': True,
-               'tag': 'my-tag'})
-
-        mock_get_bdms.return_value = [image_bdm, volume_bdm]
-
-        bdms = instance_notification.BlockDevicePayload.from_instance(
-            instance)
-
-        self.assertEqual(1, len(bdms))
-        bdm = bdms[0]
-        self.assertIsInstance(bdm, instance_notification.BlockDevicePayload)
-        self.assertEqual('/dev/vdb', bdm.device_name)
-        self.assertEqual(0, bdm.boot_index)
-        self.assertTrue(bdm.delete_on_termination)
-        self.assertEqual('my-tag', bdm.tag)
-        self.assertEqual(uuids.volume_id, bdm.volume_id)
-
-    @mock.patch('nova.objects.instance.Instance.get_bdms',
-                return_value=mock.NonCallableMock())
-    def test_bdms_are_skipped_by_default(self, mock_get_bdms):
-        instance = instance_obj.Instance(uuid=uuids.instance_uuid)
-        bmds = instance_notification.BlockDevicePayload.from_instance(
-            instance)
-        self.assertIsNone(bmds)

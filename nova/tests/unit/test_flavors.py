@@ -15,7 +15,7 @@ Unit Tests for flavors code
 """
 from nova.compute import flavors
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import objects
 from nova.objects import base as obj_base
@@ -109,14 +109,6 @@ class InstanceTypeToolsTest(test.TestCase):
         flavors.save_flavor_info(metadata, instance_type, 'foo')
         self.assertEqual(example_prefix, metadata)
 
-    def test_delete_flavor_info(self):
-        instance_type = flavors.get_default_flavor()
-        metadata = {}
-        flavors.save_flavor_info(metadata, instance_type)
-        flavors.save_flavor_info(metadata, instance_type, '_')
-        flavors.delete_flavor_info(metadata, '', '_')
-        self.assertEqual(metadata, {})
-
     def test_flavor_numa_extras_are_saved(self):
         instance_type = flavors.get_default_flavor()
         instance_type['extra_specs'] = {
@@ -135,8 +127,6 @@ class InstanceTypeToolsTest(test.TestCase):
             'hw:numa_cpus.1': 'ABC',
         }
         self.assertEqual(expected_extra_specs, _instance_type['extra_specs'])
-        flavors.delete_flavor_info(sysmeta, '')
-        self.assertEqual({}, sysmeta)
 
 
 class InstanceTypeFilteringTest(test.TestCase):
@@ -274,8 +264,6 @@ class CreateInstanceTypeTest(test.TestCase):
         self.assertEqual(1.1, flavor.rxtx_factor)
 
     def test_rxtx_factor_must_be_within_sql_float_range(self):
-        _context = context.get_admin_context()
-        db.flavor_get_all(_context)
         # We do * 10 since this is an approximation and we need to make sure
         # the difference is noticeble.
         over_rxtx_factor = db.SQL_SP_FLOAT_MAX * 10

@@ -4,7 +4,7 @@ Store metadata on a configuration drive
 You can configure OpenStack to write metadata to a special configuration drive
 that attaches to the instance when it boots. The instance can mount this drive
 and read files from it to get information that is normally available through
-the :ref:`metadata service <metadata-service>`.
+the :doc:`metadata service </user/metadata-service>`.
 This metadata is different from the user data.
 
 One use case for using the configuration drive is to pass a networking
@@ -26,7 +26,7 @@ requirements for the compute host and image.
 **Compute host requirements**
 
 -  The following hypervisors support the configuration drive: libvirt,
-   XenServer, Hyper-V, and VMware.
+   XenServer, Hyper-V, VMware, and (since 17.0.0 Queens) PowerVM.
 
    Also, the Bare Metal service supports the configuration drive.
 
@@ -44,9 +44,9 @@ requirements for the compute host and image.
    in the ``hyperv`` configuration section to the full path to an
    :command:`qemu-img` command installation.
 
--  To use configuration drive with the Bare Metal service,
-   you do not need to prepare anything because the Bare Metal
-   service treats the configuration drive properly.
+-  To use configuration drive with PowerVM or the Bare Metal service,
+   you do not need to prepare anything because these treat the configuration
+   drive properly.
 
 **Image requirements**
 
@@ -63,8 +63,8 @@ requirements for the compute host and image.
    details about how data is organized on the configuration drive.
 
 -  If you use Xen with a configuration drive, use the
-   ``xenapi_disable_agent`` configuration parameter to disable the
-   agent.
+   :oslo.config:option:`xenserver.disable_agent` configuration parameter to
+   disable the agent.
 
 **Guidelines**
 
@@ -86,15 +86,13 @@ Enable and access the configuration drive
    parameter to the :command:`openstack server create` command.
 
    The following example enables the configuration drive and passes user
-   data, two files, and two key/value metadata pairs, all of which are
+   data, a user data file, and two key/value metadata pairs, all of which are
    accessible from the configuration drive:
 
    .. code-block:: console
 
       $ openstack server create --config-drive true --image my-image-name \
         --flavor 1 --key-name mykey --user-data ./my-user-data.txt \
-        --file /etc/network/interfaces=/home/myuser/instance-interfaces \
-        --file known_hosts=/home/myuser/.ssh/known_hosts \
         --property role=webservers --property essential=false MYINSTANCE
 
    You can also configure the Compute service to always create a
@@ -105,11 +103,14 @@ Enable and access the configuration drive
 
       force_config_drive = true
 
+   It is also possible to force the config drive by specifying the
+   ``img_config_drive=mandatory`` property in the image.
+
    .. note::
 
-      If a user passes the ``--config-drive true`` flag to the :command:`nova
-      boot` command, an administrator cannot disable the configuration
-      drive.
+      If a user passes the ``--config-drive true`` flag to the
+      :command:`openstack server create` command, an administrator cannot
+      disable the configuration drive.
 
 #. If your guest operating system supports accessing disk by label, you
    can mount the configuration drive as the
@@ -182,16 +183,6 @@ The file contents are formatted for readability.
 
    {
        "availability_zone": "nova",
-       "files": [
-           {
-               "content_path": "/content/0000",
-               "path": "/etc/network/interfaces"
-           },
-           {
-               "content_path": "/content/0001",
-               "path": "known_hosts"
-           }
-       ],
        "hostname": "test.novalocal",
        "launch_index": 0,
        "name": "test",
@@ -204,13 +195,6 @@ The file contents are formatted for readability.
        },
        "uuid": "83679162-1378-4288-a2d4-70e13ec132aa"
    }
-
-Note the effect of the
-``--file /etc/network/interfaces=/home/myuser/instance-interfaces``
-argument that was passed to the :command:`openstack server create` command.
-The contents of this file are contained in the ``openstack/content/0000``
-file on the configuration drive, and the path is specified as
-``/etc/network/interfaces`` in the ``meta_data.json`` file.
 
 EC2 metadata format
 -------------------
@@ -281,7 +265,11 @@ following line to the ``/etc/nova/nova.conf`` file:
 
 .. code-block:: console
 
+   [hyperv]
    config_drive_cdrom=true
+
+.. note:: Attaching a configuration drive as a CD drive is only supported
+          by the Hyper-V compute driver.
 
 For legacy reasons, you can configure the configuration drive to use
 VFAT format instead of ISO 9660. It is unlikely that you would require
@@ -293,4 +281,4 @@ systems. However, to use the VFAT format, add the following line to the
 
    config_drive_format=vfat
 
-If you choose VFAT, the configuration drive is 64 MB.
+If you choose VFAT, the configuration drive is 64 MB.

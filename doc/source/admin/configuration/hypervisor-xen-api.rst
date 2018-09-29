@@ -102,6 +102,14 @@ In OpenStack, customer VMs may run in either PV or HVM mode.  However, the
 OpenStack domU (that's the one running ``nova-compute``) must be running in PV
 mode.
 
+xapi pool
+---------
+
+A resource pool comprises multiple XenServer host installations, bound together
+into a single managed entity which can host virtual machines. When combined with
+shared storage, VMs could dynamically move between XenServer hosts, with minimal
+downtime since no block copying is needed.
+
 XenAPI deployment architecture
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -199,11 +207,11 @@ XenServer/6.2.0/1.0/en_gb/supplemental_pack_ddk.html>`_.
 
 .. important::
 
-   Make sure you use the EXT type of storage repository (SR).  Features that
-   require access to VHD files (such as copy on write, snapshot and migration)
-   do not work when you use the LVM SR.  Storage repository (SR) is a
-   XAPI-specific term relating to the physical storage where virtual disks are
-   stored.
+   When using ``[xenserver]image_handler=direct_vhd`` (the default), make sure
+   you use the EXT type of storage repository (SR).  Features that require access
+   to VHD files (such as copy on write, snapshot and migration) do not work when
+   you use the LVM SR. Storage repository (SR) is a XAPI-specific term relating to
+   the physical storage where virtual disks are stored.
 
    On the XenServer installation screen, choose the :guilabel:`XenDesktop
    Optimized` option. If you use an answer file, make sure you use
@@ -225,6 +233,14 @@ The following steps need to be completed after the hypervisor's installation:
 #. Create a paravirtualized virtual machine that can run ``nova-compute``.
 
 #. Install and configure ``nova-compute`` in the above virtual machine.
+
+#. To support live migration requiring no block device migration, you should
+   add the current host to a xapi pool using shared storage. You need to know
+   the pool master ip address, user name and password:
+
+.. code-block:: console
+
+    xe pool-join master-address=MASTER_IP master-username=root master-password=MASTER_PASSWORD
 
 Install XAPI plug-ins
 ---------------------
@@ -345,7 +361,6 @@ To enable the XenAPI driver, add the following configuration options to
    connection_username = root
    connection_password = your_password
    ovs_integration_bridge = br-int
-   vif_driver = nova.virt.xenapi.vif.XenAPIOpenVswitchDriver
 
 These connection details are used by OpenStack Compute service to contact your
 hypervisor and are the same details you use to connect XenCenter, the XenServer
@@ -360,11 +375,10 @@ Networking configuration
 ------------------------
 
 The Networking service in the Compute node is running
-``neutron-openvswitch-agent``, this manages dom0's OVS. You can refer
-Networking `openvswitch_agent.ini sample`__ for details,
-however there are several specific items to look out for.
-
-__ https://docs.openstack.org/neutron/latest/configuration/samples/openvswitch-agent.html
+``neutron-openvswitch-agent``. This manages ``dom0``\'s OVS. You should refer
+to the :neutron-doc:`openvswitch_agent.ini sample
+<configuration/samples/openvswitch-agent.html>` for details, however there are
+several specific items to look out for.
 
 .. code-block:: ini
 
@@ -425,19 +439,30 @@ attached NFS or any other shared storage):
 
    sr_matching_filter = "default-sr:true"
 
-Image upload in TGZ compressed format
--------------------------------------
+Use different image handler
+---------------------------
 
-To start uploading ``tgz`` compressed raw disk images to the Image service,
-configure ``xenapi_image_upload_handler`` by replacing ``GlanceStore`` with
-``VdiThroughDevStore``.
+We support three different implementations for glance image handler. You
+can choose a specific image handler based on the demand:
+
+* ``direct_vhd``: This image handler will call XAPI plugins to directly
+  process the VHD files in XenServer SR(Storage Repository). So this handler
+  only works when the host's SR type is file system based e.g. ext, nfs.
+
+* ``vdi_local_dev``: This image handler uploads ``tgz`` compressed raw
+  disk images to the glance image service.
+
+* ``vdi_remote_stream``:  With this image handler, the image data streams
+  between XenServer and the glance image service. As it uses the remote
+  APIs supported by XAPI, this plugin works for all SR types supported by
+  XenServer.
+
+``direct_vhd`` is the default image handler. If want to use a different image
+handler, you can change the config setting of ``image_handler`` within the
+``[xenserver]`` section. For example, the following config setting is to use
+``vdi_remote_stream`` as the image handler:
 
 .. code-block:: ini
 
-   xenapi_image_upload_handler=nova.virt.xenapi.image.vdi_through_dev.VdiThroughDevStore
-
-As opposed to:
-
-.. code-block:: ini
-
-   xenapi_image_upload_handler=nova.virt.xenapi.image.glance.GlanceStore
+   [xenserver]
+   image_handler=vdi_remote_stream

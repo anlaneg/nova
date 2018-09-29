@@ -27,17 +27,24 @@ class ServerGroupPayload(base.NotificationPayloadBase):
         'policies': ('group', 'policies'),
         'members': ('group', 'members'),
         'hosts': ('group', 'hosts'),
+        'policy': ('group', 'policy'),
+        'rules': ('group', 'rules'),
     }
     # Version 1.0: Initial version
-    VERSION = '1.0'
+    # Version 1.1: Deprecate policies, add policy and add rules
+    VERSION = '1.1'
     fields = {
         'uuid': fields.UUIDField(),
         'name': fields.StringField(nullable=True),
         'user_id': fields.StringField(nullable=True),
         'project_id': fields.StringField(nullable=True),
+        # NOTE(yikun): policies is deprecated and should
+        # be removed on the next major version bump
         'policies': fields.ListOfStringsField(nullable=True),
         'members': fields.ListOfStringsField(nullable=True),
         'hosts': fields.ListOfStringsField(nullable=True),
+        'policy': fields.StringField(nullable=True),
+        'rules': fields.DictOfStringsField(),
     }
 
     def __init__(self, group):
@@ -49,6 +56,7 @@ class ServerGroupPayload(base.NotificationPayloadBase):
         self.populate_schema(group=cgroup)
 
 
+@base.notification_sample('server_group-add_member.json')
 @base.notification_sample('server_group-create.json')
 @base.notification_sample('server_group-delete.json')
 @nova_base.NovaObjectRegistry.register_notification

@@ -105,7 +105,7 @@ class DriverBlockDevice(dict):
     _fields = set()
     _legacy_fields = set()
 
-    _proxy_as_attr_inherited = set(['uuid'])
+    _proxy_as_attr_inherited = set(['uuid', 'is_volume'])
     _update_on_save = {'disk_bus': None,
                        'device_name': None,
                        'device_type': None}
@@ -144,14 +144,28 @@ class DriverBlockDevice(dict):
     def __getattr__(self, name):
         if name in self._proxy_as_attr:
             return getattr(self._bdm_obj, name)
+        elif name in self._fields:
+            return self[name]
         else:
-            super(DriverBlockDevice, self).__getattr__(name)
+            return super(DriverBlockDevice, self).__getattr__(name)
 
     def __setattr__(self, name, value):
         if name in self._proxy_as_attr:
-            return setattr(self._bdm_obj, name, value)
+            setattr(self._bdm_obj, name, value)
+        elif name in self._fields:
+            self[name] = value
         else:
             super(DriverBlockDevice, self).__setattr__(name, value)
+
+    def __getitem__(self, name):
+        if name in self._proxy_as_attr:
+            return getattr(self._bdm_obj, name)
+        return super(DriverBlockDevice, self).__getitem__(name)
+
+    def __setitem__(self, name, value):
+        if name in self._proxy_as_attr:
+            setattr(self._bdm_obj, name, value)
+        super(DriverBlockDevice, self).__setitem__(name, value)
 
     def _transform(self):
         """Transform bdm to the format that is passed to drivers."""
@@ -308,6 +322,7 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
             with excutils.save_and_reraise_exception():
                 LOG.warning('Guest refused to detach volume %(vol)s',
                             {'vol': volume_id}, instance=instance)
+                volume_api.roll_detaching(context, volume_id)
         except Exception:
             with excutils.save_and_reraise_exception():
                 LOG.exception('Failed to detach volume '
@@ -470,7 +485,8 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
                 with excutils.save_and_reraise_exception():
                     if do_driver_attach:
                         try:
-                            virt_driver.detach_volume(connection_info,
+                            virt_driver.detach_volume(context,
+                                                      connection_info,
                                                       instance,
                                                       self['mount_device'],
                                                       encryption=encryption)
@@ -567,7 +583,8 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
                 if do_driver_attach:
                     # Disconnect the volume from the host.
                     try:
-                        virt_driver.detach_volume(connection_info,
+                        virt_driver.detach_volume(context,
+                                                  connection_info,
                                                   instance,
                                                   self['mount_device'],
                                                   encryption=encryption)
@@ -636,7 +653,17 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
         else:
             attachment_ref = volume_api.attachment_get(context,
                                                        self['attachment_id'])
+            # The _volume_attach method stashes a 'multiattach' flag in the
+            # BlockDeviceMapping.connection_info which is not persisted back
+            # in cinder so before we overwrite the BDM.connection_info (via
+            # the update_db decorator on this method), we need to make sure
+            # and preserve the multiattach flag if it's set. Note that this
+            # is safe to do across refreshes because the multiattach capability
+            # of a volume cannot be changed while the volume is in-use.
+            multiattach = self['connection_info'].get('multiattach', False)
             connection_info = attachment_ref['connection_info']
+            if multiattach:
+                connection_info['multiattach'] = True
 
         if 'serial' not in connection_info:
             connection_info['serial'] = self.volume_id
@@ -670,7 +697,7 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
                             {'volume_id': volume_id, 'exc': exc})
 
 
-class DriverSnapshotBlockDevice(DriverVolumeBlockDevice):
+class DriverVolSnapshotBlockDevice(DriverVolumeBlockDevice):
 
     _valid_source = 'snapshot'
     _proxy_as_attr_inherited = set(['snapshot_id'])
@@ -693,11 +720,11 @@ class DriverSnapshotBlockDevice(DriverVolumeBlockDevice):
             # make us go down the new-style attach flow.
 
         # Call the volume attach now
-        super(DriverSnapshotBlockDevice, self).attach(
+        super(DriverVolSnapshotBlockDevice, self).attach(
             context, instance, volume_api, virt_driver)
 
 
-class DriverImageBlockDevice(DriverVolumeBlockDevice):
+class DriverVolImageBlockDevice(DriverVolumeBlockDevice):
 
     _valid_source = 'image'
     _proxy_as_attr_inherited = set(['image_id'])
@@ -717,11 +744,11 @@ class DriverImageBlockDevice(DriverVolumeBlockDevice):
             # TODO(mriedem): Create an attachment to reserve the volume and
             # make us go down the new-style attach flow.
 
-        super(DriverImageBlockDevice, self).attach(
+        super(DriverVolImageBlockDevice, self).attach(
             context, instance, volume_api, virt_driver)
 
 
-class DriverBlankBlockDevice(DriverVolumeBlockDevice):
+class DriverVolBlankBlockDevice(DriverVolumeBlockDevice):
 
     _valid_source = 'blank'
     _proxy_as_attr_inherited = set(['image_id'])
@@ -741,7 +768,7 @@ class DriverBlankBlockDevice(DriverVolumeBlockDevice):
             # TODO(mriedem): Create an attachment to reserve the volume and
             # make us go down the new-style attach flow.
 
-        super(DriverBlankBlockDevice, self).attach(
+        super(DriverVolBlankBlockDevice, self).attach(
             context, instance, volume_api, virt_driver)
 
 
@@ -769,13 +796,13 @@ convert_volumes = functools.partial(_convert_block_devices,
 
 
 convert_snapshots = functools.partial(_convert_block_devices,
-                                     DriverSnapshotBlockDevice)
+                                     DriverVolSnapshotBlockDevice)
 
 convert_images = functools.partial(_convert_block_devices,
-                                     DriverImageBlockDevice)
+                                     DriverVolImageBlockDevice)
 
 convert_blanks = functools.partial(_convert_block_devices,
-                                   DriverBlankBlockDevice)
+                                   DriverVolBlankBlockDevice)
 
 
 def convert_all_volumes(*volume_bdms):
@@ -868,8 +895,8 @@ def get_swap(transformed_list):
 
 
 _IMPLEMENTED_CLASSES = (DriverSwapBlockDevice, DriverEphemeralBlockDevice,
-                        DriverVolumeBlockDevice, DriverSnapshotBlockDevice,
-                        DriverImageBlockDevice, DriverBlankBlockDevice)
+                        DriverVolumeBlockDevice, DriverVolSnapshotBlockDevice,
+                        DriverVolImageBlockDevice, DriverVolBlankBlockDevice)
 
 
 def is_implemented(bdm):

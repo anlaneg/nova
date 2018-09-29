@@ -74,8 +74,7 @@ Install and configure components
 
         [keystone_authtoken]
         # ...
-        auth_uri = http://controller:5000
-        auth_url = http://controller:35357
+        auth_url = http://controller:5000/v3
         memcached_servers = controller:11211
         auth_type = password
         project_domain_name = default
@@ -113,7 +112,7 @@ Install and configure components
 
         [DEFAULT]
         # ...
-        use_neutron = True
+        use_neutron = true
         firewall_driver = nova.virt.firewall.NoopFirewallDriver
 
      .. note::
@@ -123,6 +122,10 @@ Install and configure components
         firewall service by using the
         ``nova.virt.firewall.NoopFirewallDriver`` firewall driver.
 
+   * Configure the ``[neutron]`` section of **/etc/nova/nova.conf**. Refer to
+     the :neutron-doc:`Networking service install guide
+     <install/compute-install-obs.html>` for more details.
+
    * In the ``[vnc]`` section, enable and configure remote console access:
 
      .. path /etc/nova/nova.conf
@@ -130,7 +133,7 @@ Install and configure components
 
         [vnc]
         # ...
-        enabled = True
+        enabled = true
         server_listen = 0.0.0.0
         server_proxyclient_address = $my_ip
         novncproxy_base_url = http://controller:6080/vnc_auto.html
@@ -174,12 +177,12 @@ Install and configure components
 
         [placement]
         # ...
-        os_region_name = RegionOne
+        region_name = RegionOne
         project_domain_name = Default
         project_name = service
         auth_type = password
         user_domain_name = Default
-        auth_url = http://controller:35357/v3
+        auth_url = http://controller:5000/v3
         username = placement
         password = PLACEMENT_PASS
 

@@ -12,12 +12,12 @@
 
 import mock
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova import exception
 from nova import objects
 from nova.tests.unit.objects import test_instance_numa_topology
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 fake_instance_uuid = uuids.fake
@@ -82,19 +82,19 @@ class _TestMigrationContext(object):
         else:
             self.assertIsNone(mig_context)
 
-    @mock.patch('nova.db.instance_extra_get_by_instance_uuid')
+    @mock.patch('nova.db.api.instance_extra_get_by_instance_uuid')
     def test_get_by_instance_uuid(self, mock_get):
         mock_get.return_value = fake_db_context
         self._test_get_by_instance_uuid(fake_db_context)
 
-    @mock.patch('nova.db.instance_extra_get_by_instance_uuid')
+    @mock.patch('nova.db.api.instance_extra_get_by_instance_uuid')
     def test_get_by_instance_uuid_none(self, mock_get):
         db_context = fake_db_context.copy()
         db_context['migration_context'] = None
         mock_get.return_value = db_context
         self._test_get_by_instance_uuid(db_context)
 
-    @mock.patch('nova.db.instance_extra_get_by_instance_uuid')
+    @mock.patch('nova.db.api.instance_extra_get_by_instance_uuid')
     def test_get_by_instance_uuid_missing(self, mock_get):
         mock_get.return_value = None
         self.assertRaises(

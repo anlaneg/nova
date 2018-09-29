@@ -24,11 +24,13 @@ import traceback
 
 import netifaces
 from oslo_log import log
+from oslo_serialization import jsonutils
 import six
 
 from nova import block_device
 from nova.compute import power_state
 from nova.compute import task_states
+from nova.compute import vm_states
 import nova.conf
 from nova import exception
 from nova import notifications
@@ -38,6 +40,8 @@ from nova.notifications.objects import exception as notification_exception
 from nova.notifications.objects import flavor as flavor_notification
 from nova.notifications.objects import instance as instance_notification
 from nova.notifications.objects import keypair as keypair_notification
+from nova.notifications.objects import libvirt as libvirt_notification
+from nova.notifications.objects import metrics as metrics_notification
 from nova.notifications.objects import server_group as sg_notification
 from nova import objects
 from nova.objects import fields
@@ -221,6 +225,28 @@ def is_volume_backed_instance(context, instance, bdms=None):
     return not instance['image_ref']
 
 
+def heal_reqspec_is_bfv(ctxt, request_spec, instance):
+    """Calculates the is_bfv flag for a RequestSpec created before Rocky.
+
+    Starting in Rocky, new instances have their RequestSpec created with
+    the "is_bfv" flag to indicate if they are volume-backed which is used
+    by the scheduler when determining root disk resource allocations.
+
+    RequestSpecs created before Rocky will not have the is_bfv flag set
+    so we need to calculate it here and update the RequestSpec.
+
+    :param ctxt: nova.context.RequestContext auth context
+    :param request_spec: nova.objects.RequestSpec used for scheduling
+    :param instance: nova.objects.Instance being scheduled
+    """
+    if 'is_bfv' in request_spec:
+        return
+    # Determine if this is a volume-backed instance and set the field
+    # in the request spec accordingly.
+    request_spec.is_bfv = is_volume_backed_instance(ctxt, instance)
+    request_spec.save()
+
+
 def convert_mb_to_ceil_gb(mb_value):
     gb_int = 0
     if mb_value:
@@ -259,23 +285,24 @@ def get_value_from_system_metadata(instance, key, type, default):
         return default
 
 
-def notify_usage_exists(notifier, context, instance_ref, current_period=False,
-                        ignore_missing_network_data=True,
+def notify_usage_exists(notifier, context, instance_ref, host,
+                        current_period=False, ignore_missing_network_data=True,
                         system_metadata=None, extra_usage_info=None):
-    """Generates 'exists' unversioned legacy notification for an instance for
-    usage auditing purposes.
+    """Generates 'exists' unversioned legacy and transformed notification
+    for an instance for usage auditing purposes.
 
     :param notifier: a messaging.Notifier
-
+    :param context: request context for the current operation
+    :param instance_ref: nova.objects.Instance object from which to report
+        usage
+    :param host: the host emitting the notification
     :param current_period: if True, this will generate a usage for the
         current usage period; if False, this will generate a usage for the
         previous audit period.
-
     :param ignore_missing_network_data: if True, log any exceptions generated
         while getting network info; if False, raise the exception.
-    :param system_metadata: system_metadata DB entries for the instance,
-        if not None.  *NOTE*: Currently unused here in trunk, but needed for
-        potential custom modifications.
+    :param system_metadata: system_metadata override for the instance. If
+        None, the instance_ref.system_metadata will be used.
     :param extra_usage_info: Dictionary containing extra values to add or
         override in the notification if not None.
     """
@@ -299,12 +326,39 @@ def notify_usage_exists(notifier, context, instance_ref, current_period=False,
         extra_info.update(extra_usage_info)
 
     notify_about_instance_usage(notifier, context, instance_ref, 'exists',
-            system_metadata=system_metadata, extra_usage_info=extra_info)
+                                extra_usage_info=extra_info)
+
+    audit_period = instance_notification.AuditPeriodPayload(
+            audit_period_beginning=audit_start,
+            audit_period_ending=audit_end)
+
+    bandwidth = [instance_notification.BandwidthPayload(
+                    network_name=label,
+                    in_bytes=b['bw_in'],
+                    out_bytes=b['bw_out'])
+                 for label, b in bw.items()]
+
+    payload = instance_notification.InstanceExistsPayload(
+        context=context,
+        instance=instance_ref,
+        audit_period=audit_period,
+        bandwidth=bandwidth)
+
+    notification = instance_notification.InstanceExistsNotification(
+        context=context,
+        priority=fields.NotificationPriority.INFO,
+        publisher=notification_base.NotificationPublisher(
+            host=host, source=fields.NotificationSource.COMPUTE),
+        event_type=notification_base.EventType(
+            object='instance',
+            action=fields.NotificationAction.EXISTS),
+        payload=payload)
+    notification.emit(context)
 
 
 def notify_about_instance_usage(notifier, context, instance, event_suffix,
-                                network_info=None, system_metadata=None,
-                                extra_usage_info=None, fault=None):
+                                network_info=None, extra_usage_info=None,
+                                fault=None):
     """Send an unversioned legacy notification about an instance.
 
     All new notifications should use notify_about_instance_action which sends
@@ -313,8 +367,6 @@ def notify_about_instance_usage(notifier, context, instance, event_suffix,
     :param notifier: a messaging.Notifier
     :param event_suffix: Event type like "delete.start" or "exists"
     :param network_info: Networking information, if provided.
-    :param system_metadata: system_metadata DB entries for the instance,
-        if provided.
     :param extra_usage_info: Dictionary containing extra values to add or
         override in the notification.
     """
@@ -322,7 +374,7 @@ def notify_about_instance_usage(notifier, context, instance, event_suffix,
         extra_usage_info = {}
 
     usage_info = notifications.info_from_instance(context, instance,
-            network_info, system_metadata, **extra_usage_info)
+            network_info, populate_image_ref_url=True, **extra_usage_info)
 
     if fault:
         # NOTE(johngarbutt) mirrors the format in wrap_exception
@@ -338,14 +390,14 @@ def notify_about_instance_usage(notifier, context, instance, event_suffix,
     method(context, 'compute.instance.%s' % event_suffix, usage_info)
 
 
-def _get_fault_and_priority_from_exc(exception):
+def _get_fault_and_priority_from_exc_and_tb(exception, tb):
     fault = None
     priority = fields.NotificationPriority.INFO
 
     if exception:
         priority = fields.NotificationPriority.ERROR
-        fault = notification_exception.ExceptionPayload.from_exception(
-            exception)
+        fault = notification_exception.ExceptionPayload.from_exc_and_traceback(
+            exception, tb)
 
     return fault, priority
 
@@ -353,7 +405,7 @@ def _get_fault_and_priority_from_exc(exception):
 @rpc.if_notifications_enabled
 def notify_about_instance_action(context, instance, host, action, phase=None,
                                  source=fields.NotificationSource.COMPUTE,
-                                 exception=None, bdms=None):
+                                 exception=None, bdms=None, tb=None):
     """Send versioned notification about the action made on the instance
     :param instance: the instance which the action performed on
     :param host: the host emitting the notification
@@ -363,9 +415,11 @@ def notify_about_instance_action(context, instance, host, action, phase=None,
     :param exception: the thrown exception (used in error notifications)
     :param bdms: BlockDeviceMappingList object for the instance. If it is not
                 provided then we will load it from the db if so configured
+    :param tb: the traceback (used in error notifications)
     """
-    fault, priority = _get_fault_and_priority_from_exc(exception)
+    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
     payload = instance_notification.InstanceActionPayload(
+            context=context,
             instance=instance,
             fault=fault,
             bdms=bdms)
@@ -384,7 +438,7 @@ def notify_about_instance_action(context, instance, host, action, phase=None,
 
 @rpc.if_notifications_enabled
 def notify_about_instance_create(context, instance, host, phase=None,
-                                 exception=None, bdms=None):
+                                 exception=None, bdms=None, tb=None):
     """Send versioned notification about instance creation
 
     :param context: the request context
@@ -394,9 +448,11 @@ def notify_about_instance_create(context, instance, host, phase=None,
     :param exception: the thrown exception (used in error notifications)
     :param bdms: BlockDeviceMappingList object for the instance. If it is not
                 provided then we will load it from the db if so configured
+    :param tb: the traceback (used in error notifications)
     """
-    fault, priority = _get_fault_and_priority_from_exc(exception)
+    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
     payload = instance_notification.InstanceCreatePayload(
+        context=context,
         instance=instance,
         fault=fault,
         bdms=bdms)
@@ -415,7 +471,7 @@ def notify_about_instance_create(context, instance, host, phase=None,
 
 @rpc.if_notifications_enabled
 def notify_about_volume_attach_detach(context, instance, host, action, phase,
-                                      volume_id=None, exception=None):
+                                      volume_id=None, exception=None, tb=None):
     """Send versioned notification about the action made on the instance
     :param instance: the instance which the action performed on
     :param host: the host emitting the notification
@@ -423,9 +479,11 @@ def notify_about_volume_attach_detach(context, instance, host, action, phase,
     :param phase: the phase of the action
     :param volume_id: id of the volume will be attached
     :param exception: the thrown exception (used in error notifications)
+    :param tb: the traceback (used in error notifications)
     """
-    fault, priority = _get_fault_and_priority_from_exc(exception)
+    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
     payload = instance_notification.InstanceActionVolumePayload(
+            context=context,
             instance=instance,
             fault=fault,
             volume_id=volume_id)
@@ -443,8 +501,9 @@ def notify_about_volume_attach_detach(context, instance, host, action, phase,
 
 
 @rpc.if_notifications_enabled
-def notify_about_instance_rescue_action(
-        context, instance, host, rescue_image_ref, phase=None, exception=None):
+def notify_about_instance_rescue_action(context, instance, host,
+                                        rescue_image_ref, phase=None,
+                                        exception=None, tb=None):
     """Send versioned notification about the action made on the instance
 
     :param instance: the instance which the action performed on
@@ -452,9 +511,11 @@ def notify_about_instance_rescue_action(
     :param rescue_image_ref: the rescue image ref
     :param phase: the phase of the action
     :param exception: the thrown exception (used in error notifications)
+    :param tb: the traceback (used in error notifications)
     """
-    fault, priority = _get_fault_and_priority_from_exc(exception)
+    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
     payload = instance_notification.InstanceActionRescuePayload(
+            context=context,
             instance=instance,
             fault=fault,
             rescue_image_ref=rescue_image_ref)
@@ -496,7 +557,8 @@ def notify_about_keypair_action(context, keypair, action, phase):
 
 @rpc.if_notifications_enabled
 def notify_about_volume_swap(context, instance, host, phase,
-                             old_volume_id, new_volume_id, exception=None):
+                             old_volume_id, new_volume_id, exception=None,
+                             tb=None):
     """Send versioned notification about the volume swap action
        on the instance
 
@@ -507,9 +569,11 @@ def notify_about_volume_swap(context, instance, host, phase,
     :param old_volume_id: the ID of the volume that is copied from and detached
     :param new_volume_id: the ID of the volume that is copied to and attached
     :param exception: an exception
+    :param tb: the traceback (used in error notifications)
     """
-    fault, priority = _get_fault_and_priority_from_exc(exception)
+    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
     payload = instance_notification.InstanceActionVolumeSwapPayload(
+        context=context,
         instance=instance,
         fault=fault,
         old_volume_id=old_volume_id,
@@ -540,6 +604,7 @@ def notify_about_instance_snapshot(context, instance, host, phase,
     :param snapshot_image_id: the ID of the snapshot
     """
     payload = instance_notification.InstanceActionSnapshotPayload(
+        context=context,
         instance=instance,
         fault=None,
         snapshot_image_id=snapshot_image_id)
@@ -570,6 +635,7 @@ def notify_about_resize_prep_instance(context, instance, host, phase,
     """
 
     payload = instance_notification.InstanceActionResizePrepPayload(
+        context=context,
         instance=instance,
         fault=None,
         new_flavor=flavor_notification.FlavorPayload(flavor=new_flavor))
@@ -665,6 +731,109 @@ def notify_about_server_group_action(context, group, action):
     notification.emit(context)
 
 
+@rpc.if_notifications_enabled
+def notify_about_server_group_add_member(context, group_id):
+    group = objects.InstanceGroup.get_by_uuid(context, group_id)
+    payload = sg_notification.ServerGroupPayload(group)
+    notification = sg_notification.ServerGroupNotification(
+        priority=fields.NotificationPriority.INFO,
+        publisher=notification_base.NotificationPublisher(
+            host=CONF.host, source=fields.NotificationSource.API),
+        event_type=notification_base.EventType(
+            object='server_group',
+            action=fields.NotificationAction.ADD_MEMBER),
+        payload=payload)
+    notification.emit(context)
+
+
+@rpc.if_notifications_enabled
+def notify_about_instance_rebuild(context, instance, host,
+                                  action=fields.NotificationAction.REBUILD,
+                                  phase=None,
+                                  source=fields.NotificationSource.COMPUTE,
+                                  exception=None, bdms=None, tb=None):
+    """Send versioned notification about instance rebuild
+
+    :param instance: the instance which the action performed on
+    :param host: the host emitting the notification
+    :param action: the name of the action
+    :param phase: the phase of the action
+    :param source: the source of the notification
+    :param exception: the thrown exception (used in error notifications)
+    :param bdms: BlockDeviceMappingList object for the instance. If it is not
+                provided then we will load it from the db if so configured
+    :param tb: the traceback (used in error notifications)
+    """
+    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
+    payload = instance_notification.InstanceActionRebuildPayload(
+            context=context,
+            instance=instance,
+            fault=fault,
+            bdms=bdms)
+    notification = instance_notification.InstanceActionRebuildNotification(
+            context=context,
+            priority=priority,
+            publisher=notification_base.NotificationPublisher(
+                host=host, source=source),
+            event_type=notification_base.EventType(
+                    object='instance',
+                    action=action,
+                    phase=phase),
+            payload=payload)
+    notification.emit(context)
+
+
+@rpc.if_notifications_enabled
+def notify_about_metrics_update(context, host, host_ip, nodename,
+                                monitor_metric_list):
+    """Send versioned notification about updating metrics
+
+    :param context: the request context
+    :param host: the host emitting the notification
+    :param host_ip: the IP address of the host
+    :param nodename: the node name
+    :param monitor_metric_list: the MonitorMetricList object
+    """
+    payload = metrics_notification.MetricsPayload(
+            host=host,
+            host_ip=host_ip,
+            nodename=nodename,
+            monitor_metric_list=monitor_metric_list)
+    notification = metrics_notification.MetricsNotification(
+            context=context,
+            priority=fields.NotificationPriority.INFO,
+            publisher=notification_base.NotificationPublisher(
+                host=host, source=fields.NotificationSource.COMPUTE),
+            event_type=notification_base.EventType(
+                object='metrics',
+                action=fields.NotificationAction.UPDATE),
+            payload=payload)
+    notification.emit(context)
+
+
+@rpc.if_notifications_enabled
+def notify_about_libvirt_connect_error(context, ip, exception, tb):
+    """Send a versioned notification about libvirt connect error.
+
+    :param context: the request context
+    :param ip: the IP address of the host
+    :param exception: the thrown exception
+    :param tb: the traceback
+    """
+    fault, _ = _get_fault_and_priority_from_exc_and_tb(exception, tb)
+    payload = libvirt_notification.LibvirtErrorPayload(ip=ip, reason=fault)
+    notification = libvirt_notification.LibvirtErrorNotification(
+        priority=fields.NotificationPriority.ERROR,
+        publisher=notification_base.NotificationPublisher(
+            host=CONF.host, source=fields.NotificationSource.COMPUTE),
+        event_type=notification_base.EventType(
+            object='libvirt',
+            action=fields.NotificationAction.CONNECT,
+            phase=fields.NotificationPhase.ERROR),
+        payload=payload)
+    notification.emit(context)
+
+
 def refresh_info_cache_for_instance(context, instance):
     """Refresh the info cache for an instance.
 
@@ -745,52 +914,22 @@ def get_machine_ips():
     return addresses
 
 
-def resize_quota_delta(context, new_flavor, old_flavor, sense, compare):
-    """Calculate any quota adjustment required at a particular point
-    in the resize cycle.
+def upsize_quota_delta(new_flavor, old_flavor):
+    """Calculate deltas required to adjust quota for an instance upsize.
 
-    :param context: the request context
     :param new_flavor: the target instance type
     :param old_flavor: the original instance type
-    :param sense: the sense of the adjustment, 1 indicates a
-                  forward adjustment, whereas -1 indicates a
-                  reversal of a prior adjustment
-    :param compare: the direction of the comparison, 1 indicates
-                    we're checking for positive deltas, whereas
-                    -1 indicates negative deltas
     """
     def _quota_delta(resource):
-        return sense * (new_flavor[resource] - old_flavor[resource])
+        return (new_flavor[resource] - old_flavor[resource])
 
     deltas = {}
-    if compare * _quota_delta('vcpus') > 0:
+    if _quota_delta('vcpus') > 0:
         deltas['cores'] = _quota_delta('vcpus')
-    if compare * _quota_delta('memory_mb') > 0:
+    if _quota_delta('memory_mb') > 0:
         deltas['ram'] = _quota_delta('memory_mb')
 
     return deltas
-
-
-def upsize_quota_delta(context, new_flavor, old_flavor):
-    """Calculate deltas required to adjust quota for an instance upsize.
-    """
-    return resize_quota_delta(context, new_flavor, old_flavor, 1, 1)
-
-
-def reverse_upsize_quota_delta(context, instance):
-    """Calculate deltas required to reverse a prior upsizing
-    quota adjustment.
-    """
-    return resize_quota_delta(context, instance.new_flavor,
-                              instance.old_flavor, -1, -1)
-
-
-def downsize_quota_delta(context, instance):
-    """Calculate deltas required to adjust quota for an instance downsize.
-    """
-    old_flavor = instance.get_flavor('old')
-    new_flavor = instance.get_flavor('new')
-    return resize_quota_delta(context, new_flavor, old_flavor, 1, -1)
 
 
 def get_headroom(quotas, usages, deltas):
@@ -926,18 +1065,73 @@ def remove_shelved_keys_from_system_metadata(instance):
             del (instance.system_metadata[key])
 
 
+def may_have_ports_or_volumes(instance):
+    """Checks to see if an instance may have ports or volumes based on vm_state
+
+    This is primarily only useful when instance.host is None.
+
+    :param instance: The nova.objects.Instance in question.
+    :returns: True if the instance may have ports of volumes, False otherwise
+    """
+    # NOTE(melwitt): When an instance build fails in the compute manager,
+    # the instance host and node are set to None and the vm_state is set
+    # to ERROR. In the case, the instance with host = None has actually
+    # been scheduled and may have ports and/or volumes allocated on the
+    # compute node.
+    if instance.vm_state in (vm_states.SHELVED_OFFLOADED, vm_states.ERROR):
+        return True
+    return False
+
+
+def get_stashed_volume_connector(bdm, instance):
+    """Lookup a connector dict from the bdm.connection_info if set
+
+    Gets the stashed connector dict out of the bdm.connection_info if set
+    and the connector host matches the instance host.
+
+    :param bdm: nova.objects.block_device.BlockDeviceMapping
+    :param instance: nova.objects.instance.Instance
+    :returns: volume connector dict or None
+    """
+    if 'connection_info' in bdm and bdm.connection_info is not None:
+        # NOTE(mriedem): We didn't start stashing the connector in the
+        # bdm.connection_info until Mitaka so it might not be there on old
+        # attachments. Also, if the volume was attached when the instance
+        # was in shelved_offloaded state and it hasn't been unshelved yet
+        # we don't have the attachment/connection information either.
+        connector = jsonutils.loads(bdm.connection_info).get('connector')
+        if connector:
+            if connector.get('host') == instance.host:
+                return connector
+            LOG.debug('Found stashed volume connector for instance but '
+                      'connector host %(connector_host)s does not match '
+                      'the instance host %(instance_host)s.',
+                      {'connector_host': connector.get('host'),
+                       'instance_host': instance.host}, instance=instance)
+            if (instance.host is None and
+                    may_have_ports_or_volumes(instance)):
+                LOG.debug('Allowing use of stashed volume connector with '
+                          'instance host None because instance with '
+                          'vm_state %(vm_state)s has been scheduled in '
+                          'the past.', {'vm_state': instance.vm_state},
+                          instance=instance)
+                return connector
+
+
 class EventReporter(object):
     """Context manager to report instance action events."""
 
-    def __init__(self, context, event_name, *instance_uuids):
+    def __init__(self, context, event_name, host, *instance_uuids):
         self.context = context
         self.event_name = event_name
         self.instance_uuids = instance_uuids
+        self.host = host
 
     def __enter__(self):
         for uuid in self.instance_uuids:
             objects.InstanceActionEvent.event_start(
-                self.context, uuid, self.event_name, want_result=False)
+                self.context, uuid, self.event_name, want_result=False,
+                host=self.host)
 
         return self
 
@@ -966,7 +1160,8 @@ def wrap_instance_event(prefix):
             instance_uuid = keyed_args['instance']['uuid']
 
             event_name = '{0}_{1}'.format(prefix, function.__name__)
-            with EventReporter(context, event_name, instance_uuid):
+            host = self.host if hasattr(self, 'host') else None
+            with EventReporter(context, event_name, host, instance_uuid):
                 return function(self, context, *args, **kwargs)
         return decorated_function
     return helper
@@ -985,17 +1180,32 @@ class UnlimitedSemaphore(object):
 
 
 @contextlib.contextmanager
-def notify_about_instance_delete(notifier, context, instance,
-                                 delete_type='delete'):
-    # Pre-load system_metadata because if this context is around an
-    # instance.destroy(), lazy-loading it later would result in an
-    # InstanceNotFound error.
-    system_metadata = instance.system_metadata
+def notify_about_instance_delete(notifier, context, instance, host,
+                                 delete_type='delete',
+                                 source=fields.NotificationSource.API):
     try:
         notify_about_instance_usage(notifier, context, instance,
                                     "%s.start" % delete_type)
+        # Note(gibi): force_delete types will be handled in a
+        # subsequent patch
+        if delete_type in ['delete', 'soft_delete']:
+            notify_about_instance_action(
+                context,
+                instance,
+                host=host,
+                source=source,
+                action=delete_type,
+                phase=fields.NotificationPhase.START)
+
         yield
     finally:
         notify_about_instance_usage(notifier, context, instance,
-                                    "%s.end" % delete_type,
-                                    system_metadata=system_metadata)
+                                    "%s.end" % delete_type)
+        if delete_type in ['delete', 'soft_delete']:
+            notify_about_instance_action(
+                context,
+                instance,
+                host=host,
+                source=source,
+                action=delete_type,
+                phase=fields.NotificationPhase.END)

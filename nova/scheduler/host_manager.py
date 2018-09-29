@@ -34,7 +34,6 @@ import six
 import nova.conf
 from nova import context as context_module
 from nova import exception
-from nova.i18n import _LI, _LW
 from nova import objects
 from nova.pci import stats as pci_stats
 from nova.scheduler import filters
@@ -88,8 +87,8 @@ def set_update_time_on_success(function):
             # Ignores exception raised from consume_from_request() so that
             # booting instance would fail in the resource claim of compute
             # node, other suitable node may be chosen during scheduling retry.
-            LOG.warning(_LW("Selected host: %(host)s failed to consume from "
-                            "instance. Error: %(error)s"),
+            LOG.warning("Selected host: %(host)s failed to consume from "
+                        "instance. Error: %(error)s",
                         {'host': self.host, 'error': e})
         else:
             now = timeutils.utcnow()
@@ -178,7 +177,8 @@ class HostState(object):
                 LOG.debug("Update host state with service dict: %s", service)
                 self.service = ReadOnlyDict(service)
             if inst_dict is not None:
-                LOG.debug("Update host state with instances: %s", inst_dict)
+                LOG.debug("Update host state with instances: %s",
+                          list(inst_dict))
                 self.instances = inst_dict
 
         return _locked_update(self, compute, service, aggregates, inst_dict)
@@ -205,11 +205,11 @@ class HostState(object):
         if least_gb is not None:
             if least_gb > free_gb:
                 # can occur when an instance in database is not on host
-                LOG.warning(_LW("Host %(hostname)s has more disk space than "
-                                "database expected "
-                                "(%(physical)s GB > %(database)s GB)"),
-                            {'physical': least_gb, 'database': free_gb,
-                             'hostname': compute.hypervisor_hostname})
+                LOG.warning(
+                    "Host %(hostname)s has more disk space than database "
+                    "expected (%(physical)s GB > %(database)s GB)",
+                    {'physical': least_gb, 'database': free_gb,
+                     'hostname': compute.hypervisor_hostname})
             free_gb = min(least_gb, free_gb)
         free_disk_mb = free_gb * 1024
 
@@ -256,6 +256,9 @@ class HostState(object):
         self.cpu_allocation_ratio = compute.cpu_allocation_ratio
         self.ram_allocation_ratio = compute.ram_allocation_ratio
         self.disk_allocation_ratio = compute.disk_allocation_ratio
+
+        # update failed_builds counter reported by the compute
+        self.failed_builds = int(self.stats.get('failed_builds', 0))
 
     def consume_from_request(self, spec_obj):
         """Incrementally update host state from a RequestSpec object."""
@@ -340,7 +343,7 @@ class HostManager(object):
         return HostState(host, node, cell)
 
     def __init__(self):
-        self.cells = None
+        self.refresh_cells_caches()
         self.filter_handler = filters.HostFilterHandler()
         filter_classes = self.filter_handler.get_matching_classes(
                 CONF.filter_scheduler.available_filters)
@@ -417,7 +420,6 @@ class HostManager(object):
 
         def _async_init_instance_info(computes_by_cell):
             context = context_module.RequestContext()
-            self._load_cells(context)
             LOG.debug("START:_async_init_instance_info")
             self._instance_info = {}
 
@@ -501,7 +503,7 @@ class HostManager(object):
                         del host_map[(hostname, nodename)]
                         ignored_hosts.append(host)
             ignored_hosts_str = ', '.join(ignored_hosts)
-            LOG.info(_LI('Host filter ignoring hosts: %s'), ignored_hosts_str)
+            LOG.info('Host filter ignoring hosts: %s', ignored_hosts_str)
 
         def _match_forced_hosts(host_map, hosts_to_force):
             forced_hosts = []
@@ -513,12 +515,12 @@ class HostManager(object):
                     forced_hosts.append(hostname)
             if host_map:
                 forced_hosts_str = ', '.join(forced_hosts)
-                msg = _LI('Host filter forcing available hosts to %s')
+                LOG.info('Host filter forcing available hosts to %s',
+                         forced_hosts_str)
             else:
                 forced_hosts_str = ', '.join(hosts_to_force)
-                msg = _LI("No hosts matched due to not matching "
-                          "'force_hosts' value of '%s'")
-            LOG.info(msg, forced_hosts_str)
+                LOG.info("No hosts matched due to not matching "
+                         "'force_hosts' value of '%s'", forced_hosts_str)
 
         def _match_forced_nodes(host_map, nodes_to_force):
             forced_nodes = []
@@ -529,12 +531,12 @@ class HostManager(object):
                     forced_nodes.append(nodename)
             if host_map:
                 forced_nodes_str = ', '.join(forced_nodes)
-                msg = _LI('Host filter forcing available nodes to %s')
+                LOG.info('Host filter forcing available nodes to %s',
+                         forced_nodes_str)
             else:
                 forced_nodes_str = ', '.join(nodes_to_force)
-                msg = _LI("No nodes matched due to not matching "
-                          "'force_nodes' value of '%s'")
-            LOG.info(msg, forced_nodes_str)
+                LOG.info("No nodes matched due to not matching "
+                         "'force_nodes' value of '%s'", forced_nodes_str)
 
         def _get_hosts_matching_request(hosts, requested_destination):
             (host, node) = (requested_destination.host,
@@ -542,14 +544,14 @@ class HostManager(object):
             requested_nodes = [x for x in hosts
                                if x.host == host and x.nodename == node]
             if requested_nodes:
-                LOG.info(_LI('Host filter only checking host %(host)s and '
-                             'node %(node)s'), {'host': host, 'node': node})
+                LOG.info('Host filter only checking host %(host)s and '
+                         'node %(node)s', {'host': host, 'node': node})
             else:
                 # NOTE(sbauza): The API level should prevent the user from
                 # providing a wrong destination but let's make sure a wrong
                 # destination doesn't trample the scheduler still.
-                LOG.info(_LI('No hosts matched due to not matching requested '
-                             'destination (%(host)s, %(node)s)'),
+                LOG.info('No hosts matched due to not matching requested '
+                         'destination (%(host)s, %(node)s)',
                          {'host': host, 'node': node})
             return iter(requested_nodes)
 
@@ -613,37 +615,67 @@ class HostManager(object):
          - services is a dict of services indexed by hostname
         """
 
+        def targeted_operation(cctxt):
+            services = objects.ServiceList.get_by_binary(
+                cctxt, 'nova-compute', include_disabled=True)
+            if compute_uuids is None:
+                return services, objects.ComputeNodeList.get_all(cctxt)
+            else:
+                return services, objects.ComputeNodeList.get_all_by_uuids(
+                    cctxt, compute_uuids)
+
+        timeout = context_module.CELL_TIMEOUT
+        results = context_module.scatter_gather_cells(context, cells, timeout,
+                                                      targeted_operation)
         compute_nodes = collections.defaultdict(list)
         services = {}
-        for cell in cells:
-            LOG.debug('Getting compute nodes and services for cell %(cell)s',
-                      {'cell': cell.identity})
-            with context_module.target_cell(context, cell) as cctxt:
-                if compute_uuids is None:
-                    compute_nodes[cell.uuid].extend(
-                        objects.ComputeNodeList.get_all(cctxt))
-                else:
-                    compute_nodes[cell.uuid].extend(
-                        objects.ComputeNodeList.get_all_by_uuids(
-                            cctxt, compute_uuids))
-                services.update(
-                    {service.host: service
-                     for service in objects.ServiceList.get_by_binary(
-                             cctxt, 'nova-compute',
-                             include_disabled=True)})
+        for cell_uuid, result in results.items():
+            if result is context_module.raised_exception_sentinel:
+                LOG.warning('Failed to get computes for cell %s', cell_uuid)
+            elif result is context_module.did_not_respond_sentinel:
+                LOG.warning('Timeout getting computes for cell %s', cell_uuid)
+            else:
+                _services, _compute_nodes = result
+                compute_nodes[cell_uuid].extend(_compute_nodes)
+                services.update({service.host: service
+                                 for service in _services})
         return compute_nodes, services
 
-    def _load_cells(self, context):
-        if not self.cells:
-            # NOTE(danms): global list of cells cached forever right now
-            self.cells = objects.CellMappingList.get_all(context)
-            LOG.debug('Found %(count)i cells: %(cells)s',
-                      {'count': len(self.cells),
-                       'cells': ', '.join([c.uuid for c in self.cells])})
+    def refresh_cells_caches(self):
+        # NOTE(tssurya): This function is called from the scheduler manager's
+        # reset signal handler and also upon startup of the scheduler.
+        context = context_module.RequestContext()
+        temp_cells = objects.CellMappingList.get_all(context)
+        # NOTE(tssurya): filtering cell0 from the list since it need
+        # not be considered for scheduling.
+        for c in temp_cells:
+            if c.is_cell0():
+                temp_cells.objects.remove(c)
+                # once its done break for optimization
+                break
+        # NOTE(danms, tssurya): global list of cells cached which
+        # will be refreshed every time a SIGHUP is sent to the scheduler.
+        self.cells = temp_cells
+        LOG.debug('Found %(count)i cells: %(cells)s',
+                  {'count': len(self.cells),
+                   'cells': ', '.join([c.uuid for c in self.cells])})
+        # NOTE(tssurya): Global cache of only the enabled cells. This way
+        # scheduling is limited only to the enabled cells. However this
+        # cache will be refreshed every time a cell is disabled or enabled
+        # or when a new cell is created as long as a SIGHUP signal is sent
+        # to the scheduler.
+        self.enabled_cells = [c for c in self.cells if not c.disabled]
+        # Filtering the disabled cells only for logging purposes.
+        disabled_cells = [c for c in self.cells if c.disabled]
+        LOG.debug('Found %(count)i disabled cells: %(cells)s',
+                  {'count': len(disabled_cells),
+                   'cells': ', '.join(
+                   [c.identity for c in disabled_cells])})
 
     def get_host_states_by_uuids(self, context, compute_uuids, spec_obj):
 
-        self._load_cells(context)
+        if not self.cells:
+            LOG.warning("No cells were found")
         if (spec_obj and 'requested_destination' in spec_obj and
                 spec_obj.requested_destination and
                 'cell' in spec_obj.requested_destination):
@@ -654,7 +686,7 @@ class HostManager(object):
         if only_cell:
             cells = [only_cell]
         else:
-            cells = self.cells
+            cells = self.enabled_cells
 
         compute_nodes, services = self._get_computes_for_cells(
             context, cells, compute_uuids=compute_uuids)
@@ -665,7 +697,6 @@ class HostManager(object):
         the HostManager knows about. Also, each of the consumable resources
         in HostState are pre-populated and adjusted based on data in the db.
         """
-        self._load_cells(context)
         compute_nodes, services = self._get_computes_for_cells(context,
                                                                self.cells)
         return self._get_host_states(context, compute_nodes, services)
@@ -683,8 +714,8 @@ class HostManager(object):
                 service = services.get(compute.host)
 
                 if not service:
-                    LOG.warning(_LW(
-                        "No compute service record found for host %(host)s"),
+                    LOG.warning(
+                        "No compute service record found for host %(host)s",
                         {'host': compute.host})
                     continue
                 host = compute.host
@@ -724,8 +755,10 @@ class HostManager(object):
                      'instance info for this host.', host_name)
             return {}
         with context_module.target_cell(context, hm.cell_mapping) as cctxt:
-            inst_list = objects.InstanceList.get_by_host(cctxt, host_name)
-            return {inst.uuid: inst for inst in inst_list}
+            uuids = objects.InstanceList.get_uuids_by_host(cctxt, host_name)
+            # Putting the context in the otherwise fake Instance object at
+            # least allows out of tree filters to lazy-load fields.
+            return {uuid: objects.Instance(cctxt, uuid=uuid) for uuid in uuids}
 
     def _get_instance_info(self, context, compute):
         """Gets the host instance info from the compute host.
@@ -780,8 +813,8 @@ class HostManager(object):
                 host_info["updated"] = True
             else:
                 self._recreate_instance_info(context, host_name)
-                LOG.info(_LI("Received an update from an unknown host '%s'. "
-                             "Re-created its InstanceList."), host_name)
+                LOG.info("Received an update from an unknown host '%s'. "
+                         "Re-created its InstanceList.", host_name)
 
     @utils.synchronized(HOST_INSTANCE_SEMAPHORE)
     def delete_instance_info(self, context, host_name, instance_uuid):
@@ -798,8 +831,8 @@ class HostManager(object):
             host_info["updated"] = True
         else:
             self._recreate_instance_info(context, host_name)
-            LOG.info(_LI("Received a delete update from an unknown host '%s'. "
-                         "Re-created its InstanceList."), host_name)
+            LOG.info("Received a delete update from an unknown host '%s'. "
+                     "Re-created its InstanceList.", host_name)
 
     @utils.synchronized(HOST_INSTANCE_SEMAPHORE)
     def sync_instance_info(self, context, host_name, instance_uuids):
@@ -816,13 +849,13 @@ class HostManager(object):
             compute_set = set(instance_uuids)
             if not local_set == compute_set:
                 self._recreate_instance_info(context, host_name)
-                LOG.info(_LI("The instance sync for host '%s' did not match. "
-                             "Re-created its InstanceList."), host_name)
+                LOG.info("The instance sync for host '%s' did not match. "
+                         "Re-created its InstanceList.", host_name)
                 return
             host_info["updated"] = True
-            LOG.info(_LI("Successfully synced instances from host '%s'."),
-                     host_name)
+            LOG.debug("Successfully synced instances from host '%s'.",
+                      host_name)
         else:
             self._recreate_instance_info(context, host_name)
-            LOG.info(_LI("Received a sync request from an unknown host '%s'. "
-                         "Re-created its InstanceList."), host_name)
+            LOG.info("Received a sync request from an unknown host '%s'. "
+                     "Re-created its InstanceList.", host_name)

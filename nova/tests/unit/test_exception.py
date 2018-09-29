@@ -104,7 +104,7 @@ class WrapExceptionTestCase(test.NoDBTestCase):
 
         payload = notification['payload']
         self.assertEqual('ExceptionPayload', payload['nova_object.name'])
-        self.assertEqual('1.0', payload['nova_object.version'])
+        self.assertEqual('1.1', payload['nova_object.version'])
 
         payload = payload['nova_object.data']
         self.assertEqual('TestingException', payload['exception'])
@@ -112,6 +112,7 @@ class WrapExceptionTestCase(test.NoDBTestCase):
         self.assertEqual('bad_function_exception', payload['function_name'])
         self.assertEqual('nova.tests.unit.test_exception',
                          payload['module_name'])
+        self.assertIn('bad_function_exception', payload['traceback'])
 
     @mock.patch('nova.rpc.NOTIFIER')
     @mock.patch('nova.notifications.objects.exception.'
@@ -228,6 +229,23 @@ class NovaExceptionTestCase(test.NoDBTestCase):
 
         exc = FakeNovaException_Remote(lame_arg='lame')
         self.assertEqual("some message %(somearg)s", exc.format_message())
+
+    def test_repr(self):
+        class FakeNovaException(exception.NovaException):
+            msg_fmt = "some message"
+
+        mock_exc = FakeNovaException(code=500)
+
+        exc_repr = repr(mock_exc)
+
+        eval_repr = eval(exc_repr)
+        exc_kwargs = eval_repr.get('kwargs')
+
+        self.assertIsNotNone(exc_kwargs)
+
+        self.assertEqual(500, exc_kwargs.get('code'))
+        self.assertEqual('some message', eval_repr.get('message'))
+        self.assertEqual('FakeNovaException', eval_repr.get('class'))
 
 
 class ConvertedExceptionTestCase(test.NoDBTestCase):

@@ -31,6 +31,7 @@ import traceback
 
 from dateutil import parser as dateutil_parser
 import decorator
+from keystoneauth1 import exceptions as ks_exc
 import netaddr
 from oslo_config import cfg
 from oslo_db import exception as db_exc
@@ -44,12 +45,13 @@ import six
 import six.moves.urllib.parse as urlparse
 from sqlalchemy.engine import url as sqla_url
 
-from nova.api.ec2 import ec2utils
+from nova.api.openstack.placement.objects import consumer as consumer_obj
 from nova.cmd import common as cmd_common
+from nova.compute import api as compute_api
 import nova.conf
 from nova import config
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova.db import migration
 from nova.db.sqlalchemy import api as sa_db
 from nova import exception
@@ -58,12 +60,15 @@ from nova import objects
 from nova.objects import block_device as block_device_obj
 from nova.objects import build_request as build_request_obj
 from nova.objects import host_mapping as host_mapping_obj
-from nova.objects import instance_group as instance_group_obj
+from nova.objects import instance as instance_obj
+from nova.objects import instance_mapping as instance_mapping_obj
 from nova.objects import keypair as keypair_obj
 from nova.objects import quotas as quotas_obj
 from nova.objects import request_spec
 from nova import quota
 from nova import rpc
+from nova.scheduler.client import report
+from nova.scheduler import utils as scheduler_utils
 from nova import utils
 from nova import version
 from nova.virt import ironic
@@ -81,16 +86,6 @@ _EXTRA_DEFAULT_LOG_LEVELS = ['oslo_concurrency=INFO',
 # Decorators for actions
 args = cmd_common.args
 action_description = cmd_common.action_description
-
-
-def param2id(object_id):
-    """Helper function to convert various volume id types to internal id.
-    args: [object_id], e.g. 'vol-0000000a' or 'volume-0000000a' or '10'
-    """
-    if '-' in object_id:
-        return ec2utils.ec2_vol_id_to_uuid(object_id)
-    else:
-        return object_id
 
 
 def mask_passwd_in_url(url):
@@ -318,13 +313,7 @@ class NetworkCommands(object):
             raise Exception(_("Please specify either fixed_range or uuid"))
 
         net_manager = importutils.import_object(CONF.network_manager)
-        if "NeutronManager" in CONF.network_manager:
-            if uuid is None:
-                raise Exception(_("UUID is required to delete "
-                                  "Neutron Networks"))
-            if fixed_range:
-                raise Exception(_("Deleting by fixed_range is not supported "
-                                "with the NeutronManager"))
+
         # delete the network
         net_manager.delete_network(context.get_admin_context(),
             fixed_range, uuid)
@@ -382,13 +371,28 @@ class NetworkCommands(object):
 class DbCommands(object):
     """Class for managing the main database."""
 
+    # NOTE(danms): These functions are called with a DB context and a
+    # count, which is the maximum batch size requested by the
+    # user. They must be idempotent. At most $count records should be
+    # migrated. The function must return a tuple of (found, done). The
+    # found value indicates how many unmigrated records existed in the
+    # database prior to the migration (either total, or up to the
+    # $count limit provided), and a nonzero found value tells the user
+    # that there is still work to do. The done value indicates whether
+    # or not any records were actually migrated by the function. Thus
+    # if both (found, done) are nonzero, work was done and some work
+    # remains. If found is nonzero and done is zero, some records are
+    # not migratable, but all migrations that can complete have
+    # finished.
     online_migrations = (
         # Added in Newton
+        # TODO(mriedem): Remove this in Stein along with the compatibility
+        # code in the api and conductor services; the nova-status upgrade check
+        # added in Rocky is the tool operators can use to make sure they have
+        # completed this migration.
         request_spec.migrate_instances_add_request_spec,
         # Added in Newton
         keypair_obj.migrate_keypairs_to_api_db,
-        # Added in Newton
-        instance_group_obj.migrate_instance_groups_to_api_db,
         # Added in Ocata
         # NOTE(mriedem): This online migration is going to be backported to
         # Newton also since it's an upgrade issue when upgrading from Mitaka.
@@ -403,6 +407,15 @@ class DbCommands(object):
         sa_db.migration_migrate_to_uuid,
         # Added in Queens
         block_device_obj.BlockDeviceMapping.populate_uuids,
+        # Added in Rocky
+        # NOTE(tssurya): This online migration is going to be backported to
+        # Queens and Pike since instance.avz of instances before Pike
+        # need to be populated if it was not specified during boot time.
+        instance_obj.populate_missing_availability_zones,
+        # Added in Rocky
+        consumer_obj.create_incomplete_consumers,
+        # Added in Rocky
+        instance_mapping_obj.populate_queued_for_delete,
     )
 
     def __init__(self):
@@ -495,7 +508,8 @@ Error: %s""") % six.text_type(e))
         """Move deleted rows from production tables to shadow tables.
 
         Returns 0 if nothing was archived, 1 if some number of rows were
-        archived, 2 if max_rows is invalid. If automating, this should be
+        archived, 2 if max_rows is invalid, 3 if no connection could be
+        established to the API DB. If automating, this should be
         run continuously while the result is 1, stopping at 0.
         """
         max_rows = int(max_rows)
@@ -506,6 +520,19 @@ Error: %s""") % six.text_type(e))
             print(_('max rows must be <= %(max_value)d') %
                   {'max_value': db.MAX_INT})
             return 2
+
+        ctxt = context.get_admin_context()
+        try:
+            # NOTE(tssurya): This check has been added to validate if the API
+            # DB is reachable or not as this is essential for purging the
+            # instance_mappings and request_specs of the deleted instances.
+            objects.CellMappingList.get_all(ctxt)
+        except db_exc.CantStartEngineError:
+            print(_('Failed to connect to API DB so aborting this archival '
+                    'attempt. Please check your config file to make sure that '
+                    'CONF.api_database.connection is set and run this '
+                    'command again.'))
+            return 3
 
         table_to_rows_archived = {}
         deleted_instance_uuids = []
@@ -525,13 +552,18 @@ Error: %s""") % six.text_type(e))
             if deleted_instance_uuids:
                 table_to_rows_archived.setdefault('instance_mappings', 0)
                 table_to_rows_archived.setdefault('request_specs', 0)
-                ctxt = context.get_admin_context()
+                table_to_rows_archived.setdefault('instance_group_member', 0)
                 deleted_mappings = objects.InstanceMappingList.destroy_bulk(
                                             ctxt, deleted_instance_uuids)
                 table_to_rows_archived['instance_mappings'] += deleted_mappings
                 deleted_specs = objects.RequestSpec.destroy_bulk(
                                             ctxt, deleted_instance_uuids)
                 table_to_rows_archived['request_specs'] += deleted_specs
+                deleted_group_members = (
+                    objects.InstanceGroup.destroy_members_bulk(
+                        ctxt, deleted_instance_uuids))
+                table_to_rows_archived['instance_group_member'] += (
+                    deleted_group_members)
             if not until_complete:
                 break
             elif not run:
@@ -654,9 +686,7 @@ Error: %s""") % six.text_type(e))
                         'migrated') % {'total': found,
                                        'meth': name,
                                        'done': done})
-            migrations.setdefault(name, (0, 0))
-            migrations[name] = (migrations[name][0] + found,
-                                migrations[name][1] + done)
+            migrations[name] = found, done
             if max_count is not None:
                 ran += done
                 if ran >= max_count:
@@ -685,8 +715,14 @@ Error: %s""") % six.text_type(e))
         migration_info = {}
         while ran is None or ran != 0:
             migrations = self._run_migration(ctxt, max_count)
-            migration_info.update(migrations)
-            ran = sum([done for found, done in migrations.values()])
+            ran = 0
+            for name in migrations:
+                migration_info.setdefault(name, (0, 0))
+                migration_info[name] = (
+                    migration_info[name][0] + migrations[name][0],
+                    migration_info[name][1] + migrations[name][1],
+                )
+                ran += migrations[name][1]
             if not unlimited:
                 break
 
@@ -698,6 +734,8 @@ Error: %s""") % six.text_type(e))
             t.add_row([name, info[0], info[1]])
         print(t)
 
+        # TODO(mriedem): Potentially add another return code for
+        # "there are more migrations, but not completable right now"
         return ran and 1 or 0
 
     @args('--resource_class', metavar='<class>', required=True,
@@ -806,7 +844,11 @@ class ApiDbCommands(object):
     @args('--version', metavar='<version>', help=argparse.SUPPRESS)
     @args('version2', metavar='VERSION', nargs='?', help='Database version')
     def sync(self, version=None, version2=None):
-        """Sync the database up to the most recent version."""
+        """Sync the database up to the most recent version.
+
+        If placement_database.connection is not None, sync that
+        database using the API database migrations.
+        """
         if version and not version2:
             print(_("DEPRECATED: The '--version' parameter was deprecated in "
                     "the Pike cycle and will not be supported in future "
@@ -814,7 +856,15 @@ class ApiDbCommands(object):
                     "instead"))
             version2 = version
 
-        return migration.db_sync(version2, database='api')
+        # NOTE(cdent): At the moment, the migration code deep in the belly
+        # of the migration package doesn't actually return anything, so
+        # returning the result of db_sync is not particularly meaningful
+        # here. But, in case that changes, we store the result from the
+        # the placement sync to and with the api sync.
+        result = True
+        if CONF.placement_database.connection is not None:
+            result = migration.db_sync(version2, database='placement')
+        return migration.db_sync(version2, database='api') and result
 
     def version(self):
         """Print the current database version."""
@@ -982,6 +1032,14 @@ class CellV2Commands(object):
         if not transport_url:
             print('Must specify --transport-url if [DEFAULT]/transport_url '
                   'is not set in the configuration file.')
+            return None
+
+        try:
+            messaging.TransportURL.parse(conf=CONF, url=transport_url)
+        except (messaging.InvalidTransportURL, ValueError) as e:
+            print(_('Invalid transport URL: %s') % six.text_type(e))
+            return None
+
         return transport_url
 
     def _non_unique_transport_url_database_connection_checker(self, ctxt,
@@ -1130,7 +1188,11 @@ class CellV2Commands(object):
                'in the cell will be mapped in batches of 50. If you have a '
                'large number of instances, consider specifying a custom value '
                'and run the command until it exits with 0.')
-    def map_instances(self, cell_uuid, max_count=None):
+    @args('--reset', action='store_true', dest='reset_marker',
+          help='The command will start from the beginning as opposed to the '
+               'default behavior of starting from where the last run '
+               'finished')
+    def map_instances(self, cell_uuid, max_count=None, reset_marker=None):
         """Map instances into the provided cell.
 
         Instances in the nova database of the provided cell (nova database
@@ -1138,9 +1200,24 @@ class CellV2Commands(object):
         oldest to newest and if unmapped, will be mapped to the provided cell.
         A max-count can be set on the number of instance to map in a single
         run. Repeated runs of the command will start from where the last run
-        finished so it is not necessary to increase max-count to finish. An
-        exit code of 0 indicates that all instances have been mapped.
+        finished so it is not necessary to increase max-count to finish. A
+        reset option can be passed which will reset the marker, thus making the
+        command start from the beginning as opposed to the default behavior of
+        starting from where the last run finished. An exit code of 0 indicates
+        that all instances have been mapped.
         """
+
+        # NOTE(stephenfin): The support for batching in this command relies on
+        # a bit of a hack. We initially process N instance-cell mappings, where
+        # N is the value of '--max-count' if provided else 50. To ensure we
+        # can continue from N on the next iteration, we store a instance-cell
+        # mapping object with a special name and the UUID of the last
+        # instance-cell mapping processed (N - 1) in munged form. On the next
+        # iteration, we search for the special name and unmunge the UUID to
+        # pick up where we left off. This is done until all mappings are
+        # processed. The munging is necessary as there's a unique constraint on
+        # the UUID field and we need something reversable. For more
+        # information, see commit 9038738d0.
 
         if max_count is not None:
             try:
@@ -1169,6 +1246,8 @@ class CellV2Commands(object):
         else:
             # There should be only one here
             marker = marker_mapping[0].instance_uuid.replace(' ', '-')
+            if reset_marker:
+                marker = None
             marker_mapping[0].destroy()
 
         next_marker = True
@@ -1335,7 +1414,11 @@ class CellV2Commands(object):
           help=_('Considered successful (exit code 0) only when an unmapped '
                  'host is discovered. Any other outcome will be considered a '
                  'failure (exit code 1).'))
-    def discover_hosts(self, cell_uuid=None, verbose=False, strict=False):
+    @args('--by-service', action='store_true', default=False,
+          dest='by_service',
+          help=_('Discover hosts by service instead of compute node'))
+    def discover_hosts(self, cell_uuid=None, verbose=False, strict=False,
+                       by_service=False):
         """Searches cells, or a single cell, and maps found hosts.
 
         When a new host is added to a deployment it will add a service entry
@@ -1348,7 +1431,8 @@ class CellV2Commands(object):
                 print(msg)
 
         ctxt = context.RequestContext()
-        hosts = host_mapping_obj.discover_hosts(ctxt, cell_uuid, status_fn)
+        hosts = host_mapping_obj.discover_hosts(ctxt, cell_uuid, status_fn,
+                                                by_service)
         # discover_hosts will return an empty list if no hosts are discovered
         if strict:
             return int(not hosts)
@@ -1365,14 +1449,15 @@ class CellV2Commands(object):
           help=_('The transport url for the cell message queue'))
     @args('--verbose', action='store_true',
           help=_('Output the uuid of the created cell'))
+    @args('--disabled', action='store_true',
+          help=_('To create a pre-disabled cell.'))
     def create_cell(self, name=None, database_connection=None,
-                    transport_url=None, verbose=False):
+                    transport_url=None, verbose=False, disabled=False):
         ctxt = context.get_context()
-        transport_url = transport_url or CONF.transport_url
+        transport_url = self._validate_transport_url(transport_url)
         if not transport_url:
-            print(_('Must specify --transport-url if [DEFAULT]/transport_url '
-                    'is not set in the configuration file.'))
             return 1
+
         database_connection = database_connection or CONF.database.connection
         if not database_connection:
             print(_('Must specify --database_connection '
@@ -1387,7 +1472,8 @@ class CellV2Commands(object):
             ctxt,
             uuid=cell_mapping_uuid, name=name,
             transport_url=transport_url,
-            database_connection=database_connection)
+            database_connection=database_connection,
+            disabled=disabled)
         cell_mapping.create()
         if verbose:
             print(cell_mapping_uuid)
@@ -1398,24 +1484,29 @@ class CellV2Commands(object):
     def list_cells(self, verbose=False):
         """Lists the v2 cells in the deployment.
 
-        By default only the cell name and uuid are shown. Use the --verbose
-        option to see transport URL and database connection details.
+        By default the cell name, uuid, disabled state, masked transport
+        URL and database connection details are shown. Use the --verbose
+        option to see transport URL and database connection with their
+        sensitive details.
         """
         cell_mappings = objects.CellMappingList.get_all(
             context.get_admin_context())
 
         field_names = [_('Name'), _('UUID'), _('Transport URL'),
-                       _('Database Connection')]
+                       _('Database Connection'), _('Disabled')]
 
         t = prettytable.PrettyTable(field_names)
-        for cell in sorted(cell_mappings, key=lambda _cell: _cell.name):
-            fields = [cell.name, cell.uuid]
+        for cell in sorted(cell_mappings,
+                           # CellMapping.name is optional
+                           key=lambda _cell: _cell.name or ''):
+            fields = [cell.name or '', cell.uuid]
             if verbose:
                 fields.extend([cell.transport_url, cell.database_connection])
             else:
                 fields.extend([
                     mask_passwd_in_url(cell.transport_url),
                     mask_passwd_in_url(cell.database_connection)])
+            fields.extend([cell.disabled])
             t.add_row(fields)
         print(t)
         return 0
@@ -1455,10 +1546,16 @@ class CellV2Commands(object):
         # Check to see if there are any HostMappings for this cell.
         host_mappings = objects.HostMappingList.get_by_cell_id(
             ctxt, cell_mapping.id)
-        if host_mappings and not force:
-            print(_('There are existing hosts mapped to cell with uuid %s.') %
-                  cell_uuid)
-            return 2
+        nodes = []
+        if host_mappings:
+            if not force:
+                print(_('There are existing hosts mapped to cell with uuid '
+                        '%s.') % cell_uuid)
+                return 2
+            # We query for the compute nodes in the cell,
+            # so that they can be unmapped.
+            with context.target_cell(ctxt, cell_mapping) as cctxt:
+                nodes = objects.ComputeNodeList.get_all(cctxt)
 
         # Check to see if there are any InstanceMappings for this cell.
         instance_mappings = objects.InstanceMappingList.get_by_cell_id(
@@ -1486,6 +1583,12 @@ class CellV2Commands(object):
         for instance_mapping in instance_mappings:
             instance_mapping.destroy()
 
+        # Unmap the compute nodes so that they can be discovered
+        # again in future, if needed.
+        for node in nodes:
+            node.mapped = 0
+            node.save()
+
         # Delete hosts mapped to the cell.
         for host_mapping in host_mappings:
             host_mapping.destroy()
@@ -1505,19 +1608,32 @@ class CellV2Commands(object):
           dest='db_connection',
           help=_('Set the cell database_connection. NOTE that running nodes '
                  'will not see the change until restart!'))
+    @args('--disable', action='store_true', dest='disable',
+          help=_('Disables the cell. Note that the scheduling will be blocked '
+                 'to this cell until its enabled and followed by a SIGHUP of '
+                 'nova-scheduler service.'))
+    @args('--enable', action='store_true', dest='enable',
+          help=_('Enables the cell. Note that this makes a disabled cell '
+                 'available for scheduling after a SIGHUP of the '
+                 'nova-scheduler service'))
     def update_cell(self, cell_uuid, name=None, transport_url=None,
-                    db_connection=None):
+                    db_connection=None, disable=False, enable=False):
         """Updates the properties of a cell by the given uuid.
 
         If the cell is not found by uuid, this command will return an exit
         code of 1. If the provided transport_url or/and database_connection
         is/are same as another cell, this command will return an exit code
-        of 3. If the properties cannot be set, this will return 2.
+        of 3. If the properties cannot be set, this will return 2. If an
+        attempt is made to disable and enable a cell at the same time, this
+        command will exit with a return code of 4. If an attempt is made to
+        disable or enable cell0 this command will exit with a return code of 5.
         Otherwise, the exit code will be 0.
 
         NOTE: Updating the transport_url or database_connection fields on
         a running system will NOT result in all nodes immediately using the
         new values. Use caution when changing these values.
+        NOTE (tssurya): The scheduler will not notice that a cell has been
+        enabled/disabled until it is restarted or sent the SIGHUP signal.
         """
         ctxt = context.get_admin_context()
         try:
@@ -1543,6 +1659,22 @@ class CellV2Commands(object):
 
         if db_connection:
             cell_mapping.database_connection = db_connection
+
+        if disable and enable:
+            print(_('Cell cannot be disabled and enabled at the same time.'))
+            return 4
+        if disable or enable:
+            if cell_mapping.is_cell0():
+                print(_('Cell0 cannot be disabled.'))
+                return 5
+            elif disable and not cell_mapping.disabled:
+                cell_mapping.disabled = True
+            elif enable and cell_mapping.disabled:
+                cell_mapping.disabled = False
+            elif disable and cell_mapping.disabled:
+                print(_('Cell %s is already disabled') % cell_uuid)
+            elif enable and not cell_mapping.disabled:
+                print(_('Cell %s is already enabled') % cell_uuid)
 
         try:
             cell_mapping.save()
@@ -1618,7 +1750,10 @@ class CellV2Commands(object):
 
         with context.target_cell(ctxt, cell_mapping) as cctxt:
             instances = objects.InstanceList.get_by_host(cctxt, host)
-            nodes = objects.ComputeNodeList.get_all_by_host(cctxt, host)
+            try:
+                nodes = objects.ComputeNodeList.get_all_by_host(cctxt, host)
+            except exception.ComputeHostNotFound:
+                nodes = []
 
         if instances:
             print(_('There are instances on the host %s.') % host)
@@ -1632,6 +1767,523 @@ class CellV2Commands(object):
         return 0
 
 
+class PlacementCommands(object):
+    """Commands for managing placement resources."""
+
+    @staticmethod
+    def _get_compute_node_uuid(ctxt, instance, node_cache):
+        """Find the ComputeNode.uuid for the given Instance
+
+        :param ctxt: cell-targeted nova.context.RequestContext
+        :param instance: the instance to lookup a compute node
+        :param node_cache: dict of Instance.node keys to ComputeNode.uuid
+            values; this cache is updated if a new node is processed.
+        :returns: ComputeNode.uuid for the given instance
+        :raises: nova.exception.ComputeHostNotFound
+        """
+        if instance.node in node_cache:
+            return node_cache[instance.node]
+
+        compute_node = objects.ComputeNode.get_by_host_and_nodename(
+            ctxt, instance.host, instance.node)
+        node_uuid = compute_node.uuid
+        node_cache[instance.node] = node_uuid
+        return node_uuid
+
+    def _heal_allocations_for_instance(self, ctxt, instance, node_cache,
+                                       output, placement):
+        """Checks the given instance to see if it needs allocation healing
+
+        :param ctxt: cell-targeted nova.context.RequestContext
+        :param instance: the instance to check for allocation healing
+        :param node_cache: dict of Instance.node keys to ComputeNode.uuid
+            values; this cache is updated if a new node is processed.
+        :param outout: function that takes a single message for verbose output
+        :param placement: nova.scheduler.client.report.SchedulerReportClient
+            to communicate with the Placement service API.
+        :return: True if allocations were created or updated for the instance,
+            None if nothing needed to be done
+        :raises: nova.exception.ComputeHostNotFound if a compute node for a
+            given instance cannot be found
+        :raises: AllocationCreateFailed if unable to create allocations for
+            a given instance against a given compute node resource provider
+        :raises: AllocationUpdateFailed if unable to update allocations for
+            a given instance with consumer project/user information
+        """
+        if instance.task_state is not None:
+            output(_('Instance %(instance)s is undergoing a task '
+                     'state transition: %(task_state)s') %
+                   {'instance': instance.uuid,
+                    'task_state': instance.task_state})
+            return
+
+        if instance.node is None:
+            output(_('Instance %s is not on a host.') % instance.uuid)
+            return
+
+        try:
+            allocations = placement.get_allocs_for_consumer(
+                ctxt, instance.uuid)
+        except ks_exc.ClientException as e:
+            raise exception.AllocationUpdateFailed(
+                consumer_uuid=instance.uuid,
+                error=_("Allocation retrieval failed: %s") % e)
+        except exception.ConsumerAllocationRetrievalFailed as e:
+            output(_("Allocation retrieval failed: %s") % e)
+            allocations = None
+
+        # get_allocations_for_consumer uses safe_connect which will
+        # return None if we can't communicate with Placement, and the
+        # response can have an empty {'allocations': {}} response if
+        # there are no allocations for the instance so handle both
+        if allocations and allocations.get('allocations'):
+            # Check to see if the allocation project_id
+            # and user_id matches the instance project and user and
+            # fix the allocation project/user if they don't match.
+            # Allocations created before Placement API version 1.8
+            # did not have a project_id/user_id, and migrated records
+            # could have sentinel values from config.
+            if (allocations.get('project_id') ==
+                    instance.project_id and
+                    allocations.get('user_id') == instance.user_id):
+                output(_('Instance %s already has allocations with '
+                         'matching consumer project/user.') %
+                       instance.uuid)
+                return
+            # We have an instance with allocations but not the correct
+            # project_id/user_id, so we want to update the allocations
+            # and re-put them. We don't use put_allocations here
+            # because we don't want to mess up shared or nested
+            # provider allocations.
+            allocations['project_id'] = instance.project_id
+            allocations['user_id'] = instance.user_id
+            # We use CONSUMER_GENERATION_VERSION for PUT
+            # /allocations/{consumer_id} to mirror the body structure from
+            # get_allocs_for_consumer.
+            resp = placement.put(
+                '/allocations/%s' % instance.uuid,
+                allocations, version=report.CONSUMER_GENERATION_VERSION)
+            if resp:
+                output(_('Successfully updated allocations for '
+                         'instance %s.') % instance.uuid)
+                return True
+            else:
+                raise exception.AllocationUpdateFailed(
+                    consumer_uuid=instance.uuid, error=resp.text)
+
+        # This instance doesn't have allocations so we need to find
+        # its compute node resource provider.
+        node_uuid = self._get_compute_node_uuid(
+            ctxt, instance, node_cache)
+
+        # Now get the resource allocations for the instance based
+        # on its embedded flavor.
+        resources = scheduler_utils.resources_from_flavor(
+            instance, instance.flavor)
+        if placement.put_allocations(
+                ctxt, node_uuid, instance.uuid, resources,
+                instance.project_id, instance.user_id,
+                consumer_generation=None):
+            output(_('Successfully created allocations for '
+                     'instance %(instance)s against resource '
+                     'provider %(provider)s.') %
+                   {'instance': instance.uuid, 'provider': node_uuid})
+            return True
+        else:
+            raise exception.AllocationCreateFailed(
+                instance=instance.uuid, provider=node_uuid)
+
+    def _heal_instances_in_cell(self, ctxt, max_count, unlimited, output,
+                                placement):
+        """Checks for instances to heal in a given cell.
+
+        :param ctxt: cell-targeted nova.context.RequestContext
+        :param max_count: batch size (limit per instance query)
+        :param unlimited: True if all instances in the cell should be
+            processed, else False to just process $max_count instances
+        :param outout: function that takes a single message for verbose output
+        :param placement: nova.scheduler.client.report.SchedulerReportClient
+            to communicate with the Placement service API.
+        :return: Number of instances that had allocations created.
+        :raises: nova.exception.ComputeHostNotFound if a compute node for a
+            given instance cannot be found
+        :raises: AllocationCreateFailed if unable to create allocations for
+            a given instance against a given compute node resource provider
+        :raises: AllocationUpdateFailed if unable to update allocations for
+            a given instance with consumer project/user information
+        """
+        # Keep a cache of instance.node to compute node resource provider UUID.
+        # This will save some queries for non-ironic instances to the
+        # compute_nodes table.
+        node_cache = {}
+        # Track the total number of instances that have allocations created
+        # for them in this cell. We return when num_processed equals max_count
+        # and unlimited=True or we exhaust the number of instances to process
+        # in this cell.
+        num_processed = 0
+        # Get all instances from this cell which have a host and are not
+        # undergoing a task state transition. Go from oldest to newest.
+        # NOTE(mriedem): Unfortunately we don't have a marker to use
+        # between runs where the user is specifying --max-count.
+        # TODO(mriedem): Store a marker in system_metadata so we can
+        # automatically pick up where we left off without the user having
+        # to pass it in (if unlimited is False).
+        filters = {'deleted': False}
+        instances = objects.InstanceList.get_by_filters(
+            ctxt, filters=filters, sort_key='created_at', sort_dir='asc',
+            limit=max_count, expected_attrs=['flavor'])
+        while instances:
+            output(_('Found %s candidate instances.') % len(instances))
+            # For each instance in this list, we need to see if it has
+            # allocations in placement and if so, assume it's correct and
+            # continue.
+            for instance in instances:
+                if self._heal_allocations_for_instance(
+                        ctxt, instance, node_cache, output, placement):
+                    num_processed += 1
+
+            # Make sure we don't go over the max count. Note that we
+            # don't include instances that already have allocations in the
+            # max_count number, only the number of instances that have
+            # successfully created allocations.
+            if not unlimited and num_processed == max_count:
+                return num_processed
+
+            # Use a marker to get the next page of instances in this cell.
+            # Note that InstanceList doesn't support slice notation.
+            marker = instances[len(instances) - 1].uuid
+            instances = objects.InstanceList.get_by_filters(
+                ctxt, filters=filters, sort_key='created_at', sort_dir='asc',
+                limit=max_count, marker=marker, expected_attrs=['flavor'])
+
+        return num_processed
+
+    @action_description(
+        _("Iterates over non-cell0 cells looking for instances which do "
+          "not have allocations in the Placement service, or have incomplete "
+          "consumer project_id/user_id values in existing allocations, and "
+          "which are not undergoing a task state transition. For each "
+          "instance found, allocations are created (or updated) against the "
+          "compute node resource provider for that instance based on the "
+          "flavor associated with the instance. This command requires that "
+          "the [api_database]/connection and [placement] configuration "
+          "options are set."))
+    @args('--max-count', metavar='<max_count>', dest='max_count',
+          help='Maximum number of instances to process. If not specified, all '
+               'instances in each cell will be mapped in batches of 50. '
+               'If you have a large number of instances, consider specifying '
+               'a custom value and run the command until it exits with '
+               '0 or 4.')
+    @args('--verbose', action='store_true', dest='verbose', default=False,
+          help='Provide verbose output during execution.')
+    def heal_allocations(self, max_count=None, verbose=False):
+        """Heals instance allocations in the Placement service
+
+        Return codes:
+
+        * 0: Command completed successfully and allocations were created.
+        * 1: --max-count was reached and there are more instances to process.
+        * 2: Unable to find a compute node record for a given instance.
+        * 3: Unable to create (or update) allocations for an instance against
+             its compute node resource provider.
+        * 4: Command completed successfully but no allocations were created.
+        * 127: Invalid input.
+        """
+        # NOTE(mriedem): Thoughts on ways to expand this:
+        # - add a --dry-run option to just print which instances would have
+        #   allocations created for them
+        # - allow passing a specific cell to heal
+        # - allow filtering on enabled/disabled cells
+        # - allow passing a specific instance to heal
+        # - add a force option to force allocations for instances which have
+        #   task_state is not None (would get complicated during a migration);
+        #   for example, this could cleanup ironic instances that have
+        #   allocations on VCPU/MEMORY_MB/DISK_GB but are now using a custom
+        #   resource class
+        # - add an option to overwrite allocations for instances which already
+        #   have allocations (but the operator thinks might be wrong?); this
+        #   would probably only be safe with a specific instance.
+        # - deal with nested resource providers?
+
+        output = lambda msg: None
+        if verbose:
+            output = lambda msg: print(msg)
+
+        # TODO(mriedem): Rather than --max-count being both a total and batch
+        # count, should we have separate options to be specific, i.e. --total
+        # and --batch-size? Then --batch-size defaults to 50 and --total
+        # defaults to None to mean unlimited.
+        if max_count is not None:
+            try:
+                max_count = int(max_count)
+            except ValueError:
+                max_count = -1
+            unlimited = False
+            if max_count < 1:
+                print(_('Must supply a positive integer for --max-count.'))
+                return 127
+        else:
+            max_count = 50
+            unlimited = True
+            output(_('Running batches of %i until complete') % max_count)
+
+        ctxt = context.get_admin_context()
+        cells = objects.CellMappingList.get_all(ctxt)
+        if not cells:
+            output(_('No cells to process.'))
+            return 4
+
+        placement = report.SchedulerReportClient()
+        num_processed = 0
+        # TODO(mriedem): Use context.scatter_gather_skip_cell0.
+        for cell in cells:
+            # Skip cell0 since that is where instances go that do not get
+            # scheduled and hence would not have allocations against a host.
+            if cell.uuid == objects.CellMapping.CELL0_UUID:
+                continue
+            output(_('Looking for instances in cell: %s') % cell.identity)
+
+            limit_per_cell = max_count
+            if not unlimited:
+                # Adjust the limit for the next cell. For example, if the user
+                # only wants to process a total of 100 instances and we did
+                # 75 in cell1, then we only need 25 more from cell2 and so on.
+                limit_per_cell = max_count - num_processed
+
+            with context.target_cell(ctxt, cell) as cctxt:
+                try:
+                    num_processed += self._heal_instances_in_cell(
+                        cctxt, limit_per_cell, unlimited, output, placement)
+                except exception.ComputeHostNotFound as e:
+                    print(e.format_message())
+                    return 2
+                except (exception.AllocationCreateFailed,
+                        exception.AllocationUpdateFailed) as e:
+                    print(e.format_message())
+                    return 3
+
+                # Make sure we don't go over the max count. Note that we
+                # don't include instances that already have allocations in the
+                # max_count number, only the number of instances that have
+                # successfully created allocations.
+                if num_processed == max_count:
+                    output(_('Max count reached. Processed %s instances.')
+                           % num_processed)
+                    return 1
+
+        output(_('Processed %s instances.') % num_processed)
+        if not num_processed:
+            return 4
+        return 0
+
+    @staticmethod
+    def _get_rp_uuid_for_host(ctxt, host):
+        """Finds the resource provider (compute node) UUID for the given host.
+
+        :param ctxt: cell-targeted nova RequestContext
+        :param host: name of the compute host
+        :returns: The UUID of the resource provider (compute node) for the host
+        :raises: nova.exception.HostMappingNotFound if no host_mappings record
+            is found for the host; indicates
+            "nova-manage cell_v2 discover_hosts" needs to be run on the cell.
+        :raises: nova.exception.ComputeHostNotFound if no compute_nodes record
+            is found in the cell database for the host; indicates the
+            nova-compute service on that host might need to be restarted.
+        :raises: nova.exception.TooManyComputesForHost if there are more than
+            one compute_nodes records in the cell database for the host which
+            is only possible (under normal circumstances) for ironic hosts but
+            ironic hosts are not currently supported with host aggregates so
+            if more than one compute node is found for the host, it is
+            considered an error which the operator will need to resolve
+            manually.
+        """
+        # Get the host mapping to determine which cell it's in.
+        hm = objects.HostMapping.get_by_host(ctxt, host)
+        # Now get the compute node record for the host from the cell.
+        with context.target_cell(ctxt, hm.cell_mapping) as cctxt:
+            # There should really only be one, since only ironic
+            # hosts can have multiple nodes, and you can't have
+            # ironic hosts in aggregates for that reason. If we
+            # find more than one, it's an error.
+            nodes = objects.ComputeNodeList.get_all_by_host(
+                cctxt, host)
+
+            if len(nodes) > 1:
+                # This shouldn't happen, so we need to bail since we
+                # won't know which node to use.
+                raise exception.TooManyComputesForHost(
+                    num_computes=len(nodes), host=host)
+            return nodes[0].uuid
+
+    @action_description(
+        _("Mirrors compute host aggregates to resource provider aggregates "
+          "in the Placement service. Requires the [api_database] and "
+          "[placement] sections of the nova configuration file to be "
+          "populated."))
+    @args('--verbose', action='store_true', dest='verbose', default=False,
+          help='Provide verbose output during execution.')
+    # TODO(mriedem): Add an option for the 'remove aggregate' behavior.
+    # We know that we want to mirror hosts aggregate membership to
+    # placement, but regarding removal, what if the operator or some external
+    # tool added the resource provider to an aggregate but there is no matching
+    # host aggregate, e.g. ironic nodes or shared storage provider
+    # relationships?
+    # TODO(mriedem): Probably want an option to pass a specific host instead of
+    # doing all of them.
+    def sync_aggregates(self, verbose=False):
+        """Synchronizes nova host aggregates with resource provider aggregates
+
+        Adds nodes to missing provider aggregates in Placement.
+
+        NOTE: Depending on the size of your deployment and the number of
+        compute hosts in aggregates, this command could cause a non-negligible
+        amount of traffic to the placement service and therefore is
+        recommended to be run during maintenance windows.
+
+        Return codes:
+
+        * 0: Successful run
+        * 1: A host was found with more than one matching compute node record
+        * 2: An unexpected error occurred while working with the placement API
+        * 3: Failed updating provider aggregates in placement
+        * 4: Host mappings not found for one or more host aggregate members
+        * 5: Compute node records not found for one or more hosts
+        * 6: Resource provider not found by uuid for a given host
+        """
+        # Start by getting all host aggregates.
+        ctxt = context.get_admin_context()
+        aggregate_api = compute_api.AggregateAPI()
+        placement = aggregate_api.placement_client
+        aggregates = aggregate_api.get_aggregate_list(ctxt)
+        # Now we're going to loop over the existing compute hosts in aggregates
+        # and check to see if their corresponding resource provider, found via
+        # the host's compute node uuid, are in the same aggregate. If not, we
+        # add the resource provider to the aggregate in Placement.
+        output = lambda msg: None
+        if verbose:
+            output = lambda msg: print(msg)
+        output(_('Filling in missing placement aggregates'))
+        # Since hosts can be in more than one aggregate, keep track of the host
+        # to its corresponding resource provider uuid to avoid redundant
+        # lookups.
+        host_to_rp_uuid = {}
+        unmapped_hosts = set()  # keep track of any missing host mappings
+        computes_not_found = set()  # keep track of missing nodes
+        providers_not_found = {}  # map of hostname to missing provider uuid
+        for aggregate in aggregates:
+            output(_('Processing aggregate: %s') % aggregate.name)
+            for host in aggregate.hosts:
+                output(_('Processing host: %s') % host)
+                rp_uuid = host_to_rp_uuid.get(host)
+                if not rp_uuid:
+                    try:
+                        rp_uuid = self._get_rp_uuid_for_host(ctxt, host)
+                        host_to_rp_uuid[host] = rp_uuid
+                    except exception.HostMappingNotFound:
+                        # Don't fail on this now, we can dump it at the end.
+                        unmapped_hosts.add(host)
+                        continue
+                    except exception.ComputeHostNotFound:
+                        # Don't fail on this now, we can dump it at the end.
+                        computes_not_found.add(host)
+                        continue
+                    except exception.TooManyComputesForHost as e:
+                        # TODO(mriedem): Should we treat this like the other
+                        # errors and not fail immediately but dump at the end?
+                        print(e.format_message())
+                        return 1
+
+                # We've got our compute node record, so now we can look to
+                # see if the matching resource provider, found via compute
+                # node uuid, is in the same aggregate in placement, found via
+                # aggregate uuid.
+                # NOTE(mriedem): We could re-use placement.aggregate_add_host
+                # here although that has to do the provider lookup by host as
+                # well, but it does handle generation conflicts.
+                resp = placement.get(  # use 1.19 to get the generation
+                    '/resource_providers/%s/aggregates' % rp_uuid,
+                    version='1.19')
+                if resp:
+                    body = resp.json()
+                    provider_aggregate_uuids = body['aggregates']
+                    # The moment of truth: is the provider in the same host
+                    # aggregate relationship?
+                    aggregate_uuid = aggregate.uuid
+                    if aggregate_uuid not in provider_aggregate_uuids:
+                        # Add the resource provider to this aggregate.
+                        provider_aggregate_uuids.append(aggregate_uuid)
+                        # Now update the provider aggregates using the
+                        # generation to ensure we're conflict-free.
+                        aggregate_update_body = {
+                            'aggregates': provider_aggregate_uuids,
+                            'resource_provider_generation':
+                                body['resource_provider_generation']
+                        }
+                        put_resp = placement.put(
+                            '/resource_providers/%s/aggregates' % rp_uuid,
+                            aggregate_update_body, version='1.19')
+                        if put_resp:
+                            output(_('Successfully added host (%(host)s) and '
+                                     'provider (%(provider)s) to aggregate '
+                                     '(%(aggregate)s).') %
+                                   {'host': host, 'provider': rp_uuid,
+                                    'aggregate': aggregate_uuid})
+                        elif put_resp.status_code == 404:
+                            # We must have raced with a delete on the resource
+                            # provider.
+                            providers_not_found[host] = rp_uuid
+                        else:
+                            # TODO(mriedem): Handle 409 conflicts by retrying
+                            # the operation.
+                            print(_('Failed updating provider aggregates for '
+                                    'host (%(host)s), provider (%(provider)s) '
+                                    'and aggregate (%(aggregate)s). Error: '
+                                    '%(error)s') %
+                                  {'host': host, 'provider': rp_uuid,
+                                   'aggregate': aggregate_uuid,
+                                   'error': put_resp.text})
+                            return 3
+                elif resp.status_code == 404:
+                    # The resource provider wasn't found. Store this for later.
+                    providers_not_found[host] = rp_uuid
+                else:
+                    print(_('An error occurred getting resource provider '
+                            'aggregates from placement for provider '
+                            '%(provider)s. Error: %(error)s') %
+                          {'provider': rp_uuid, 'error': resp.text})
+                    return 2
+
+        # Now do our error handling. Note that there is no real priority on
+        # the error code we return. We want to dump all of the issues we hit
+        # so the operator can fix them before re-running the command, but
+        # whether we return 4 or 5 or 6 doesn't matter.
+        return_code = 0
+        if unmapped_hosts:
+            print(_('The following hosts were found in nova host aggregates '
+                    'but no host mappings were found in the nova API DB. Run '
+                    '"nova-manage cell_v2 discover_hosts" and then retry. '
+                    'Missing: %s') % ','.join(unmapped_hosts))
+            return_code = 4
+
+        if computes_not_found:
+            print(_('Unable to find matching compute_nodes record entries in '
+                    'the cell database for the following hosts; does the '
+                    'nova-compute service on each host need to be restarted? '
+                    'Missing: %s') % ','.join(computes_not_found))
+            return_code = 5
+
+        if providers_not_found:
+            print(_('Unable to find matching resource provider record in '
+                    'placement with uuid for the following hosts: %s. Try '
+                    'restarting the nova-compute service on each host and '
+                    'then retry.') %
+                  ','.join('(%s=%s)' % (host, providers_not_found[host])
+                           for host in sorted(providers_not_found.keys())))
+            return_code = 6
+
+        return return_code
+
+
 CATEGORIES = {
     'api_db': ApiDbCommands,
     'cell': CellCommands,
@@ -1639,6 +2291,7 @@ CATEGORIES = {
     'db': DbCommands,
     'floating': FloatingIpCommands,
     'network': NetworkCommands,
+    'placement': PlacementCommands
 }
 
 

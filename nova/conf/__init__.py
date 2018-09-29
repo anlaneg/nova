@@ -30,7 +30,6 @@ from nova.conf import conductor
 from nova.conf import configdrive
 from nova.conf import console
 from nova.conf import consoleauth
-from nova.conf import crypto
 from nova.conf import database
 from nova.conf import devices
 from nova.conf import ephemeral_storage
@@ -52,9 +51,11 @@ from nova.conf import osapi_v21
 from nova.conf import paths
 from nova.conf import pci
 from nova.conf import placement
+from nova.conf import powervm
 from nova.conf import quota
 from nova.conf import rdp
 from nova.conf import remote_debug
+from nova.conf import rpc
 from nova.conf import scheduler
 from nova.conf import serial_console
 from nova.conf import service
@@ -69,6 +70,7 @@ from nova.conf import workarounds
 from nova.conf import wsgi
 from nova.conf import xenserver
 from nova.conf import xvp
+from nova.conf import zvm
 
 CONF = cfg.CONF
 
@@ -83,7 +85,6 @@ conductor.register_opts(CONF)
 configdrive.register_opts(CONF)
 console.register_opts(CONF)
 consoleauth.register_opts(CONF)
-crypto.register_opts(CONF)
 database.register_opts(CONF)
 devices.register_opts(CONF)
 ephemeral_storage.register_opts(CONF)
@@ -105,8 +106,10 @@ osapi_v21.register_opts(CONF)
 paths.register_opts(CONF)
 pci.register_opts(CONF)
 placement.register_opts(CONF)
+powervm.register_opts(CONF)
 quota.register_opts(CONF)
 rdp.register_opts(CONF)
+rpc.register_opts(CONF)
 scheduler.register_opts(CONF)
 serial_console.register_opts(CONF)
 service.register_opts(CONF)
@@ -121,5 +124,6 @@ workarounds.register_opts(CONF)
 wsgi.register_opts(CONF)
 xenserver.register_opts(CONF)
 xvp.register_opts(CONF)
+zvm.register_opts(CONF)
 
 remote_debug.register_cli_opts(CONF)

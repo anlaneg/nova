@@ -16,7 +16,6 @@
 
 from oslo_log import log as logging
 
-from nova.i18n import _LW
 from nova.scheduler import filters
 from nova.scheduler.filters import utils
 
@@ -55,10 +54,10 @@ class BaseRamFilter(filters.BaseHostFilter):
         usable_ram = memory_mb_limit - used_ram_mb
         if not usable_ram >= requested_ram:
             LOG.debug("%(host_state)s does not have %(requested_ram)s MB "
-                    "usable ram, it only has %(usable_ram)s MB usable ram.",
-                    {'host_state': host_state,
-                     'requested_ram': requested_ram,
-                     'usable_ram': usable_ram})
+                      "usable ram, it only has %(usable_ram)s MB usable ram.",
+                      {'host_state': host_state,
+                       'requested_ram': requested_ram,
+                       'usable_ram': usable_ram})
             return False
 
         # save oversubscription limit for compute node to test against:
@@ -68,6 +67,18 @@ class BaseRamFilter(filters.BaseHostFilter):
 
 class RamFilter(BaseRamFilter):
     """Ram Filter with over subscription flag."""
+
+    def __init__(self):
+        super(RamFilter, self).__init__()
+        LOG.warning('The RamFilter is deprecated since the 19.0.0 Stein '
+                    'release. MEMORY_MB filtering is performed natively '
+                    'using the Placement service when using the '
+                    'filter_scheduler driver. Users of the '
+                    'caching_scheduler driver may still rely on this '
+                    'filter but the caching_scheduler driver is itself '
+                    'deprecated. Furthermore, enabling RamFilter may '
+                    'incorrectly filter out baremetal nodes which must be '
+                    'scheduled using custom resource classes.')
 
     def _get_ram_allocation_ratio(self, host_state, spec_obj):
         return host_state.ram_allocation_ratio
@@ -88,7 +99,7 @@ class AggregateRamFilter(BaseRamFilter):
             ratio = utils.validate_num_values(
                 aggregate_vals, host_state.ram_allocation_ratio, cast_to=float)
         except ValueError as e:
-            LOG.warning(_LW("Could not decode ram_allocation_ratio: '%s'"), e)
+            LOG.warning("Could not decode ram_allocation_ratio: '%s'", e)
             ratio = host_state.ram_allocation_ratio
 
         return ratio

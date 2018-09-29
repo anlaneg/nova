@@ -18,7 +18,7 @@ from oslo_utils import versionutils
 
 from nova import availability_zones
 from nova import context as nova_context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova.notifications.objects import base as notification
 from nova.notifications.objects import service as service_notification
@@ -31,7 +31,7 @@ LOG = logging.getLogger(__name__)
 
 
 # NOTE(danms): This is the global service version counter
-SERVICE_VERSION = 30
+SERVICE_VERSION = 35
 
 
 # NOTE(danms): This is our SERVICE_VERSION history. The idea is that any
@@ -131,6 +131,21 @@ SERVICE_VERSION_HISTORY = (
     {'compute_rpc': '4.22'},
     # Version 30: Compute RPC version 5.0
     {'compute_rpc': '5.0'},
+    # Version 31: The compute manager checks if 'trusted_certs' are supported
+    {'compute_rpc': '5.0'},
+    # Version 32: Add 'file_backed_memory' support. The service version bump is
+    # needed to allow the destination of a live migration to reject the
+    # migration if 'file_backed_memory' is enabled and the source does not
+    # support 'file_backed_memory'
+    {'compute_rpc': '5.0'},
+    # Version 33: Add support for check on the server group with
+    # 'max_server_per_host' rules
+    {'compute_rpc': '5.0'},
+    # Version 34: Adds support to abort queued/preparing live migrations.
+    {'compute_rpc': '5.0'},
+    # Version 35: Indicates that nova-compute supports live migration with
+    # ports bound early on the destination host using VIFMigrateData.
+    {'compute_rpc': '5.0'},
 )
 
 
@@ -222,7 +237,7 @@ class Service(base.NovaPersistentObject, base.NovaObject,
     def _do_compute_node(self, context, primitive, version_manifest):
         try:
             target_version = version_manifest['ComputeNode']
-            # NOTE(sbauza): Some drivers (VMware, Ironic) can have multiple
+            # NOTE(sbauza): Ironic deployments can have multiple
             # nodes for the same service, but for keeping same behaviour,
             # returning only the first elem of the list
             compute = objects.ComputeNodeList.get_all_by_host(
@@ -287,7 +302,7 @@ class Service(base.NovaPersistentObject, base.NovaObject,
             # NOTE(sbauza); Previous behaviour was raising a ServiceNotFound,
             # we keep it for backwards compatibility
             raise exception.ServiceNotFound(service_id=self.id)
-        # NOTE(sbauza): Some drivers (VMware, Ironic) can have multiple nodes
+        # NOTE(sbauza): Ironic deployments can have multiple nodes
         # for the same service, but for keeping same behaviour, returning only
         # the first elem of the list
         self.compute_node = compute_nodes[0]
@@ -460,17 +475,72 @@ class Service(base.NovaPersistentObject, base.NovaObject,
                                              use_slave=use_slave)
 
 
-def get_minimum_version_all_cells(context, binaries):
-    """Get the minimum service version, checking all cells"""
+def get_minimum_version_all_cells(context, binaries, require_all=False):
+    """Get the minimum service version, checking all cells.
 
-    cells = objects.CellMappingList.get_all(context)
+    This attempts to calculate the minimum service version for a set
+    of binaries across all the cells in the system. If require_all
+    is False, then any cells that fail to report a version will be
+    ignored (assuming they won't be candidates for scheduling and thus
+    excluding them from the minimum version calculation is reasonable).
+    If require_all is True, then a failing cell will cause this to raise
+    exception.CellTimeout, as would be appropriate for gating some
+    data migration until everything is new enough.
+
+    Note that services that do not report a positive version are excluded
+    from this, as it crosses all cells which will naturally not have all
+    services.
+    """
+
+    if not all(binary.startswith('nova-') for binary in binaries):
+        LOG.warning('get_minimum_version_all_cells called with '
+                    'likely-incorrect binaries `%s\'', ','.join(binaries))
+        raise exception.ObjectActionError(
+            action='get_minimum_version_all_cells',
+            reason='Invalid binary prefix')
+
+    # NOTE(danms): Instead of using Service.get_minimum_version_multi(), we
+    # replicate the call directly to the underlying DB method here because
+    # we want to defeat the caching and we need to filter non-present
+    # services differently from the single-cell method.
+
+    results = nova_context.scatter_gather_all_cells(
+        context,
+        Service._db_service_get_minimum_version,
+        binaries)
+
     min_version = None
-    for cell in cells:
-        with nova_context.target_cell(context, cell) as cctxt:
-            version = objects.Service.get_minimum_version_multi(
-                cctxt, binaries)
-        min_version = min(min_version, version) if min_version else version
-    return min_version
+    for cell_uuid, result in results.items():
+        if result is nova_context.did_not_respond_sentinel:
+            LOG.warning('Cell %s did not respond when getting minimum '
+                        'service version', cell_uuid)
+            if require_all:
+                raise exception.CellTimeout()
+        elif result is nova_context.raised_exception_sentinel:
+            LOG.warning('Failed to get minimum service version for cell %s',
+                        cell_uuid)
+            if require_all:
+                # NOTE(danms): Okay, this isn't necessarily a timeout, but
+                # it's functionally the same from the caller's perspective
+                # and we logged the fact that it was actually a failure
+                # for the forensic investigator during the scatter/gather
+                # routine.
+                raise exception.CellTimeout()
+        else:
+            # NOTE(danms): Don't consider a zero or None result as the minimum
+            # since we're crossing cells and will likely not have all the
+            # services being probed.
+            relevant_versions = [version for version in result.values()
+                                 if version]
+            if relevant_versions:
+                min_version_cell = min(relevant_versions)
+                min_version = (min(min_version, min_version_cell)
+                               if min_version else min_version_cell)
+
+    # NOTE(danms): If we got no matches at all (such as at first startup)
+    # then report that as zero to be consistent with the other such
+    # methods.
+    return min_version or 0
 
 
 @base.NovaObjectRegistry.register

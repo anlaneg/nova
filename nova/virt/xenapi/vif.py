@@ -127,116 +127,8 @@ class XenVIFDriver(object):
     def create_vif_interim_network(self, vif):
         pass
 
-    def delete_network_and_bridge(self, instance, vif):
+    def delete_network_and_bridge(self, instance, vif_id):
         pass
-
-
-class XenAPIBridgeDriver(XenVIFDriver):
-    """VIF Driver for XenAPI that uses XenAPI to create Networks."""
-
-    # NOTE(huanxie): This driver uses linux bridge as backend for XenServer,
-    # it only supports nova network, for using neutron, you should use
-    # XenAPIOpenVswitchDriver
-
-    def plug(self, instance, vif, vm_ref=None, device=None):
-        if not vm_ref:
-            vm_ref = vm_utils.lookup(self._session, instance['name'])
-        if not vm_ref:
-            raise exception.VirtualInterfacePlugException(
-                "Cannot find instance %s, discard vif plug" % instance['name'])
-
-        # if VIF already exists, return this vif_ref directly
-        vif_ref = self._get_vif_ref(vif, vm_ref)
-        if vif_ref:
-            LOG.debug("VIF %s already exists when plug vif",
-                      vif_ref, instance=instance)
-            return vif_ref
-
-        if not device:
-            device = 0
-
-        if vif['network'].get_meta('should_create_vlan'):
-            network_ref = self._ensure_vlan_bridge(vif['network'])
-        else:
-            network_ref = network_utils.find_network_with_bridge(
-                    self._session, vif['network']['bridge'])
-        vif_rec = {}
-        vif_rec['device'] = str(device)
-        vif_rec['network'] = network_ref
-        vif_rec['VM'] = vm_ref
-        vif_rec['MAC'] = vif['address']
-        vif_rec['MTU'] = '1500'
-        vif_rec['other_config'] = {}
-        if vif.get_meta('rxtx_cap'):
-            vif_rec['qos_algorithm_type'] = 'ratelimit'
-            vif_rec['qos_algorithm_params'] = {'kbps':
-                         str(int(vif.get_meta('rxtx_cap')) * 1024)}
-        else:
-            vif_rec['qos_algorithm_type'] = ''
-            vif_rec['qos_algorithm_params'] = {}
-        return self._create_vif(vif, vif_rec, vm_ref)
-
-    def _ensure_vlan_bridge(self, network):
-        """Ensure that a VLAN bridge exists."""
-
-        vlan_num = network.get_meta('vlan')
-        bridge = network['bridge']
-        bridge_interface = (CONF.vlan_interface or
-                            network.get_meta('bridge_interface'))
-        # Check whether bridge already exists
-        # Retrieve network whose name_label is "bridge"
-        network_ref = network_utils.find_network_with_name_label(
-                                        self._session, bridge)
-        if network_ref is None:
-            # If bridge does not exists
-            # 1 - create network
-            description = 'network for nova bridge %s' % bridge
-            network_rec = {'name_label': bridge,
-                           'name_description': description,
-                           'other_config': {}}
-            network_ref = self._session.call_xenapi('network.create',
-                                                    network_rec)
-            # 2 - find PIF for VLAN NOTE(salvatore-orlando): using double
-            # quotes inside single quotes as xapi filter only support
-            # tokens in double quotes
-            expr = ('field "device" = "%s" and field "VLAN" = "-1"' %
-                    bridge_interface)
-            pifs = self._session.call_xenapi('PIF.get_all_records_where',
-                                             expr)
-
-            # Multiple PIF are ok: we are dealing with a pool
-            if len(pifs) == 0:
-                raise Exception(_('Found no PIF for device %s') %
-                                bridge_interface)
-            for pif_ref in pifs.keys():
-                self._session.call_xenapi('VLAN.create',
-                                          pif_ref,
-                                          str(vlan_num),
-                                          network_ref)
-        else:
-            # Check VLAN tag is appropriate
-            network_rec = self._session.call_xenapi('network.get_record',
-                                                    network_ref)
-            # Retrieve PIFs from network
-            for pif_ref in network_rec['PIFs']:
-                # Retrieve VLAN from PIF
-                pif_rec = self._session.call_xenapi('PIF.get_record',
-                                                    pif_ref)
-                pif_vlan = int(pif_rec['VLAN'])
-                # Raise an exception if VLAN != vlan_num
-                if pif_vlan != vlan_num:
-                    raise Exception(_("PIF %(pif_uuid)s for network "
-                                      "%(bridge)s has VLAN id %(pif_vlan)d. "
-                                      "Expected %(vlan_num)d"),
-                                    {'pif_uuid': pif_rec['uuid'],
-                                     'bridge': bridge,
-                                     'pif_vlan': pif_vlan,
-                                     'vlan_num': vlan_num})
-
-        return network_ref
-
-    def unplug(self, instance, vif, vm_ref):
-        super(XenAPIBridgeDriver, self).unplug(instance, vif, vm_ref)
 
 
 class XenAPIOpenVswitchDriver(XenVIFDriver):
@@ -283,69 +175,76 @@ class XenAPIOpenVswitchDriver(XenVIFDriver):
         return vif_ref
 
     def unplug(self, instance, vif, vm_ref):
-        """unplug vif:
+        super(XenAPIOpenVswitchDriver, self).unplug(instance, vif, vm_ref)
+        self.delete_network_and_bridge(instance, vif['id'])
+
+    def delete_network_and_bridge(self, instance, vif_id):
+        """Delete network and bridge:
         1. delete the patch port pair between the integration bridge and
            the qbr linux bridge(if exist) and the interim network.
         2. destroy the interim network
         3. delete the OVS bridge service for the interim network
         4. delete linux bridge qbr and related ports if exist
         """
-        super(XenAPIOpenVswitchDriver, self).unplug(instance, vif, vm_ref)
-        net_name = self.get_vif_interim_net_name(vif['id'])
-        network = network_utils.find_network_with_name_label(
-            self._session, net_name)
-        if network is None:
+        network = self._get_network_by_vif(vif_id)
+        if not network:
             return
         vifs = self._session.network.get_VIFs(network)
-        if vifs:
-            # only remove the interim network when it's empty.
-            # for resize/migrate on local host, vifs on both of the
-            # source and target VM will be connected to the same
-            # interim network.
-            return
-        self.delete_network_and_bridge(instance, vif)
-
-    def delete_network_and_bridge(self, instance, vif):
-        net_name = self.get_vif_interim_net_name(vif['id'])
-        network = network_utils.find_network_with_name_label(
-            self._session, net_name)
-        if network is None:
-            LOG.debug("Didn't find network by name %s", net_name,
-                      instance=instance)
-            return
-        LOG.debug('destroying patch port pair for vif: vif_id=%(vif_id)s',
-                  {'vif_id': vif['id']})
         bridge_name = self._session.network.get_bridge(network)
-        patch_port1, tap_name = self._get_patch_port_pair_names(vif['id'])
+        if vifs:
+            # Still has vifs attached to this network
+            for remain_vif in vifs:
+                # if the remain vifs are on the local server, give up all the
+                # operations. If the remain vifs are on the remote hosts, keep
+                # the network and delete the bridge
+                if self._get_host_by_vif(remain_vif) == self._session.host_ref:
+                    return
+        else:
+            # No vif left, delete the network
+            try:
+                self._session.network.destroy(network)
+            except Exception as e:
+                LOG.warning("Failed to destroy network for vif (id=%(if)s), "
+                            "exception:%(exception)s",
+                            {'if': vif_id, 'exception': e}, instance=instance)
+                raise exception.VirtualInterfaceUnplugException(
+                    reason=_("Failed to destroy network"))
+        # Two cases:
+        # 1) No vif left, just delete the bridge
+        # 2) For resize/intra-pool migrate, vifs on both of the
+        #    source and target VM will be connected to the same
+        #    interim network. If the VM is resident on a remote host,
+        #    linux bridge on current host will be deleted.
+        self.delete_bridge(instance, vif_id, bridge_name)
+
+    def delete_bridge(self, instance, vif_id, bridge_name):
+        LOG.debug('destroying patch port pair for vif id: vif_id=%(vif_id)s',
+                  {'vif_id': vif_id})
+        patch_port1, tap_name = self._get_patch_port_pair_names(vif_id)
         try:
             # delete the patch port pair
             host_network.ovs_del_port(self._session, bridge_name, patch_port1)
         except Exception as e:
-            LOG.warning("Failed to delete patch port pair for vif %(if)s,"
+            LOG.warning("Failed to delete patch port pair for vif id %(if)s,"
                         " exception:%(exception)s",
-                        {'if': vif, 'exception': e}, instance=instance)
+                        {'if': vif_id, 'exception': e}, instance=instance)
             raise exception.VirtualInterfaceUnplugException(
                 reason=_("Failed to delete patch port pair"))
 
-        LOG.debug('destroying network: network=%(network)s,'
-                  'bridge=%(br)s',
-                  {'network': network, 'br': bridge_name})
+        LOG.debug('destroying bridge: bridge=%(br)s', {'br': bridge_name})
         try:
-            self._session.network.destroy(network)
             # delete bridge if it still exists.
-            # As there is patch port existing on this bridge when destroying
-            # the VM vif (which happens when shutdown the VM), the bridge
-            # won't be destroyed automatically by XAPI. So let's destroy it
-            # at here.
+            # As there are patch ports existing on this bridge when
+            # destroying won't be destroyed automatically by XAPI, let's
+            # destroy it at here.
             host_network.ovs_del_br(self._session, bridge_name)
-
-            qbr_name = self._get_qbr_name(vif['id'])
-            qvb_name, qvo_name = self._get_veth_pair_names(vif['id'])
+            qbr_name = self._get_qbr_name(vif_id)
+            qvb_name, qvo_name = self._get_veth_pair_names(vif_id)
             if self._device_exists(qbr_name):
                 # delete tap port, qvb port and qbr
                 LOG.debug(
-                    "destroy linux bridge %(qbr)s when unplug vif %(vif)s",
-                    {'qbr': qbr_name, 'vif': vif['id']})
+                    "destroy linux bridge %(qbr)s when unplug vif id"
+                    " %(vif_id)s", {'qbr': qbr_name, 'vif_id': vif_id})
                 self._delete_linux_port(qbr_name, tap_name)
                 self._delete_linux_port(qbr_name, qvb_name)
                 self._delete_linux_bridge(qbr_name)
@@ -353,11 +252,34 @@ class XenAPIOpenVswitchDriver(XenVIFDriver):
                                       CONF.xenserver.ovs_integration_bridge,
                                       qvo_name)
         except Exception as e:
-            LOG.warning("Failed to delete bridge for vif %(if)s, "
+            LOG.warning("Failed to delete bridge for vif id %(if)s, "
                         "exception:%(exception)s",
-                        {'if': vif, 'exception': e}, instance=instance)
+                        {'if': vif_id, 'exception': e}, instance=instance)
             raise exception.VirtualInterfaceUnplugException(
                 reason=_("Failed to delete bridge"))
+
+    def _get_network_by_vif(self, vif_id):
+        net_name = self.get_vif_interim_net_name(vif_id)
+        network = network_utils.find_network_with_name_label(
+            self._session, net_name)
+        if network is None:
+            LOG.debug("Failed to find network for vif id %(if)s",
+                      {'if': vif_id})
+            return
+        return network
+
+    def _get_host_by_vif(self, vif_id):
+        network = self._get_network_by_vif(vif_id)
+        if not network:
+            return
+        vif_info = self._session.VIF.get_all_records_where(
+            'field "network" = "%s"' % network)
+        if not vif_info or len(vif_info) != 1:
+            raise exception.NovaException(
+                "Couldn't find vif id information in network %s"
+                % network)
+        vm_ref = self._session.VIF.get_VM(list(vif_info.keys())[0])
+        return self._session.VM.get_resident_on(vm_ref)
 
     def hot_plug(self, vif, instance, vm_ref, vif_ref):
         # hot plug vif only when VM's power state is running
@@ -491,9 +413,14 @@ class XenAPIOpenVswitchDriver(XenVIFDriver):
 
     def create_vif_interim_network(self, vif):
         net_name = self.get_vif_interim_net_name(vif['id'])
+        # In a pooled environment, make the network shared in order to ensure
+        # it can also be used in the target host while live migrating.
+        # "assume_network_is_shared" flag does not affect environments where
+        # storage pools are not used.
         network_rec = {'name_label': net_name,
-                   'name_description': "interim network for vif",
-                   'other_config': {}}
+                       'name_description': "interim network for vif[%s]"
+                       % vif['id'],
+                       'other_config': {'assume_network_is_shared': 'true'}}
         network_ref = network_utils.find_network_with_name_label(
             self._session, net_name)
         if network_ref:

@@ -15,6 +15,7 @@
 #    under the License.
 
 import functools
+import six
 
 import nova.api.openstack
 from nova.api.openstack.compute import admin_actions
@@ -28,17 +29,12 @@ from nova.api.openstack.compute import baremetal_nodes
 from nova.api.openstack.compute import cells
 from nova.api.openstack.compute import certificates
 from nova.api.openstack.compute import cloudpipe
-from nova.api.openstack.compute import config_drive
 from nova.api.openstack.compute import console_auth_tokens
 from nova.api.openstack.compute import console_output
 from nova.api.openstack.compute import consoles
 from nova.api.openstack.compute import create_backup
 from nova.api.openstack.compute import deferred_delete
 from nova.api.openstack.compute import evacuate
-from nova.api.openstack.compute import extended_availability_zone
-from nova.api.openstack.compute import extended_server_attributes
-from nova.api.openstack.compute import extended_status
-from nova.api.openstack.compute import extended_volumes
 from nova.api.openstack.compute import extension_info
 from nova.api.openstack.compute import fixed_ips
 from nova.api.openstack.compute import flavor_access
@@ -50,7 +46,6 @@ from nova.api.openstack.compute import floating_ip_pools
 from nova.api.openstack.compute import floating_ips
 from nova.api.openstack.compute import floating_ips_bulk
 from nova.api.openstack.compute import fping
-from nova.api.openstack.compute import hide_server_addresses
 from nova.api.openstack.compute import hosts
 from nova.api.openstack.compute import hypervisors
 from nova.api.openstack.compute import image_metadata
@@ -81,7 +76,6 @@ from nova.api.openstack.compute import server_metadata
 from nova.api.openstack.compute import server_migrations
 from nova.api.openstack.compute import server_password
 from nova.api.openstack.compute import server_tags
-from nova.api.openstack.compute import server_usage
 from nova.api.openstack.compute import servers
 from nova.api.openstack.compute import services
 from nova.api.openstack.compute import shelve
@@ -94,10 +88,6 @@ from nova.api.openstack.compute import virtual_interfaces
 from nova.api.openstack.compute import volumes
 from nova.api.openstack import wsgi
 from nova.api import wsgi as base_wsgi
-import nova.conf
-
-
-CONF = nova.conf.CONF
 
 
 def _create_controller(main_controller, controller_list,
@@ -271,18 +261,7 @@ security_group_rules_controller = functools.partial(_create_controller,
 
 
 server_controller = functools.partial(_create_controller,
-    servers.ServersController,
-    [
-        config_drive.ConfigDriveController,
-        extended_availability_zone.ExtendedAZController,
-        extended_server_attributes.ExtendedServerAttributesController,
-        extended_status.ExtendedStatusController,
-        extended_volumes.ExtendedVolumesController,
-        hide_server_addresses.Controller,
-        keypairs.Controller,
-        security_groups.SecurityGroupsOutputController,
-        server_usage.ServerUsageController,
-    ],
+    servers.ServersController, [],
     [
         admin_actions.AdminActionsController,
         admin_password.AdminPasswordController,
@@ -892,7 +871,7 @@ class APIRouterV21(base_wsgi.Router):
             # For example, the request to the '' will be redirect to the '/' in
             # the Nova API. To indicate that, using the target path instead of
             # a dict. The route entry just writes as "('', '/)".
-            if isinstance(methods, str):
+            if isinstance(methods, six.string_types):
                 self.map.redirect(path, methods)
                 continue
 

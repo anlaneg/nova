@@ -13,12 +13,6 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-import eventlet
+from nova import utils
 
-from nova import debugger
-
-if debugger.enabled():
-    # turn off thread patching to enable the remote debugger
-    eventlet.monkey_patch(os=False, thread=False)
-else:
-    eventlet.monkey_patch(os=False)
+utils.monkey_patch()

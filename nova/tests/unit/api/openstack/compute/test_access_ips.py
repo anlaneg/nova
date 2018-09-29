@@ -33,11 +33,12 @@ class AccessIPsAPIValidationTestV21(test.TestCase):
 
         def fake_rebuild(*args, **kwargs):
             pass
-
+        # Neutron security groups are tested in test_neutron_security_groups.py
+        self.flags(use_neutron=False)
         fakes.stub_out_nw_api(self)
         self._set_up_controller()
         fake.stub_out_image_service(self)
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       fakes.fake_instance_get())
         self.stub_out('nova.objects.instance.Instance.save', fake_save)
         self.stub_out('nova.compute.api.API.rebuild', fake_rebuild)

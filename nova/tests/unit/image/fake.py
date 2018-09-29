@@ -163,13 +163,14 @@ class _FakeImageService(object):
         """Return list of detailed image information."""
         return copy.deepcopy(list(self.images.values()))
 
-    def download(self, context, image_id, dst_path=None, data=None):
+    def download(self, context, image_id, data=None, dst_path=None,
+                 trusted_certs=None):
         self.show(context, image_id)
         if data:
-            data.write(self._imagedata.get(image_id, ''))
+            data.write(self._imagedata.get(image_id, b''))
         elif dst_path:
             with open(dst_path, 'wb') as data:
-                data.write(self._imagedata.get(image_id, ''))
+                data.write(self._imagedata.get(image_id, b''))
 
     def show(self, context, image_id, include_locations=False,
              show_deleted=True):

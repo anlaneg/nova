@@ -7,9 +7,7 @@ Server for the Nova OpenStack Compute APIs
 ------------------------------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-09-27
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,8 +21,8 @@ Synopsis
 Description
 ===========
 
-`nova-api-os-compute` is a server daemon that serves the Nova OpenStack Compute
-API
+:program:`nova-api-os-compute` is a server daemon that serves the Nova
+OpenStack Compute API.
 
 Options
 =======
@@ -43,8 +41,8 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
-* `Using WSGI with Nova <https://docs.openstack.org/nova/latest/user/wsgi.html>`__
+* :nova-doc:`OpenStack Nova <>`
+* :nova-doc:`Using WSGI with Nova <user/wsgi.html>`
 
 Bugs
 ====

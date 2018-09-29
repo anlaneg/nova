@@ -15,11 +15,13 @@ import oslo_messaging as messaging
 import six
 
 from nova.compute import power_state
+from nova.compute import utils as compute_utils
 from nova.conductor.tasks import base
 from nova.conductor.tasks import migrate
 import nova.conf
 from nova import exception
 from nova.i18n import _
+from nova import network
 from nova import objects
 from nova.scheduler import utils as scheduler_utils
 from nova import utils
@@ -32,6 +34,19 @@ def should_do_migration_allocation(context):
     minver = objects.Service.get_minimum_version_multi(context,
                                                        ['nova-compute'])
     return minver >= 25
+
+
+def supports_extended_port_binding(context, host):
+    """Checks if the compute host service is new enough to support the neutron
+    port binding-extended details.
+
+    :param context: The user request context.
+    :param host: The nova-compute host to check.
+    :returns: True if the compute host is new enough to support extended
+              port binding information, False otherwise.
+    """
+    svc = objects.Service.get_by_host_and_binary(context, host, 'nova-compute')
+    return svc.version >= 35
 
 
 class LiveMigrationTask(base.TaskBase):
@@ -52,6 +67,7 @@ class LiveMigrationTask(base.TaskBase):
         self.request_spec = request_spec
         self._source_cn = None
         self._held_allocations = None
+        self.network_api = network.API()
 
     def _execute(self):
         self._check_instance_is_active()
@@ -124,8 +140,7 @@ class LiveMigrationTask(base.TaskBase):
             migrate.revert_allocation_for_migration(self.context,
                                                     self._source_cn,
                                                     self.instance,
-                                                    self.migration,
-                                                    self._held_allocations)
+                                                    self.migration)
 
     def _check_instance_is_active(self):
         if self.instance.power_state not in (power_state.RUNNING,
@@ -226,6 +241,41 @@ class LiveMigrationTask(base.TaskBase):
                     "%s") % destination
             raise exception.MigrationPreCheckError(msg)
 
+        # Check to see that neutron supports the binding-extended API and
+        # check to see that both the source and destination compute hosts
+        # are new enough to support the new port binding flow.
+        if (self.network_api.supports_port_binding_extension(self.context) and
+                supports_extended_port_binding(self.context, self.source) and
+                supports_extended_port_binding(self.context, destination)):
+            self.migrate_data.vifs = (
+                self._bind_ports_on_destination(destination))
+
+    def _bind_ports_on_destination(self, destination):
+        LOG.debug('Start binding ports on destination host: %s', destination,
+                  instance=self.instance)
+        # Bind ports on the destination host; returns a dict, keyed by
+        # port ID, of a new destination host port binding dict per port
+        # that was bound. This information is then stuffed into the
+        # migrate_data.
+        try:
+            bindings = self.network_api.bind_ports_to_host(
+                self.context, self.instance, destination)
+        except exception.PortBindingFailed as e:
+            # Port binding failed for that host, try another one.
+            raise exception.MigrationPreCheckError(
+                reason=e.format_message())
+
+        source_vif_map = {
+            vif['id']: vif for vif in self.instance.get_network_info()
+        }
+        migrate_vifs = []
+        for port_id, binding in bindings.items():
+            migrate_vif = objects.VIFMigrateData(
+                port_id=port_id, **binding)
+            migrate_vif.source_vif = source_vif_map[port_id]
+            migrate_vifs.append(migrate_vif)
+        return migrate_vifs
+
     def _get_source_cell_mapping(self):
         """Returns the CellMapping for the cell in which the instance lives
 
@@ -266,13 +316,13 @@ class LiveMigrationTask(base.TaskBase):
             This is generally at least seeded with the source host.
         :returns: nova.objects.RequestSpec object
         """
-        image = utils.get_image_from_system_metadata(
-            self.instance.system_metadata)
-        filter_properties = {'ignore_hosts': attempted_hosts}
         if not self.request_spec:
             # NOTE(sbauza): We were unable to find an original RequestSpec
             # object - probably because the instance is old.
             # We need to mock that the old way
+            image = utils.get_image_from_system_metadata(
+                self.instance.system_metadata)
+            filter_properties = {'ignore_hosts': attempted_hosts}
             request_spec = objects.RequestSpec.from_components(
                 self.context, self.instance.uuid, image,
                 self.instance.flavor, self.instance.numa_topology,
@@ -301,7 +351,10 @@ class LiveMigrationTask(base.TaskBase):
             request_spec.requested_destination = objects.Destination(
                 cell=cell_mapping)
 
-        request_spec.ensure_project_id(self.instance)
+        request_spec.ensure_project_and_user_id(self.instance)
+        request_spec.ensure_network_metadata(self.instance)
+        compute_utils.heal_reqspec_is_bfv(
+            self.context, request_spec, self.instance)
 
         return request_spec
 

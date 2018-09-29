@@ -17,14 +17,11 @@
 from oslo_config import fixture as config_fixture
 from oslo_policy import opts as policy_opts
 
-import nova.conf
+from nova.conf import neutron
 from nova.conf import paths
 from nova import config
 from nova import ipv6
-import nova.keymgr
 from nova.tests.unit import utils
-
-CONF = nova.conf.CONF
 
 
 class ConfFixture(config_fixture.Config):
@@ -80,12 +77,9 @@ class ConfFixture(config_fixture.Config):
         # tests.
         self.conf.set_default('keep_alive', False, group="wsgi")
 
-        # placement group
-        self.conf.set_default('os_region_name', 'RegionOne',
-                              group='placement')
-
         config.parse_args([], default_config_files=[], configure_db=False,
                           init_rpc=False)
         policy_opts.set_defaults(self.conf)
+        neutron.register_dynamic_opts(self.conf)
         self.addCleanup(utils.cleanup_dns_managers)
         self.addCleanup(ipv6.api.reset_backend)

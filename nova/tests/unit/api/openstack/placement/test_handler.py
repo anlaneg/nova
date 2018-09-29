@@ -13,15 +13,16 @@
 #    under the License.
 """Unit tests for the functions used by the placement API handlers."""
 
+import microversion_parse
 import mock
+from oslo_utils.fixture import uuidsentinel
 import routes
+import testtools
 import webob
 
 from nova.api.openstack.placement import handler
 from nova.api.openstack.placement.handlers import root
 from nova.api.openstack.placement import microversion
-from nova import test
-from nova.tests import uuidsentinel
 
 
 # Used in tests below
@@ -38,11 +39,11 @@ def _environ(path='/moo', method='GET'):
         'wsgi.url_scheme': 'http',
         # The microversion version value is not used, but it
         # needs to be set to avoid a KeyError.
-        microversion.MICROVERSION_ENVIRON: microversion.Version(1, 12),
+        microversion.MICROVERSION_ENVIRON: microversion_parse.Version(1, 12),
     }
 
 
-class DispatchTest(test.NoDBTestCase):
+class DispatchTest(testtools.TestCase):
 
     def setUp(self):
         super(DispatchTest, self).setUp()
@@ -79,7 +80,7 @@ class DispatchTest(test.NoDBTestCase):
                          environ['wsgiorg.routing_args'][1]['id'])
 
 
-class MapperTest(test.NoDBTestCase):
+class MapperTest(testtools.TestCase):
 
     def setUp(self):
         super(MapperTest, self).setUp()
@@ -122,7 +123,7 @@ class MapperTest(test.NoDBTestCase):
         self.assertEqual(str, type(allow_header))
 
 
-class PlacementLoggingTest(test.NoDBTestCase):
+class PlacementLoggingTest(testtools.TestCase):
 
     @mock.patch("nova.api.openstack.placement.handler.LOG")
     def test_404_no_error_log(self, mocked_log):
@@ -137,7 +138,7 @@ class PlacementLoggingTest(test.NoDBTestCase):
         mocked_log.exception.assert_not_called()
 
 
-class DeclarationsTest(test.NoDBTestCase):
+class DeclarationsTest(testtools.TestCase):
 
     def setUp(self):
         super(DeclarationsTest, self).setUp()
@@ -154,7 +155,7 @@ class DeclarationsTest(test.NoDBTestCase):
         self.assertEqual(root.home, result['action'])
 
 
-class ContentHeadersTest(test.NoDBTestCase):
+class ContentHeadersTest(testtools.TestCase):
 
     def setUp(self):
         super(ContentHeadersTest, self).setUp()

@@ -14,7 +14,6 @@
 #    under the License.
 
 import functools
-import inspect
 
 from oslo_concurrency import lockutils
 from oslo_log import log as logging
@@ -25,6 +24,7 @@ from nova import hooks
 from nova.i18n import _
 from nova.network import model as network_model
 from nova import objects
+from nova import utils
 
 
 LOG = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ def refresh_cache(f):
 
     Requires context and instance as function args
     """
-    argspec = inspect.getargspec(f)
+    argspec = utils.getargspec(f)
 
     @functools.wraps(f)
     def wrapper(self, context, *args, **kwargs):
@@ -262,22 +262,28 @@ class NetworkAPI(base.Base):
         """Template method, so a subclass can implement for neutron/network."""
         raise NotImplementedError()
 
-    def create_pci_requests_for_sriov_ports(self, context,
-                                            pci_requests,
-                                            requested_networks):
-        """Check requested networks for any SR-IOV port request.
-
-        Create a PCI request object for each SR-IOV port, and add it to the
-        pci_requests object that contains a list of PCI request object.
-        """
-        raise NotImplementedError()
-
     def validate_networks(self, context, requested_networks, num_instances):
         """validate the networks passed at the time of creating
         the server.
 
         Return the number of instances that can be successfully allocated
         with the requested network configuration.
+        """
+        raise NotImplementedError()
+
+    def create_resource_requests(self, context, requested_networks):
+        """Retrieve all information for the networks passed at the time of
+        creating the server.
+
+        :param context: The request context.
+        :param requested_networks: The networks requested for the server.
+        :type requested_networks: nova.objects.RequestedNetworkList
+        :param pci_requests: The list of PCI requests to which additional PCI
+            requests created here will be added.
+        :type pci_requests: nova.objects.InstancePCIRequests
+
+        :returns: An instance of ``objects.NetworkMetadata`` for use by the
+            scheduler or None.
         """
         raise NotImplementedError()
 
@@ -371,3 +377,55 @@ class NetworkAPI(base.Base):
 
     def has_substr_port_filtering_extension(self, context):
         return False
+
+    def supports_port_binding_extension(self, context):
+        """Checks to see if the networking API supports the binding-extended
+        ports API extension.
+
+        Defaults to False since this is only implemented by the neutron API.
+
+        :param context: the user request context
+        :returns: True if the binding-extended API extension is available,
+                  False otherwise
+        """
+        return False
+
+    def bind_ports_to_host(self, context, instance, host,
+                           vnic_type=None, profile=None):
+        """Attempts to bind the ports from the instance on the given host
+
+        If the ports are already actively bound to another host, like the
+        source host during live migration, then the new port bindings will
+        be inactive, assuming $host is the destination host for the live
+        migration.
+
+        In the event of an error, any ports which were successfully bound to
+        the host should have those host bindings removed from the ports.
+
+        This method should not be used if "supports_port_binding_extension"
+        returns False.
+
+        :param context: the user request context
+        :type context: nova.context.RequestContext
+        :param instance: the instance with a set of ports
+        :type instance: nova.objects.Instance
+        :param host: the host on which to bind the ports which
+                     are attached to the instance
+        :type host: str
+        :param vnic_type: optional vnic type string for the host
+                          port binding
+        :type vnic_type: str
+        :param profile: optional vif profile dict for the host port
+                        binding; note that the port binding profile is mutable
+                        via the networking "Port Binding" API so callers that
+                        pass in a profile should ensure they have the latest
+                        version from neutron with their changes merged,
+                        which can be determined using the "revision_number"
+                        attribute of the port.
+        :type profile: dict
+        :raises: PortBindingFailed if any of the ports failed to be bound to
+                 the destination host
+        :returns: dict, keyed by port ID, of a new host port
+                  binding dict per port that was bound
+        """
+        raise NotImplementedError()

@@ -14,6 +14,7 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 import six
 import webob
@@ -26,7 +27,6 @@ from nova import objects
 from nova import test
 from nova.tests.unit.api.openstack.compute import admin_only_action_common
 from nova.tests.unit.api.openstack import fakes
-from nova.tests import uuidsentinel as uuids
 
 
 class MigrateServerTestsV21(admin_only_action_common.CommonTests):
@@ -36,20 +36,16 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
     _api_version = '2.1'
     disk_over_commit = False
     force = None
-    async = False
+    async_ = False
     host_name = None
 
     def setUp(self):
         super(MigrateServerTestsV21, self).setUp()
         self.controller = getattr(self.migrate_server, self.controller_name)()
         self.compute_api = self.controller.compute_api
-
-        def _fake_controller(*args, **kwargs):
-            return self.controller
-
-        self.stubs.Set(self.migrate_server, self.controller_name,
-                       _fake_controller)
-        self.mox.StubOutWithMock(self.compute_api, 'get')
+        self.stub_out('nova.api.openstack.compute.migrate_server.'
+                      'MigrateServerController',
+                      lambda *a, **kw: self.controller)
 
     def _get_migration_body(self, **kwargs):
         return {'os-migrateLive': self._get_params(**kwargs)}
@@ -64,7 +60,7 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
                                '_migrate_live': 'live_migrate'}
         body_map = {'_migrate_live': self._get_migration_body(host='hostname')}
         args_map = {'_migrate_live': ((False, self.disk_over_commit,
-                                       'hostname', self.force, self.async),
+                                       'hostname', self.force, self.async_),
                                       {}),
                     '_migrate': ((), {'host_name': self.host_name})}
         self._test_actions(['_migrate', '_migrate_live'], body_map=body_map,
@@ -76,7 +72,7 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
                                '_migrate_live': 'live_migrate'}
         body_map = {'_migrate_live': self._get_migration_body(host=None)}
         args_map = {'_migrate_live': ((False, self.disk_over_commit, None,
-                                       self.force, self.async),
+                                       self.force, self.async_),
                                       {}),
                     '_migrate': ((), {'host_name': None})}
         self._test_actions(['_migrate', '_migrate_live'], body_map=body_map,
@@ -95,7 +91,7 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
         body_map = {'_migrate_live':
                     self._get_migration_body(host='hostname')}
         args_map = {'_migrate_live': ((False, self.disk_over_commit,
-                                       'hostname', self.force, self.async),
+                                       'hostname', self.force, self.async_),
                                       {}),
                     '_migrate': ((), {'host_name': self.host_name})}
         exception_arg = {'_migrate': 'migrate',
@@ -112,7 +108,7 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
         body_map = {'_migrate_live':
                     self._get_migration_body(host='hostname')}
         args_map = {'_migrate_live': ((False, self.disk_over_commit,
-                                       'hostname', self.force, self.async),
+                                       'hostname', self.force, self.async_),
                                       {}),
                     '_migrate': ((), {'host_name': self.host_name})}
         self._test_actions_with_locked_instance(
@@ -120,16 +116,18 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
             args_map=args_map, method_translations=method_translations)
 
     def _test_migrate_exception(self, exc_info, expected_result):
-        self.mox.StubOutWithMock(self.compute_api, 'resize')
         instance = self._stub_instance_get()
-        self.compute_api.resize(
-            self.context, instance,
-            host_name=self.host_name).AndRaise(exc_info)
 
-        self.mox.ReplayAll()
-        self.assertRaises(expected_result,
-                          self.controller._migrate,
-                          self.req, instance['uuid'], body={'migrate': None})
+        with mock.patch.object(self.compute_api, 'resize',
+                               side_effect=exc_info) as mock_resize:
+            self.assertRaises(expected_result,
+                              self.controller._migrate,
+                              self.req, instance['uuid'],
+                              body={'migrate': None})
+            mock_resize.assert_called_once_with(
+                self.context, instance, host_name=self.host_name)
+        self.mock_get.assert_called_once_with(self.context, instance.uuid,
+                                              expected_attrs=None)
 
     def test_migrate_too_many_instances(self):
         exc_info = exception.TooManyInstances(overs='', req='', used=0,
@@ -137,17 +135,21 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
         self._test_migrate_exception(exc_info, webob.exc.HTTPForbidden)
 
     def _test_migrate_live_succeeded(self, param):
-        self.mox.StubOutWithMock(self.compute_api, 'live_migrate')
         instance = self._stub_instance_get()
-        self.compute_api.live_migrate(self.context, instance, False,
-                                      self.disk_over_commit, 'hostname',
-                                      self.force, self.async)
 
-        self.mox.ReplayAll()
         live_migrate_method = self.controller._migrate_live
-        live_migrate_method(self.req, instance.uuid,
-                            body={'os-migrateLive': param})
-        self.assertEqual(202, live_migrate_method.wsgi_code)
+
+        with mock.patch.object(self.compute_api,
+                               'live_migrate') as mock_live_migrate:
+            live_migrate_method(self.req, instance.uuid,
+                                body={'os-migrateLive': param})
+            self.assertEqual(202, live_migrate_method.wsgi_code)
+            mock_live_migrate.assert_called_once_with(
+                self.context, instance, False, self.disk_over_commit,
+                'hostname', self.force, self.async_)
+
+        self.mock_get.assert_called_once_with(self.context, instance.uuid,
+                                              expected_attrs=None)
 
     def test_migrate_live_enabled(self):
         param = self._get_params(host='hostname')
@@ -209,21 +211,22 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
                                          uuid=None,
                                          expected_exc=webob.exc.HTTPBadRequest,
                                          check_response=True):
-        self.mox.StubOutWithMock(self.compute_api, 'live_migrate')
-
         instance = self._stub_instance_get(uuid=uuid)
-        self.compute_api.live_migrate(self.context, instance, False,
-                                      self.disk_over_commit,
-                                      'hostname', self.force, self.async
-                                      ).AndRaise(fake_exc)
-        self.mox.ReplayAll()
-
         body = self._get_migration_body(host='hostname')
-        ex = self.assertRaises(expected_exc,
-                               self.controller._migrate_live,
-                               self.req, instance.uuid, body=body)
-        if check_response:
-            self.assertIn(six.text_type(fake_exc), ex.explanation)
+
+        with mock.patch.object(
+                self.compute_api, 'live_migrate',
+                side_effect=fake_exc) as mock_live_migrate:
+            ex = self.assertRaises(expected_exc,
+                                   self.controller._migrate_live,
+                                   self.req, instance.uuid, body=body)
+            if check_response:
+                self.assertIn(six.text_type(fake_exc), ex.explanation)
+            mock_live_migrate.assert_called_once_with(
+                self.context, instance, False, self.disk_over_commit,
+                'hostname', self.force, self.async_)
+        self.mock_get.assert_called_once_with(self.context, instance.uuid,
+                                              expected_attrs=None)
 
     def test_migrate_live_compute_service_unavailable(self):
         self._test_migrate_live_failed_with_exception(
@@ -316,7 +319,7 @@ class MigrateServerTestsV225(MigrateServerTestsV21):
         body_map = {'_migrate_live': {'os-migrateLive': {'host': 'hostname',
                                       'block_migration': 'auto'}}}
         args_map = {'_migrate_live': ((None, None, 'hostname', self.force,
-                                       self.async), {})}
+                                       self.async_), {})}
         self._test_actions(['_migrate_live'], body_map=body_map,
                            method_translations=method_translations,
                            args_map=args_map)
@@ -329,10 +332,6 @@ class MigrateServerTestsV225(MigrateServerTestsV21):
         self.assertRaises(self.validation_error,
                           self.controller._migrate_live,
                           self.req, fakes.FAKE_UUID, body=body)
-
-    def test_migrate_live_migration_with_old_nova_not_supported(self):
-        self._test_migrate_live_failed_with_exception(
-            exception.LiveMigrationWithOldNovaNotSupported())
 
 
 class MigrateServerTestsV230(MigrateServerTestsV225):
@@ -353,7 +352,7 @@ class MigrateServerTestsV230(MigrateServerTestsV225):
                                       'block_migration': 'auto',
                                       'force': litteral_force}}}
         args_map = {'_migrate_live': ((None, None, 'hostname', force,
-                                       self.async), {})}
+                                       self.async_), {})}
         self._test_actions(['_migrate_live'], body_map=body_map,
                            method_translations=method_translations,
                            args_map=args_map)
@@ -373,7 +372,7 @@ class MigrateServerTestsV230(MigrateServerTestsV225):
 
 
 class MigrateServerTestsV234(MigrateServerTestsV230):
-    async = True
+    async_ = True
 
     def setUp(self):
         super(MigrateServerTestsV234, self).setUp()
@@ -428,39 +427,41 @@ class MigrateServerTestsV234(MigrateServerTestsV230):
         pass
 
     def test_migrate_live_compute_host_not_found(self):
+        body = {'os-migrateLive':
+                {'host': 'hostname', 'block_migration': 'auto'}}
         exc = exception.ComputeHostNotFound(
                 reason="Compute host %(host)s could not be found.",
                 host='hostname')
-        self.mox.StubOutWithMock(self.compute_api, 'live_migrate')
         instance = self._stub_instance_get()
-        self.compute_api.live_migrate(self.context, instance, None,
-                                      self.disk_over_commit, 'hostname',
-                                      self.force, self.async).AndRaise(exc)
 
-        self.mox.ReplayAll()
-        body = {'os-migrateLive':
-                {'host': 'hostname', 'block_migration': 'auto'}}
-
-        self.assertRaises(webob.exc.HTTPBadRequest,
-                          self.controller._migrate_live,
-                          self.req, instance.uuid, body=body)
+        with mock.patch.object(self.compute_api, 'live_migrate',
+                               side_effect=exc) as mock_live_migrate:
+            self.assertRaises(webob.exc.HTTPBadRequest,
+                              self.controller._migrate_live,
+                              self.req, instance.uuid, body=body)
+            mock_live_migrate.assert_called_once_with(
+                self.context, instance, None, self.disk_over_commit,
+                'hostname', self.force, self.async_)
+        self.mock_get.assert_called_once_with(self.context, instance.uuid,
+                                              expected_attrs=None)
 
     def test_migrate_live_unexpected_error(self):
-        exc = exception.InvalidHypervisorType(
-                reason="The supplied hypervisor type of is invalid.")
-        self.mox.StubOutWithMock(self.compute_api, 'live_migrate')
-        instance = self._stub_instance_get()
-        self.compute_api.live_migrate(self.context, instance, None,
-                                      self.disk_over_commit, 'hostname',
-                                      self.force, self.async).AndRaise(exc)
-
-        self.mox.ReplayAll()
         body = {'os-migrateLive':
                 {'host': 'hostname', 'block_migration': 'auto'}}
+        exc = exception.InvalidHypervisorType(
+                reason="The supplied hypervisor type of is invalid.")
+        instance = self._stub_instance_get()
 
-        self.assertRaises(webob.exc.HTTPInternalServerError,
-                          self.controller._migrate_live,
-                          self.req, instance.uuid, body=body)
+        with mock.patch.object(self.compute_api, 'live_migrate',
+                               side_effect=exc) as mock_live_migrate:
+            self.assertRaises(webob.exc.HTTPInternalServerError,
+                              self.controller._migrate_live,
+                              self.req, instance.uuid, body=body)
+            mock_live_migrate.assert_called_once_with(
+                self.context, instance, None, self.disk_over_commit,
+                'hostname', self.force, self.async_)
+        self.mock_get.assert_called_once_with(self.context, instance.uuid,
+                                              expected_attrs=None)
 
 
 class MigrateServerTestsV256(MigrateServerTestsV234):

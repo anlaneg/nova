@@ -19,6 +19,7 @@ from ironicclient import exc as ironic_exception
 import mock
 from oslo_config import cfg
 from oslo_service import loopingcall
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 import six
 from testtools import matchers
@@ -27,6 +28,7 @@ from tooz import hashring as hash_ring
 from nova.api.metadata import base as instance_metadata
 from nova import block_device
 from nova.compute import power_state as nova_states
+from nova.compute import provider_tree
 from nova.compute import task_states
 from nova.compute import vm_states
 from nova.console import type as console_type
@@ -34,7 +36,7 @@ from nova import context as nova_context
 from nova import exception
 from nova.network import model as network_model
 from nova import objects
-from nova.objects import fields
+from nova import rc_fields as fields
 from nova import servicegroup
 from nova import test
 from nova.tests import fixtures
@@ -43,7 +45,6 @@ from nova.tests.unit import fake_instance
 from nova.tests.unit import matchers as nova_matchers
 from nova.tests.unit import utils
 from nova.tests.unit.virt.ironic import utils as ironic_utils
-from nova.tests import uuidsentinel as uuids
 from nova.virt import block_device as driver_block_device
 from nova.virt import configdrive
 from nova.virt import driver
@@ -92,6 +93,11 @@ def _get_stats():
     return {'cpu_arch': 'x86_64'}
 
 
+def _get_cached_node(**kw):
+    """Return a fake node object representative of objects in the cache."""
+    return ironic_utils.get_test_node(fields=ironic_driver._NODE_FIELDS, **kw)
+
+
 def _make_compute_service(hostname):
     return objects.Service(host=hostname)
 
@@ -114,6 +120,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
         self.ctx = nova_context.get_admin_context()
         self.instance_uuid = uuidutils.generate_uuid()
 
+        self.ptree = provider_tree.ProviderTree()
+        self.ptree.new_root(mock.sentinel.nodename, mock.sentinel.nodename)
+
         # mock retries configs to avoid sleeps and make tests run quicker
         CONF.set_default('api_max_retries', default=1, group='ironic')
         CONF.set_default('api_retry_interval', default=0, group='ironic')
@@ -128,15 +137,13 @@ class IronicDriverTestCase(test.NoDBTestCase):
         self.assertFalse(self.driver.capabilities['has_imagecache'],
                          'Driver capabilities for \'has_imagecache\''
                          'is invalid')
-        self.assertFalse(self.driver.capabilities['supports_recreate'],
-                         'Driver capabilities for \'supports_recreate\''
+        self.assertFalse(self.driver.capabilities['supports_evacuate'],
+                         'Driver capabilities for \'supports_evacuate\''
                          'is invalid')
         self.assertFalse(self.driver.capabilities[
                              'supports_migrate_to_same_host'],
                          'Driver capabilities for '
                          '\'supports_migrate_to_same_host\' is invalid')
-        self.assertTrue(self.driver.requires_allocation_refresh,
-                        'Driver requires allocation refresh')
 
     def test__get_hypervisor_type(self):
         self.assertEqual('ironic', self.driver._get_hypervisor_type())
@@ -147,8 +154,8 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(FAKE_CLIENT.node, 'get_by_instance_uuid')
     def test__validate_instance_and_node(self, mock_gbiui):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(uuid=node_uuid,
-                                          instance_uuid=self.instance_uuid)
+        node = _get_cached_node(
+                uuid=node_uuid, instance_uuid=self.instance_uuid)
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    uuid=self.instance_uuid)
         mock_gbiui.return_value = node
@@ -173,8 +180,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test__wait_for_active_pass(self, fake_validate, fake_refresh):
         instance = fake_instance.fake_instance_obj(self.ctx,
                 uuid=uuidutils.generate_uuid())
-        node = ironic_utils.get_test_node(
-                provision_state=ironic_states.DEPLOYING)
+        node = _get_cached_node(provision_state=ironic_states.DEPLOYING)
 
         fake_validate.return_value = node
         self.driver._wait_for_active(instance)
@@ -187,8 +193,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test__wait_for_active_done(self, fake_validate, fake_refresh):
         instance = fake_instance.fake_instance_obj(self.ctx,
                 uuid=uuidutils.generate_uuid())
-        node = ironic_utils.get_test_node(
-                provision_state=ironic_states.ACTIVE)
+        node = _get_cached_node(provision_state=ironic_states.ACTIVE)
 
         fake_validate.return_value = node
         self.assertRaises(loopingcall.LoopingCallDone,
@@ -202,8 +207,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test__wait_for_active_fail(self, fake_validate, fake_refresh):
         instance = fake_instance.fake_instance_obj(self.ctx,
                 uuid=uuidutils.generate_uuid())
-        node = ironic_utils.get_test_node(
-                provision_state=ironic_states.DEPLOYFAIL)
+        node = _get_cached_node(provision_state=ironic_states.DEPLOYFAIL)
 
         fake_validate.return_value = node
         self.assertRaises(exception.InstanceDeployFailure,
@@ -239,8 +243,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test__wait_for_power_state_pass(self, fake_validate):
         instance = fake_instance.fake_instance_obj(self.ctx,
                 uuid=uuidutils.generate_uuid())
-        node = ironic_utils.get_test_node(
-                target_power_state=ironic_states.POWER_OFF)
+        node = _get_cached_node(target_power_state=ironic_states.POWER_OFF)
 
         fake_validate.return_value = node
         self.driver._wait_for_power_state(instance, 'fake message')
@@ -251,8 +254,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test__wait_for_power_state_ok(self, fake_validate):
         instance = fake_instance.fake_instance_obj(self.ctx,
                 uuid=uuidutils.generate_uuid())
-        node = ironic_utils.get_test_node(
-                target_power_state=ironic_states.NOSTATE)
+        node = _get_cached_node(target_power_state=ironic_states.NOSTATE)
 
         fake_validate.return_value = node
         self.assertRaises(loopingcall.LoopingCallDone,
@@ -263,14 +265,13 @@ class IronicDriverTestCase(test.NoDBTestCase):
         node_uuid = uuidutils.generate_uuid()
         props = _get_properties()
         stats = _get_stats()
-        node = ironic_utils.get_test_node(uuid=node_uuid,
-                                          instance_uuid=self.instance_uuid,
-                                          properties=props,
-                                          resource_class='foo')
+        node = _get_cached_node(
+                uuid=node_uuid, instance_uuid=self.instance_uuid,
+                properties=props, resource_class='foo')
 
         result = self.driver._node_resource(node)
 
-        wantkeys = ["hypervisor_hostname", "hypervisor_type",
+        wantkeys = ["uuid", "hypervisor_hostname", "hypervisor_type",
                     "hypervisor_version", "cpu_info",
                     "vcpus", "vcpus_used",
                     "memory_mb", "memory_mb_used",
@@ -283,13 +284,13 @@ class IronicDriverTestCase(test.NoDBTestCase):
         gotkeys = sorted(result.keys())
         self.assertEqual(wantkeys, gotkeys)
 
-        self.assertEqual(props['cpus'], result['vcpus'])
-        self.assertEqual(result['vcpus'], result['vcpus_used'])
-        self.assertEqual(props['memory_mb'], result['memory_mb'])
-        self.assertEqual(result['memory_mb'], result['memory_mb_used'])
-        self.assertEqual(props['local_gb'], result['local_gb'])
-        self.assertEqual(result['local_gb'], result['local_gb_used'])
-
+        self.assertEqual(0, result['vcpus'])
+        self.assertEqual(0, result['vcpus_used'])
+        self.assertEqual(0, result['memory_mb'])
+        self.assertEqual(0, result['memory_mb_used'])
+        self.assertEqual(0, result['local_gb'])
+        self.assertEqual(0, result['local_gb_used'])
+        self.assertEqual(node_uuid, result['uuid'])
         self.assertEqual(node_uuid, result['hypervisor_hostname'])
         self.assertEqual(stats, result['stats'])
         self.assertEqual('foo', result['resource_class'])
@@ -299,7 +300,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
         node_uuid = uuidutils.generate_uuid()
         props = _get_properties()
         props['cpu_arch'] = 'i386'
-        node = ironic_utils.get_test_node(uuid=node_uuid, properties=props)
+        node = _get_cached_node(uuid=node_uuid, properties=props)
 
         result = self.driver._node_resource(node)
         self.assertEqual('i686', result['supported_instances'][0][0])
@@ -309,7 +310,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
         node_uuid = uuidutils.generate_uuid()
         props = _get_properties()
         del props['cpu_arch']
-        node = ironic_utils.get_test_node(uuid=node_uuid, properties=props)
+        node = _get_cached_node(uuid=node_uuid, properties=props)
 
         result = self.driver._node_resource(node)
         self.assertEqual([], result['supported_instances'])
@@ -317,7 +318,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test__node_resource_exposes_capabilities(self):
         props = _get_properties()
         props['capabilities'] = 'test:capability, test2:value2'
-        node = ironic_utils.get_test_node(properties=props)
+        node = _get_cached_node(properties=props)
         result = self.driver._node_resource(node)
         stats = result['stats']
         self.assertIsNone(stats.get('capabilities'))
@@ -327,14 +328,14 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test__node_resource_no_capabilities(self):
         props = _get_properties()
         props['capabilities'] = None
-        node = ironic_utils.get_test_node(properties=props)
+        node = _get_cached_node(properties=props)
         result = self.driver._node_resource(node)
         self.assertIsNone(result['stats'].get('capabilities'))
 
     def test__node_resource_malformed_capabilities(self):
         props = _get_properties()
         props['capabilities'] = 'test:capability,:no_key,no_val:'
-        node = ironic_utils.get_test_node(properties=props)
+        node = _get_cached_node(properties=props)
         result = self.driver._node_resource(node)
         stats = result['stats']
         self.assertEqual('capability', stats.get('test'))
@@ -343,7 +344,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
         node_uuid = uuidutils.generate_uuid()
         props = _get_properties()
         stats = _get_stats()
-        node = ironic_utils.get_test_node(
+        node = _get_cached_node(
             uuid=node_uuid,
             instance_uuid=None,
             power_state=ironic_states.POWER_OFF,
@@ -351,11 +352,11 @@ class IronicDriverTestCase(test.NoDBTestCase):
             provision_state=ironic_states.AVAILABLE)
 
         result = self.driver._node_resource(node)
-        self.assertEqual(props['cpus'], result['vcpus'])
+        self.assertEqual(0, result['vcpus'])
         self.assertEqual(0, result['vcpus_used'])
-        self.assertEqual(props['memory_mb'], result['memory_mb'])
+        self.assertEqual(0, result['memory_mb'])
         self.assertEqual(0, result['memory_mb_used'])
-        self.assertEqual(props['local_gb'], result['local_gb'])
+        self.assertEqual(0, result['local_gb'])
         self.assertEqual(0, result['local_gb_used'])
         self.assertEqual(node_uuid, result['hypervisor_hostname'])
         self.assertEqual(stats, result['stats'])
@@ -367,9 +368,8 @@ class IronicDriverTestCase(test.NoDBTestCase):
         node_uuid = uuidutils.generate_uuid()
         props = _get_properties()
         stats = _get_stats()
-        node = ironic_utils.get_test_node(uuid=node_uuid,
-                                          instance_uuid=None,
-                                          properties=props)
+        node = _get_cached_node(
+                uuid=node_uuid, instance_uuid=None, properties=props)
 
         result = self.driver._node_resource(node)
         self.assertEqual(0, result['vcpus'])
@@ -389,7 +389,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
         props = _get_properties()
         stats = _get_stats()
         instance_info = _get_instance_info()
-        node = ironic_utils.get_test_node(
+        node = _get_cached_node(
             uuid=node_uuid,
             instance_uuid=uuidutils.generate_uuid(),
             provision_state=ironic_states.ACTIVE,
@@ -397,19 +397,19 @@ class IronicDriverTestCase(test.NoDBTestCase):
             instance_info=instance_info)
 
         result = self.driver._node_resource(node)
-        self.assertEqual(props['cpus'], result['vcpus'])
-        self.assertEqual(result['vcpus'], result['vcpus_used'])
-        self.assertEqual(props['memory_mb'], result['memory_mb'])
-        self.assertEqual(result['memory_mb'], result['memory_mb_used'])
-        self.assertEqual(props['local_gb'], result['local_gb'])
-        self.assertEqual(result['local_gb'], result['local_gb_used'])
+        self.assertEqual(0, result['vcpus'])
+        self.assertEqual(0, result['vcpus_used'])
+        self.assertEqual(0, result['memory_mb'])
+        self.assertEqual(0, result['memory_mb_used'])
+        self.assertEqual(0, result['local_gb'])
+        self.assertEqual(0, result['local_gb_used'])
         self.assertEqual(node_uuid, result['hypervisor_hostname'])
         self.assertEqual(stats, result['stats'])
 
     @mock.patch.object(ironic_driver.LOG, 'warning')
     def test__parse_node_properties(self, mock_warning):
         props = _get_properties()
-        node = ironic_utils.get_test_node(
+        node = _get_cached_node(
             uuid=uuidutils.generate_uuid(),
             properties=props)
         # raw_cpu_arch is included because extra_specs filters do not
@@ -429,7 +429,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
         props['memory_mb'] = 'bad-value'
         props['local_gb'] = 'bad-value'
         props['cpu_arch'] = 'bad-value'
-        node = ironic_utils.get_test_node(
+        node = _get_cached_node(
             uuid=uuidutils.generate_uuid(),
             properties=props)
         # raw_cpu_arch is included because extra_specs filters do not
@@ -449,7 +449,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test__parse_node_properties_canonicalize_cpu_arch(self, mock_warning):
         props = _get_properties()
         props['cpu_arch'] = 'amd64'
-        node = ironic_utils.get_test_node(
+        node = _get_cached_node(
             uuid=uuidutils.generate_uuid(),
             properties=props)
         # raw_cpu_arch is included because extra_specs filters do not
@@ -517,13 +517,15 @@ class IronicDriverTestCase(test.NoDBTestCase):
             instances.append(fake_instance.fake_instance_obj(self.ctx,
                                                              id=i,
                                                              uuid=uuid))
-            nodes.append(ironic_utils.get_test_node(instance_uuid=uuid))
+            nodes.append(ironic_utils.get_test_node(instance_uuid=uuid,
+                                                    fields=['instance_uuid']))
 
         mock_inst_by_uuid.side_effect = instances
         mock_call.return_value = nodes
 
         response = self.driver.list_instances()
-        mock_call.assert_called_with("node.list", associated=True, limit=0)
+        mock_call.assert_called_with("node.list", associated=True,
+                                     fields=['instance_uuid'], limit=0)
         expected_calls = [mock.call(mock.ANY, instances[0].uuid),
                           mock.call(mock.ANY, instances[1].uuid)]
         mock_inst_by_uuid.assert_has_calls(expected_calls)
@@ -534,10 +536,11 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(objects.Instance, 'get_by_uuid')
     def test_list_instances_fail(self, mock_inst_by_uuid, mock_call):
         mock_call.side_effect = exception.NovaException
-        response = self.driver.list_instances()
-        mock_call.assert_called_with("node.list", associated=True, limit=0)
+        self.assertRaises(exception.VirtDriverNotReady,
+                          self.driver.list_instances)
+        mock_call.assert_called_with("node.list", associated=True,
+                                     fields=['instance_uuid'], limit=0)
         self.assertFalse(mock_inst_by_uuid.called)
-        self.assertThat(response, matchers.HasLength(0))
 
     @mock.patch.object(cw.IronicClientWrapper, 'call')
     def test_list_instance_uuids(self, mock_call):
@@ -545,11 +548,13 @@ class IronicDriverTestCase(test.NoDBTestCase):
         nodes = []
         for n in range(num_nodes):
             nodes.append(ironic_utils.get_test_node(
-                                      instance_uuid=uuidutils.generate_uuid()))
+                                      instance_uuid=uuidutils.generate_uuid(),
+                                      fields=['instance_uuid']))
 
         mock_call.return_value = nodes
         uuids = self.driver.list_instance_uuids()
-        mock_call.assert_called_with('node.list', associated=True, limit=0)
+        mock_call.assert_called_with('node.list', associated=True,
+                                     fields=['instance_uuid'], limit=0)
         expected = [n.instance_uuid for n in nodes]
         self.assertEqual(sorted(expected), sorted(uuids))
 
@@ -560,13 +565,14 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test_node_is_available_empty_cache_empty_list(self, mock_services,
                                                       mock_instances, mock_get,
                                                       mock_list):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         mock_get.return_value = node
         mock_list.return_value = []
         self.assertTrue(self.driver.node_is_available(node.uuid))
         mock_get.assert_called_with(node.uuid,
                                     fields=ironic_driver._NODE_FIELDS)
-        mock_list.assert_called_with(detail=True, limit=0)
+        mock_list.assert_called_with(fields=ironic_driver._NODE_FIELDS,
+                                     limit=0)
 
         mock_get.side_effect = ironic_exception.NotFound
         self.assertFalse(self.driver.node_is_available(node.uuid))
@@ -577,11 +583,12 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(objects.ServiceList, 'get_all_computes_by_hv_type')
     def test_node_is_available_empty_cache(self, mock_services, mock_instances,
                                            mock_get, mock_list):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         mock_get.return_value = node
         mock_list.return_value = [node]
         self.assertTrue(self.driver.node_is_available(node.uuid))
-        mock_list.assert_called_with(detail=True, limit=0)
+        mock_list.assert_called_with(fields=ironic_driver._NODE_FIELDS,
+                                     limit=0)
         self.assertEqual(0, mock_get.call_count)
 
     @mock.patch.object(FAKE_CLIENT.node, 'list')
@@ -590,7 +597,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(objects.ServiceList, 'get_all_computes_by_hv_type')
     def test_node_is_available_with_cache(self, mock_services, mock_instances,
                                           mock_get, mock_list):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         mock_get.return_value = node
         mock_list.return_value = [node]
         # populate the cache
@@ -639,13 +646,13 @@ class IronicDriverTestCase(test.NoDBTestCase):
              'provision_state': ironic_states.DELETED},
         ]
         for n in node_dicts:
-            node = ironic_utils.get_test_node(**n)
+            node = _get_cached_node(**n)
             self.assertTrue(self.driver._node_resources_unavailable(node))
 
         for ok_state in (ironic_states.AVAILABLE, ironic_states.NOSTATE):
             # these are both ok and should present as available as they
             # have no instance_uuid
-            avail_node = ironic_utils.get_test_node(
+            avail_node = _get_cached_node(
                             power_state=ironic_states.POWER_OFF,
                             provision_state=ok_state)
             unavailable = self.driver._node_resources_unavailable(avail_node)
@@ -659,10 +666,10 @@ class IronicDriverTestCase(test.NoDBTestCase):
              'provision_state': ironic_states.ACTIVE},
         ]
         for n in node_dicts:
-            node = ironic_utils.get_test_node(**n)
+            node = _get_cached_node(**n)
             self.assertTrue(self.driver._node_resources_used(node))
 
-        unused_node = ironic_utils.get_test_node(
+        unused_node = _get_cached_node(
             instance_uuid=None,
             provision_state=ironic_states.AVAILABLE)
         self.assertFalse(self.driver._node_resources_used(unused_node))
@@ -695,7 +702,8 @@ class IronicDriverTestCase(test.NoDBTestCase):
              'power_state': ironic_states.ERROR,
              'expected': True},
         ]
-        nodes = [ironic_utils.get_test_node(**n) for n in node_dicts]
+        nodes = [_get_cached_node(**n)
+                 for n in node_dicts]
         mock_list.return_value = nodes
         available_nodes = self.driver.get_available_nodes()
         mock_gi.assert_called_once_with(mock.ANY, CONF.host)
@@ -703,10 +711,13 @@ class IronicDriverTestCase(test.NoDBTestCase):
         self.assertEqual(sorted(expected_uuids), sorted(available_nodes))
 
     @mock.patch.object(ironic_driver.IronicDriver,
+                       '_node_resources_used', return_value=False)
+    @mock.patch.object(ironic_driver.IronicDriver,
                        '_node_resources_unavailable', return_value=False)
     @mock.patch.object(ironic_driver.IronicDriver, '_node_resource')
     @mock.patch.object(ironic_driver.IronicDriver, '_node_from_cache')
-    def test_get_inventory_no_rc(self, mock_nfc, mock_nr, mock_res_unavail):
+    def test_update_provider_tree_no_rc(self, mock_nfc, mock_nr,
+                                        mock_res_unavail, mock_res_used):
         """Ensure that when node.resource_class is missing, that we return the
         legacy VCPU, MEMORY_MB and DISK_GB resources for inventory.
         """
@@ -720,44 +731,23 @@ class IronicDriverTestCase(test.NoDBTestCase):
             'resource_class': None,
         }
 
-        result = self.driver.get_inventory(mock.sentinel.nodename)
+        self.assertRaises(exception.NoResourceClass,
+                          self.driver.update_provider_tree,
+                          self.ptree, mock.sentinel.nodename)
 
-        expected = {
-            fields.ResourceClass.VCPU: {
-                'total': 24,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 24,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            fields.ResourceClass.MEMORY_MB: {
-                'total': 1024,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 1024,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            fields.ResourceClass.DISK_GB: {
-                'total': 100,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 100,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-        }
         mock_nfc.assert_called_once_with(mock.sentinel.nodename)
         mock_nr.assert_called_once_with(mock_nfc.return_value)
+        mock_res_used.assert_called_once_with(mock_nfc.return_value)
         mock_res_unavail.assert_called_once_with(mock_nfc.return_value)
-        self.assertEqual(expected, result)
 
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_node_resources_used', return_value=False)
     @mock.patch.object(ironic_driver.IronicDriver,
                        '_node_resources_unavailable', return_value=False)
     @mock.patch.object(ironic_driver.IronicDriver, '_node_resource')
     @mock.patch.object(ironic_driver.IronicDriver, '_node_from_cache')
-    def test_get_inventory_with_rc(self, mock_nfc, mock_nr, mock_res_unavail):
+    def test_update_provider_tree_with_rc(self, mock_nfc, mock_nr,
+                                          mock_res_unavail, mock_res_used):
         """Ensure that when node.resource_class is present, that we return the
         legacy VCPU, MEMORY_MB and DISK_GB resources for inventory in addition
         to the custom resource class inventory record.
@@ -772,33 +762,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
             'resource_class': 'iron-nfv',
         }
 
-        result = self.driver.get_inventory(mock.sentinel.nodename)
+        self.driver.update_provider_tree(self.ptree, mock.sentinel.nodename)
 
         expected = {
-            fields.ResourceClass.VCPU: {
-                'total': 24,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 24,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            fields.ResourceClass.MEMORY_MB: {
-                'total': 1024,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 1024,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            fields.ResourceClass.DISK_GB: {
-                'total': 100,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 100,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
             'CUSTOM_IRON_NFV': {
                 'total': 1,
                 'reserved': 0,
@@ -810,14 +776,19 @@ class IronicDriverTestCase(test.NoDBTestCase):
         }
         mock_nfc.assert_called_once_with(mock.sentinel.nodename)
         mock_nr.assert_called_once_with(mock_nfc.return_value)
+        mock_res_used.assert_called_once_with(mock_nfc.return_value)
         mock_res_unavail.assert_called_once_with(mock_nfc.return_value)
+        result = self.ptree.data(mock.sentinel.nodename).inventory
         self.assertEqual(expected, result)
 
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_node_resources_used', return_value=False)
     @mock.patch.object(ironic_driver.IronicDriver,
                        '_node_resources_unavailable', return_value=False)
     @mock.patch.object(ironic_driver.IronicDriver, '_node_resource')
     @mock.patch.object(ironic_driver.IronicDriver, '_node_from_cache')
-    def test_get_inventory_only_rc(self, mock_nfc, mock_nr, mock_res_unavail):
+    def test_update_provider_tree_only_rc(self, mock_nfc, mock_nr,
+                                          mock_res_unavail, mock_res_used):
         """Ensure that when node.resource_class is present, that we return the
         legacy VCPU, MEMORY_MB and DISK_GB resources for inventory in addition
         to the custom resource class inventory record.
@@ -832,7 +803,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
             'resource_class': 'iron-nfv',
         }
 
-        result = self.driver.get_inventory(mock.sentinel.nodename)
+        self.driver.update_provider_tree(self.ptree, mock.sentinel.nodename)
 
         expected = {
             'CUSTOM_IRON_NFV': {
@@ -846,15 +817,20 @@ class IronicDriverTestCase(test.NoDBTestCase):
         }
         mock_nfc.assert_called_once_with(mock.sentinel.nodename)
         mock_nr.assert_called_once_with(mock_nfc.return_value)
+        mock_res_used.assert_called_once_with(mock_nfc.return_value)
         mock_res_unavail.assert_called_once_with(mock_nfc.return_value)
+        result = self.ptree.data(mock.sentinel.nodename).inventory
         self.assertEqual(expected, result)
 
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_node_resources_used', return_value=True)
     @mock.patch.object(ironic_driver.IronicDriver,
                        '_node_resources_unavailable', return_value=False)
     @mock.patch.object(ironic_driver.IronicDriver, '_node_resource')
     @mock.patch.object(ironic_driver.IronicDriver, '_node_from_cache')
-    def test_get_inventory_with_rc_occupied(self, mock_nfc, mock_nr,
-                                            mock_res_unavail):
+    def test_update_provider_tree_with_rc_occupied(self, mock_nfc, mock_nr,
+                                                   mock_res_unavail,
+                                                   mock_res_used):
         """Ensure that when a node is used, we report the inventory matching
         the consumed resources.
         """
@@ -868,33 +844,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
             'resource_class': 'iron-nfv',
         }
 
-        result = self.driver.get_inventory(mock.sentinel.nodename)
+        self.driver.update_provider_tree(self.ptree, mock.sentinel.nodename)
 
         expected = {
-            fields.ResourceClass.VCPU: {
-                'total': 24,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 24,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            fields.ResourceClass.MEMORY_MB: {
-                'total': 1024,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 1024,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            fields.ResourceClass.DISK_GB: {
-                'total': 100,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 100,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
             'CUSTOM_IRON_NFV': {
                 'total': 1,
                 'reserved': 0,
@@ -906,41 +858,121 @@ class IronicDriverTestCase(test.NoDBTestCase):
         }
         mock_nfc.assert_called_once_with(mock.sentinel.nodename)
         mock_nr.assert_called_once_with(mock_nfc.return_value)
-        mock_res_unavail.assert_called_once_with(mock_nfc.return_value)
+        mock_res_used.assert_called_once_with(mock_nfc.return_value)
+        self.assertFalse(mock_res_unavail.called)
+        result = self.ptree.data(mock.sentinel.nodename).inventory
         self.assertEqual(expected, result)
 
     @mock.patch.object(ironic_driver.IronicDriver,
+                       '_node_resources_used', return_value=False)
+    @mock.patch.object(ironic_driver.IronicDriver,
                        '_node_resources_unavailable', return_value=True)
+    @mock.patch.object(ironic_driver.IronicDriver, '_node_resource')
     @mock.patch.object(ironic_driver.IronicDriver, '_node_from_cache')
-    def test_get_inventory_disabled_node(self, mock_nfc, mock_res_unavail):
-        """Ensure that when a node is disabled, that get_inventory() returns
-        an empty dict.
+    def test_update_provider_tree_disabled_node(self, mock_nfc, mock_nr,
+                                                mock_res_unavail,
+                                                mock_res_used):
+        """Ensure that when a node is disabled, that update_provider_tree()
+        sets inventory with reserved amounts equal to the total amounts.
         """
-        result = self.driver.get_inventory(mock.sentinel.nodename)
+        mock_nr.return_value = {
+            'vcpus': 24,
+            'vcpus_used': 0,
+            'memory_mb': 1024,
+            'memory_mb_used': 0,
+            'local_gb': 100,
+            'local_gb_used': 0,
+            'resource_class': 'iron-nfv',
+        }
+
+        self.driver.update_provider_tree(self.ptree, mock.sentinel.nodename)
+
+        expected = {
+            'CUSTOM_IRON_NFV': {
+                'total': 1,
+                'reserved': 1,
+                'min_unit': 1,
+                'max_unit': 1,
+                'step_size': 1,
+                'allocation_ratio': 1.0,
+            },
+        }
         mock_nfc.assert_called_once_with(mock.sentinel.nodename)
+        mock_nr.assert_called_once_with(mock_nfc.return_value)
         mock_res_unavail.assert_called_once_with(mock_nfc.return_value)
-        self.assertEqual({}, result)
-
-    @mock.patch.object(ironic_driver.IronicDriver, '_node_from_cache')
-    def test_get_traits_no_traits(self, mock_nfc):
-        """Ensure that when the node has no traits, we return no traits."""
-        node = ironic_utils.get_test_node()
-        mock_nfc.return_value = node
-        result = self.driver.get_traits(node.uuid)
-
-        mock_nfc.assert_called_once_with(node.uuid)
-        self.assertEqual([], result)
-
-    @mock.patch.object(ironic_driver.IronicDriver, '_node_from_cache')
-    def test_get_traits_with_traits(self, mock_nfc):
-        """Ensure that when the node has traits, we return the traits."""
-        node = ironic_utils.get_test_node(traits=['trait1', 'trait2'])
-        mock_nfc.return_value = node
-        result = self.driver.get_traits(node.uuid)
-
-        expected = ['trait1', 'trait2']
-        mock_nfc.assert_called_once_with(node.uuid)
+        mock_res_used.assert_called_once_with(mock_nfc.return_value)
+        result = self.ptree.data(mock.sentinel.nodename).inventory
         self.assertEqual(expected, result)
+
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_node_resources_used', return_value=True)
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_node_resources_unavailable', return_value=False)
+    @mock.patch.object(ironic_driver.IronicDriver, '_node_resource')
+    @mock.patch.object(ironic_driver.IronicDriver, '_node_from_cache')
+    def test_update_provider_tree_no_traits(self, mock_nfc, mock_nr,
+                                            mock_res_unavail, mock_res_used):
+        """Ensure that when the node has no traits, we set no traits."""
+        mock_nr.return_value = {
+            'vcpus': 24,
+            'vcpus_used': 24,
+            'memory_mb': 1024,
+            'memory_mb_used': 1024,
+            'local_gb': 100,
+            'local_gb_used': 100,
+            'resource_class': 'iron-nfv',
+        }
+
+        mock_nfc.return_value = _get_cached_node(uuid=mock.sentinel.nodename)
+
+        self.driver.update_provider_tree(self.ptree, mock.sentinel.nodename)
+
+        mock_nfc.assert_called_once_with(mock.sentinel.nodename)
+        mock_nr.assert_called_once_with(mock_nfc.return_value)
+        mock_res_used.assert_called_once_with(mock_nfc.return_value)
+        self.assertFalse(mock_res_unavail.called)
+        result = self.ptree.data(mock.sentinel.nodename).traits
+        self.assertEqual(set(), result)
+
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_node_resources_used', return_value=True)
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_node_resources_unavailable', return_value=False)
+    @mock.patch.object(ironic_driver.IronicDriver, '_node_resource')
+    @mock.patch.object(ironic_driver.IronicDriver, '_node_from_cache')
+    def test_update_provider_tree_with_traits(self, mock_nfc, mock_nr,
+                                              mock_res_unavail, mock_res_used):
+        """Ensure that when the node has traits, we set the traits."""
+        mock_nr.return_value = {
+            'vcpus': 24,
+            'vcpus_used': 24,
+            'memory_mb': 1024,
+            'memory_mb_used': 1024,
+            'local_gb': 100,
+            'local_gb_used': 100,
+            'resource_class': 'iron-nfv',
+        }
+
+        traits = ['trait1', 'trait2']
+        mock_nfc.return_value = _get_cached_node(
+            uuid=mock.sentinel.nodename, traits=traits)
+
+        self.driver.update_provider_tree(self.ptree, mock.sentinel.nodename)
+
+        mock_nfc.assert_called_once_with(mock.sentinel.nodename)
+        mock_nr.assert_called_once_with(mock_nfc.return_value)
+        mock_res_used.assert_called_once_with(mock_nfc.return_value)
+        self.assertFalse(mock_res_unavail.called)
+        result = self.ptree.data(mock.sentinel.nodename).traits
+        self.assertEqual(set(traits), result)
+
+        # A different set of traits - we should replace (for now).
+        traits = ['trait1', 'trait7', 'trait42']
+        mock_nfc.return_value = _get_cached_node(
+            uuid=mock.sentinel.nodename, traits=traits)
+        self.driver.update_provider_tree(self.ptree, mock.sentinel.nodename)
+        result = self.ptree.data(mock.sentinel.nodename).traits
+        self.assertEqual(set(traits), result)
 
     @mock.patch.object(FAKE_CLIENT.node, 'get')
     @mock.patch.object(FAKE_CLIENT.node, 'list')
@@ -949,8 +981,8 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(ironic_driver.IronicDriver, '_node_resource')
     def test_get_available_resource(self, mock_nr, mock_services,
                                     mock_instances, mock_list, mock_get):
-        node = ironic_utils.get_test_node()
-        node_2 = ironic_utils.get_test_node(uuid=uuidutils.generate_uuid())
+        node = _get_cached_node()
+        node_2 = _get_cached_node(uuid=uuidutils.generate_uuid())
         fake_resource = 'fake-resource'
         mock_get.return_value = node
         # ensure cache gets populated without the node we want
@@ -971,7 +1003,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test_get_available_resource_with_cache(self, mock_nr, mock_services,
                                                mock_instances, mock_list,
                                                mock_get):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         fake_resource = 'fake-resource'
         mock_list.return_value = [node]
         mock_nr.return_value = fake_resource
@@ -985,33 +1017,108 @@ class IronicDriverTestCase(test.NoDBTestCase):
         self.assertEqual(0, mock_get.call_count)
         mock_nr.assert_called_once_with(node)
 
+    @mock.patch.object(ironic_driver.IronicDriver, '_get_node_list')
+    @mock.patch.object(objects.InstanceList, 'get_uuids_by_host')
+    @mock.patch.object(objects.ServiceList, 'get_all_computes_by_hv_type')
     @mock.patch.object(FAKE_CLIENT.node, 'get_by_instance_uuid')
-    def test_get_info(self, mock_gbiu):
+    def test_get_info(self, mock_gbiu, mock_svc_by_hv,
+                      mock_uuids_by_host, mock_get_node_list):
         properties = {'memory_mb': 512, 'cpus': 2}
         power_state = ironic_states.POWER_ON
-        node = ironic_utils.get_test_node(instance_uuid=self.instance_uuid,
-                                          properties=properties,
-                                          power_state=power_state)
+        node = _get_cached_node(
+                instance_uuid=self.instance_uuid, properties=properties,
+                power_state=power_state)
 
         mock_gbiu.return_value = node
+        mock_svc_by_hv.return_value = []
+        mock_get_node_list.return_value = []
 
         # ironic_states.POWER_ON should be mapped to
         # nova_states.RUNNING
         instance = fake_instance.fake_instance_obj('fake-context',
                                                    uuid=self.instance_uuid)
+        mock_uuids_by_host.return_value = [instance.uuid]
         result = self.driver.get_info(instance)
         self.assertEqual(hardware.InstanceInfo(state=nova_states.RUNNING),
                          result)
+        mock_gbiu.assert_called_once_with(instance.uuid,
+                                          fields=ironic_driver._NODE_FIELDS)
 
+    @mock.patch.object(ironic_driver.IronicDriver, '_get_node_list')
+    @mock.patch.object(objects.InstanceList, 'get_uuids_by_host')
+    @mock.patch.object(objects.ServiceList, 'get_all_computes_by_hv_type')
     @mock.patch.object(FAKE_CLIENT.node, 'get_by_instance_uuid')
-    def test_get_info_http_not_found(self, mock_gbiu):
+    def test_get_info_cached(self, mock_gbiu, mock_svc_by_hv,
+                             mock_uuids_by_host, mock_get_node_list):
+        properties = {'memory_mb': 512, 'cpus': 2}
+        power_state = ironic_states.POWER_ON
+        node = _get_cached_node(
+                instance_uuid=self.instance_uuid, properties=properties,
+                power_state=power_state)
+
+        mock_gbiu.return_value = node
+        mock_svc_by_hv.return_value = []
+        mock_get_node_list.return_value = [node]
+
+        # ironic_states.POWER_ON should be mapped to
+        # nova_states.RUNNING
+        instance = fake_instance.fake_instance_obj('fake-context',
+                                                   uuid=self.instance_uuid)
+        mock_uuids_by_host.return_value = [instance.uuid]
+        result = self.driver.get_info(instance)
+        self.assertEqual(hardware.InstanceInfo(state=nova_states.RUNNING),
+                         result)
+        mock_gbiu.assert_not_called()
+
+    @mock.patch.object(ironic_driver.IronicDriver, '_get_node_list')
+    @mock.patch.object(objects.InstanceList, 'get_uuids_by_host')
+    @mock.patch.object(objects.ServiceList, 'get_all_computes_by_hv_type')
+    @mock.patch.object(FAKE_CLIENT.node, 'get_by_instance_uuid')
+    def test_get_info_not_found_in_cache(self, mock_gbiu, mock_svc_by_hv,
+                                         mock_uuids_by_host,
+                                         mock_get_node_list):
+        properties = {'memory_mb': 512, 'cpus': 2}
+        power_state = ironic_states.POWER_ON
+        node = _get_cached_node(
+                instance_uuid=self.instance_uuid, properties=properties,
+                power_state=power_state)
+        node2 = _get_cached_node()
+
+        mock_gbiu.return_value = node
+        mock_svc_by_hv.return_value = []
+        mock_get_node_list.return_value = [node2]
+
+        # ironic_states.POWER_ON should be mapped to
+        # nova_states.RUNNING
+        instance = fake_instance.fake_instance_obj('fake-context',
+                                                   uuid=self.instance_uuid)
+        mock_uuids_by_host.return_value = [instance.uuid]
+        result = self.driver.get_info(instance)
+        self.assertEqual(hardware.InstanceInfo(state=nova_states.RUNNING),
+                         result)
+        mock_gbiu.assert_called_once()
+        mock_gbiu.assert_called_once_with(instance.uuid,
+                                          fields=ironic_driver._NODE_FIELDS)
+
+    @mock.patch.object(ironic_driver.IronicDriver, '_get_node_list')
+    @mock.patch.object(objects.InstanceList, 'get_uuids_by_host')
+    @mock.patch.object(objects.ServiceList, 'get_all_computes_by_hv_type')
+    @mock.patch.object(FAKE_CLIENT.node, 'get_by_instance_uuid')
+    def test_get_info_http_not_found(self, mock_gbiu, mock_svc_by_hv,
+                                     mock_uuids_by_host, mock_get_node_list):
         mock_gbiu.side_effect = ironic_exception.NotFound()
+        mock_svc_by_hv.return_value = []
+        mock_get_node_list.return_value = []
 
         instance = fake_instance.fake_instance_obj(
                                   self.ctx, uuid=uuidutils.generate_uuid())
+        mock_uuids_by_host.return_value = [instance]
+        mock_uuids_by_host.return_value = [instance.uuid]
         result = self.driver.get_info(instance)
         self.assertEqual(hardware.InstanceInfo(state=nova_states.NOSTATE),
                          result)
+        mock_gbiu.assert_called_once_with(instance.uuid,
+                                          fields=ironic_driver._NODE_FIELDS)
 
     @mock.patch.object(objects.Instance, 'save')
     @mock.patch.object(loopingcall, 'FixedIntervalLoopingCall')
@@ -1024,7 +1131,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def _test_spawn(self, mock_sf, mock_aiitn, mock_wait_active,
                     mock_avti, mock_node, mock_looping, mock_save):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid)
+        node = _get_cached_node(driver='fake', uuid=node_uuid)
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
         fake_flavor = objects.Flavor(ephemeral_gb=0)
         instance.flavor = fake_flavor
@@ -1094,7 +1201,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                                            mock_looping, mock_required_by):
         mock_required_by.return_value = False
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid)
+        node = _get_cached_node(driver='fake', uuid=node_uuid)
         fake_flavor = objects.Flavor(ephemeral_gb=0)
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
         instance.flavor = fake_flavor
@@ -1116,7 +1223,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
 
     def _test_add_instance_info_to_node(self, mock_update=None,
                                         mock_call=None):
-        node = ironic_utils.get_test_node(driver='fake')
+        node = _get_cached_node(driver='fake')
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    node=node.uuid)
         image_meta = ironic_utils.get_test_image_meta()
@@ -1139,9 +1246,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                           {'path': '/instance_info/memory_mb', 'op': 'add',
                            'value': str(instance.flavor.memory_mb)},
                           {'path': '/instance_info/local_gb', 'op': 'add',
-                           'value': str(node.properties.get('local_gb', 0))},
-                          {'path': '/instance_uuid', 'op': 'add',
-                           'value': instance.uuid}]
+                           'value': str(node.properties.get('local_gb', 0))}]
 
         if mock_call is not None:
             # assert call() is invoked with retry_on_conflict False to
@@ -1163,7 +1268,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(FAKE_CLIENT.node, 'update')
     def test__add_instance_info_to_node_fail(self, mock_update):
         mock_update.side_effect = ironic_exception.BadRequest()
-        node = ironic_utils.get_test_node(driver='fake')
+        node = _get_cached_node(driver='fake')
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    node=node.uuid)
         image_meta = ironic_utils.get_test_image_meta()
@@ -1173,7 +1278,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                           node, instance, image_meta, flavor)
 
     def _test_remove_instance_info_from_node(self, mock_update):
-        node = ironic_utils.get_test_node(driver='fake')
+        node = _get_cached_node(driver='fake')
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    node=node.uuid)
         self.driver._remove_instance_info_from_node(node, instance)
@@ -1321,7 +1426,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                                                mock_required_by):
         mock_required_by.return_value = False
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid)
+        node = _get_cached_node(driver='fake', uuid=node_uuid)
         flavor = ironic_utils.get_test_flavor()
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
         instance.flavor = flavor
@@ -1334,6 +1439,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
 
         self.assertRaises(exception.ValidationError, self.driver.spawn,
                           self.ctx, instance, image_meta, [], None, {})
+        self.assertEqual(1, mock_node.get.call_count)
         mock_node.get.assert_called_once_with(
             node_uuid, fields=ironic_driver._NODE_FIELDS)
         mock_avti.assert_called_once_with(self.ctx, instance, None)
@@ -1349,7 +1455,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                                                 mock_node, mock_required_by):
         mock_required_by.return_value = False
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid)
+        node = _get_cached_node(driver='fake', uuid=node_uuid)
         flavor = ironic_utils.get_test_flavor()
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
         instance.flavor = flavor
@@ -1357,11 +1463,8 @@ class IronicDriverTestCase(test.NoDBTestCase):
         mock_node.validate.return_value = ironic_utils.get_test_validation()
         image_meta = ironic_utils.get_test_image_meta()
 
-        class TestException(Exception):
-            pass
-
-        mock_sf.side_effect = TestException()
-        self.assertRaises(TestException, self.driver.spawn,
+        mock_sf.side_effect = test.TestingException()
+        self.assertRaises(test.TestingException, self.driver.spawn,
                           self.ctx, instance, image_meta, [], None, {})
 
         mock_node.get.assert_called_once_with(
@@ -1381,7 +1484,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                                          mock_required_by):
         mock_required_by.return_value = True
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid)
+        node = _get_cached_node(driver='fake', uuid=node_uuid)
         flavor = ironic_utils.get_test_flavor()
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
         instance.flavor = flavor
@@ -1389,13 +1492,10 @@ class IronicDriverTestCase(test.NoDBTestCase):
         mock_node.validate.return_value = ironic_utils.get_test_validation()
         image_meta = ironic_utils.get_test_image_meta()
 
-        class TestException(Exception):
-            pass
-
-        mock_configdrive.side_effect = TestException()
+        mock_configdrive.side_effect = test.TestingException()
         with mock.patch.object(self.driver, '_cleanup_deploy',
                                autospec=True) as mock_cleanup_deploy:
-            self.assertRaises(TestException, self.driver.spawn,
+            self.assertRaises(test.TestingException, self.driver.spawn,
                               self.ctx, instance, image_meta, [], None, {})
 
         mock_node.get.assert_called_once_with(
@@ -1413,7 +1513,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                                             mock_node, mock_required_by):
         mock_required_by.return_value = False
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid)
+        node = _get_cached_node(driver='fake', uuid=node_uuid)
         flavor = ironic_utils.get_test_flavor()
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
         instance.flavor = flavor
@@ -1441,7 +1541,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                                              mock_node, mock_required_by):
         mock_required_by.return_value = False
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid)
+        node = _get_cached_node(driver='fake', uuid=node_uuid)
         flavor = ironic_utils.get_test_flavor()
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
         instance.flavor = flavor
@@ -1471,7 +1571,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                                              mock_required_by):
         mock_required_by.return_value = False
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid)
+        node = _get_cached_node(driver='fake', uuid=node_uuid)
         flavor = ironic_utils.get_test_flavor()
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
         instance.flavor = flavor
@@ -1504,7 +1604,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                                                  mock_required_by):
         mock_required_by.return_value = False
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid)
+        node = _get_cached_node(driver='fake', uuid=node_uuid)
         flavor = ironic_utils.get_test_flavor(ephemeral_gb=1)
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
         instance.flavor = flavor
@@ -1525,8 +1625,8 @@ class IronicDriverTestCase(test.NoDBTestCase):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
         network_info = 'foo'
 
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid,
-                                          provision_state=state)
+        node = _get_cached_node(
+                driver='fake', uuid=node_uuid, provision_state=state)
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
 
         def fake_set_provision_state(*_):
@@ -1562,8 +1662,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test_destroy_trigger_undeploy_fail(self, mock_clean, fake_validate,
                                            mock_sps):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid,
-                                          provision_state=ironic_states.ACTIVE)
+        node = _get_cached_node(
+                driver='fake', uuid=node_uuid,
+                provision_state=ironic_states.ACTIVE)
         fake_validate.return_value = node
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    node=node_uuid)
@@ -1596,14 +1697,14 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_validate_instance_and_node')
     def _test__unprovision_instance(self, mock_validate_inst, mock_set_pstate,
                                     state=None):
-        node = ironic_utils.get_test_node(
-            driver='fake',
-            provision_state=state)
+        node = _get_cached_node(driver='fake', provision_state=state)
         instance = fake_instance.fake_instance_obj(self.ctx, node=node.uuid)
         mock_validate_inst.return_value = node
-        self.driver._unprovision(instance, node)
+        with mock.patch.object(self.driver, 'node_cache') as cache_mock:
+            self.driver._unprovision(instance, node)
         mock_validate_inst.assert_called_once_with(instance)
         mock_set_pstate.assert_called_once_with(node.uuid, "deleted")
+        cache_mock.pop.assert_called_once_with(node.uuid, None)
 
     def test__unprovision_cleaning(self):
         self._test__unprovision_instance(state=ironic_states.CLEANING)
@@ -1617,9 +1718,8 @@ class IronicDriverTestCase(test.NoDBTestCase):
     def test__unprovision_fail_max_retries(self, mock_validate_inst,
                                            mock_set_pstate):
         CONF.set_default('api_max_retries', default=2, group='ironic')
-        node = ironic_utils.get_test_node(
-            driver='fake',
-            provision_state=ironic_states.ACTIVE)
+        node = _get_cached_node(
+            driver='fake', provision_state=ironic_states.ACTIVE)
         instance = fake_instance.fake_instance_obj(self.ctx, node=node.uuid)
 
         mock_validate_inst.return_value = node
@@ -1635,7 +1735,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_validate_instance_and_node')
     def test__unprovision_instance_not_found(self, mock_validate_inst,
                                              mock_set_pstate):
-        node = ironic_utils.get_test_node(
+        node = _get_cached_node(
             driver='fake', provision_state=ironic_states.DELETING)
         instance = fake_instance.fake_instance_obj(self.ctx, node=node.uuid)
 
@@ -1648,8 +1748,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(FAKE_CLIENT, 'node')
     def test_destroy_unassociate_fail(self, mock_node):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid,
-                                          provision_state=ironic_states.ACTIVE)
+        node = _get_cached_node(
+                driver='fake', uuid=node_uuid,
+                provision_state=ironic_states.ACTIVE)
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
 
         mock_node.get_by_instance_uuid.return_value = node
@@ -1666,7 +1767,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_validate_instance_and_node')
     @mock.patch.object(FAKE_CLIENT.node, 'set_power_state')
     def test_reboot(self, mock_sp, fake_validate, mock_looping):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         fake_validate.side_effect = [node, node]
 
         fake_looping_call = FakeLoopingCall()
@@ -1680,7 +1781,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_validate_instance_and_node')
     @mock.patch.object(FAKE_CLIENT.node, 'inject_nmi')
     def test_trigger_crash_dump(self, mock_nmi, fake_validate):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         fake_validate.return_value = node
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    node=node.uuid)
@@ -1691,7 +1792,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_validate_instance_and_node')
     @mock.patch.object(FAKE_CLIENT.node, 'inject_nmi')
     def test_trigger_crash_dump_error(self, mock_nmi, fake_validate):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         fake_validate.return_value = node
         mock_nmi.side_effect = ironic_exception.BadRequest()
         instance = fake_instance.fake_instance_obj(self.ctx,
@@ -1704,7 +1805,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_validate_instance_and_node')
     @mock.patch.object(FAKE_CLIENT.node, 'set_power_state')
     def test_reboot_soft(self, mock_sp, fake_validate, mock_looping):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         fake_validate.side_effect = [node, node]
 
         fake_looping_call = FakeLoopingCall()
@@ -1720,7 +1821,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(FAKE_CLIENT.node, 'set_power_state')
     def test_reboot_soft_not_supported(self, mock_sp, fake_validate,
                                        mock_looping):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         fake_validate.side_effect = [node, node]
         mock_sp.side_effect = [ironic_exception.BadRequest(), None]
 
@@ -1737,7 +1838,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_validate_instance_and_node')
     @mock.patch.object(FAKE_CLIENT.node, 'set_power_state')
     def test_power_on(self, mock_sp, fake_validate, mock_looping):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         fake_validate.side_effect = [node, node]
 
         fake_looping_call = FakeLoopingCall()
@@ -1760,7 +1861,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_validate_instance_and_node')
     @mock.patch.object(FAKE_CLIENT.node, 'set_power_state')
     def test_power_off(self, mock_sp, fake_validate):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         fake_validate.side_effect = [node, node]
 
         self._test_power_off()
@@ -1770,9 +1871,8 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_validate_instance_and_node')
     @mock.patch.object(FAKE_CLIENT.node, 'set_power_state')
     def test_power_off_soft(self, mock_sp, fake_validate):
-        node = ironic_utils.get_test_node()
-        power_off_node = ironic_utils.get_test_node(
-            power_state=ironic_states.POWER_OFF)
+        node = _get_cached_node()
+        power_off_node = _get_cached_node(power_state=ironic_states.POWER_OFF)
         fake_validate.side_effect = [node, power_off_node]
 
         self._test_power_off(timeout=30)
@@ -1783,7 +1883,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_validate_instance_and_node')
     @mock.patch.object(FAKE_CLIENT.node, 'set_power_state')
     def test_power_off_soft_exception(self, mock_sp, fake_validate):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         fake_validate.side_effect = [node, node]
         mock_sp.side_effect = [ironic_exception.BadRequest(), None]
 
@@ -1796,7 +1896,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
                        '_validate_instance_and_node')
     @mock.patch.object(FAKE_CLIENT.node, 'set_power_state')
     def test_power_off_soft_not_stopped(self, mock_sp, fake_validate):
-        node = ironic_utils.get_test_node()
+        node = _get_cached_node()
         fake_validate.side_effect = [node, node]
 
         self._test_power_off(timeout=30)
@@ -1807,7 +1907,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(FAKE_CLIENT.node, 'vif_attach')
     def test_plug_vifs_with_port(self, mock_vatt):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(uuid=node_uuid)
+        node = _get_cached_node(uuid=node_uuid)
 
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    node=node_uuid)
@@ -1823,7 +1923,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(ironic_driver.IronicDriver, '_plug_vifs')
     def test_plug_vifs(self, mock__plug_vifs, mock_get):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(uuid=node_uuid)
+        node = _get_cached_node(uuid=node_uuid)
 
         mock_get.return_value = node
         instance = fake_instance.fake_instance_obj(self.ctx,
@@ -1838,7 +1938,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(FAKE_CLIENT.node, 'vif_attach')
     def test_plug_vifs_multiple_ports(self, mock_vatt):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(uuid=node_uuid)
+        node = _get_cached_node(uuid=node_uuid)
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    node=node_uuid)
         first_vif_id = 'aaaaaaaa-vv11-cccc-dddd-eeeeeeeeeeee'
@@ -1858,7 +1958,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(FAKE_CLIENT, 'node')
     def test_plug_vifs_failure(self, mock_node):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(uuid=node_uuid)
+        node = _get_cached_node(uuid=node_uuid)
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    node=node_uuid)
         first_vif_id = 'aaaaaaaa-vv11-cccc-dddd-eeeeeeeeeeee'
@@ -1874,10 +1974,34 @@ class IronicDriverTestCase(test.NoDBTestCase):
                           self.driver._plug_vifs, node, instance,
                           network_info)
 
+    @mock.patch('time.sleep')
+    @mock.patch.object(FAKE_CLIENT, 'node')
+    def test_plug_vifs_failure_no_conductor(self, mock_node, mock_sleep):
+        node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        node = _get_cached_node(uuid=node_uuid)
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node_uuid)
+        first_vif_id = 'aaaaaaaa-vv11-cccc-dddd-eeeeeeeeeeee'
+        second_vif_id = 'aaaaaaaa-vv22-cccc-dddd-eeeeeeeeeeee'
+        first_vif = ironic_utils.get_test_vif(address='22:FF:FF:FF:FF:FF',
+                                              id=first_vif_id)
+        second_vif = ironic_utils.get_test_vif(address='11:FF:FF:FF:FF:FF',
+                                               id=second_vif_id)
+        msg = 'No conductor service registered which supports driver ipmi.'
+        mock_node.vif_attach.side_effect = [None,
+                                            ironic_exception.BadRequest(msg),
+                                            None]
+        network_info = [first_vif, second_vif]
+        self.driver._plug_vifs(node, instance, network_info)
+        calls = [mock.call(node.uuid, first_vif_id),
+                 mock.call(node.uuid, second_vif_id),
+                 mock.call(node.uuid, second_vif_id)]
+        mock_node.vif_attach.assert_has_calls(calls, any_order=True)
+
     @mock.patch.object(FAKE_CLIENT, 'node')
     def test_plug_vifs_already_attached(self, mock_node):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(uuid=node_uuid)
+        node = _get_cached_node(uuid=node_uuid)
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    node=node_uuid)
         first_vif_id = 'aaaaaaaa-vv11-cccc-dddd-eeeeeeeeeeee'
@@ -1895,7 +2019,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(FAKE_CLIENT.node, 'vif_attach')
     def test_plug_vifs_no_network_info(self, mock_vatt):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(uuid=node_uuid)
+        node = _get_cached_node(uuid=node_uuid)
 
         instance = fake_instance.fake_instance_obj(self.ctx,
                                                    node=node_uuid)
@@ -1908,7 +2032,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(FAKE_CLIENT, 'node')
     def test_unplug_vifs(self, mock_node):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(uuid=node_uuid)
+        node = _get_cached_node(uuid=node_uuid)
         mock_node.get.return_value = node
 
         instance = fake_instance.fake_instance_obj(self.ctx,
@@ -1925,7 +2049,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(FAKE_CLIENT, 'node')
     def test_unplug_vifs_port_not_associated(self, mock_node):
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = ironic_utils.get_test_node(uuid=node_uuid)
+        node = _get_cached_node(uuid=node_uuid)
 
         mock_node.get.return_value = node
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
@@ -2000,9 +2124,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
                       mock_set_pstate, mock_looping, mock_wait_active,
                       preserve=False):
         node_uuid = uuidutils.generate_uuid()
-        node = ironic_utils.get_test_node(uuid=node_uuid,
-                                          instance_uuid=self.instance_uuid,
-                                          instance_type_id=5)
+        node = _get_cached_node(
+                uuid=node_uuid, instance_uuid=self.instance_uuid,
+                instance_type_id=5)
         mock_get.return_value = node
 
         image_meta = ironic_utils.get_test_image_meta()
@@ -2075,9 +2199,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
                                               mock_required_by,
                                               mock_configdrive):
         node_uuid = uuidutils.generate_uuid()
-        node = ironic_utils.get_test_node(uuid=node_uuid,
-                                          instance_uuid=self.instance_uuid,
-                                          instance_type_id=5)
+        node = _get_cached_node(
+                uuid=node_uuid, instance_uuid=self.instance_uuid,
+                instance_type_id=5)
         mock_get.return_value = node
         mock_required_by.return_value = True
         mock_configdrive.side_effect = exception.NovaException()
@@ -2110,9 +2234,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
                               mock_add_instance_info, mock_set_pstate,
                               mock_required_by, mock_configdrive):
         node_uuid = uuidutils.generate_uuid()
-        node = ironic_utils.get_test_node(uuid=node_uuid,
-                                          instance_uuid=self.instance_uuid,
-                                          instance_type_id=5)
+        node = _get_cached_node(
+                uuid=node_uuid, instance_uuid=self.instance_uuid,
+                instance_type_id=5)
         mock_get.return_value = node
         mock_required_by.return_value = False
 
@@ -2202,7 +2326,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(FAKE_CLIENT.portgroup, 'list')
     def _test_get_volume_connector_no_ip(
             self, mac_specified, mock_pgroup, mock_port, mock_node,
-            mock_nw_info, portgroup_exist=False):
+            mock_nw_info, portgroup_exist=False, no_fixed_ip=False):
         node_uuid = uuids.node_uuid
         node_props = {'cpu_arch': 'x86_64'}
         node = ironic_utils.get_test_node(uuid=node_uuid,
@@ -2229,12 +2353,17 @@ class IronicDriverTestCase(test.NoDBTestCase):
 
         mock_node.get.return_value = node
         mock_node.list_volume_connectors.return_value = connectors
-        mock_nw_info.return_value = [vif]
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
         port = ironic_utils.get_test_port(
             node_uuid=node_uuid, address='11:22:33:44:55:66',
             internal_info={'tenant_vif_port_id': vif['id']})
         mock_port.return_value = [port]
+        if no_fixed_ip:
+            mock_nw_info.return_value = []
+            expected_props.pop('ip')
+            expected_props['host'] = instance.hostname
+        else:
+            mock_nw_info.return_value = [vif]
         if portgroup_exist:
             portgroup = ironic_utils.get_test_portgroup(
                 node_uuid=node_uuid, address='11:22:33:44:55:66',
@@ -2268,6 +2397,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
 
     def test_get_volume_connector_no_ip_without_mac(self):
         self._test_get_volume_connector_no_ip(False)
+
+    def test_get_volume_connector_no_ip_no_fixed_ip(self):
+        self._test_get_volume_connector_no_ip(False, no_fixed_ip=True)
 
     @mock.patch.object(ironic_driver.IronicDriver, 'plug_vifs')
     def test_prepare_networks_before_block_device_mapping(self, mock_pvifs):
@@ -2311,9 +2443,83 @@ class IronicDriverTestCase(test.NoDBTestCase):
         result = self.driver._get_node_list()
         mock_error.assert_not_called()
         self.assertEqual(["node1", "node2"], result)
-        result = self.driver._get_node_list()
+        self.assertRaises(exception.VirtDriverNotReady,
+                          self.driver._get_node_list)
         mock_error.assert_called_once()
-        self.assertEqual([], result)
+
+    @mock.patch.object(cw.IronicClientWrapper, 'call')
+    def test_prepare_for_spawn(self, mock_call):
+        node = ironic_utils.get_test_node(driver='fake')
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+        self.driver.prepare_for_spawn(instance)
+        expected_patch = [{'path': '/instance_uuid', 'op': 'add',
+                           'value': instance.uuid}]
+        mock_call.has_calls(
+            [mock.call('node.get', node.uuid, mock.ANY),
+             mock.call('node.update', node.uuid,
+                      expected_patch, retry_on_conflict=False)])
+
+    @mock.patch.object(cw.IronicClientWrapper, 'call')
+    def test__set_instance_uuid(self, mock_call):
+        node = ironic_utils.get_test_node(driver='fake')
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+        expected_patch = [{'path': '/instance_uuid', 'op': 'add',
+                           'value': instance.uuid}]
+        self.driver._set_instance_uuid(node, instance)
+        mock_call.has_calls(
+             [mock.call('node.update', node.uuid,
+                      expected_patch, retry_on_conflict=False)])
+
+    def test_prepare_for_spawn_invalid_instance(self):
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=None)
+        self.assertRaises(ironic_exception.BadRequest,
+                          self.driver.prepare_for_spawn,
+                          instance)
+
+    @mock.patch.object(cw.IronicClientWrapper, 'call')
+    def test_prepare_for_spawn_conflict(self, mock_call):
+        node = ironic_utils.get_test_node(driver='fake')
+        mock_call.side_effect = [node, ironic_exception.BadRequest]
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+        self.assertRaises(exception.InstanceDeployFailure,
+                          self.driver.prepare_for_spawn,
+                          instance)
+
+    @mock.patch.object(ironic_driver.IronicDriver, '_cleanup_deploy')
+    @mock.patch.object(cw.IronicClientWrapper, 'call')
+    def test_failed_spawn_cleanup(self, mock_call, mock_cleanup):
+        node = ironic_utils.get_test_node(driver='fake')
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+        self.driver.failed_spawn_cleanup(instance)
+        mock_call.assert_called_once_with('node.get_by_instance_uuid',
+                                          instance.uuid,
+                                          fields=ironic_driver._NODE_FIELDS)
+        self.assertEqual(1, mock_cleanup.call_count)
+
+    @mock.patch.object(ironic_driver.IronicDriver, '_stop_firewall')
+    @mock.patch.object(ironic_driver.IronicDriver, '_unplug_vifs')
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_cleanup_volume_target_info')
+    @mock.patch.object(cw.IronicClientWrapper, 'call')
+    def test__cleanup_deploy(self, mock_call, mock_vol, mock_unvif,
+                              mock_stop_fw):
+        # TODO(TheJulia): This REALLY should be updated to cover all of the
+        # calls that take place.
+        node = ironic_utils.get_test_node(driver='fake')
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+        self.driver._cleanup_deploy(node, instance)
+        mock_vol.assert_called_once_with(instance)
+        mock_unvif.assert_called_once_with(node, instance, None)
+        mock_stop_fw.assert_called_once_with(instance, None)
+        expected_patch = [{'path': '/instance_uuid', 'op': 'remove'}]
+        mock_call.has_calls(
+            [mock.call('node.update', node.uuid, expected_patch)])
 
 
 class IronicDriverSyncTestCase(IronicDriverTestCase):
@@ -2347,12 +2553,14 @@ class IronicDriverSyncTestCase(IronicDriverTestCase):
                 node=node2_uuid,
                 host=hostname,
                 flavor=fake_flavor2)
-        node1 = ironic_utils.get_test_node(uuid=node1_uuid,
+        node1 = _get_cached_node(
+                uuid=node1_uuid,
                 instance_uuid=inst1.uuid,
                 instance_type_id=1,
                 resource_class="first",
                 network_interface="flat")
-        node2 = ironic_utils.get_test_node(uuid=node2_uuid,
+        node2 = _get_cached_node(
+                uuid=node2_uuid,
                 instance_uuid=inst2.uuid,
                 instance_type_id=2,
                 resource_class="second",
@@ -2401,12 +2609,14 @@ class IronicDriverSyncTestCase(IronicDriverTestCase):
                 node=node2_uuid,
                 host=hostname,
                 flavor=fake_flavor2)
-        node1 = ironic_utils.get_test_node(uuid=node1_uuid,
+        node1 = _get_cached_node(
+                uuid=node1_uuid,
                 instance_uuid=inst1.uuid,
                 instance_type_id=1,
                 resource_class="first",
                 network_interface="flat")
-        node2 = ironic_utils.get_test_node(uuid=node2_uuid,
+        node2 = _get_cached_node(
+                uuid=node2_uuid,
                 instance_uuid=inst2.uuid,
                 instance_type_id=2,
                 resource_class="second",
@@ -2456,12 +2666,14 @@ class IronicDriverSyncTestCase(IronicDriverTestCase):
                 node=node2_uuid,
                 host=hostname,
                 flavor=fake_flavor2)
-        node1 = ironic_utils.get_test_node(uuid=node1_uuid,
+        node1 = _get_cached_node(
+                uuid=node1_uuid,
                 instance_uuid=inst1.uuid,
                 instance_type_id=1,
                 resource_class=None,
                 network_interface="flat")
-        node2 = ironic_utils.get_test_node(uuid=node2_uuid,
+        node2 = _get_cached_node(
+                uuid=node2_uuid,
                 instance_uuid=inst2.uuid,
                 instance_type_id=2,
                 resource_class="second",
@@ -2514,12 +2726,14 @@ class IronicDriverSyncTestCase(IronicDriverTestCase):
                 node=node2_uuid,
                 host=hostname,
                 flavor=fake_flavor2)
-        node1 = ironic_utils.get_test_node(uuid=node1_uuid,
+        node1 = _get_cached_node(
+                uuid=node1_uuid,
                 instance_uuid=inst1.uuid,
                 instance_type_id=1,
                 resource_class="first",
                 network_interface="flat")
-        node2 = ironic_utils.get_test_node(uuid=node2_uuid,
+        node2 = _get_cached_node(
+                uuid=node2_uuid,
                 instance_uuid=inst2.uuid,
                 instance_type_id=2,
                 resource_class="second",
@@ -2566,12 +2780,14 @@ class IronicDriverSyncTestCase(IronicDriverTestCase):
                 node=node2_uuid,
                 host=hostname,
                 flavor=fake_flavor2)
-        node1 = ironic_utils.get_test_node(uuid=node1_uuid,
+        node1 = _get_cached_node(
+                uuid=node1_uuid,
                 instance_uuid=inst1.uuid,
                 instance_type_id=1,
                 resource_class="first",
                 network_interface="flat")
-        node2 = ironic_utils.get_test_node(uuid=node2_uuid,
+        node2 = _get_cached_node(
+                uuid=node2_uuid,
                 instance_uuid=inst2.uuid,
                 instance_type_id=2,
                 resource_class="second",
@@ -2625,12 +2841,14 @@ class IronicDriverSyncTestCase(IronicDriverTestCase):
                 node=node3_uuid,
                 host=hostname,
                 flavor=fake_flavor3)
-        node1 = ironic_utils.get_test_node(uuid=node1_uuid,
+        node1 = _get_cached_node(
+                uuid=node1_uuid,
                 instance_uuid=inst1.uuid,
                 instance_type_id=1,
                 resource_class="first",
                 network_interface="flat")
-        node2 = ironic_utils.get_test_node(uuid=node2_uuid,
+        node2 = _get_cached_node(
+                uuid=node2_uuid,
                 instance_uuid=inst2.uuid,
                 instance_type_id=2,
                 resource_class="second",
@@ -2684,7 +2902,8 @@ class IronicDriverSyncTestCase(IronicDriverTestCase):
     @mock.patch.object(ironic_driver.IronicDriver, '_node_from_cache')
     def test_pike_flavor_migration_already_migrated(self, mock_node_from_cache,
             mock_normalize):
-        node1 = ironic_utils.get_test_node(uuid=uuids.node1,
+        node1 = _get_cached_node(
+                uuid=uuids.node1,
                 instance_uuid=uuids.instance,
                 instance_type_id=1,
                 resource_class="first",
@@ -2693,6 +2912,190 @@ class IronicDriverSyncTestCase(IronicDriverTestCase):
         self.driver._migrated_instance_uuids = set([uuids.instance])
         self.driver._pike_flavor_migration([uuids.node1])
         mock_normalize.assert_not_called()
+
+    @mock.patch.object(loopingcall, 'FixedIntervalLoopingCall')
+    @mock.patch.object(FAKE_CLIENT.node, 'set_provision_state')
+    def test_rescue(self, mock_sps, mock_looping):
+        node = ironic_utils.get_test_node()
+
+        fake_looping_call = FakeLoopingCall()
+        mock_looping.return_value = fake_looping_call
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+
+        self.driver.rescue(self.ctx, instance, None, None, 'xyz')
+        mock_sps.assert_called_once_with(node.uuid, 'rescue',
+                                         rescue_password='xyz')
+
+    @mock.patch.object(loopingcall, 'FixedIntervalLoopingCall')
+    @mock.patch.object(FAKE_CLIENT.node, 'set_provision_state')
+    def test_rescue_provision_state_fail(self, mock_sps, mock_looping):
+        node = ironic_utils.get_test_node()
+
+        fake_looping_call = FakeLoopingCall()
+        mock_looping.return_value = fake_looping_call
+        mock_sps.side_effect = ironic_exception.BadRequest()
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+
+        self.assertRaises(exception.InstanceRescueFailure,
+                          self.driver.rescue,
+                          self.ctx, instance, None, None, 'xyz')
+
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_validate_instance_and_node')
+    @mock.patch.object(FAKE_CLIENT.node, 'set_provision_state')
+    def test_rescue_instance_not_found(self, mock_sps, fake_validate):
+        node = ironic_utils.get_test_node(driver='fake')
+
+        instance = fake_instance.fake_instance_obj(self.ctx, node=node.uuid)
+        fake_validate.side_effect = exception.InstanceNotFound(
+            instance_id='fake')
+
+        self.assertRaises(exception.InstanceRescueFailure,
+                          self.driver.rescue,
+                          self.ctx, instance, None, None, 'xyz')
+
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_validate_instance_and_node')
+    @mock.patch.object(FAKE_CLIENT.node, 'set_provision_state')
+    def test_rescue_rescue_fail(self, mock_sps, fake_validate):
+        node = ironic_utils.get_test_node(
+                   provision_state=ironic_states.RESCUEFAIL,
+                   last_error='rescue failed')
+
+        fake_validate.return_value = node
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+
+        self.assertRaises(exception.InstanceRescueFailure,
+                          self.driver.rescue,
+                          self.ctx, instance, None, None, 'xyz')
+
+    @mock.patch.object(ironic_driver.IronicDriver, '_can_send_version')
+    @mock.patch.object(ironic_driver, 'LOG', autospec=True)
+    def test_rescue_api_unavailable(self, mock_log, mock_csv):
+        node = ironic_utils.get_test_node()
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+        mock_csv.side_effect = exception.IronicAPIVersionNotAvailable(
+            version='1.38')
+
+        def _fake_log_error(msg, *args, **kwargs):
+            regex = r'Required Ironic API version.*for rescuing.'
+            self.assertThat(msg, matchers.MatchesRegex(regex))
+        mock_log.error.side_effect = _fake_log_error
+
+        self.assertRaises(exception.InstanceRescueFailure,
+                          self.driver.rescue,
+                          self.ctx, instance, None, None, 'xyz')
+        self.assertTrue(mock_log.error.called)
+
+    @mock.patch.object(loopingcall, 'FixedIntervalLoopingCall')
+    @mock.patch.object(FAKE_CLIENT.node, 'set_provision_state')
+    def test_unrescue(self, mock_sps, mock_looping):
+        node = ironic_utils.get_test_node()
+
+        fake_looping_call = FakeLoopingCall()
+        mock_looping.return_value = fake_looping_call
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+
+        self.driver.unrescue(instance, None)
+        mock_sps.assert_called_once_with(node.uuid, 'unrescue')
+
+    @mock.patch.object(loopingcall, 'FixedIntervalLoopingCall')
+    @mock.patch.object(FAKE_CLIENT.node, 'set_provision_state')
+    def test_unrescue_provision_state_fail(self, mock_sps, mock_looping):
+        node = ironic_utils.get_test_node()
+
+        fake_looping_call = FakeLoopingCall()
+        mock_looping.return_value = fake_looping_call
+        mock_sps.side_effect = ironic_exception.BadRequest()
+
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+        self.assertRaises(exception.InstanceUnRescueFailure,
+                          self.driver.unrescue,
+                          instance, None)
+
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_validate_instance_and_node')
+    @mock.patch.object(FAKE_CLIENT.node, 'set_provision_state')
+    def test_unrescue_instance_not_found(self, mock_sps, fake_validate):
+        node = ironic_utils.get_test_node(driver='fake')
+
+        instance = fake_instance.fake_instance_obj(self.ctx, node=node.uuid)
+        fake_validate.side_effect = exception.InstanceNotFound(
+            instance_id='fake')
+
+        self.assertRaises(exception.InstanceUnRescueFailure,
+                          self.driver.unrescue,
+                          instance, None)
+
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_validate_instance_and_node')
+    @mock.patch.object(FAKE_CLIENT.node, 'set_provision_state')
+    def test_unrescue_unrescue_fail(self, mock_sps, fake_validate):
+        node = ironic_utils.get_test_node(
+                   provision_state=ironic_states.UNRESCUEFAIL,
+                   last_error='unrescue failed')
+
+        fake_validate.return_value = node
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+
+        self.assertRaises(exception.InstanceUnRescueFailure,
+                          self.driver.unrescue,
+                          instance, None)
+
+    @mock.patch.object(ironic_driver.IronicDriver, '_can_send_version')
+    @mock.patch.object(ironic_driver, 'LOG', autospec=True)
+    def test_unrescue_api_unavailable(self, mock_log, mock_csv):
+        node = ironic_utils.get_test_node()
+        instance = fake_instance.fake_instance_obj(self.ctx,
+                                                   node=node.uuid)
+
+        mock_csv.side_effect = exception.IronicAPIVersionNotAvailable(
+            version='1.38')
+
+        def _fake_log_error(msg, *args, **kwargs):
+            regex = r'Required Ironic API version.*for unrescuing.'
+            self.assertThat(msg, matchers.MatchesRegex(regex))
+        mock_log.error.side_effect = _fake_log_error
+
+        self.assertRaises(exception.InstanceUnRescueFailure,
+                          self.driver.unrescue,
+                          instance, None)
+        self.assertTrue(mock_log.error.called)
+
+    def test__can_send_version(self):
+        self.assertIsNone(
+            self.driver._can_send_version(
+                min_version='%d.%d' % cw.IRONIC_API_VERSION))
+
+    def test__can_send_version_too_new(self):
+        self.assertRaises(exception.IronicAPIVersionNotAvailable,
+                          self.driver._can_send_version,
+                          min_version='%d.%d' % (cw.IRONIC_API_VERSION[0],
+                                                 cw.IRONIC_API_VERSION[1] + 1))
+
+    def test__can_send_version_too_old(self):
+        self.assertRaises(
+            exception.IronicAPIVersionNotAvailable,
+            self.driver._can_send_version,
+            max_version='%d.%d' % (cw.PRIOR_IRONIC_API_VERSION[0],
+                                   cw.PRIOR_IRONIC_API_VERSION[1] - 1))
+
+    @mock.patch.object(cw.IronicClientWrapper, 'current_api_version',
+                       autospec=True)
+    @mock.patch.object(cw.IronicClientWrapper, 'is_api_version_negotiated',
+                       autospec=True)
+    def test__can_send_version_not_negotiated(self, mock_is_negotiated,
+                                              mock_api_version):
+        mock_is_negotiated.return_value = False
+        self.assertIsNone(self.driver._can_send_version())
+        self.assertFalse(mock_api_version.called)
 
 
 @mock.patch.object(instance_metadata, 'InstanceMetadata')
@@ -2708,7 +3111,7 @@ class IronicDriverGenerateConfigDriveTestCase(test.NoDBTestCase):
         self.driver.virtapi = fake.FakeVirtAPI()
         self.ctx = nova_context.get_admin_context()
         node_uuid = uuidutils.generate_uuid()
-        self.node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid)
+        self.node = _get_cached_node(driver='fake', uuid=node_uuid)
         self.instance = fake_instance.fake_instance_obj(self.ctx,
                                                         node=node_uuid)
         self.network_info = utils.get_test_network_info()
@@ -2927,19 +3330,20 @@ class NodeCacheTestCase(test.NoDBTestCase):
 
         mock_hash_ring.assert_called_once_with(mock.ANY)
         mock_instances.assert_called_once_with(mock.ANY, self.host)
-        mock_nodes.assert_called_once_with(detail=True, limit=0)
+        mock_nodes.assert_called_once_with(fields=ironic_driver._NODE_FIELDS,
+                                           limit=0)
         self.assertIsNotNone(self.driver.node_cache_time)
 
     def test__refresh_cache(self):
         # normal operation, one compute service
         instances = []
         nodes = [
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
-                instance_uuid=None),
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
-                instance_uuid=None),
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
-                instance_uuid=None),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(), instance_uuid=None),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(), instance_uuid=None),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(), instance_uuid=None),
         ]
         hosts = [self.host, self.host, self.host]
 
@@ -2952,12 +3356,12 @@ class NodeCacheTestCase(test.NoDBTestCase):
         # normal operation, many compute services
         instances = []
         nodes = [
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
-                instance_uuid=None),
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
-                instance_uuid=None),
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
-                instance_uuid=None),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(), instance_uuid=None),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(), instance_uuid=None),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(), instance_uuid=None),
         ]
         hosts = [self.host, 'host2', 'host3']
 
@@ -2971,12 +3375,12 @@ class NodeCacheTestCase(test.NoDBTestCase):
         # map to us
         instances = [uuidutils.generate_uuid()]
         nodes = [
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
-                instance_uuid=instances[0]),
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
-                instance_uuid=None),
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
-                instance_uuid=None),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(), instance_uuid=instances[0]),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(), instance_uuid=None),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(), instance_uuid=None),
         ]
         # only two calls, having the instance will short-circuit the first node
         hosts = [{self.host}, {self.host}]
@@ -2991,12 +3395,13 @@ class NodeCacheTestCase(test.NoDBTestCase):
         # an instance for, even if it maps to us
         instances = []
         nodes = [
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(),
                 instance_uuid=uuidutils.generate_uuid()),
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
-                instance_uuid=None),
-            ironic_utils.get_test_node(uuid=uuidutils.generate_uuid(),
-                instance_uuid=None),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(), instance_uuid=None),
+            _get_cached_node(
+                uuid=uuidutils.generate_uuid(), instance_uuid=None),
         ]
         hosts = [self.host, self.host]
 
@@ -3018,7 +3423,7 @@ class IronicDriverConsoleTestCase(test.NoDBTestCase):
         self.driver = ironic_driver.IronicDriver(fake.FakeVirtAPI())
         self.ctx = nova_context.get_admin_context()
         node_uuid = uuidutils.generate_uuid()
-        self.node = ironic_utils.get_test_node(driver='fake', uuid=node_uuid)
+        self.node = _get_cached_node(driver='fake', uuid=node_uuid)
         self.instance = fake_instance.fake_instance_obj(self.ctx,
                                                         node=node_uuid)
 

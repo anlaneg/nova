@@ -13,11 +13,22 @@
 import abc
 import copy
 import heapq
-import itertools
 
+import eventlet
 import six
 
+from oslo_log import log as logging
+
+import nova.conf
 from nova import context
+from nova import exception
+from nova.i18n import _
+
+LOG = logging.getLogger(__name__)
+CELL_FAIL_SENTINELS = (context.did_not_respond_sentinel,
+                       context.raised_exception_sentinel)
+
+CONF = nova.conf.CONF
 
 
 class RecordSortContext(object):
@@ -51,15 +62,58 @@ class RecordWrapper(object):
 
     Implementing __lt__ is enough for heapq.merge() to do its work.
     """
-    def __init__(self, sort_ctx, db_record):
+    def __init__(self, ctx, sort_ctx, db_record):
+        self.cell_uuid = ctx.cell_uuid
         self._sort_ctx = sort_ctx
         self._db_record = db_record
 
     def __lt__(self, other):
+        # NOTE(danms): This makes us always sort failure sentinels
+        # higher than actual results. We do this so that they bubble
+        # up in the get_records_sorted() feeder loop ahead of anything
+        # else, and so that the implementation of RecordSortContext
+        # never sees or has to handle the sentinels. If we did not
+        # sort these to the top then we could potentially return
+        # $limit results from good cells before we noticed the failed
+        # cells, and would not properly report them as failed for
+        # fix-up in the higher layers.
+        if self._db_record in CELL_FAIL_SENTINELS:
+            return True
+        elif other._db_record in CELL_FAIL_SENTINELS:
+            return False
+
         r = self._sort_ctx.compare_records(self._db_record,
                                            other._db_record)
         # cmp(x, y) returns -1 if x < y
         return r == -1
+
+
+def query_wrapper(ctx, fn, *args, **kwargs):
+    """This is a helper to run a query with predictable fail semantics.
+
+    This is a generator which will mimic the scatter_gather_cells() behavior
+    by honoring a timeout and catching exceptions, yielding the usual
+    sentinel objects instead of raising. It wraps these in RecordWrapper
+    objects, which will prioritize them to the merge sort, causing them to
+    be handled by the main get_objects_sorted() feeder loop quickly and
+    gracefully.
+    """
+    with eventlet.timeout.Timeout(context.CELL_TIMEOUT, exception.CellTimeout):
+        try:
+            for record in fn(ctx, *args, **kwargs):
+                yield record
+        except exception.CellTimeout:
+            # Here, we yield a RecordWrapper (no sort_ctx needed since
+            # we won't call into the implementation's comparison routines)
+            # wrapping the sentinel indicating timeout.
+            yield RecordWrapper(ctx, None, context.did_not_respond_sentinel)
+            raise StopIteration
+        except Exception:
+            # Here, we yield a RecordWrapper (no sort_ctx needed since
+            # we won't call into the implementation's comparison routines)
+            # wrapping the sentinel indicating failure.
+            yield RecordWrapper(ctx, None, context.raised_exception_sentinel)
+            raise StopIteration
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -67,13 +121,40 @@ class CrossCellLister(object):
     """An implementation of a cross-cell efficient lister.
 
     This primarily provides a listing implementation for fetching
-    records from across all cells, paginated and sorted appropriately.
-    The external interface is the get_records_sorted() method. You should
-    implement this if you need to efficiently list your data type from
-    cell databases.
+    records from across multiple cells, paginated and sorted
+    appropriately.  The external interface is the get_records_sorted()
+    method. You should implement this if you need to efficiently list
+    your data type from cell databases.
+
     """
-    def __init__(self, sort_ctx):
+    def __init__(self, sort_ctx, cells=None, batch_size=None):
         self.sort_ctx = sort_ctx
+        self.cells = cells
+        self.batch_size = batch_size
+        self._cells_responded = set()
+        self._cells_failed = set()
+        self._cells_timed_out = set()
+
+    @property
+    def cells_responded(self):
+        """A list of uuids representing those cells that returned a successful
+        result.
+        """
+        return list(self._cells_responded)
+
+    @property
+    def cells_failed(self):
+        """A list of uuids representing those cells that failed to return a
+        successful result.
+        """
+        return list(self._cells_failed)
+
+    @property
+    def cells_timed_out(self):
+        """A list of uuids representing those cells that timed out while being
+        contacted.
+        """
+        return list(self._cells_timed_out)
 
     @property
     @abc.abstractmethod
@@ -88,7 +169,7 @@ class CrossCellLister(object):
 
     @abc.abstractmethod
     def get_marker_record(self, ctx, marker_id):
-        """Get an instance of the marker record by id.
+        """Get the cell UUID and instance of the marker record by id.
 
         This needs to look up the marker record in whatever cell it is in
         and return it. It should be populated with values corresponding to
@@ -96,7 +177,8 @@ class CrossCellLister(object):
 
         :param ctx: A RequestContext
         :param marker_id: The identifier of the marker to find
-        :returns: An instance of the marker from the database
+        :returns: A tuple of cell_uuid where the marker was found and an
+                  instance of the marker from the database
         :raises: MarkerNotFound if the marker does not exist
         """
         pass
@@ -165,11 +247,12 @@ class CrossCellLister(object):
             # whatever cell it is in and record the values for the
             # sort keys so we can find the marker instance in each
             # cell (called the 'local' marker).
-            global_marker_record = self.get_marker_record(ctx, marker)
+            global_marker_cell, global_marker_record = self.get_marker_record(
+                ctx, marker)
             global_marker_values = [global_marker_record[key]
                                     for key in self.sort_ctx.sort_keys]
 
-        def do_query(ctx):
+        def do_query(cctx):
             """Generate RecordWrapper(record) objects from a cell.
 
             We do this inside the thread (created by
@@ -195,11 +278,11 @@ class CrossCellLister(object):
             marker_id = self.marker_identifier
 
             if marker:
-                # FIXME(danms): If we knew which cell we were in here, we could
-                # avoid looking up the marker again. But, we don't currently.
-
-                local_marker = self.get_marker_by_values(ctx,
-                                                         global_marker_values)
+                if cctx.cell_uuid == global_marker_cell:
+                    local_marker = marker
+                else:
+                    local_marker = self.get_marker_by_values(
+                        cctx, global_marker_values)
                 if local_marker:
                     if local_marker != marker:
                         # We did find a marker in our cell, but it wasn't
@@ -223,7 +306,7 @@ class CrossCellLister(object):
                             # expected.
                             local_marker_filters[marker_id] = [local_marker]
                         local_marker_prefix = self.get_by_filters(
-                            ctx, local_marker_filters, limit=1, marker=None,
+                            cctx, local_marker_filters, limit=1, marker=None,
                             **kwargs)
                 else:
                     # There was a global marker but everything in our
@@ -231,35 +314,117 @@ class CrossCellLister(object):
                     # nothing. If we didn't have this clause, we'd
                     # pass marker=None to the query below and return a
                     # full unpaginated set for our cell.
-                    return []
+                    return
 
-            main_query_result = self.get_by_filters(
-                ctx, filters,
-                limit=limit, marker=local_marker,
-                **kwargs)
+            if local_marker_prefix:
+                # Per above, if we had a matching marker object, that is
+                # the first result we should generate.
+                yield RecordWrapper(cctx, self.sort_ctx,
+                                    local_marker_prefix[0])
 
-            return (RecordWrapper(self.sort_ctx, inst) for inst in
-                    itertools.chain(local_marker_prefix, main_query_result))
+            # If a batch size was provided, use that as the limit per
+            # batch. If not, then ask for the entire $limit in a single
+            # batch.
+            batch_size = self.batch_size or limit
 
-        # FIXME(danms): If we raise or timeout on a cell we need to handle
-        # that here gracefully. The below routine will provide sentinels
-        # to indicate that, which will crash the merge below, but we don't
-        # handle this anywhere yet anyway.
-        results = context.scatter_gather_all_cells(ctx, do_query)
+            # Keep track of how many we have returned in all batches
+            return_count = 0
+
+            # If limit was unlimited then keep querying batches until
+            # we run out of results. Otherwise, query until the total count
+            # we have returned exceeds the limit.
+            while limit is None or return_count < limit:
+                batch_count = 0
+
+                # Do not query a full batch if it would cause our total
+                # to exceed the limit
+                if limit:
+                    query_size = min(batch_size, limit - return_count)
+                else:
+                    query_size = batch_size
+
+                # Get one batch
+                query_result = self.get_by_filters(
+                    cctx, filters,
+                    limit=query_size or None, marker=local_marker,
+                    **kwargs)
+
+                # Yield wrapped results from the batch, counting as we go
+                # (to avoid traversing the list to count). Also, update our
+                # local_marker each time so that local_marker is the end of
+                # this batch in order to find the next batch.
+                for item in query_result:
+                    local_marker = item[self.marker_identifier]
+                    yield RecordWrapper(cctx, self.sort_ctx, item)
+                    batch_count += 1
+
+                # No results means we are done for this cell
+                if not batch_count:
+                    break
+
+                return_count += batch_count
+                LOG.debug(('Listed batch of %(batch)i results from cell '
+                           'out of %(limit)s limit. Returned %(total)i '
+                           'total so far.'),
+                          {'batch': batch_count,
+                           'total': return_count,
+                           'limit': limit or 'no'})
+
+        # NOTE(danms): The calls to do_query() will return immediately
+        # with a generator. There is no point in us checking the
+        # results for failure or timeout since we have not actually
+        # run any code in do_query() until the first iteration
+        # below. The query_wrapper() utility handles inline
+        # translation of failures and timeouts to sentinels which will
+        # be generated and consumed just like any normal result below.
+        if self.cells:
+            results = context.scatter_gather_cells(ctx, self.cells,
+                                                   context.CELL_TIMEOUT,
+                                                   query_wrapper, do_query)
+        else:
+            results = context.scatter_gather_all_cells(ctx,
+                                                       query_wrapper, do_query)
 
         # If a limit was provided, it was passed to the per-cell query
         # routines.  That means we have NUM_CELLS * limit items across
         # results. So, we need to consume from that limit below and
-        # stop returning results.
-        limit = limit or 0
+        # stop returning results. Call that total_limit since we will
+        # modify it in the loop below, but do_query() above also looks
+        # at the original provided limit.
+        total_limit = limit or 0
 
         # Generate results from heapq so we can return the inner
         # instance instead of the wrapper. This is basically free
         # as it works as our caller iterates the results.
-        for i in heapq.merge(*results.values()):
-            yield i._db_record
-            limit -= 1
-            if limit == 0:
+        feeder = heapq.merge(*results.values())
+        while True:
+            try:
+                item = next(feeder)
+            except StopIteration:
+                return
+
+            if item._db_record in CELL_FAIL_SENTINELS:
+                if not CONF.api.list_records_by_skipping_down_cells:
+                    raise exception.NovaException(
+                        _('Cell %s is not responding but configuration '
+                          'indicates that we should fail.') % item.cell_uuid)
+                LOG.warning('Cell %s is not responding and hence is '
+                            'being omitted from the results',
+                            item.cell_uuid)
+                if item._db_record == context.did_not_respond_sentinel:
+                    self._cells_timed_out.add(item.cell_uuid)
+                elif item._db_record == context.raised_exception_sentinel:
+                    self._cells_failed.add(item.cell_uuid)
+                # We might have received one batch but timed out or failed
+                # on a later one, so be sure we fix the accounting.
+                if item.cell_uuid in self._cells_responded:
+                    self._cells_responded.remove(item.cell_uuid)
+                continue
+
+            yield item._db_record
+            self._cells_responded.add(item.cell_uuid)
+            total_limit -= 1
+            if total_limit == 0:
                 # We'll only hit this if limit was nonzero and we just
                 # generated our last one
                 return

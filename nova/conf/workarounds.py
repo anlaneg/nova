@@ -147,6 +147,44 @@ Related options:
 * [filter_scheduler]/track_instance_changes also relies on upcalls from the
   compute service to the scheduler service.
 """),
+
+    cfg.BoolOpt(
+        'enable_consoleauth',
+        default=False,
+        deprecated_for_removal=True,
+        deprecated_since="18.0.0",
+        deprecated_reason="""
+This option has been added as deprecated originally because it is used
+for avoiding a upgrade issue and it will not be used in the future.
+See the help text for more details.
+""",
+        help="""
+Enable the consoleauth service to avoid resetting unexpired consoles.
+
+Console token authorizations have moved from the ``nova-consoleauth`` service
+to the database, so all new consoles will be supported by the database backend.
+With this, consoles that existed before database backend support will be reset.
+For most operators, this should be a minimal disruption as the default TTL of a
+console token is 10 minutes.
+
+Operators that have much longer token TTL configured or otherwise wish to avoid
+immediately resetting all existing consoles can enable this flag to continue
+using the ``nova-consoleauth`` service in addition to the database backend.
+Once all of the old ``nova-consoleauth`` supported console tokens have expired,
+this flag should be disabled. For example, if a deployment has configured a
+token TTL of one hour, the operator may disable the flag, one hour after
+deploying the new code during an upgrade.
+
+.. note:: Cells v1 was not converted to use the database backend for
+  console token authorizations. Cells v1 console token authorizations will
+  continue to be supported by the ``nova-consoleauth`` service and use of
+  the ``[workarounds]/enable_consoleauth`` option does not apply to
+  Cells v1 users.
+
+Related options:
+
+* ``[consoleauth]/token_ttl``
+"""),
 ]
 
 

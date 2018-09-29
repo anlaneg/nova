@@ -31,19 +31,19 @@ tests:
   response_json_paths:
       $.errors[0].title: Forbidden
 
-- name: non admin forbidden non json
-  GET: /resource_providers
+- name: route not found non json
+  GET: /moo
   request_headers:
-      x-auth-token: user
       accept: text/plain
-  status: 403
+  status: 404
   response_strings:
-      - admin required
+      - The resource could not be found
 
-- name: post new resource provider
+- name: post new resource provider - old microversion
   POST: /resource_providers
   request_headers:
     content-type: application/json
+    openstack-api-version: placement 1.19
   data:
       name: $ENVIRON['RP_NAME']
       uuid: $ENVIRON['RP_UUID']
@@ -52,6 +52,29 @@ tests:
       location: //resource_providers/[a-f0-9-]+/
   response_forbidden_headers:
       - content-type
+
+- name: delete it
+  DELETE: $LOCATION
+  status: 204
+
+- name: post new resource provider - new microversion
+  POST: /resource_providers
+  request_headers:
+      content-type: application/json
+  data:
+      name: $ENVIRON['RP_NAME']
+      uuid: $ENVIRON['RP_UUID']
+  status: 200
+  response_headers:
+      location: //resource_providers/[a-f0-9-]+/
+  response_json_paths:
+      $.uuid: $ENVIRON['RP_UUID']
+      $.name: $ENVIRON['RP_NAME']
+      $.parent_provider_uuid: null
+      $.generation: 0
+      $.links[?rel = "self"].href: /resource_providers/$ENVIRON['RP_UUID']
+      $.links[?rel = "inventories"].href: /resource_providers/$ENVIRON['RP_UUID']/inventories
+      $.links[?rel = "usages"].href: /resource_providers/$ENVIRON['RP_UUID']/usages
 
 # On this one, don't test for which field was a duplicate because
 # that depends on how the database reports columns.
@@ -80,6 +103,7 @@ tests:
       - "Conflicting resource provider name: $ENVIRON['RP_NAME'] already exists"
   response_json_paths:
       $.errors[0].title: Conflict
+      $.errors[0].code: placement.duplicate_name
 
 - name: confirm the correct post
   GET: /resource_providers/$ENVIRON['RP_UUID']
@@ -307,7 +331,12 @@ tests:
   data:
       name: parent
       uuid: $ENVIRON['PARENT_PROVIDER_UUID']
-  status: 201
+  status: 200
+  response_json_paths:
+      $.uuid: $ENVIRON['PARENT_PROVIDER_UUID']
+      $.name: parent
+      $.parent_provider_uuid: null
+      $.generation: 0
 
 - name: get provider with old microversion no root provider UUID field
   GET: /resource_providers/$ENVIRON['PARENT_PROVIDER_UUID']
@@ -360,6 +389,15 @@ tests:
   response_strings:
       - 'un-parenting a provider is not currently allowed'
 
+- name: 409 conflict while trying to delete parent with existing child
+  DELETE: /resource_providers/$ENVIRON['PARENT_PROVIDER_UUID']
+  status: 409
+  response_strings:
+      - "Unable to delete parent resource provider
+       $ENVIRON['PARENT_PROVIDER_UUID']: It has child resource providers."
+  response_json_paths:
+      $.errors[0].code: placement.resource_provider.cannot_delete_parent
+
 - name: list all resource providers in a tree that does not exist
   GET: /resource_providers?in_tree=$ENVIRON['ALT_PARENT_PROVIDER_UUID']
   response_json_paths:
@@ -380,11 +418,12 @@ tests:
   data:
       name: altwparent
       uuid: $ENVIRON['ALT_PARENT_PROVIDER_UUID']
-  status: 201
+  status: 200
   response_headers:
       location: //resource_providers/[a-f0-9-]+/
-  response_forbidden_headers:
-      - content-type
+  response_json_paths:
+      $.uuid: $ENVIRON['ALT_PARENT_PROVIDER_UUID']
+      $.name: altwparent
 
 - name: list all resource providers in a tree
   GET: /resource_providers?in_tree=$ENVIRON['ALT_PARENT_PROVIDER_UUID']
@@ -433,6 +472,59 @@ tests:
       # Only RP_UUID satisfies both the tree and trait constraint
       $.resource_providers[?uuid="$ENVIRON['RP_UUID']"].root_provider_uuid: $ENVIRON['PARENT_PROVIDER_UUID']
 
+- name: list providers for full count
+  GET: /resource_providers
+  response_json_paths:
+      $.resource_providers.`len`: 3
+
+- name: list providers forbidden 1.22
+  GET: /resource_providers?required=!STORAGE_DISK_SSD
+  response_json_paths:
+      $.resource_providers.`len`: 1
+
+- name: confirm forbidden trait not there
+  GET: /resource_providers/$RESPONSE['$.resource_providers[0].uuid']/traits
+  response_json_paths:
+      $.traits: []
+
+- name: list providers forbidden 1.21
+  GET: /resource_providers?required=!STORAGE_DISK_SSD
+  request_headers:
+      openstack-api-version: placement 1.21
+  status: 400
+  response_strings:
+      - "Invalid query string parameters: Expected 'required' parameter value of the form: HW_CPU_X86_VMX,CUSTOM_MAGIC. Got: !STORAGE_DISK_SSD"
+
+- name: list providers forbidden again
+  GET: /resource_providers?required=!MISC_SHARES_VIA_AGGREGATE
+  response_json_paths:
+      $.resource_providers.`len`: 2
+
+- name: mixed required and forbidden
+  GET: /resource_providers?required=!HW_CPU_X86_SGX,STORAGE_DISK_SSD
+  response_json_paths:
+      $.resource_providers.`len`: 1
+
+- name: confirm mixed required and forbidden
+  GET: /resource_providers/$RESPONSE['$.resource_providers[0].uuid']/traits
+  response_json_paths:
+      $.traits.`sorted`: ['MISC_SHARES_VIA_AGGREGATE', 'STORAGE_DISK_SSD']
+
+- name: multiple forbidden
+  GET: /resource_providers?required=!MISC_SHARES_VIA_AGGREGATE,!HW_CPU_X86_SGX
+  response_json_paths:
+      $.resource_providers.`len`: 1
+
+- name: confirm multiple forbidden
+  GET: /resource_providers/$RESPONSE['$.resource_providers[0].uuid']/traits
+  response_json_paths:
+      $.traits: []
+
+- name: forbidden no apply
+  GET: /resource_providers?required=!HW_CPU_X86_VMX
+  response_json_paths:
+      $.resource_providers.`len`: 3
+
 - name: create some inventory
   PUT: /resource_providers/$ENVIRON['ALT_PARENT_PROVIDER_UUID']/inventories
   request_headers:
@@ -463,6 +555,16 @@ tests:
   GET: /resource_providers?required=
   status: 400
   response_strings:
+      - "Invalid query string parameters: Expected 'required' parameter value of the form: HW_CPU_X86_VMX,!CUSTOM_MAGIC."
+  response_json_paths:
+      $.errors[0].title: Bad Request
+
+- name: invalid 'required' parameter 1.21
+  GET: /resource_providers?required=
+  request_headers:
+      openstack-api-version: placement 1.21
+  status: 400
+  response_strings:
       - "Invalid query string parameters: Expected 'required' parameter value of the form: HW_CPU_X86_VMX,CUSTOM_MAGIC."
   response_json_paths:
       $.errors[0].title: Bad Request
@@ -471,7 +573,7 @@ tests:
   GET: /resource_providers?required=STORAGE_DISK_SSD,,MISC_SHARES_VIA_AGGREGATE
   status: 400
   response_strings:
-      - "Invalid query string parameters: Expected 'required' parameter value of the form: HW_CPU_X86_VMX,CUSTOM_MAGIC."
+      - "Invalid query string parameters: Expected 'required' parameter value of the form: HW_CPU_X86_VMX,!CUSTOM_MAGIC."
   response_json_paths:
       $.errors[0].title: Bad Request
 
@@ -510,7 +612,7 @@ tests:
       content-type: application/json
   data:
       name: cow
-  status: 201
+  status: 200
 
 - name: try to rename that provider to existing name
   PUT: $LOCATION
@@ -521,6 +623,7 @@ tests:
   status: 409
   response_json_paths:
       $.errors[0].title: Conflict
+      $.errors[0].code: placement.duplicate_name
 
 - name: fail to put that provider with uuid
   PUT: $LAST_URL
@@ -565,7 +668,7 @@ tests:
     content-type: application/json
   data:
       name: a name
-  status: 201
+  status: 200
   response_headers:
       location: //resource_providers/[a-f0-9-]+/
 
@@ -624,3 +727,49 @@ tests:
   response_forbidden_headers:
       - cache-control
       - last-modified
+
+- name: fail updating a parent to itself
+  PUT: /resource_providers/$ENVIRON['PARENT_PROVIDER_UUID']
+  request_headers:
+      content-type: application/json
+  data:
+      name: parent
+      parent_provider_uuid: $ENVIRON['PARENT_PROVIDER_UUID']
+  status: 400
+  response_strings:
+      - 'creating loop in the provider tree is not allowed.'
+
+- name: fail updating the parent to point to its child
+  PUT: /resource_providers/$ENVIRON['PARENT_PROVIDER_UUID']
+  request_headers:
+      content-type: application/json
+  data:
+      name: parent
+      parent_provider_uuid: $ENVIRON['RP_UUID']
+  status: 400
+  response_strings:
+      - 'creating loop in the provider tree is not allowed.'
+
+- name: create a resource provider with dashed uuid
+  POST: /resource_providers
+  request_headers:
+    content-type: application/json
+  data:
+      name: rp with dashed uuid
+      uuid: 2290d4af-9e6e-400b-9d65-1ee01376f71a
+  status: 200
+  response_headers:
+      location: //resource_providers/[a-f0-9-]+/
+
+- name: try to create with the same uuid but without dashes
+  POST: /resource_providers
+  request_headers:
+    content-type: application/json
+  data:
+      name: rp with dashless uuid
+      uuid: 2290d4af9e6e400b9d651ee01376f71a
+  status: 409
+  response_strings:
+      - "Conflicting resource provider uuid: 2290d4af-9e6e-400b-9d65-1ee01376f71a already exists"
+  response_json_paths:
+      $.errors[0].title: Conflict

@@ -43,6 +43,7 @@ Possible values:
 * ``vmwareapi.VMwareVCDriver``
 * ``hyperv.HyperVDriver``
 * ``powervm.PowerVMDriver``
+* ``zvm.ZVMDriver``
 """),
     cfg.BoolOpt('allow_resize_to_same_host',
         default=False,
@@ -74,25 +75,6 @@ Possible values:
                 img_signature, img_signature_key_type,
                 img_signature_certificate_uuid
 
-"""),
-    cfg.StrOpt('multi_instance_display_name_template',
-        default='%(name)s-%(count)d',
-        deprecated_for_removal=True,
-        deprecated_since='15.0.0',
-        deprecated_reason="""
-This config changes API behaviour. All changes in API behaviour should be
-discoverable.
-""",
-        help="""
-When creating multiple instances with a single request using the
-os-multiple-create API extension, this template will be used to build
-the display name for each instance. The benefit is that the instances
-end up with different hostnames. Example display names when creating
-two VM's: name-1, name-2.
-
-Possible values:
-
-* Valid keys for the template are: name, uuid, count.
 """),
     cfg.IntOpt('max_local_block_devices',
         default=3,
@@ -177,6 +159,10 @@ Timeout for Neutron VIF plugging event message arrival.
 
 Number of seconds to wait for Neutron vif plugging events to
 arrive before continuing or failing (see 'vif_plugging_is_fatal').
+
+If you are hitting timeout failures at scale, consider running rootwrap
+in "daemon mode" in the neutron agent via the ``[agent]/root_helper_daemon``
+neutron configuration option.
 
 Related options:
 
@@ -332,7 +318,7 @@ Possible values:
 * A comma-separated list of physical CPU numbers that virtual CPUs can be
   allocated to by default. Each element should be either a single CPU number,
   a range of CPU numbers, or a caret followed by a CPU number to be
-  excluded from a previous range. For example:
+  excluded from a previous range. For example::
 
     vcpu_pin_set = "4-12,^8,15"
 """),
@@ -344,7 +330,7 @@ Number of huge/large memory pages to reserved per NUMA host cell.
 Possible values:
 
 * A list of valid key=value which reflect NUMA node ID, page size
-  (Default unit is KiB) and number of pages to be reserved.
+  (Default unit is KiB) and number of pages to be reserved. For example::
 
     reserved_huge_pages = node:0,size:2048,count:64
     reserved_huge_pages = node:1,size:1GB,count:1
@@ -415,7 +401,9 @@ configuration value if no per-aggregate setting is found.
 
 NOTE: This can be set per-compute, or if set to 0.0, the value
 set on the scheduler node(s) or compute node(s) will be used
-and defaulted to 16.0.
+and defaulted to 16.0. Once set to a non-default value, it is not possible
+to "unset" the config to get back to the default behavior. If you want
+to reset back to the default, explicitly specify 16.0.
 
 NOTE: As of the 16.0.0 Pike release, this configuration option is ignored
 for the ironic.IronicDriver compute driver and is hardcoded to 1.0.
@@ -442,7 +430,9 @@ configuration value if no per-aggregate setting found.
 
 NOTE: This can be set per-compute, or if set to 0.0, the value
 set on the scheduler node(s) or compute node(s) will be used and
-defaulted to 1.5.
+defaulted to 1.5. Once set to a non-default value, it is not possible
+to "unset" the config to get back to the default behavior. If you want
+to reset back to the default, explicitly specify 1.5.
 
 NOTE: As of the 16.0.0 Pike release, this configuration option is ignored
 for the ironic.IronicDriver compute driver and is hardcoded to 1.0.
@@ -473,7 +463,9 @@ instances.
 
 NOTE: This can be set per-compute, or if set to 0.0, the value
 set on the scheduler node(s) or compute node(s) will be used and
-defaulted to 1.0.
+defaulted to 1.0. Once set to a non-default value, it is not possible
+to "unset" the config to get back to the default behavior. If you want
+to reset back to the default, explicitly specify 1.0.
 
 NOTE: As of the 16.0.0 Pike release, this configuration option is ignored
 for the ironic.IronicDriver compute driver and is hardcoded to 1.0.
@@ -628,20 +620,113 @@ compute_group_opts = [
     cfg.IntOpt('consecutive_build_service_disable_threshold',
         default=10,
         help="""
-Number of consecutive failed builds that result in disabling a compute service.
+Enables reporting of build failures to the scheduler.
 
-This option will cause nova-compute to set itself to a disabled state
-if a certain number of consecutive build failures occur. This will
-prevent the scheduler from continuing to send builds to a compute node that is
-consistently failing. Note that all failures qualify and count towards this
-score, including reschedules that may have been due to racy scheduler behavior.
-Since the failures must be consecutive, it is unlikely that occasional expected
-reschedules will actually disable a compute node.
+Any nonzero value will enable sending build failure statistics to the
+scheduler for use by the BuildFailureWeigher.
 
 Possible values:
 
-* Any positive integer representing a build failure count.
-* Zero to never auto-disable.
+* Any positive integer enables reporting build failures.
+* Zero to disable reporting build failures.
+
+Related options:
+
+* [filter_scheduler]/build_failure_weight_multiplier
+
+"""),
+    cfg.IntOpt("shutdown_retry_interval",
+        default=10,
+        min=1,
+        help="""
+Time to wait in seconds before resending an ACPI shutdown signal to
+instances.
+
+The overall time to wait is set by ``shutdown_timeout``.
+
+Possible values:
+
+* Any integer greater than 0 in seconds
+
+Related options:
+
+* ``shutdown_timeout``
+"""),
+    cfg.IntOpt('resource_provider_association_refresh',
+        default=300,
+        min=1,
+        help="""
+Interval for updating nova-compute-side cache of the compute node resource
+provider's aggregates and traits info.
+
+This option specifies the number of seconds between attempts to update a
+provider's aggregates and traits information in the local cache of the compute
+node.
+
+Possible values:
+
+* Any positive integer in seconds.
+"""),
+   cfg.StrOpt('cpu_shared_set',
+        help="""
+Defines which physical CPUs (pCPUs) will be used for best-effort guest vCPU
+resources.
+
+Currently only used by libvirt driver to place guest emulator threads when
+hw:emulator_threads_policy:share.
+
+::
+    cpu_shared_set = "4-12,^8,15"
+"""),
+    cfg.BoolOpt('live_migration_wait_for_vif_plug',
+        # TODO(mriedem): Change to default=True starting in Stein.
+        default=False,
+        help="""
+Determine if the source compute host should wait for a ``network-vif-plugged``
+event from the (neutron) networking service before starting the actual transfer
+of the guest to the destination compute host.
+
+Note that this option is read on the destination host of a live migration.
+If you set this option the same on all of your compute hosts, which you should
+do if you use the same networking backend universally, you do not have to
+worry about this.
+
+Before starting the transfer of the guest, some setup occurs on the destination
+compute host, including plugging virtual interfaces. Depending on the
+networking backend **on the destination host**, a ``network-vif-plugged``
+event may be triggered and then received on the source compute host and the
+source compute can wait for that event to ensure networking is set up on the
+destination host before starting the guest transfer in the hypervisor.
+
+By default, this is False for two reasons:
+
+1. Backward compatibility: deployments should test this out and ensure it works
+   for them before enabling it.
+
+2. The compute service cannot reliably determine which types of virtual
+   interfaces (``port.binding:vif_type``) will send ``network-vif-plugged``
+   events without an accompanying port ``binding:host_id`` change.
+   Open vSwitch and linuxbridge should be OK, but OpenDaylight is at least
+   one known backend that will not currently work in this case, see bug
+   https://launchpad.net/bugs/1755890 for more details.
+
+Possible values:
+
+* True: wait for ``network-vif-plugged`` events before starting guest transfer
+* False: do not wait for ``network-vif-plugged`` events before starting guest
+  transfer (this is how things have always worked before this option
+  was introduced)
+
+Related options:
+
+* [DEFAULT]/vif_plugging_is_fatal: if ``live_migration_wait_for_vif_plug`` is
+  True and ``vif_plugging_timeout`` is greater than 0, and a timeout is
+  reached, the live migration process will fail with an error but the guest
+  transfer will not have started to the destination host
+* [DEFAULT]/vif_plugging_timeout: if ``live_migration_wait_for_vif_plug`` is
+  True, this controls the amount of time to wait before timing out and either
+  failing if ``vif_plugging_is_fatal`` is True, or simply continuing with the
+  live migration
 """),
 ]
 
@@ -794,6 +879,10 @@ Possible values:
 * Any positive integer in seconds: The instance will exist for
   the specified number of seconds before being offloaded.
 """),
+    # NOTE(melwitt): We're also using this option as the interval for cleaning
+    # up expired console authorizations from the database. It's related to the
+    # delete_instance_interval in that it's another task for cleaning up
+    # resources related to an instance.
     cfg.IntOpt('instance_delete_interval',
         default=300,
         help="""
@@ -946,7 +1035,7 @@ Possible values:
         default=60,
         min=1,
         help="""
-Total time to wait in seconds for an instance toperform a clean
+Total time to wait in seconds for an instance to perform a clean
 shutdown.
 
 It determines the overall period (in seconds) a VM is allowed to
@@ -1039,8 +1128,8 @@ Possible values:
   ``instance_delete_interval`` to disable the delete attempts.
 
 Related options:
-* ``instance_delete_interval`` in interval_opts group can be used to disable
-  this option.
+
+* ``[DEFAULT] instance_delete_interval`` can be used to disable this option.
 """)
 ]
 
@@ -1105,10 +1194,6 @@ Possible values:
   default)
 * A string with a list of named database columns, for example ``%(id)d``
   or ``%(uuid)s`` or ``%(hostname)s``.
-
-Related options:
-
-* not to be confused with: ``multi_instance_display_name_template``
 """),
 ]
 

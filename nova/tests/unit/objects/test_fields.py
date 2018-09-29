@@ -17,12 +17,14 @@ import os
 
 import iso8601
 import mock
+from oslo_serialization import jsonutils
 from oslo_versionedobjects import exception as ovo_exc
 import six
 
 from nova import exception
 from nova.network import model as network_model
 from nova.objects import fields
+from nova import rc_fields
 from nova import test
 from nova.tests.unit import fake_instance
 from nova import utils
@@ -334,7 +336,7 @@ class TestVMMode(TestField):
 class TestResourceClass(TestString):
     def setUp(self):
         super(TestResourceClass, self).setUp()
-        self.field = fields.ResourceClassField()
+        self.field = rc_fields.ResourceClassField()
         self.coerce_good_values = [
             ('VCPU', 'VCPU'),
             ('MEMORY_MB', 'MEMORY_MB'),
@@ -361,8 +363,16 @@ class TestResourceClass(TestString):
             ("CUSTM_BOB", "CUSTOM_CUSTM_BOB"),
         ]
         for test_value, expected in values:
-            result = fields.ResourceClass.normalize_name(test_value)
+            result = rc_fields.ResourceClass.normalize_name(test_value)
             self.assertEqual(expected, result)
+
+    def test_normalize_name_bug_1762789(self):
+        """The .upper() builtin treats sharp S (\xdf) differently in py2 vs.
+        py3.  Make sure normalize_name handles it properly.
+        """
+        name = u'Fu\xdfball'
+        self.assertEqual(u'CUSTOM_FU_BALL',
+                         rc_fields.ResourceClass.normalize_name(name))
 
 
 class TestInteger(TestField):
@@ -596,6 +606,18 @@ class TestNetworkModel(TestField):
         networkinfo.append(network_model.VIF(id=456))
         self.assertEqual('NetworkModel(123,456)',
                          self.field.stringify(networkinfo))
+
+
+class TestNetworkVIFModel(TestField):
+    def setUp(self):
+        super(TestNetworkVIFModel, self).setUp()
+        model = network_model.VIF('6c197bc7-820c-40d5-8aff-7116b993e793')
+        primitive = jsonutils.dumps(model)
+        self.field = fields.Field(fields.NetworkVIFModel())
+        self.coerce_good_values = [(model, model), (primitive, model)]
+        self.coerce_bad_values = [[], 'foo']
+        self.to_primitive_values = [(model, primitive)]
+        self.from_primitive_values = [(primitive, model)]
 
 
 class TestNotificationPriority(TestField):

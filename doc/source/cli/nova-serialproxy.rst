@@ -7,9 +7,7 @@ Websocket serial Proxy for OpenStack Nova serial ports
 ------------------------------------------------------
 
 :Author: openstack@lists.launchpad.net
-:Date:   2014-03-15
 :Copyright: OpenStack Foundation
-:Version: 2014.2
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,9 +21,9 @@ Synopsis
 Description
 ===========
 
-`nova-serialproxy` is a server daemon that serves the Nova Serial Websocket
-Proxy service, which provides a websocket proxy that is compatible with
-OpenStack Nova serial ports.
+:program:`nova-serialproxy` is a server daemon that serves the Nova Serial
+Websocket Proxy service, which provides a websocket proxy that is compatible
+with OpenStack Nova serial ports.
 
 Options
 =======
@@ -43,7 +41,7 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

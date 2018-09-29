@@ -56,7 +56,17 @@ class APIResponse(object):
         self.status = response.status_code
         self.content = response.content
         if self.content:
-            self.body = jsonutils.loads(self.content)
+            # The Compute API and Placement API handle error responses a bit
+            # differently so we need to check the content-type header to
+            # figure out what to do.
+            content_type = response.headers.get('content-type')
+            if 'application/json' in content_type:
+                self.body = response.json()
+            elif 'text/html' in content_type:
+                self.body = response.text
+            else:
+                raise ValueError('Unexpected response content-type: %s' %
+                                 content_type)
         self.headers = response.headers
 
     def __str__(self):
@@ -114,13 +124,13 @@ class TestOpenStackClient(object):
 
     """
 
-    def __init__(self, auth_user, auth_key, auth_uri,
+    def __init__(self, auth_user, auth_key, auth_url,
                  project_id=None):
         super(TestOpenStackClient, self).__init__()
         self.auth_result = None
         self.auth_user = auth_user
         self.auth_key = auth_key
-        self.auth_uri = auth_uri
+        self.auth_url = auth_url
         if project_id is None:
             self.project_id = "6f70656e737461636b20342065766572"
         else:
@@ -138,16 +148,17 @@ class TestOpenStackClient(object):
         if self.auth_result:
             return self.auth_result
 
-        auth_uri = self.auth_uri
+        auth_url = self.auth_url
         headers = {'X-Auth-User': self.auth_user,
                    'X-Auth-Key': self.auth_key,
                    'X-Auth-Project-Id': self.project_id}
-        response = self.request(auth_uri,
+        response = self.request(auth_url,
                                 headers=headers)
 
         http_status = response.status_code
-        LOG.debug("%(auth_uri)s => code %(http_status)s",
-                  {'auth_uri': auth_uri, 'http_status': http_status})
+        LOG.debug("%(auth_url)s => code %(http_status)s",
+                  {'auth_url': auth_url,
+                   'http_status': http_status})
 
         # NOTE(cdent): This is a workaround for an issue where the placement
         # API fixture may respond when a request was supposed to go to the
@@ -424,6 +435,10 @@ class TestOpenStackClient(object):
         return self.api_post('/os-aggregates/%s/action' % aggregate_id,
                              {'add_host': {'host': host}})
 
+    def remove_host_from_aggregate(self, aggregate_id, host):
+        return self.api_post('/os-aggregates/%s/action' % aggregate_id,
+                             {'remove_host': {'host': host}})
+
     def get_limits(self):
         return self.api_get('/limits').body['limits']
 
@@ -483,3 +498,23 @@ class TestOpenStackClient(object):
     def delete_migration(self, server_id, migration_id):
         return self.api_delete(
             '/servers/%s/migrations/%s' % (server_id, migration_id))
+
+    def put_aggregate(self, aggregate_id, body):
+        return self.api_put(
+            '/os-aggregates/%s' % aggregate_id, body).body['aggregate']
+
+    def get_hypervisor_stats(self):
+        return self.api_get(
+            '/os-hypervisors/statistics').body['hypervisor_statistics']
+
+    def get_service_id(self, binary_name):
+        for service in self.get_services():
+            if service['binary'] == binary_name:
+                return service['id']
+        raise OpenStackApiNotFoundException('Service cannot be found.')
+
+    def put_service_force_down(self, service_id, forced_down):
+        req = {
+            'forced_down': forced_down
+        }
+        return self.api_put('os-services/%s' % service_id, req).body['service']

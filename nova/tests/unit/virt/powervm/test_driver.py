@@ -1,4 +1,4 @@
-# Copyright 2016, 2017 IBM Corp.
+# Copyright 2016, 2018 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -16,19 +16,29 @@ from __future__ import absolute_import
 
 import fixtures
 import mock
+from oslo_serialization import jsonutils
 from pypowervm import const as pvm_const
 from pypowervm import exceptions as pvm_exc
 from pypowervm.helpers import log_helper as pvm_hlp_log
 from pypowervm.helpers import vios_busy as pvm_hlp_vbusy
 from pypowervm.utils import transaction as pvm_tx
 from pypowervm.wrappers import virtual_io_server as pvm_vios
+import six
 
+from nova import block_device as nova_block_device
+from nova import conf as cfg
 from nova import exception
+from nova.objects import block_device as bdmobj
 from nova import test
 from nova.tests.unit.virt import powervm
+from nova.virt import block_device as nova_virt_bdm
+from nova.virt import driver as nova_driver
+from nova.virt.driver import ComputeDriver
 from nova.virt import hardware
 from nova.virt.powervm.disk import ssp
 from nova.virt.powervm import driver
+
+CONF = cfg.CONF
 
 
 class TestPowerVMDriver(test.NoDBTestCase):
@@ -50,12 +60,31 @@ class TestPowerVMDriver(test.NoDBTestCase):
         # Create an instance to test with
         self.inst = powervm.TEST_INSTANCE
 
+    def test_driver_capabilities(self):
+        """Test the driver capabilities."""
+        # check that the driver reports all capabilities
+        self.assertEqual(set(ComputeDriver.capabilities),
+                         set(self.drv.capabilities))
+        # check the values for each capability
+        self.assertFalse(self.drv.capabilities['has_imagecache'])
+        self.assertFalse(self.drv.capabilities['supports_evacuate'])
+        self.assertFalse(
+            self.drv.capabilities['supports_migrate_to_same_host'])
+        self.assertTrue(self.drv.capabilities['supports_attach_interface'])
+        self.assertFalse(self.drv.capabilities['supports_device_tagging'])
+        self.assertFalse(
+            self.drv.capabilities['supports_tagged_attach_interface'])
+        self.assertFalse(
+            self.drv.capabilities['supports_tagged_attach_volume'])
+        self.assertTrue(self.drv.capabilities['supports_extend_volume'])
+        self.assertFalse(self.drv.capabilities['supports_multiattach'])
+
     @mock.patch('nova.image.API')
     @mock.patch('pypowervm.tasks.storage.ComprehensiveScrub', autospec=True)
-    @mock.patch('nova.virt.powervm.disk.ssp.SSPDiskAdapter')
+    @mock.patch('oslo_utils.importutils.import_object_ns', autospec=True)
     @mock.patch('pypowervm.wrappers.managed_system.System', autospec=True)
     @mock.patch('pypowervm.tasks.partition.validate_vios_ready', autospec=True)
-    def test_init_host(self, mock_vvr, mock_sys, mock_ssp, mock_scrub,
+    def test_init_host(self, mock_vvr, mock_sys, mock_import, mock_scrub,
                        mock_img):
         mock_hostw = mock.Mock(uuid='uuid')
         mock_sys.get.return_value = [mock_hostw]
@@ -69,8 +98,10 @@ class TestPowerVMDriver(test.NoDBTestCase):
         self.assertEqual(mock_hostw, self.drv.host_wrapper)
         mock_scrub.assert_called_once_with(self.drv.adapter)
         mock_scrub.return_value.execute.assert_called_once_with()
-        mock_ssp.assert_called_once_with(self.drv.adapter, 'uuid')
-        self.assertEqual(mock_ssp.return_value, self.drv.disk_dvr)
+        mock_import.assert_called_once_with(
+            'nova.virt.powervm.disk', 'localdisk.LocalStorage',
+            self.drv.adapter, 'uuid')
+        self.assertEqual(mock_import.return_value, self.drv.disk_dvr)
         mock_img.assert_called_once_with()
         self.assertEqual(mock_img.return_value, self.drv.image_api)
 
@@ -111,6 +142,7 @@ class TestPowerVMDriver(test.NoDBTestCase):
         mock_bhrfm.assert_called_once_with('sys')
         self.assertEqual('sys', self.drv.host_wrapper)
 
+    @mock.patch('nova.virt.powervm.tasks.storage.AttachVolume.execute')
     @mock.patch('nova.virt.powervm.tasks.network.PlugMgmtVif.execute')
     @mock.patch('nova.virt.powervm.tasks.network.PlugVifs.execute')
     @mock.patch('nova.virt.powervm.media.ConfigDrivePowerVM')
@@ -122,7 +154,7 @@ class TestPowerVMDriver(test.NoDBTestCase):
                 autospec=True)
     def test_spawn_ops(self, mock_scrub, mock_bldftsk, mock_crt_lpar,
                        mock_cdrb, mock_cfg_drv, mock_plug_vifs,
-                       mock_plug_mgmt_vif):
+                       mock_plug_mgmt_vif, mock_attach_vol):
         """Validates the 'typical' spawn flow of the spawn of an instance. """
         mock_cdrb.return_value = True
         self.drv.host_wrapper = mock.Mock()
@@ -130,8 +162,10 @@ class TestPowerVMDriver(test.NoDBTestCase):
                                                  instance=True)
         mock_ftsk = pvm_tx.FeedTask('fake', [mock.Mock(spec=pvm_vios.VIOS)])
         mock_bldftsk.return_value = mock_ftsk
+        block_device_info = self._fake_bdms()
         self.drv.spawn('context', self.inst, 'img_meta', 'files', 'password',
-                       'allocs', network_info='netinfo')
+                       'allocs', network_info='netinfo',
+                       block_device_info=block_device_info)
         mock_crt_lpar.assert_called_once_with(
             self.adp, self.drv.host_wrapper, self.inst)
         mock_bldftsk.assert_called_once_with(
@@ -145,6 +179,7 @@ class TestPowerVMDriver(test.NoDBTestCase):
         self.drv.disk_dvr.attach_disk.assert_called_once_with(
             self.inst, self.drv.disk_dvr.create_disk_from_image.return_value,
             mock_ftsk)
+        self.assertEqual(2, mock_attach_vol.call_count)
         mock_cfg_drv.assert_called_once_with(self.adp)
         mock_cfg_drv.return_value.create_cfg_drv_vopt.assert_called_once_with(
             self.inst, 'files', 'netinfo', mock_ftsk, admin_pass='password',
@@ -152,13 +187,16 @@ class TestPowerVMDriver(test.NoDBTestCase):
         self.pwron.assert_called_once_with(self.adp, self.inst)
 
         mock_cfg_drv.reset_mock()
+        mock_attach_vol.reset_mock()
 
-        # No config drive
+        # No config drive, no bdms
         mock_cdrb.return_value = False
         self.drv.spawn('context', self.inst, 'img_meta', 'files', 'password',
                        'allocs')
         mock_cfg_drv.assert_not_called()
+        mock_attach_vol.assert_not_called()
 
+    @mock.patch('nova.virt.powervm.tasks.storage.DetachVolume.execute')
     @mock.patch('nova.virt.powervm.tasks.network.UnplugVifs.execute')
     @mock.patch('nova.virt.powervm.vm.delete_lpar')
     @mock.patch('nova.virt.powervm.media.ConfigDrivePowerVM')
@@ -166,7 +204,7 @@ class TestPowerVMDriver(test.NoDBTestCase):
     @mock.patch('pypowervm.tasks.partition.build_active_vio_feed_task',
                 autospec=True)
     def test_destroy(self, mock_bldftsk, mock_cdrb, mock_cfgdrv,
-                     mock_dlt_lpar, mock_unplug):
+                     mock_dlt_lpar, mock_unplug, mock_detach_vol):
         """Validates PowerVM destroy."""
         self.drv.host_wrapper = mock.Mock()
         self.drv.disk_dvr = mock.create_autospec(ssp.SSPDiskAdapter,
@@ -174,10 +212,12 @@ class TestPowerVMDriver(test.NoDBTestCase):
 
         mock_ftsk = pvm_tx.FeedTask('fake', [mock.Mock(spec=pvm_vios.VIOS)])
         mock_bldftsk.return_value = mock_ftsk
+        block_device_info = self._fake_bdms()
 
         # Good path, with config drive, destroy disks
         mock_cdrb.return_value = True
-        self.drv.destroy('context', self.inst, [], block_device_info={})
+        self.drv.destroy('context', self.inst, [],
+                         block_device_info=block_device_info)
         self.pwroff.assert_called_once_with(
             self.adp, self.inst, force_immediate=True)
         mock_bldftsk.assert_called_once_with(
@@ -187,6 +227,7 @@ class TestPowerVMDriver(test.NoDBTestCase):
         mock_cfgdrv.assert_called_once_with(self.adp)
         mock_cfgdrv.return_value.dlt_vopt.assert_called_once_with(
             self.inst, stg_ftsk=mock_bldftsk.return_value)
+        self.assertEqual(2, mock_detach_vol.call_count)
         self.drv.disk_dvr.detach_disk.assert_called_once_with(
             self.inst)
         self.drv.disk_dvr.delete_disks.assert_called_once_with(
@@ -200,13 +241,15 @@ class TestPowerVMDriver(test.NoDBTestCase):
         mock_cfgdrv.reset_mock()
         self.drv.disk_dvr.detach_disk.reset_mock()
         self.drv.disk_dvr.delete_disks.reset_mock()
+        mock_detach_vol.reset_mock()
         mock_dlt_lpar.reset_mock()
 
-        # No config drive, preserve disks
+        # No config drive, preserve disks, no block device info
         mock_cdrb.return_value = False
         self.drv.destroy('context', self.inst, [], block_device_info={},
                          destroy_disks=False)
         mock_cfgdrv.return_value.dlt_vopt.assert_not_called()
+        mock_detach_vol.assert_not_called()
         self.drv.disk_dvr.delete_disks.assert_not_called()
 
         # Non-forced power_off, since preserving disks
@@ -269,6 +312,29 @@ class TestPowerVMDriver(test.NoDBTestCase):
                           self.drv.destroy, 'context', self.inst, [],
                           block_device_info={})
 
+    @mock.patch('nova.virt.powervm.tasks.image.UpdateTaskState.'
+                'execute', autospec=True)
+    @mock.patch('nova.virt.powervm.tasks.storage.InstanceDiskToMgmt.'
+                'execute', autospec=True)
+    @mock.patch('nova.virt.powervm.tasks.image.StreamToGlance.execute')
+    @mock.patch('nova.virt.powervm.tasks.storage.RemoveInstanceDiskFromMgmt.'
+                'execute')
+    def test_snapshot(self, mock_rm, mock_stream, mock_conn, mock_update):
+        self.drv.disk_dvr = mock.Mock()
+        self.drv.image_api = mock.Mock()
+        mock_conn.return_value = 'stg_elem', 'vios_wrap', 'disk_path'
+        self.drv.snapshot('context', self.inst, 'image_id',
+                          'update_task_state')
+        self.assertEqual(2, mock_update.call_count)
+        self.assertEqual(1, mock_conn.call_count)
+        mock_stream.assert_called_once_with(disk_path='disk_path')
+        mock_rm.assert_called_once_with(
+            stg_elem='stg_elem', vios_wrap='vios_wrap', disk_path='disk_path')
+
+        self.drv.disk_dvr.capabilities = {'snapshot': False}
+        self.assertRaises(exception.NotSupportedWithOption, self.drv.snapshot,
+                         'context', self.inst, 'image_id', 'update_task_state')
+
     def test_power_on(self):
         self.drv.power_on('context', self.inst, 'network_info')
         self.pwron.assert_called_once_with(self.adp, self.inst)
@@ -295,6 +361,65 @@ class TestPowerVMDriver(test.NoDBTestCase):
         inst = mock.Mock()
         self.drv.reboot('context', inst, 'network_info', 'HARD')
         mock_reboot.assert_called_once_with(self.adp, inst, True)
+
+    @mock.patch('nova.virt.powervm.driver.PowerVMDriver.plug_vifs')
+    def test_attach_interface(self, mock_plug_vifs):
+        self.drv.attach_interface('context', 'inst', 'image_meta', 'vif')
+        mock_plug_vifs.assert_called_once_with('inst', ['vif'])
+
+    @mock.patch('nova.virt.powervm.driver.PowerVMDriver.unplug_vifs')
+    def test_detach_interface(self, mock_unplug_vifs):
+        self.drv.detach_interface('context', 'inst', 'vif')
+        mock_unplug_vifs.assert_called_once_with('inst', ['vif'])
+
+    @mock.patch('nova.virt.powervm.tasks.vm.Get', autospec=True)
+    @mock.patch('nova.virt.powervm.tasks.base.run', autospec=True)
+    @mock.patch('nova.virt.powervm.tasks.network.PlugVifs', autospec=True)
+    @mock.patch('taskflow.patterns.linear_flow.Flow', autospec=True)
+    def test_plug_vifs(self, mock_tf, mock_plug_vifs, mock_tf_run, mock_get):
+        # Successful plug
+        mock_inst = mock.Mock()
+        self.drv.plug_vifs(mock_inst, 'net_info')
+        mock_get.assert_called_once_with(self.adp, mock_inst)
+        mock_plug_vifs.assert_called_once_with(
+            self.drv.virtapi, self.adp, mock_inst, 'net_info')
+        add_calls = [mock.call(mock_get.return_value),
+                     mock.call(mock_plug_vifs.return_value)]
+        mock_tf.return_value.add.assert_has_calls(add_calls)
+        mock_tf_run.assert_called_once_with(
+            mock_tf.return_value, instance=mock_inst)
+
+        # InstanceNotFound and generic exception both raise
+        mock_tf_run.side_effect = exception.InstanceNotFound('id')
+        exc = self.assertRaises(exception.VirtualInterfacePlugException,
+                                self.drv.plug_vifs, mock_inst, 'net_info')
+        self.assertIn('instance', six.text_type(exc))
+        mock_tf_run.side_effect = Exception
+        exc = self.assertRaises(exception.VirtualInterfacePlugException,
+                                self.drv.plug_vifs, mock_inst, 'net_info')
+        self.assertIn('unexpected', six.text_type(exc))
+
+    @mock.patch('nova.virt.powervm.tasks.base.run', autospec=True)
+    @mock.patch('nova.virt.powervm.tasks.network.UnplugVifs', autospec=True)
+    @mock.patch('taskflow.patterns.linear_flow.Flow', autospec=True)
+    def test_unplug_vifs(self, mock_tf, mock_unplug_vifs, mock_tf_run):
+        # Successful unplug
+        mock_inst = mock.Mock()
+        self.drv.unplug_vifs(mock_inst, 'net_info')
+        mock_unplug_vifs.assert_called_once_with(self.adp, mock_inst,
+                                                 'net_info')
+        mock_tf.return_value.add.assert_called_once_with(
+            mock_unplug_vifs.return_value)
+        mock_tf_run.assert_called_once_with(mock_tf.return_value, mock_inst)
+
+        # InstanceNotFound should pass
+        mock_tf_run.side_effect = exception.InstanceNotFound(instance_id='1')
+        self.drv.unplug_vifs(mock_inst, 'net_info')
+
+        # Raise InterfaceDetachFailed otherwise
+        mock_tf_run.side_effect = Exception
+        self.assertRaises(exception.InterfaceDetachFailed,
+                          self.drv.unplug_vifs, mock_inst, 'net_info')
 
     @mock.patch('pypowervm.tasks.vterm.open_remotable_vnc_vterm',
                 autospec=True)
@@ -323,3 +448,93 @@ class TestPowerVMDriver(test.NoDBTestCase):
     def test_deallocate_networks_on_reschedule(self):
         candeallocate = self.drv.deallocate_networks_on_reschedule(mock.Mock())
         self.assertTrue(candeallocate)
+
+    @mock.patch('nova.virt.powervm.volume.fcvscsi.FCVscsiVolumeAdapter')
+    def test_attach_volume(self, mock_vscsi_adpt):
+        """Validates the basic PowerVM attach volume."""
+        # BDMs
+        mock_bdm = self._fake_bdms()['block_device_mapping'][0]
+
+        with mock.patch.object(self.inst, 'save') as mock_save:
+            # Invoke the method.
+            self.drv.attach_volume('context', mock_bdm.get('connection_info'),
+                                   self.inst, mock.sentinel.stg_ftsk)
+
+        # Verify the connect volume was invoked
+        mock_vscsi_adpt.return_value.attach_volume.assert_called_once_with()
+        mock_save.assert_called_once_with()
+
+    @mock.patch('nova.virt.powervm.volume.fcvscsi.FCVscsiVolumeAdapter')
+    def test_detach_volume(self, mock_vscsi_adpt):
+        """Validates the basic PowerVM detach volume."""
+        # BDMs
+        mock_bdm = self._fake_bdms()['block_device_mapping'][0]
+
+        # Invoke the method, good path test.
+        self.drv.detach_volume('context', mock_bdm.get('connection_info'),
+                               self.inst, mock.sentinel.stg_ftsk)
+        # Verify the disconnect volume was invoked
+        mock_vscsi_adpt.return_value.detach_volume.assert_called_once_with()
+
+    @mock.patch('nova.virt.powervm.volume.fcvscsi.FCVscsiVolumeAdapter')
+    def test_extend_volume(self, mock_vscsi_adpt):
+        mock_bdm = self._fake_bdms()['block_device_mapping'][0]
+        self.drv.extend_volume(mock_bdm.get('connection_info'), self.inst)
+        mock_vscsi_adpt.return_value.extend_volume.assert_called_once_with()
+
+    def test_vol_drv_iter(self):
+        block_device_info = self._fake_bdms()
+        bdms = nova_driver.block_device_info_get_mapping(block_device_info)
+        vol_adpt = mock.Mock()
+
+        def _get_results(bdms):
+            # Patch so we get the same mock back each time.
+            with mock.patch('nova.virt.powervm.volume.fcvscsi.'
+                            'FCVscsiVolumeAdapter', return_value=vol_adpt):
+                return [
+                    (bdm, vol_drv) for bdm, vol_drv in self.drv._vol_drv_iter(
+                        'context', self.inst, bdms)]
+
+        results = _get_results(bdms)
+        self.assertEqual(
+            'fake_vol1',
+            results[0][0]['connection_info']['data']['volume_id'])
+        self.assertEqual(vol_adpt, results[0][1])
+        self.assertEqual(
+            'fake_vol2',
+            results[1][0]['connection_info']['data']['volume_id'])
+        self.assertEqual(vol_adpt, results[1][1])
+
+        # Test with empty bdms
+        self.assertEqual([], _get_results([]))
+
+    @staticmethod
+    def _fake_bdms():
+        def _fake_bdm(volume_id, target_lun):
+            connection_info = {'driver_volume_type': 'fibre_channel',
+                               'data': {'volume_id': volume_id,
+                                        'target_lun': target_lun,
+                                        'initiator_target_map':
+                                        {'21000024F5': ['50050768']}}}
+            mapping_dict = {'source_type': 'volume', 'volume_id': volume_id,
+                            'destination_type': 'volume',
+                            'connection_info':
+                            jsonutils.dumps(connection_info),
+                            }
+            bdm_dict = nova_block_device.BlockDeviceDict(mapping_dict)
+            bdm_obj = bdmobj.BlockDeviceMapping(**bdm_dict)
+
+            return nova_virt_bdm.DriverVolumeBlockDevice(bdm_obj)
+
+        bdm_list = [_fake_bdm('fake_vol1', 0), _fake_bdm('fake_vol2', 1)]
+        block_device_info = {'block_device_mapping': bdm_list}
+
+        return block_device_info
+
+    @mock.patch('nova.virt.powervm.volume.fcvscsi.wwpns', autospec=True)
+    def test_get_volume_connector(self, mock_wwpns):
+        vol_connector = self.drv.get_volume_connector(mock.Mock())
+        self.assertEqual(mock_wwpns.return_value, vol_connector['wwpns'])
+        self.assertFalse(vol_connector['multipath'])
+        self.assertEqual(vol_connector['host'], CONF.host)
+        self.assertIsNone(vol_connector['initiator'])

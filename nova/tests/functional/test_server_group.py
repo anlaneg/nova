@@ -17,16 +17,17 @@ import time
 
 import mock
 from oslo_config import cfg
+import six
 
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova.db.sqlalchemy import api as db_api
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api import client
 from nova.tests.functional import integrated_helpers
-from nova.tests.unit import fake_network
 from nova.tests.unit import policy_fixture
+from nova import utils
 from nova.virt import fake
 
 import nova.scheduler.utils
@@ -92,9 +93,12 @@ class ServerGroupTestBase(test.TestCase,
         self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
 
     def _boot_a_server_to_group(self, group,
-                                expected_status='ACTIVE', flavor=None):
-        server = self._build_minimal_create_server_request(self.api,
-                                                           'some-server')
+                                expected_status='ACTIVE', flavor=None,
+                                az=None):
+        server = self._build_minimal_create_server_request(
+            self.api, 'some-server',
+            image_uuid='a2459075-d96c-40d5-893e-577ff92e721c', networks=[],
+            az=az)
         if flavor:
             server['flavorRef'] = ('http://fake.server/%s'
                                                   % flavor['id'])
@@ -148,7 +152,6 @@ class ServerGroupTestV21(ServerGroupTestBase):
         fake.set_nodes(['host2'])
         self.addCleanup(fake.restore_nodes)
         self.compute2 = self.start_service('compute', host='host2')
-        fake_network.set_stub_network_methods(self)
 
     def test_get_no_groups(self):
         groups = self.api.get_server_groups()
@@ -686,6 +689,11 @@ class ServerGroupTestV215(ServerGroupTestV21):
 
         host.start()
 
+    def _check_group_format(self, group, created_group):
+        self.assertEqual(group['policies'], created_group['policies'])
+        self.assertEqual({}, created_group['metadata'])
+        self.assertNotIn('rules', created_group)
+
     def test_create_and_delete_groups(self):
         groups = [self.anti_affinity,
                   self.affinity,
@@ -698,9 +706,8 @@ class ServerGroupTestV215(ServerGroupTestV21):
             created_group = self.api.post_server_groups(group)
             created_groups.append(created_group)
             self.assertEqual(group['name'], created_group['name'])
-            self.assertEqual(group['policies'], created_group['policies'])
+            self._check_group_format(group, created_group)
             self.assertEqual([], created_group['members'])
-            self.assertEqual({}, created_group['metadata'])
             self.assertIn('id', created_group)
 
             group_details = self.api.get_server_group(created_group['id'])
@@ -845,3 +852,217 @@ class ServerGroupTestV215(ServerGroupTestV21):
 
     def test_soft_affinity_not_supported(self):
         pass
+
+
+class ServerGroupTestV264(ServerGroupTestV215):
+    api_major_version = 'v2.1'
+    microversion = '2.64'
+    anti_affinity = {'name': 'fake-name-1', 'policy': 'anti-affinity'}
+    affinity = {'name': 'fake-name-2', 'policy': 'affinity'}
+    soft_anti_affinity = {'name': 'fake-name-3',
+                          'policy': 'soft-anti-affinity'}
+    soft_affinity = {'name': 'fake-name-4', 'policy': 'soft-affinity'}
+
+    def _check_group_format(self, group, created_group):
+        self.assertEqual(group['policy'], created_group['policy'])
+        self.assertEqual(group.get('rules', {}), created_group['rules'])
+        self.assertNotIn('metadata', created_group)
+        self.assertNotIn('policies', created_group)
+
+    def test_boot_server_with_anti_affinity_rules(self):
+        anti_affinity_max_2 = {
+            'name': 'fake-name-1',
+            'policy': 'anti-affinity',
+            'rules': {'max_server_per_host': 2}
+        }
+        created_group = self.api.post_server_groups(anti_affinity_max_2)
+        servers1st = self._boot_servers_to_group(created_group)
+        servers2nd = self._boot_servers_to_group(created_group)
+
+        # We have 2 computes so the fifth server won't fit into the same group
+        failed_server = self._boot_a_server_to_group(created_group,
+                                                     expected_status='ERROR')
+        self.assertEqual('No valid host was found. '
+                         'There are not enough hosts available.',
+                         failed_server['fault']['message'])
+
+        hosts = map(lambda x: x['OS-EXT-SRV-ATTR:host'],
+                    servers1st + servers2nd)
+        hosts = [h for h in hosts]
+        # 4 servers
+        self.assertEqual(4, len(hosts))
+        # schedule to 2 host
+        self.assertEqual(2, len(set(hosts)))
+        # each host has 2 servers
+        for host in set(hosts):
+            self.assertEqual(2, hosts.count(host))
+
+
+class ServerGroupTestMultiCell(ServerGroupTestBase):
+
+    NUMBER_OF_CELLS = 2
+
+    def setUp(self):
+        super(ServerGroupTestMultiCell, self).setUp()
+        # Start two compute services, one per cell
+        fake.set_nodes(['host1'])
+        self.addCleanup(fake.restore_nodes)
+        self.compute1 = self.start_service('compute', host='host1',
+                                           cell='cell1')
+        fake.set_nodes(['host2'])
+        self.addCleanup(fake.restore_nodes)
+        self.compute2 = self.start_service('compute', host='host2',
+                                           cell='cell2')
+        # This is needed to find a server that is still booting with multiple
+        # cells, while waiting for the state change to ACTIVE. See the
+        # _get_instance method in the compute/api for details.
+        self.useFixture(nova_fixtures.AllServicesCurrent())
+
+        self.aggregates = {}
+
+    def _create_aggregate(self, name):
+        agg = self.admin_api.post_aggregate({'aggregate': {'name': name}})
+        self.aggregates[name] = agg
+
+    def _add_host_to_aggregate(self, agg, host):
+        """Add a compute host to nova aggregates.
+
+        :param agg: Name of the nova aggregate
+        :param host: Name of the compute host
+        """
+        agg = self.aggregates[agg]
+        self.admin_api.add_host_to_aggregate(agg['id'], host)
+
+    def _set_az_aggregate(self, agg, az):
+        """Set the availability_zone of an aggregate
+
+        :param agg: Name of the nova aggregate
+        :param az: Availability zone name
+        """
+        agg = self.aggregates[agg]
+        action = {
+            'set_metadata': {
+                'metadata': {
+                    'availability_zone': az,
+                }
+            },
+        }
+        self.admin_api.post_aggregate_action(agg['id'], action)
+
+    def test_boot_servers_with_affinity(self):
+        # Create a server group for affinity
+        # As of microversion 2.64, a single policy must be specified when
+        # creating a server group.
+        created_group = self.api.post_server_groups(self.affinity)
+        # Create aggregates for cell1 and cell2
+        self._create_aggregate('agg1_cell1')
+        self._create_aggregate('agg2_cell2')
+        # Add each cell to a separate aggregate
+        self._add_host_to_aggregate('agg1_cell1', 'host1')
+        self._add_host_to_aggregate('agg2_cell2', 'host2')
+        # Set each cell to a separate availability zone
+        self._set_az_aggregate('agg1_cell1', 'cell1')
+        self._set_az_aggregate('agg2_cell2', 'cell2')
+        # Boot a server to cell2 with the affinity policy. Order matters here
+        # because the CellDatabases fixture defaults the local cell database to
+        # cell1. So boot the server to cell2 where the group member cannot be
+        # found as a result of the default setting.
+        self._boot_a_server_to_group(created_group, az='cell2')
+        # Boot a server to cell1 with the affinity policy. This should fail
+        # because group members found in cell2 should violate the policy.
+        self._boot_a_server_to_group(created_group, az='cell1',
+                                     expected_status='ERROR')
+
+
+class TestAntiAffinityLiveMigration(test.TestCase,
+                                    integrated_helpers.InstanceHelperMixin):
+
+    def setUp(self):
+        super(TestAntiAffinityLiveMigration, self).setUp()
+        # Setup common fixtures.
+        self.useFixture(policy_fixture.RealPolicyFixture())
+        self.useFixture(nova_fixtures.NeutronFixture(self))
+        self.useFixture(nova_fixtures.PlacementFixture())
+        # Setup API.
+        api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
+            api_version='v2.1'))
+        self.api = api_fixture.api
+        self.admin_api = api_fixture.admin_api
+        # Fake out glance.
+        nova.tests.unit.image.fake.stub_out_image_service(self)
+        self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
+        # Start conductor, scheduler and two computes.
+        self.start_service('conductor')
+        self.start_service('scheduler')
+        for host in ('host1', 'host2'):
+            fake.set_nodes([host])
+            self.addCleanup(fake.restore_nodes)
+            self.start_service('compute', host=host)
+
+    def test_serial_no_valid_host_then_pass_with_third_host(self):
+        """Creates 2 servers in order (not a multi-create request) in an
+        anti-affinity group so there will be 1 server on each host. Then
+        attempts to live migrate the first server which will fail because the
+        only other available host will be full. Then starts up a 3rd compute
+        service and retries the live migration which should then pass.
+        """
+        # Create the anti-affinity group used for the servers.
+        group = self.api.post_server_groups(
+            {'name': 'test_serial_no_valid_host_then_pass_with_third_host',
+             'policies': ['anti-affinity']})
+        servers = []
+        for x in range(2):
+            server = self._build_minimal_create_server_request(
+                self.api,
+                'test_serial_no_valid_host_then_pass_with_third_host-%d' % x,
+                networks='none')
+            # Add the group hint so the server is created in our group.
+            server_req = {
+                'server': server,
+                'os:scheduler_hints': {'group': group['id']}
+            }
+            # Use microversion 2.37 for passing networks='none'.
+            with utils.temporary_mutation(self.api, microversion='2.37'):
+                server = self.api.post_server(server_req)
+                servers.append(
+                    self._wait_for_state_change(
+                        self.admin_api, server, 'ACTIVE'))
+
+        # Make sure each server is on a unique host.
+        hosts = set([svr['OS-EXT-SRV-ATTR:host'] for svr in servers])
+        self.assertEqual(2, len(hosts))
+
+        # And make sure the group has 2 members.
+        members = self.api.get_server_group(group['id'])['members']
+        self.assertEqual(2, len(members))
+
+        # Now attempt to live migrate one of the servers which should fail
+        # because we don't have a free host. Since we're using microversion 2.1
+        # the scheduling will be synchronous and we should get back a 400
+        # response for the NoValidHost error.
+        body = {
+            'os-migrateLive': {
+                'host': None,
+                'block_migration': False,
+                'disk_over_commit': False
+            }
+        }
+        # Specifically use the first server since that was the first member
+        # added to the group.
+        server = servers[0]
+        ex = self.assertRaises(client.OpenStackApiException,
+                               self.admin_api.post_server_action,
+                               server['id'], body)
+        self.assertEqual(400, ex.response.status_code)
+        self.assertIn('No valid host', six.text_type(ex))
+
+        # Now start up a 3rd compute service and retry the live migration which
+        # should work this time.
+        fake.set_nodes(['host3'])
+        self.addCleanup(fake.restore_nodes)
+        self.start_service('compute', host='host3')
+        self.admin_api.post_server_action(server['id'], body)
+        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        # Now the server should be on host3 since that was the only available
+        # host for the live migration.
+        self.assertEqual('host3', server['OS-EXT-SRV-ATTR:host'])

@@ -19,23 +19,18 @@ Tests For Scheduler
 
 import mock
 import oslo_messaging as messaging
+from oslo_utils.fixture import uuidsentinel as uuids
 
-import nova.conf
 from nova import context
 from nova import objects
 from nova.scheduler import caching_scheduler
-from nova.scheduler import chance
 from nova.scheduler import filter_scheduler
 from nova.scheduler import host_manager
-from nova.scheduler import ironic_host_manager
 from nova.scheduler import manager
 from nova import servicegroup
 from nova import test
 from nova.tests.unit import fake_server_actions
 from nova.tests.unit.scheduler import fakes
-from nova.tests import uuidsentinel as uuids
-
-CONF = nova.conf.CONF
 
 
 class SchedulerManagerInitTestCase(test.NoDBTestCase):
@@ -49,15 +44,6 @@ class SchedulerManagerInitTestCase(test.NoDBTestCase):
                                                 mock_init_inst):
         driver = self.manager_cls().driver
         self.assertIsInstance(driver, filter_scheduler.FilterScheduler)
-
-    @mock.patch.object(host_manager.HostManager, '_init_instance_info')
-    @mock.patch.object(host_manager.HostManager, '_init_aggregates')
-    def test_init_using_chance_schedulerdriver(self,
-                                               mock_init_agg,
-                                               mock_init_inst):
-        self.flags(driver='chance_scheduler', group='scheduler')
-        driver = self.manager_cls().driver
-        self.assertIsInstance(driver, chance.ChanceScheduler)
 
     @mock.patch.object(host_manager.HostManager, '_init_instance_info')
     @mock.patch.object(host_manager.HostManager, '_init_aggregates')
@@ -231,6 +217,25 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
         place_res = ([], {}, None)
         self._test_select_destination(place_res)
 
+    @mock.patch('nova.scheduler.request_filter.process_reqspec')
+    @mock.patch('nova.scheduler.utils.resources_from_request_spec')
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                'get_allocation_candidates')
+    def test_select_destination_is_rebuild(self, mock_get_ac, mock_rfrs,
+                                           mock_process):
+        fake_spec = objects.RequestSpec(
+            scheduler_hints={'_nova_check_type': ['rebuild']})
+        fake_spec.instance_uuid = uuids.instance
+        with mock.patch.object(self.manager.driver, 'select_destinations'
+                ) as select_destinations:
+            self.manager.select_destinations(self.context, spec_obj=fake_spec,
+                    instance_uuids=[fake_spec.instance_uuid])
+            select_destinations.assert_called_once_with(
+                self.context, fake_spec,
+                [fake_spec.instance_uuid], None, None, None, False)
+            mock_get_ac.assert_not_called()
+            mock_process.assert_not_called()
+
     @mock.patch('nova.scheduler.utils.resources_from_request_spec')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'get_allocation_candidates')
@@ -324,6 +329,12 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
                                               mock.sentinel.host_name,
                                               mock.sentinel.instance_uuids)
 
+    def test_reset(self):
+        with mock.patch.object(self.manager.driver.host_manager,
+                               'refresh_cells_caches') as mock_refresh:
+            self.manager.reset()
+            mock_refresh.assert_called_once_with()
+
     @mock.patch('nova.objects.host_mapping.discover_hosts')
     def test_discover_hosts(self, mock_discover):
         cm1 = objects.CellMapping(name='cell1')
@@ -333,30 +344,6 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
                                       objects.HostMapping(host='b',
                                                           cell_mapping=cm2)]
         self.manager._discover_hosts_in_cells(mock.sentinel.context)
-
-
-class SchedulerInitTestCase(test.NoDBTestCase):
-    """Test case for base scheduler driver initiation."""
-
-    driver_cls = fakes.FakeScheduler
-
-    @mock.patch.object(host_manager.HostManager, '_init_instance_info')
-    @mock.patch.object(host_manager.HostManager, '_init_aggregates')
-    def test_init_using_default_hostmanager(self,
-                                            mock_init_agg,
-                                            mock_init_inst):
-        manager = self.driver_cls().host_manager
-        self.assertIsInstance(manager, host_manager.HostManager)
-
-    @mock.patch.object(ironic_host_manager.IronicHostManager,
-                       '_init_instance_info')
-    @mock.patch.object(host_manager.HostManager, '_init_aggregates')
-    def test_init_using_ironic_hostmanager(self,
-                                           mock_init_agg,
-                                           mock_init_inst):
-        self.flags(host_manager='ironic_host_manager', group='scheduler')
-        manager = self.driver_cls().host_manager
-        self.assertIsInstance(manager, ironic_host_manager.IronicHostManager)
 
 
 class SchedulerTestCase(test.NoDBTestCase):

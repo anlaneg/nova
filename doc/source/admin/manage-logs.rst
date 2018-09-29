@@ -10,7 +10,7 @@ the configuration file, add this line to the ``/etc/nova/nova.conf`` file:
 
 .. code-block:: ini
 
-   log-config=/etc/nova/logging.conf
+   log_config_append=/etc/nova/logging.conf
 
 To change the logging level, add ``DEBUG``, ``INFO``, ``WARNING``, or ``ERROR``
 as a parameter.
@@ -35,8 +35,8 @@ For more about the logging configuration syntax, including the ``handlers`` and
 on logging configuration files.
 
 For an example of the ``logging.conf`` file with various defined handlers, see
-the `Example Configuration File for nova
-<https://docs.openstack.org/oslo.log/latest/admin/example_nova.html>`__.
+the :oslo.log-doc:`Example Configuration File for nova
+<admin/example_nova.html>`.
 
 Syslog
 ~~~~~~

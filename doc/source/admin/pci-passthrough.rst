@@ -17,8 +17,10 @@ assigned to only one guest and cannot be shared.
 
 .. note::
 
-   For information on attaching virtual SR-IOV devices to guests, refer to the
-   `Networking Guide`_.
+   For information on creating servers with virtual SR-IOV devices, refer to
+   the :neutron-doc:`Networking Guide <admin/config-sriov>`. Attaching
+   SR-IOV ports to existing servers is not currently supported, see
+   `bug 1708433 <https://bugs.launchpad.net/nova/+bug/1708433>`_ for details.
 
 To enable PCI passthrough, follow the steps below:
 
@@ -40,7 +42,9 @@ To enable PCI passthrough, follow the steps below:
 Configure nova-scheduler (Controller)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-#. Configure ``nova-scheduler`` as specified in `Configure nova-scheduler`_.
+#. Configure ``nova-scheduler`` as specified in :neutron-doc:`Configure
+   nova-scheduler
+   <admin/config-sriov.html#configure-nova-scheduler-controller`.
 
 #. Restart the ``nova-scheduler`` service.
 
@@ -82,7 +86,29 @@ Enable PCI passthrough (Compute)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Enable VT-d and IOMMU. For more information, refer to steps one and two in
-`Create Virtual Functions`_.
+:neutron-doc:`Create Virtual Functions
+<admin/config-sriov.html#create-virtual-functions-compute`.
+
+For Hyper-V compute nodes, the requirements are as follows:
+
+* Windows 10 or Windows / Hyper-V Server 2016 or newer.
+* VT-d and SR-IOV enabled on the host.
+* Assignable PCI devices.
+
+In order to check the requirements above and if there are any assignable PCI
+devices, run the following Powershell commands:
+
+   .. code-block:: console
+
+       Start-BitsTransfer https://raw.githubusercontent.com/Microsoft/Virtualization-Documentation/master/hyperv-samples/benarm-powershell/DDA/survey-dda.ps1
+        .\survey-dda.ps1
+
+If the compute node passes all the requirements, the desired assignable PCI
+devices to be disabled and unmounted from the host, in order to be assignable
+by Hyper-V. The following can be read for more details: `Hyper-V PCI
+passthrough`__.
+
+.. __: https://blogs.technet.microsoft.com/heyscriptingguy/2016/07/14/passing-through-devices-to-hyper-v-vms-by-using-discrete-device-assignment/
 
 Configure PCI devices (Compute)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -138,8 +164,3 @@ available with the specified ``vendor_id`` and ``product_id`` that matches the
 .. code-block:: console
 
    # openstack server create --flavor m1.large --image cirros-0.3.5-x86_64-uec --wait test-pci
-
-.. Links
-.. _`Create Virtual Functions`: https://docs.openstack.org/neutron/latest/admin/config-sriov.html#create-virtual-functions-compute
-.. _`Configure nova-scheduler`: https://docs.openstack.org/neutron/latest/admin/config-sriov.html#configure-nova-scheduler-controller
-.. _`Networking Guide`: https://docs.openstack.org/neutron/latest/admin/config-sriov.html

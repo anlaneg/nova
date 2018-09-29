@@ -129,6 +129,9 @@ class Service(service.Service):
         self.servicegroup_api = servicegroup.API()
         #载入对应的manager_class,并构造manager_class对应的对象
         manager_class = importutils.import_class(self.manager_class_name)
+        if objects_base.NovaObject.indirection_api:
+            conductor_api = conductor.API()
+            conductor_api.wait_until_ready(context.get_admin_context())
         #当前的manager对象，见SERVICE_MANAGERS
         self.manager = manager_class(host=self.host, *args, **kwargs)
         self.rpcserver = None
@@ -138,9 +141,6 @@ class Service(service.Service):
         self.periodic_interval_max = periodic_interval_max
         self.saved_args, self.saved_kwargs = args, kwargs
         self.backdoor_port = None
-        if objects_base.NovaObject.indirection_api:
-            conductor_api = conductor.API()
-            conductor_api.wait_until_ready(context.get_admin_context())
         setup_profiler(binary, self.host)
 
     def __repr__(self):
@@ -333,9 +333,13 @@ class WSGIService(service.Service):
 
         """
         self.name = name
-        # NOTE(danms): Name can be metadata, osapi_compute, or ec2, per
+        # NOTE(danms): Name can be metadata, osapi_compute, per
         # nova.service's enabled_apis
         self.binary = 'nova-%s' % name
+
+        LOG.warning('Running %s using eventlet is deprecated. Deploy with '
+                    'a WSGI server such as uwsgi or mod_wsgi.', self.binary)
+
         self.topic = None
         self.manager = self._get_manager()
         self.loader = loader or api_wsgi.Loader()

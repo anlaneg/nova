@@ -10,15 +10,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_utils.fixture import uuidsentinel
 from oslo_utils import uuidutils
 
+from nova.compute import vm_states
 from nova import context
 from nova import exception
 from nova.objects import cell_mapping
+from nova.objects import instance
 from nova.objects import instance_mapping
 from nova import test
 from nova.tests import fixtures
-from nova.tests import uuidsentinel
 
 
 sample_mapping = {'instance_uuid': '',
@@ -124,6 +126,76 @@ class InstanceMappingTestCase(test.NoDBTestCase):
         self.assertEqual(result_mapping.cell_mapping.id,
                          c_mapping.id)
 
+    def test_populate_queued_for_delete(self):
+        cells = []
+        celldbs = fixtures.CellDatabases()
+
+        # Create two cell databases and map them
+        for uuid in (uuidsentinel.cell1, uuidsentinel.cell2):
+            cm = cell_mapping.CellMapping(context=self.context, uuid=uuid,
+                                          database_connection=uuid,
+                                          transport_url='fake://')
+            cm.create()
+            cells.append(cm)
+            celldbs.add_cell_database(uuid)
+        self.useFixture(celldbs)
+
+        # Create 5 instances per cell, two deleted, one with matching
+        # queued_for_delete in the instance mapping
+        for cell in cells:
+            for i in range(0, 5):
+                # Instance 4 should be SOFT_DELETED
+                vm_state = (vm_states.SOFT_DELETED if i == 4
+                            else vm_states.ACTIVE)
+
+                # Instance 2 should already be marked as queued_for_delete
+                qfd = True if i == 2 else None
+
+                with context.target_cell(self.context, cell) as cctxt:
+                    inst = instance.Instance(
+                        cctxt,
+                        vm_state=vm_state,
+                        project_id=self.context.project_id,
+                        user_id=self.context.user_id)
+                    inst.create()
+                    if i in (2, 3):
+                        # Instances 2 and 3 are hard-deleted
+                        inst.destroy()
+
+                instance_mapping.InstanceMapping._create_in_db(
+                    self.context,
+                    {'project_id': self.context.project_id,
+                     'cell_id': cell.id,
+                     'queued_for_delete': qfd,
+                     'instance_uuid': inst.uuid})
+
+        done, total = instance_mapping.populate_queued_for_delete(self.context,
+                                                                  2)
+        # First two needed fixing, and honored the limit
+        self.assertEqual(2, done)
+        self.assertEqual(2, total)
+
+        done, total = instance_mapping.populate_queued_for_delete(self.context,
+                                                                  1000)
+
+        # Last six included two that were already done, and spanned to the
+        # next cell
+        self.assertEqual(6, done)
+        self.assertEqual(6, total)
+
+        mappings = instance_mapping.InstanceMappingList.get_by_project_id(
+            self.context, self.context.project_id)
+
+        # Check that we have only the expected number of records with
+        # True/False (which implies no NULL records).
+
+        # Six deleted instances
+        self.assertEqual(6, len(
+            [im for im in mappings if im.queued_for_delete is True]))
+        # Four non-deleted instances
+        self.assertEqual(4, len(
+            [im for im in mappings if im.queued_for_delete is False]))
+
 
 class InstanceMappingListTestCase(test.NoDBTestCase):
     USES_DB_SELF = True
@@ -183,3 +255,40 @@ class InstanceMappingListTestCase(test.NoDBTestCase):
             self.context, uuids + [uuidsentinel.deleted_instance])
         self.assertEqual(sorted(uuids),
                          sorted([m.instance_uuid for m in mappings]))
+
+    def test_get_by_cell_and_project(self):
+        cells = []
+        # Create two cells
+        for uuid in (uuidsentinel.cell1, uuidsentinel.cell2):
+            cm = cell_mapping.CellMapping(context=self.context, uuid=uuid,
+                                          database_connection="fake:///",
+                                          transport_url='fake://')
+            cm.create()
+            cells.append(cm)
+        # With each cell having two instance_mappings of two project_ids.
+        uuids = {cells[0].id: [uuidsentinel.c1i1, uuidsentinel.c1i2],
+                 cells[1].id: [uuidsentinel.c2i1, uuidsentinel.c2i2]}
+        project_ids = ['fake-project-1', 'fake-project-2']
+        for cell_id, uuid in uuids.items():
+            instance_mapping.InstanceMapping._create_in_db(
+                    self.context,
+                    {'project_id': project_ids[0],
+                     'cell_id': cell_id,
+                     'instance_uuid': uuid[0]})
+            instance_mapping.InstanceMapping._create_in_db(
+                    self.context,
+                    {'project_id': project_ids[1],
+                     'cell_id': cell_id,
+                     'instance_uuid': uuid[1]})
+
+        ims = instance_mapping.InstanceMappingList.get_by_cell_and_project(
+            self.context, cells[0].id, 'fake-project-2')
+        self.assertEqual([uuidsentinel.c1i2],
+                         sorted([m.instance_uuid for m in ims]))
+        ims = instance_mapping.InstanceMappingList.get_by_cell_and_project(
+            self.context, cells[1].id, 'fake-project-1')
+        self.assertEqual([uuidsentinel.c2i1],
+                         sorted([m.instance_uuid for m in ims]))
+        ims = instance_mapping.InstanceMappingList.get_by_cell_and_project(
+            self.context, cells[0].id, 'fake-project-3')
+        self.assertEqual([], sorted([m.instance_uuid for m in ims]))

@@ -14,6 +14,7 @@
 
 from os_vif import objects as osv_objects
 from os_vif.objects import fields as os_vif_fields
+import six
 
 from nova import exception
 from nova.network import model
@@ -974,8 +975,33 @@ class OSVIFUtilTestCase(test.NoDBTestCase):
         )
 
         actual = os_vif_util.nova_to_osvif_vif(vif)
+        # expected vif_name is nic + vif_id, with total length 14 chars
+        expected_vif_name = 'nicdc065497-3c'
 
-        self.assertIsNone(actual)
+        self.assertIsInstance(actual, osv_objects.vif.VIFGeneric)
+        self.assertEqual(expected_vif_name, actual.vif_name)
+
+    def test_nova_to_osvif_vif_ivs_bridged(self):
+        vif = model.VIF(
+            id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
+            type=model.VIF_TYPE_IVS,
+            address="22:52:25:62:e2:aa",
+            network=model.Network(
+                id="b82c1929-051e-481d-8110-4669916c7915",
+                label="Demo Net",
+                subnets=[]),
+            details={
+                model.VIF_DETAILS_PORT_FILTER: True,
+                model.VIF_DETAILS_OVS_HYBRID_PLUG: True,
+            }
+        )
+
+        actual = os_vif_util.nova_to_osvif_vif(vif)
+        # expected vif_name is nic + vif_id, with total length 14 chars
+        expected_vif_name = 'nicdc065497-3c'
+
+        self.assertIsInstance(actual, osv_objects.vif.VIFBridge)
+        self.assertEqual(expected_vif_name, actual.vif_name)
 
     def test_nova_to_osvif_vif_unknown(self):
         vif = model.VIF(
@@ -988,9 +1014,20 @@ class OSVIFUtilTestCase(test.NoDBTestCase):
                 subnets=[]),
         )
 
-        self.assertRaises(exception.NovaException,
-                          os_vif_util.nova_to_osvif_vif,
-                          vif)
+        ex = self.assertRaises(exception.NovaException,
+                               os_vif_util.nova_to_osvif_vif, vif)
+        self.assertIn('Unsupported VIF type wibble', six.text_type(ex))
+
+    def test_nova_to_osvif_vif_binding_failed(self):
+        vif = model.VIF(
+            id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
+            type="binding_failed",
+            address="22:52:25:62:e2:aa",
+            network=model.Network(
+                id="b82c1929-051e-481d-8110-4669916c7915",
+                label="Demo Net",
+                subnets=[]),)
+        self.assertIsNone(os_vif_util.nova_to_osvif_vif(vif))
 
     def test_nova_to_osvif_vhostuser_vrouter(self):
         vif = model.VIF(

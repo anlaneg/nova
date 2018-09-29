@@ -1,4 +1,4 @@
-# Copyright 2015, 2017 IBM Corp.
+# Copyright 2015, 2018 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -25,49 +25,17 @@ import pypowervm.util as pvm_u
 import pypowervm.wrappers.cluster as pvm_clust
 import pypowervm.wrappers.storage as pvm_stg
 
-import nova.conf
 from nova import exception
 from nova import image
+from nova.virt.powervm.disk import driver as disk_drv
 from nova.virt.powervm import vm
 
-
 LOG = logging.getLogger(__name__)
-CONF = nova.conf.CONF
 
 IMAGE_API = image.API()
 
 
-class DiskType(object):
-    BOOT = 'boot'
-    IMAGE = 'image'
-
-
-class IterableToFileAdapter(object):
-    """A degenerate file-like so that an iterable can be read like a file.
-
-    The Glance client returns an iterable, but PowerVM requires a file.  This
-    is the adapter between the two.
-
-    Taken from xenapi/image/apis.py
-    """
-
-    def __init__(self, iterable):
-        self.iterator = iterable.__iter__()
-        self.remaining_data = ''
-
-    def read(self, size):
-        chunk = self.remaining_data
-        try:
-            while not chunk:
-                chunk = next(self.iterator)
-        except StopIteration:
-            return ''
-        return_value = chunk[0:size]
-        self.remaining_data = chunk[size:]
-        return return_value
-
-
-class SSPDiskAdapter(object):
+class SSPDiskAdapter(disk_drv.DiskAdapter):
     """Provides a disk adapter for Shared Storage Pools.
 
     Shared Storage Pools are a clustered file system technology that can link
@@ -79,6 +47,14 @@ class SSPDiskAdapter(object):
 
     capabilities = {
         'shared_storage': True,
+        # NOTE(efried): Whereas the SSP disk driver definitely does image
+        # caching, it's not through the nova.virt.imagecache.ImageCacheManager
+        # API.  Setting `has_imagecache` to True here would have the side
+        # effect of having a periodic task try to call this class's
+        # manage_image_cache method (not implemented here; and a no-op in the
+        # superclass) which would be harmless, but unnecessary.
+        'has_imagecache': False,
+        'snapshot': True,
     }
 
     def __init__(self, adapter, host_uuid):
@@ -87,8 +63,8 @@ class SSPDiskAdapter(object):
         :param adapter: pypowervm.adapter.Adapter for the PowerVM REST API.
         :param host_uuid: PowerVM UUID of the managed system.
         """
-        self._adapter = adapter
-        self._host_uuid = host_uuid
+        super(SSPDiskAdapter, self).__init__(adapter, host_uuid)
+
         try:
             self._clust = pvm_clust.Cluster.get(self._adapter)[0]
             self._ssp = pvm_stg.SSP.get_by_href(
@@ -137,7 +113,7 @@ class SSPDiskAdapter(object):
                                        match_func=match_func)
 
         # Remove the mapping from *each* VIOS on the LPAR's host.
-        # The LPAR's host has to be self.host_uuid, else the PowerVM API will
+        # The LPAR's host has to be self._host_uuid, else the PowerVM API will
         # fail.
         #
         # Note - this may not be all the VIOSes on the system...just the ones
@@ -190,14 +166,14 @@ class SSPDiskAdapter(object):
 
         image_lu = tsk_cs.get_or_upload_image_lu(
             self._tier, pvm_u.sanitize_file_name_for_api(
-                image_meta.name, prefix=DiskType.IMAGE + '_',
+                image_meta.name, prefix=disk_drv.DiskType.IMAGE + '_',
                 suffix='_' + image_meta.checksum),
-            random.choice(self._vios_uuids), IterableToFileAdapter(
+            random.choice(self._vios_uuids), disk_drv.IterableToFileAdapter(
                 IMAGE_API.download(context, image_meta.id)), image_meta.size,
             upload_type=tsk_stg.UploadType.IO_STREAM)
 
         boot_lu_name = pvm_u.sanitize_file_name_for_api(
-            instance.name, prefix=DiskType.BOOT + '_')
+            instance.name, prefix=disk_drv.DiskType.BOOT + '_')
 
         LOG.info('SSP: Disk name is %s', boot_lu_name, instance=instance)
 
@@ -227,7 +203,7 @@ class SSPDiskAdapter(object):
             return tsk_map.add_map(vios_w, mapping)
 
         # Add the mapping to *each* VIOS on the LPAR's host.
-        # The LPAR's host has to be self.host_uuid, else the PowerVM API will
+        # The LPAR's host has to be self._host_uuid, else the PowerVM API will
         # fail.
         #
         # Note: this may not be all the VIOSes on the system - just the ones
@@ -247,10 +223,36 @@ class SSPDiskAdapter(object):
         """
         ret = []
         for n in self._clust.nodes:
-            # Skip any nodes that we don't have the vios uuid or uri
+            # Skip any nodes that we don't have the VIOS uuid or uri
             if not (n.vios_uuid and n.vios_uri):
                 continue
             if self._host_uuid == pvm_u.get_req_path_uuid(
                     n.vios_uri, preserve_case=True, root=True):
                 ret.append(n.vios_uuid)
         return ret
+
+    def disconnect_disk_from_mgmt(self, vios_uuid, disk_name):
+        """Disconnect a disk from the management partition.
+
+        :param vios_uuid: The UUID of the Virtual I/O Server serving the
+                          mapping.
+        :param disk_name: The name of the disk to unmap.
+        """
+        tsk_map.remove_lu_mapping(self._adapter, vios_uuid, self.mp_uuid,
+                                  disk_names=[disk_name])
+        LOG.info("Unmapped boot disk %(disk_name)s from the management "
+                 "partition from Virtual I/O Server %(vios_uuid)s.",
+                 {'disk_name': disk_name, 'mp_uuid': self.mp_uuid,
+                  'vios_uuid': vios_uuid})
+
+    @staticmethod
+    def _disk_match_func(disk_type, instance):
+        """Return a matching function to locate the disk for an instance.
+
+        :param disk_type: One of the DiskType enum values.
+        :param instance: The instance whose disk is to be found.
+        :return: Callable suitable for the match_func parameter of the
+                 pypowervm.tasks.scsi_mapper.find_maps method.
+        """
+        disk_name = SSPDiskAdapter._get_disk_name(disk_type, instance)
+        return tsk_map.gen_match_func(pvm_stg.LU, names=[disk_name])

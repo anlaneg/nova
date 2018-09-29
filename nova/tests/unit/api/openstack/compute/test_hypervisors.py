@@ -18,6 +18,7 @@ import copy
 import mock
 import netaddr
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 import six
 from webob import exc
 
@@ -29,7 +30,7 @@ from nova import objects
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_instance
-from nova.tests import uuidsentinel as uuids
+
 
 CPU_INFO = """
 {"arch": "x86_64",
@@ -248,7 +249,7 @@ class HypervisorsTestV21(test.NoDBTestCase):
         host_api.compute_node_get = mock.MagicMock(
             side_effect=fake_compute_node_get)
 
-        self.stub_out('nova.db.compute_node_statistics',
+        self.stub_out('nova.db.api.compute_node_statistics',
                       fake_compute_node_statistics)
 
     def test_view_hypervisor_nodetail_noservers(self):

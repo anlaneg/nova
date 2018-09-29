@@ -17,11 +17,12 @@ import copy
 import mock
 import netaddr
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel
 from oslo_utils import timeutils
 from oslo_versionedobjects import base as ovo_base
 from oslo_versionedobjects import exception as ovo_exc
 
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import objects
 from nova.objects import base
@@ -30,7 +31,7 @@ from nova.objects import hv_spec
 from nova.objects import service
 from nova.tests.unit import fake_pci_device_pools
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel
+
 
 NOW = timeutils.utcnow().replace(microsecond=0)
 fake_stats = {'num_foo': '10'}
@@ -42,11 +43,11 @@ fake_numa_topology = objects.NUMATopology(
         cells=[objects.NUMACell(id=0, cpuset=set([1, 2]), memory=512,
                                 cpu_usage=0, memory_usage=0,
                                 mempages=[], pinned_cpus=set([]),
-                                siblings=[]),
+                                siblings=[set([1]), set([2])]),
                objects.NUMACell(id=1, cpuset=set([3, 4]), memory=512,
                                 cpu_usage=0, memory_usage=0,
                                 mempages=[], pinned_cpus=set([]),
-                                siblings=[])])
+                                siblings=[set([3]), set([4])])])
 fake_numa_topology_db_format = fake_numa_topology._to_json()
 fake_supported_instances = [('x86_64', 'kvm', 'hvm')]
 fake_hv_spec = hv_spec.HVSpec(arch=fake_supported_instances[0][0],
@@ -235,7 +236,7 @@ class _TestComputeNodeObject(object):
                          subs=self.subs(),
                          comparators=self.comparators())
 
-    @mock.patch('nova.db.compute_node_get_all_by_host')
+    @mock.patch('nova.db.api.compute_node_get_all_by_host')
     def test_get_first_node_by_host_for_old_compat(
             self, cn_get_all_by_host):
         another_node = fake_compute_node.copy()
@@ -262,7 +263,7 @@ class _TestComputeNodeObject(object):
             self.context, 'fake')
 
     @mock.patch.object(db, 'compute_node_create')
-    @mock.patch('nova.db.compute_node_get', return_value=fake_compute_node)
+    @mock.patch('nova.db.api.compute_node_get', return_value=fake_compute_node)
     def test_create(self, mock_get, mock_create):
         mock_create.return_value = fake_compute_node
         compute = compute_node.ComputeNode(context=self.context)
@@ -287,9 +288,9 @@ class _TestComputeNodeObject(object):
         }
         mock_create.assert_called_once_with(self.context, param_dict)
 
-    @mock.patch('nova.db.compute_node_create')
+    @mock.patch('nova.db.api.compute_node_create')
     @mock.patch('oslo_utils.uuidutils.generate_uuid')
-    @mock.patch('nova.db.compute_node_get', return_value=fake_compute_node)
+    @mock.patch('nova.db.api.compute_node_get', return_value=fake_compute_node)
     def test_create_allocates_uuid(self, mock_get, mock_gu, mock_create):
         mock_create.return_value = fake_compute_node
         mock_gu.return_value = fake_compute_node['uuid']
@@ -299,8 +300,8 @@ class _TestComputeNodeObject(object):
         mock_create.assert_called_once_with(
             self.context, {'uuid': fake_compute_node['uuid']})
 
-    @mock.patch('nova.db.compute_node_create')
-    @mock.patch('nova.db.compute_node_get', return_value=fake_compute_node)
+    @mock.patch('nova.db.api.compute_node_create')
+    @mock.patch('nova.db.api.compute_node_get', return_value=fake_compute_node)
     def test_recreate_fails(self, mock_get, mock_create):
         mock_create.return_value = fake_compute_node
         compute = compute_node.ComputeNode(context=self.context)
@@ -313,7 +314,7 @@ class _TestComputeNodeObject(object):
         mock_create.assert_called_once_with(self.context, param_dict)
 
     @mock.patch.object(db, 'compute_node_update')
-    @mock.patch('nova.db.compute_node_get', return_value=fake_compute_node)
+    @mock.patch('nova.db.api.compute_node_get', return_value=fake_compute_node)
     def test_save(self, mock_get, mock_update):
         mock_update.return_value = fake_compute_node
         compute = compute_node.ComputeNode(context=self.context)
@@ -337,7 +338,7 @@ class _TestComputeNodeObject(object):
         }
         mock_update.assert_called_once_with(self.context, 123, param_dict)
 
-    @mock.patch('nova.db.compute_node_update')
+    @mock.patch('nova.db.api.compute_node_update')
     def test_save_pci_device_pools_empty(self, mock_update):
         fake_pci = jsonutils.dumps(
             objects.PciDevicePoolList(objects=[]).obj_to_primitive())
@@ -356,7 +357,7 @@ class _TestComputeNodeObject(object):
         mock_update.assert_called_once_with(
             self.context, 123, {'pci_stats': fake_pci})
 
-    @mock.patch('nova.db.compute_node_update')
+    @mock.patch('nova.db.api.compute_node_update')
     def test_save_pci_device_pools_null(self, mock_update):
         compute_dict = fake_compute_node.copy()
         compute_dict['pci_stats'] = None
@@ -412,7 +413,7 @@ class _TestComputeNodeObject(object):
                          comparators=self.comparators())
         mock_search.assert_called_once_with(self.context, 'hyper')
 
-    @mock.patch('nova.db.compute_node_get_all_by_pagination',
+    @mock.patch('nova.db.api.compute_node_get_all_by_pagination',
                 return_value=[fake_compute_node])
     def test_get_by_pagination(self, fake_get_by_pagination):
         computes = compute_node.ComputeNodeList.get_by_pagination(
@@ -422,7 +423,7 @@ class _TestComputeNodeObject(object):
                          subs=self.subs(),
                          comparators=self.comparators())
 
-    @mock.patch('nova.db.compute_nodes_get_by_service_id')
+    @mock.patch('nova.db.api.compute_nodes_get_by_service_id')
     def test__get_by_service(self, cn_get_by_svc_id):
         cn_get_by_svc_id.return_value = [fake_compute_node]
         computes = compute_node.ComputeNodeList._get_by_service(self.context,
@@ -432,7 +433,7 @@ class _TestComputeNodeObject(object):
                          subs=self.subs(),
                          comparators=self.comparators())
 
-    @mock.patch('nova.db.compute_node_get_all_by_host')
+    @mock.patch('nova.db.api.compute_node_get_all_by_host')
     def test_get_all_by_host(self, cn_get_all_by_host):
         cn_get_all_by_host.return_value = [fake_compute_node]
         computes = compute_node.ComputeNodeList.get_all_by_host(self.context,
@@ -487,9 +488,12 @@ class _TestComputeNodeObject(object):
     def test_update_from_virt_driver(self):
         # copy in case the update has a side effect
         resources = copy.deepcopy(fake_resources)
+        # Emulate the ironic driver which adds a uuid field.
+        resources['uuid'] = uuidsentinel.node_uuid
         compute = compute_node.ComputeNode()
         compute.update_from_virt_driver(resources)
-        expected = fake_compute_with_resources
+        expected = fake_compute_with_resources.obj_clone()
+        expected.uuid = uuidsentinel.node_uuid
         self.assertTrue(base.obj_equal_prims(expected, compute))
 
     def test_update_from_virt_driver_missing_field(self):

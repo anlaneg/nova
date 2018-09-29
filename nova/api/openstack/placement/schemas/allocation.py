@@ -13,6 +13,8 @@
 
 import copy
 
+from nova.api.openstack.placement.schemas import common
+
 
 ALLOCATION_SCHEMA = {
     "type": "object",
@@ -38,7 +40,7 @@ ALLOCATION_SCHEMA = {
                         "type": "object",
                         "minProperties": 1,
                         "patternProperties": {
-                            "^[0-9A-Z_]+$": {
+                            common.RC_PATTERN: {
                                 "type": "integer",
                                 "minimum": 1,
                             }
@@ -78,7 +80,7 @@ ALLOCATION_SCHEMA_V1_12 = {
             "minProperties": 1,
             # resource provider uuid
             "patternProperties": {
-                "^[0-9a-fA-F-]{36}$": {
+                common.UUID_PATTERN: {
                     "type": "object",
                     "properties": {
                         # generation is optional
@@ -90,7 +92,7 @@ ALLOCATION_SCHEMA_V1_12 = {
                             "minProperties": 1,
                             # resource class
                             "patternProperties": {
-                                "^[0-9A-Z_]+$": {
+                                common.RC_PATTERN: {
                                     "type": "integer",
                                     "minimum": 1,
                                 }
@@ -115,6 +117,7 @@ ALLOCATION_SCHEMA_V1_12 = {
             "maxLength": 255
         }
     },
+    "additionalProperties": False,
     "required": [
         "allocations",
         "project_id",
@@ -136,6 +139,31 @@ POST_ALLOCATIONS_V1_13 = {
     "minProperties": 1,
     "additionalProperties": False,
     "patternProperties": {
-        "^[0-9a-fA-F-]{36}$": DELETABLE_ALLOCATIONS
+        common.UUID_PATTERN: DELETABLE_ALLOCATIONS
     }
+}
+
+# A required consumer generation was added to the top-level dict in this
+# version of PUT /allocations/{consumer_uuid}. In addition, the PUT
+# /allocations/{consumer_uuid}/now allows for empty allocations (indicating the
+# allocations are being removed)
+ALLOCATION_SCHEMA_V1_28 = copy.deepcopy(DELETABLE_ALLOCATIONS)
+ALLOCATION_SCHEMA_V1_28['properties']['consumer_generation'] = {
+    "type": ["integer", "null"],
+    "additionalProperties": False
+}
+ALLOCATION_SCHEMA_V1_28['required'].append("consumer_generation")
+
+# A required consumer generation was added to the allocations dicts in this
+# version of POST /allocations
+REQUIRED_GENERATION_ALLOCS_POST = copy.deepcopy(DELETABLE_ALLOCATIONS)
+alloc_props = REQUIRED_GENERATION_ALLOCS_POST['properties']
+alloc_props['consumer_generation'] = {
+    "type": ["integer", "null"],
+    "additionalProperties": False
+}
+REQUIRED_GENERATION_ALLOCS_POST['required'].append("consumer_generation")
+POST_ALLOCATIONS_V1_28 = copy.deepcopy(POST_ALLOCATIONS_V1_13)
+POST_ALLOCATIONS_V1_28["patternProperties"] = {
+    common.UUID_PATTERN: REQUIRED_GENERATION_ALLOCS_POST
 }

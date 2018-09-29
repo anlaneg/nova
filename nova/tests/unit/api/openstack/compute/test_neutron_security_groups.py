@@ -19,22 +19,21 @@ from neutronclient.common import exceptions as n_exc
 from oslo_config import cfg
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 import webob
 
 from nova.api.openstack.compute import security_groups
-from nova import compute
 from nova import context
-import nova.db
+import nova.db.api
 from nova import exception
 from nova.network import model
 from nova.network.neutronv2 import api as neutron_api
-from nova.network.security_group import neutron_driver
 from nova.objects import instance as instance_obj
 from nova import test
 from nova.tests.unit.api.openstack.compute import test_security_groups
 from nova.tests.unit.api.openstack import fakes
-from nova.tests import uuidsentinel as uuids
+
 
 UUID_SERVER = uuids.server
 
@@ -166,7 +165,7 @@ class TestNeutronSecurityGroupsV21(
             device_id=test_security_groups.FAKE_UUID1)
         expected = [{'rules': [], 'tenant_id': 'fake', 'id': sg['id'],
                     'name': 'test', 'description': 'test-description'}]
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       test_security_groups.return_server_by_uuid)
         req = fakes.HTTPRequest.blank('/v2/fake/servers/%s/os-security-groups'
                                       % test_security_groups.FAKE_UUID1)
@@ -204,7 +203,7 @@ class TestNeutronSecurityGroupsV21(
             _context, instance_obj.Instance(), db_inst,
             expected_attrs=instance_obj.INSTANCE_DEFAULT_FIELDS)
         neutron = neutron_api.API()
-        with mock.patch.object(nova.db, 'instance_get_by_uuid',
+        with mock.patch.object(nova.db.api, 'instance_get_by_uuid',
                                return_value=db_inst):
             neutron.allocate_for_instance(_context, instance, False, None,
                                           security_groups=[sg['id']])
@@ -233,7 +232,7 @@ class TestNeutronSecurityGroupsV21(
             network_id=net['network']['id'], security_groups=[sg['id']],
             device_id=UUID_SERVER)
 
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       test_security_groups.return_server)
         body = dict(addSecurityGroup=dict(name="test"))
 
@@ -251,7 +250,7 @@ class TestNeutronSecurityGroupsV21(
             network_id=net['network']['id'], security_groups=[sg1['id']],
             device_id=UUID_SERVER)
 
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       test_security_groups.return_server)
         body = dict(addSecurityGroup=dict(name="sg1"))
 
@@ -269,7 +268,7 @@ class TestNeutronSecurityGroupsV21(
             port_security_enabled=True,
             device_id=UUID_SERVER)
 
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       test_security_groups.return_server)
         body = dict(addSecurityGroup=dict(name="test"))
 
@@ -284,7 +283,7 @@ class TestNeutronSecurityGroupsV21(
             network_id=net['network']['id'], port_security_enabled=False,
             device_id=UUID_SERVER)
 
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       test_security_groups.return_server)
         body = dict(addSecurityGroup=dict(name="test"))
 
@@ -302,7 +301,7 @@ class TestNeutronSecurityGroupsV21(
             port_security_enabled=True, ip_allocation='deferred',
             device_id=UUID_SERVER)
 
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       test_security_groups.return_server)
         body = dict(addSecurityGroup=dict(name="test"))
 
@@ -311,7 +310,7 @@ class TestNeutronSecurityGroupsV21(
         self.manager._addSecurityGroup(req, UUID_SERVER, body)
 
     def test_disassociate_by_non_existing_security_group_name(self):
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       test_security_groups.return_server)
         body = dict(removeSecurityGroup=dict(name='non-existing'))
 
@@ -340,7 +339,7 @@ class TestNeutronSecurityGroupsV21(
             network_id=net['network']['id'], security_groups=[sg['id']],
             device_id=UUID_SERVER)
 
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       test_security_groups.return_server)
         body = dict(removeSecurityGroup=dict(name="test"))
 
@@ -515,16 +514,30 @@ class TestNeutronSecurityGroupsOutputTest(TestNeutronSecurityGroupsTestCase):
         super(TestNeutronSecurityGroupsOutputTest, self).setUp()
         fakes.stub_out_nw_api(self)
         self.controller = security_groups.SecurityGroupController()
-        self.stubs.Set(compute.api.API, 'get',
-                       test_security_groups.fake_compute_get)
-        self.stubs.Set(compute.api.API, 'get_all',
-                       test_security_groups.fake_compute_get_all)
-        self.stubs.Set(compute.api.API, 'create',
-                       test_security_groups.fake_compute_create)
-        self.stubs.Set(neutron_driver.SecurityGroupAPI,
-                       'get_instances_security_groups_bindings',
-                       (test_security_groups.
-                       fake_get_instances_security_groups_bindings))
+        self.stub_out('nova.compute.api.API.get',
+                      test_security_groups.fake_compute_get)
+        self.stub_out('nova.compute.api.API.get_all',
+                      test_security_groups.fake_compute_get_all)
+        self.stub_out('nova.compute.api.API.create',
+                      test_security_groups.fake_compute_create)
+        self.stub_out(
+            'nova.network.security_group.neutron_driver.SecurityGroupAPI.'
+            'get_instances_security_groups_bindings',
+            self._fake_get_instances_security_groups_bindings)
+
+    def _fake_get_instances_security_groups_bindings(self, inst, context,
+                                                     servers):
+        groups = {
+            '00000000-0000-0000-0000-000000000001': [{'name': 'fake-0-0'},
+                                                     {'name': 'fake-0-1'}],
+            '00000000-0000-0000-0000-000000000002': [{'name': 'fake-1-0'},
+                                                     {'name': 'fake-1-1'}],
+            '00000000-0000-0000-0000-000000000003': [{'name': 'fake-2-0'},
+                                                     {'name': 'fake-2-1'}]}
+        result = {}
+        for server in servers:
+            result[server['id']] = groups.get(server['id'])
+        return result
 
     def _make_request(self, url, body=None):
         req = fakes.HTTPRequest.blank(url)
@@ -581,12 +594,10 @@ class TestNeutronSecurityGroupsOutputTest(TestNeutronSecurityGroupsTestCase):
         self.assertEqual(group.get('name'), 'default')
 
     def test_show(self):
-        def fake_get_instance_security_groups(inst, context, id):
-            return [{'name': 'fake-2-0'}, {'name': 'fake-2-1'}]
-
-        self.stubs.Set(neutron_driver.SecurityGroupAPI,
-                       'get_instance_security_groups',
-                       fake_get_instance_security_groups)
+        self.stub_out('nova.network.security_group.neutron_driver.'
+                      'SecurityGroupAPI.get_instance_security_groups',
+                      lambda self, inst, context, id:
+                          [{'name': 'fake-2-0'}, {'name': 'fake-2-1'}])
 
         url = '/v2/fake/servers'
         image_uuid = 'c905cedb-7281-47e4-8a62-f26bc5fc4c77'
@@ -626,12 +637,9 @@ class TestNeutronSecurityGroupsOutputTest(TestNeutronSecurityGroupsTestCase):
                 name = 'fake-%s-%s' % (i, j)
                 self.assertEqual(group.get('name'), name)
 
-    def test_no_instance_passthrough_404(self):
-
-        def fake_compute_get(*args, **kwargs):
-            raise exception.InstanceNotFound(instance_id='fake')
-
-        self.stubs.Set(compute.api.API, 'get', fake_compute_get)
+    @mock.patch('nova.compute.api.API.get',
+                side_effect=exception.InstanceNotFound(instance_id='fake'))
+    def test_no_instance_passthrough_404(self, mock_get):
         url = '/v2/fake/servers/70f6db34-de8d-4fbd-aafb-4065bdfa6115'
         res = self._make_request(url)
 

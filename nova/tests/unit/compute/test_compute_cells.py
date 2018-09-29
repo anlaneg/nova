@@ -20,6 +20,7 @@ import functools
 import inspect
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
 from nova import block_device
@@ -30,9 +31,8 @@ from nova.compute import flavors
 from nova.compute import power_state
 from nova.compute import utils as compute_utils
 from nova.compute import vm_states
-import nova.conf
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import api_models
 from nova import exception
@@ -44,11 +44,9 @@ from nova.tests.unit.compute import test_compute
 from nova.tests.unit.compute import test_shelve
 from nova.tests.unit import fake_instance
 from nova.tests.unit.objects import test_flavor
-from nova.tests import uuidsentinel as uuids
 
 
 ORIG_COMPUTE_API = None
-CONF = nova.conf.CONF
 FAKE_IMAGE_REF = uuids.image_ref
 
 NODENAME = 'fakenode1'
@@ -68,7 +66,7 @@ def stub_call_to_cells(context, instance, method, *args, **kwargs):
     # Use NoopQuotaDriver in child cells.
     saved_quotas = quota.QUOTAS
     quota.QUOTAS = quota.QuotaEngine(
-            quota_driver_class=quota.NoopQuotaDriver())
+            quota_driver=quota.NoopQuotaDriver())
     compute_api.QUOTAS = quota.QUOTAS
     try:
         return fn(context, instance, *args, **kwargs)
@@ -90,7 +88,7 @@ def stub_cast_to_cells(context, instance, method, *args, **kwargs):
     # Use NoopQuotaDriver in child cells.
     saved_quotas = quota.QUOTAS
     quota.QUOTAS = quota.QuotaEngine(
-            quota_driver_class=quota.NoopQuotaDriver())
+            quota_driver=quota.NoopQuotaDriver())
     compute_api.QUOTAS = quota.QUOTAS
     try:
         fn(context, instance, *args, **kwargs)
@@ -290,10 +288,12 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
                            'instance_delete_everywhere')
         @mock.patch.object(compute_api.API, '_lookup_instance',
                            return_value=(None, inst))
-        def _test(_mock_lookup_inst, _mock_delete_everywhere):
+        @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
+        def _test(mock_get_im, _mock_lookup_inst, _mock_delete_everywhere):
             self.assertRaises(exception.ObjectActionError,
                     self.compute_api.delete, self.context, inst)
             inst.destroy.assert_called_once_with()
+            mock_get_im.assert_called_once_with(self.context, inst.uuid)
 
         _test()
 
@@ -315,12 +315,14 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
                 'instance_delete_everywhere', side_effect=add_cell_name)
         @mock.patch.object(compute_api.API, '_lookup_instance',
                            return_value=(None, inst))
-        def _test(_mock_lookup_inst, mock_delete_everywhere,
+        @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
+        def _test(mock_get_im, _mock_lookup_inst, mock_delete_everywhere,
                   mock_compute_delete):
             self.compute_api.delete(self.context, inst)
             inst.destroy.assert_called_once_with()
 
             mock_compute_delete.assert_called_once_with(self.context, inst)
+            mock_get_im.assert_called_once_with(self.context, inst.uuid)
 
         _test()
 
@@ -514,13 +516,9 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
         super(CellsComputeAPITestCase, self).test_populate_instance_for_create(
             num_instances=2)
 
-    def test_multi_instance_display_name_default(self):
-        self._multi_instance_display_name_default(cells_enabled=True)
-
-    def test_multi_instance_display_name_template(self):
+    def test_multi_instance_display_name(self):
         super(CellsComputeAPITestCase,
-              self).test_multi_instance_display_name_template(
-                  cells_enabled=True)
+              self).test_multi_instance_display_name(cells_enabled=True)
 
 
 class CellsShelveComputeAPITestCase(test_shelve.ShelveComputeAPITestCase):
@@ -634,7 +632,7 @@ class CellsConductorAPIRPCRedirect(test.NoDBTestCase):
                              _validate, _get_image, _check_bdm,
                              _provision, _record_action_start):
         _get_image.return_value = (None, 'fake-image')
-        _validate.return_value = ({}, 1, None, ['default'])
+        _validate.return_value = ({}, 1, None, ['default'], None)
         _check_bdm.return_value = objects.BlockDeviceMappingList()
         _provision.return_value = []
 
@@ -671,10 +669,12 @@ class CellsConductorAPIRPCRedirect(test.NoDBTestCase):
         self.compute_api.resize(self.context, instance)
         self.assertTrue(self.cells_rpcapi.resize_instance.called)
 
+    @mock.patch.object(objects.ComputeNodeList, 'get_all_by_host')
     @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
     @mock.patch.object(compute_api.API, '_record_action_start')
     @mock.patch.object(objects.Instance, 'save')
-    def test_live_migrate_instance(self, instance_save, _record, _get_spec):
+    def test_live_migrate_instance(self, instance_save, _record, _get_spec,
+                                   mock_nodelist):
         orig_system_metadata = {}
         instance = fake_instance.fake_instance_obj(self.context,
                 vm_state=vm_states.ACTIVE, cell_name='fake-cell',

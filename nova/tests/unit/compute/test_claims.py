@@ -90,7 +90,7 @@ class ClaimTestCase(test.NoDBTestCase):
 
         requests = requests or self.empty_requests
 
-        @mock.patch('nova.db.instance_extra_get_by_instance_uuid',
+        @mock.patch('nova.db.api.instance_extra_get_by_instance_uuid',
                     return_value=db_numa_topology)
         def get_claim(mock_extra_get):
             return claims.Claim(self.context, instance, _NODENAME,
@@ -136,11 +136,13 @@ class ClaimTestCase(test.NoDBTestCase):
             'numa_topology': objects.NUMATopology(
                 cells=[objects.NUMACell(id=1, cpuset=set([1, 2]), memory=512,
                                         memory_usage=0, cpu_usage=0,
-                                        mempages=[], siblings=[],
+                                        mempages=[],
+                                        siblings=[set([1]), set([2])],
                                         pinned_cpus=set([])),
                        objects.NUMACell(id=2, cpuset=set([3, 4]), memory=512,
                                         memory_usage=0, cpu_usage=0,
-                                        mempages=[], siblings=[],
+                                        mempages=[],
+                                        siblings=[set([3]), set([4])],
                                         pinned_cpus=set([]))]
                 )._to_json()
         }
@@ -408,7 +410,7 @@ class MoveClaimTestCase(ClaimTestCase):
 
         @mock.patch('nova.virt.hardware.numa_get_constraints',
                     return_value=numa_topology)
-        @mock.patch('nova.db.instance_extra_get_by_instance_uuid',
+        @mock.patch('nova.db.api.instance_extra_get_by_instance_uuid',
                     return_value=self.db_numa_topology)
         def get_claim(mock_extra_get, mock_numa_get):
             return claims.MoveClaim(self.context, self.instance, _NODENAME,

@@ -38,8 +38,8 @@ from nova.compute import utils as compute_utils
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova.objects import fields as obj_fields
 import nova.privsep.path
+from nova import rc_fields as fields
 from nova.virt import driver
 from nova.virt.vmwareapi import constants
 from nova.virt.vmwareapi import ds_util
@@ -63,10 +63,11 @@ class VMwareVCDriver(driver.ComputeDriver):
 
     capabilities = {
         "has_imagecache": True,
-        "supports_recreate": False,
+        "supports_evacuate": False,
         "supports_migrate_to_same_host": True,
         "supports_attach_interface": True,
-        "supports_multiattach": False
+        "supports_multiattach": False,
+        "supports_trusted_certs": False,
     }
 
     # Legacy nodename is of the form: <mo id>(<cluster name>)
@@ -290,10 +291,9 @@ class VMwareVCDriver(driver.ComputeDriver):
             LOG.warning('The console log is missing. Check your VSPC '
                         'configuration', instance=instance)
             return b""
-        with open(path, 'rb') as fp:
-            read_log_data, remaining = nova.privsep.path.last_bytes(
-                fp, MAX_CONSOLE_BYTES)
-            return read_log_data
+        read_log_data, remaining = nova.privsep.path.last_bytes(
+            path, MAX_CONSOLE_BYTES)
+        return read_log_data
 
     def _get_vcenter_uuid(self):
         """Retrieves the vCenter UUID."""
@@ -366,21 +366,21 @@ class VMwareVCDriver(driver.ComputeDriver):
         reserved_disk_gb = compute_utils.convert_mb_to_ceil_gb(
             CONF.reserved_host_disk_mb)
         result = {
-            obj_fields.ResourceClass.VCPU: {
+            fields.ResourceClass.VCPU: {
                 'total': stats['cpu']['vcpus'],
                 'reserved': CONF.reserved_host_cpus,
                 'min_unit': 1,
                 'max_unit': stats['cpu']['max_vcpus_per_host'],
                 'step_size': 1,
             },
-            obj_fields.ResourceClass.MEMORY_MB: {
+            fields.ResourceClass.MEMORY_MB: {
                 'total': stats['mem']['total'],
                 'reserved': CONF.reserved_host_memory_mb,
                 'min_unit': 1,
                 'max_unit': stats['mem']['max_mem_mb_per_host'],
                 'step_size': 1,
             },
-            obj_fields.ResourceClass.DISK_GB: {
+            fields.ResourceClass.DISK_GB: {
                 'total': total_disk_capacity // units.Gi,
                 'reserved': reserved_disk_gb,
                 'min_unit': 1,
@@ -405,6 +405,8 @@ class VMwareVCDriver(driver.ComputeDriver):
     def detach_volume(self, context, connection_info, instance, mountpoint,
                       encryption=None):
         """Detach volume storage to VM instance."""
+        # NOTE(claudiub): if context parameter is to be used in the future,
+        # the _detach_instance_volumes method will have to be updated as well.
         return self._volumeops.detach_volume(connection_info, instance)
 
     def get_volume_connector(self, instance):
@@ -436,7 +438,9 @@ class VMwareVCDriver(driver.ComputeDriver):
             for disk in block_device_mapping:
                 connection_info = disk['connection_info']
                 try:
-                    self.detach_volume(connection_info, instance,
+                    # NOTE(claudiub): Passing None as the context, as it is
+                    # not currently used.
+                    self.detach_volume(None, connection_info, instance,
                                        disk.get('device_name'))
                 except exception.DiskNotFound:
                     LOG.warning('The volume %s does not exist!',

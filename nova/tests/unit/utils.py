@@ -23,7 +23,7 @@ from six.moves import range
 from nova.compute import flavors
 import nova.conf
 import nova.context
-import nova.db
+from nova.db import api as db
 from nova import exception
 from nova.image import glance
 from nova.network import minidns
@@ -64,11 +64,12 @@ def get_test_flavor(context=None, options=None):
                    'swap': 1024}
 
     test_flavor.update(options)
-
+    flavor_ref = objects.Flavor(context, **test_flavor)
     try:
-        flavor_ref = nova.db.flavor_create(context, test_flavor)
+        flavor_ref.create()
     except (exception.FlavorExists, exception.FlavorIdExists):
-        flavor_ref = nova.db.flavor_get_by_name(context, 'kinda.big')
+        flavor_ref = objects.Flavor.get_by_flavor_id(
+            context, test_flavor['flavorid'])
     return flavor_ref
 
 
@@ -99,7 +100,7 @@ def get_test_instance(context=None, flavor=None, obj=False):
         instance.create()
     else:
         flavors.save_flavor_info(test_instance['system_metadata'], flavor, '')
-        instance = nova.db.instance_create(context, test_instance)
+        instance = db.instance_create(context, test_instance)
     return instance
 
 FAKE_NETWORK_VLAN = 100
@@ -298,23 +299,54 @@ class CustomMockCallMatcher(object):
 
 
 def assert_instance_delete_notification_by_uuid(
-        mock_notify, expected_instance_uuid, expected_notifier,
-        expected_context, expect_targeted_context=False):
+        mock_legacy_notify, mock_notify, expected_instance_uuid,
+        expected_notifier, expected_context, expect_targeted_context=False,
+        expected_source='nova-api', expected_host='fake-mini'):
 
     match_by_instance_uuid = CustomMockCallMatcher(
         lambda instance:
         instance.uuid == expected_instance_uuid)
 
+    assert_legacy_instance_delete_notification_by_uuid(
+        mock_legacy_notify, match_by_instance_uuid, expected_notifier,
+        expected_context, expect_targeted_context)
+    assert_versioned_instance_delete_notification_by_uuid(
+        mock_notify, match_by_instance_uuid,
+        expected_context, expected_source, expected_host=expected_host)
+
+
+def assert_versioned_instance_delete_notification_by_uuid(
+        mock_notify, instance_matcher,
+        expected_context, expected_source, expected_host):
+
+    mock_notify.assert_has_calls([
+        mock.call(expected_context,
+                  instance_matcher,
+                  host=expected_host,
+                  source=expected_source,
+                  action='delete',
+                  phase='start'),
+        mock.call(expected_context,
+                  instance_matcher,
+                  host=expected_host,
+                  source=expected_source,
+                  action='delete',
+                  phase='end')])
+
+
+def assert_legacy_instance_delete_notification_by_uuid(
+        mock_notify, instance_matcher, expected_notifier,
+        expected_context, expect_targeted_context):
+
     mock_notify.assert_has_calls([
         mock.call(expected_notifier,
                   expected_context,
-                  match_by_instance_uuid,
+                  instance_matcher,
                   'delete.start'),
         mock.call(expected_notifier,
                   expected_context,
-                  match_by_instance_uuid,
-                  'delete.end',
-                  system_metadata={})])
+                  instance_matcher,
+                  'delete.end')])
 
     for call in mock_notify.call_args_list:
         if expect_targeted_context:

@@ -20,18 +20,15 @@ import fixtures
 import mock
 
 from nova.compute import rpcapi as compute_rpcapi
-import nova.conf
 from nova.console import api as console_api
 from nova.console import manager as console_manager
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import objects
 from nova import test
 from nova.tests.unit import fake_instance
 from nova.tests.unit import fake_xvp_console_proxy
-
-CONF = nova.conf.CONF
 
 
 class ConsoleTestCase(test.TestCase):
@@ -167,12 +164,12 @@ class ConsoleAPITestCase(test.NoDBTestCase):
 
         def _fake_db_console_get(_ctxt, _console_uuid, _instance_uuid):
             return self.fake_console
-        self.stub_out('nova.db.console_get', _fake_db_console_get)
+        self.stub_out('nova.db.api.console_get', _fake_db_console_get)
 
         def _fake_db_console_get_all_by_instance(_ctxt, _instance_uuid,
                                                  columns_to_join):
             return [self.fake_console]
-        self.stub_out('nova.db.console_get_all_by_instance',
+        self.stub_out('nova.db.api.console_get_all_by_instance',
                        _fake_db_console_get_all_by_instance)
 
     def test_get_consoles(self):

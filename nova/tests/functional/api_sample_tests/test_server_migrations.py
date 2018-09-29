@@ -13,13 +13,14 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from concurrent import futures
 import datetime
 
 import mock
 
 from nova.conductor import manager as conductor_manager
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import objects
 from nova.tests.functional.api_sample_tests import test_servers
 from nova.tests.unit import fake_instance
@@ -28,12 +29,12 @@ from nova.tests.unit import fake_instance
 class ServerMigrationsSampleJsonTest(test_servers.ServersSampleBase):
     sample_dir = 'server-migrations'
     scenarios = [('v2_22', {'api_major_version': 'v2.1'})]
+    microversion = '2.22'
 
     def setUp(self):
         """setUp method for server usage."""
         super(ServerMigrationsSampleJsonTest, self).setUp()
         self.uuid = self._post_server()
-        self.api.microversion = '2.22'
 
     @mock.patch.object(conductor_manager.ComputeTaskManager, '_live_migrate')
     @mock.patch.object(db, 'service_get_by_compute_host')
@@ -163,13 +164,13 @@ class ServerMigrationsSamplesJsonTestV2_23(test_servers.ServersSampleBase):
 
 class ServerMigrationsSampleJsonTestV2_24(test_servers.ServersSampleBase):
     ADMIN_API = True
+    microversion = '2.24'
     sample_dir = "server-migrations"
     scenarios = [('v2_24', {'api_major_version': 'v2.1'})]
 
     def setUp(self):
         """setUp method for server usage."""
         super(ServerMigrationsSampleJsonTestV2_24, self).setUp()
-        self.api.microversion = '2.24'
         self.uuid = self._post_server()
         self.context = context.RequestContext('fake', 'fake')
         fake_migration = {
@@ -226,3 +227,21 @@ class ServerMigrationsSamplesJsonTestV2_59(
         self.fake_migrations[1][
             'uuid'] = '22341d4b-346a-40d0-83c6-5f4f6892b650'
         super(ServerMigrationsSamplesJsonTestV2_59, self).setUp()
+
+
+class ServerMigrationsSampleJsonTestV2_65(ServerMigrationsSampleJsonTestV2_24):
+    ADMIN_API = True
+    microversion = '2.65'
+    scenarios = [('v2_65', {'api_major_version': 'v2.1'})]
+
+    @mock.patch.object(conductor_manager.ComputeTaskManager, '_live_migrate')
+    def test_live_migrate_abort_migration_queued(self, _live_migrate):
+        self.migration.status = 'queued'
+        self.migration.save()
+        self._do_post('servers/%s/action' % self.uuid, 'live-migrate-server',
+                      {'hostname': self.compute.host})
+        self.compute._waiting_live_migrations[self.uuid] = (
+            self.migration, futures.Future())
+        uri = 'servers/%s/migrations/%s' % (self.uuid, self.migration.id)
+        response = self._do_delete(uri)
+        self.assertEqual(202, response.status_code)

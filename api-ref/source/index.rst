@@ -60,17 +60,12 @@ the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
 .. include:: images.inc
 .. include:: os-baremetal-nodes.inc
 .. include:: os-tenant-network.inc
-.. include:: os-fixed-ips.inc
-.. include:: os-floating-ip-dns.inc
 .. include:: os-floating-ip-pools.inc
 .. include:: os-floating-ips.inc
-.. include:: os-floating-ips-bulk.inc
-.. include:: os-fping.inc
 .. include:: os-security-groups.inc
 .. include:: os-security-group-default-rules.inc
 .. include:: os-security-group-rules.inc
 .. include:: os-hosts.inc
-.. include:: os-virtual-interfaces.inc
 
 =============
 Obsolete APIs
@@ -81,3 +76,8 @@ Compute API in the past, but no longer exist.
 
 .. include:: os-certificates.inc
 .. include:: os-cloudpipe.inc
+.. include:: os-fping.inc
+.. include:: os-virtual-interfaces.inc
+.. include:: os-fixed-ips.inc
+.. include:: os-floating-ips-bulk.inc
+.. include:: os-floating-ip-dns.inc

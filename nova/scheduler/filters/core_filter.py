@@ -17,7 +17,6 @@
 
 from oslo_log import log as logging
 
-from nova.i18n import _LW
 from nova.scheduler import filters
 from nova.scheduler.filters import utils
 
@@ -40,7 +39,7 @@ class BaseCoreFilter(filters.BaseHostFilter):
         """
         if not host_state.vcpus_total:
             # Fail safe
-            LOG.warning(_LW("VCPUs not set; assuming CPU collection broken"))
+            LOG.warning("VCPUs not set; assuming CPU collection broken")
             return True
 
         instance_vcpus = spec_obj.vcpus
@@ -77,7 +76,18 @@ class BaseCoreFilter(filters.BaseHostFilter):
 
 
 class CoreFilter(BaseCoreFilter):
-    """CoreFilter filters based on CPU core utilization."""
+    """DEPRECATED: CoreFilter filters based on CPU core utilization."""
+
+    def __init__(self):
+        super(CoreFilter, self).__init__()
+        LOG.warning('The CoreFilter is deprecated since the 19.0.0 Stein '
+                    'release. VCPU filtering is performed natively using the '
+                    'Placement service when using the filter_scheduler '
+                    'driver. Users of the caching_scheduler driver may still '
+                    'rely on this filter but the caching_scheduler driver is '
+                    'itself deprecated. Furthermore, enabling CoreFilter '
+                    'may incorrectly filter out baremetal nodes which must be '
+                    'scheduled using custom resource classes.')
 
     def _get_cpu_allocation_ratio(self, host_state, spec_obj):
         return host_state.cpu_allocation_ratio
@@ -97,7 +107,7 @@ class AggregateCoreFilter(BaseCoreFilter):
             ratio = utils.validate_num_values(
                 aggregate_vals, host_state.cpu_allocation_ratio, cast_to=float)
         except ValueError as e:
-            LOG.warning(_LW("Could not decode cpu_allocation_ratio: '%s'"), e)
+            LOG.warning("Could not decode cpu_allocation_ratio: '%s'", e)
             ratio = host_state.cpu_allocation_ratio
 
         return ratio

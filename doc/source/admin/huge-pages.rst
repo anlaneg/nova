@@ -55,6 +55,10 @@ Transparent Huge Pages (THP)
 Enabling huge pages on the host
 -------------------------------
 
+.. important::
+   Huge pages may not be used on a host configured for file-backed memory. See
+   :doc:`file-backed-memory` for details
+
 Persistent huge pages are required owing to their guaranteed availability.
 However, persistent huge pages are not enabled by default in most environments.
 The steps for enabling huge pages differ from platform to platform and only the
@@ -200,8 +204,8 @@ run:
 
    $ openstack flavor set m1.large --property hw:mem_page_size=any
 
-For more information about the syntax for ``hw:mem_page_size``, refer to the
-`Flavors`_ guide.
+For more information about the syntax for ``hw:mem_page_size``, refer to
+:doc:`flavors`.
 
 Applications are frequently packaged as images. For applications that require
 the IO performance improvements that huge pages provides, configure image
@@ -235,5 +239,4 @@ guide.
 .. Links
 .. _`Linux THP guide`: https://www.kernel.org/doc/Documentation/vm/transhuge.txt
 .. _`Linux hugetlbfs guide`: https://www.kernel.org/doc/Documentation/vm/hugetlbpage.txt
-.. _`Flavors`: https://docs.openstack.org/admin-guide/compute-flavors.html
 .. _`Image metadata`: https://docs.openstack.org/image-guide/image-metadata.html

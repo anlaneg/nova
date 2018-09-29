@@ -17,6 +17,7 @@
 import datetime
 
 from oslo_policy import policy as oslo_policy
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 import webob
 
@@ -27,7 +28,6 @@ from nova import policy
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import matchers
-from nova.tests import uuidsentinel as uuids
 
 
 FAKE_UUID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
@@ -124,9 +124,9 @@ class ConsolesControllerTestV21(test.NoDBTestCase):
     def setUp(self):
         super(ConsolesControllerTestV21, self).setUp()
         self.instance_db = FakeInstanceDB()
-        self.stub_out('nova.db.instance_get',
+        self.stub_out('nova.db.api.instance_get',
                       self.instance_db.return_server_by_id)
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       self.instance_db.return_server_by_uuid)
         self.uuid = uuids.fake
         self.url = '/v2/fake/servers/%s/consoles' % self.uuid

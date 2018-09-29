@@ -23,8 +23,12 @@ except ImportError:
     import six.moves.xmlrpc_client as xmlrpclib
 
 from eventlet import greenthread
+import fixtures
 import mock
 from os_xenapi.client import host_xenstore
+from oslo_utils.fixture import uuidsentinel as uuids
+from oslo_utils import importutils
+from oslo_utils import timeutils
 import six
 
 from nova.compute import power_state
@@ -38,11 +42,11 @@ from nova import test
 from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
 from nova.tests.unit.virt.xenapi import stubs
-from nova.tests import uuidsentinel as uuids
 from nova import utils
 from nova.virt import fake
 from nova.virt.xenapi import agent as xenapi_agent
 from nova.virt.xenapi import fake as xenapi_fake
+from nova.virt.xenapi.image import utils as image_utils
 from nova.virt.xenapi import vm_utils
 from nova.virt.xenapi import vmops
 from nova.virt.xenapi import volume_utils
@@ -56,7 +60,7 @@ class VMOpsTestBase(stubs.XenAPITestBaseNoDB):
         self.vms = []
 
     def _setup_mock_vmops(self, product_brand=None, product_version=None):
-        stubs.stubout_session(self.stubs, xenapi_fake.SessionBase)
+        stubs.stubout_session(self, xenapi_fake.SessionBase)
         self._session = xenapi_fake.SessionBase(
             'http://localhost', 'root', 'test_pass')
         self.vmops = vmops.VMOps(self._session, fake.FakeVirtAPI())
@@ -218,6 +222,88 @@ class VMOpsTestCase(VMOpsTestBase):
         try_auto_config.assert_called_once_with(self._vmops._session,
                 'fake-ref', instance.flavor.root_gb)
 
+    @mock.patch.object(vm_utils, 'snapshot_attached_here')
+    @mock.patch.object(timeutils, 'delta_seconds')
+    @mock.patch.object(timeutils, 'utcnow')
+    @mock.patch.object(image_utils, 'get_image_handler')
+    def test_snapshot_using_image_handler(self,
+                                          mock_get_image_handler,
+                                          mock_utcnow,
+                                          mock_delta_seconds,
+                                          mock_snapshot_attached_here):
+        mock_utcnow.side_effect = ['fake_start', 'fake_end']
+        self.flags(image_handler='direct_vhd', group='xenserver')
+        mock_get_image_handler.return_value = mock.Mock()
+
+        class FakeVdiUuid(object):
+            def __enter__(self):
+                pass
+
+            def __exit__(self, Type, value, traceback):
+                pass
+
+        fake_vdi_uuid = FakeVdiUuid()
+        mock_snapshot_attached_here.return_value = fake_vdi_uuid
+        self._setup_mock_vmops()
+        vmops = self._vmops
+        with mock.patch.object(vmops, '_get_vm_opaque_ref',
+                               return_value='fake_ref') as mock_get_opa_ref:
+            fake_instance = {'name': 'fake_name'}
+
+            vmops.snapshot('fake_ctx', fake_instance, 'fake_image_id',
+                                 mock.Mock())
+
+            vmops.image_handler.upload_image.assert_called_once_with(
+                'fake_ctx', vmops._session, fake_instance,
+                'fake_image_id', None)
+            mock_get_opa_ref.assert_called_once_with(fake_instance)
+            mock_delta_seconds.assert_called_once_with('fake_start',
+                                                       'fake_end')
+            self.assertEqual(mock_utcnow.call_count, 2)
+
+    @mock.patch.object(vm_utils, 'snapshot_attached_here')
+    @mock.patch.object(timeutils, 'delta_seconds')
+    @mock.patch.object(timeutils, 'utcnow')
+    @mock.patch.object(image_utils, 'get_image_handler')
+    @mock.patch.object(importutils, 'import_object')
+    def test_snapshot_using_upload_image_handler(self,
+                                                 mock_import_object,
+                                                 mock_get_image_handler,
+                                                 mock_utcnow,
+                                                 mock_delta_seconds,
+                                                 mock_snapshot_attached_here):
+        mock_utcnow.side_effect = ['fake_start', 'fake_end']
+        self.flags(image_upload_handler='image_upload_handler',
+                   group='xenserver')
+        mock_get_image_handler.return_value = mock.Mock()
+
+        class FakeVdiUuid(object):
+            def __enter__(self):
+                pass
+
+            def __exit__(self, Type, value, traceback):
+                pass
+
+        fake_vdi_uuid = FakeVdiUuid()
+        mock_snapshot_attached_here.return_value = fake_vdi_uuid
+        mock_import_object.return_value = mock.Mock()
+        self._setup_mock_vmops()
+        vmops = self._vmops
+        with mock.patch.object(vmops, '_get_vm_opaque_ref',
+                               return_value='fake_ref') as mock_get_opa_ref:
+            fake_instance = {'name': 'fake_name'}
+
+            vmops.snapshot('fake_ctx', fake_instance, 'fake_image_id',
+                                 mock.Mock())
+
+            vmops.image_upload_handler.upload_image.assert_called_once_with(
+                'fake_ctx', vmops._session, fake_instance,
+                'fake_image_id', None)
+            mock_get_opa_ref.assert_called_once_with(fake_instance)
+            mock_delta_seconds.assert_called_once_with('fake_start',
+                                                       'fake_end')
+            self.assertEqual(mock_utcnow.call_count, 2)
+
 
 class InjectAutoDiskConfigTestCase(VMOpsTestBase):
     def test_inject_auto_disk_config_when_present(self):
@@ -297,46 +383,95 @@ class GetConsoleOutputTestCase(VMOpsTestBase):
 
 class SpawnTestCase(VMOpsTestBase):
     def _stub_out_common(self):
-        self.mox.StubOutWithMock(self.vmops, '_ensure_instance_name_unique')
-        self.mox.StubOutWithMock(self.vmops, '_ensure_enough_free_mem')
-        self.mox.StubOutWithMock(self.vmops, '_update_instance_progress')
-        self.mox.StubOutWithMock(vm_utils, 'determine_disk_image_type')
-        self.mox.StubOutWithMock(self.vmops, '_get_vdis_for_instance')
-        self.mox.StubOutWithMock(vm_utils, 'safe_destroy_vdis')
-        self.mox.StubOutWithMock(self.vmops._volumeops,
-                                 'safe_cleanup_from_vdis')
-        self.mox.StubOutWithMock(self.vmops, '_resize_up_vdis')
-        self.mox.StubOutWithMock(vm_utils,
-                                 'create_kernel_and_ramdisk')
-        self.mox.StubOutWithMock(vm_utils, 'destroy_kernel_ramdisk')
-        self.mox.StubOutWithMock(self.vmops, '_create_vm_record')
-        self.mox.StubOutWithMock(self.vmops, '_destroy')
-        self.mox.StubOutWithMock(self.vmops, '_attach_disks')
-        self.mox.StubOutWithMock(self.vmops, '_save_device_metadata')
-        self.mox.StubOutWithMock(self.vmops, '_prepare_disk_metadata')
-        self.mox.StubOutWithMock(pci_manager, 'get_instance_pci_devs')
-        self.mox.StubOutWithMock(vm_utils, 'set_other_config_pci')
-        self.mox.StubOutWithMock(self.vmops, '_attach_orig_disks')
-        self.mox.StubOutWithMock(self.vmops, 'inject_network_info')
-        self.mox.StubOutWithMock(self.vmops, '_inject_hostname')
-        self.mox.StubOutWithMock(self.vmops, '_inject_instance_metadata')
-        self.mox.StubOutWithMock(self.vmops, '_inject_auto_disk_config')
-        self.mox.StubOutWithMock(self.vmops, '_file_inject_vm_settings')
-        self.mox.StubOutWithMock(self.vmops, '_create_vifs')
-        self.mox.StubOutWithMock(self.vmops.firewall_driver,
-                                 'setup_basic_filtering')
-        self.mox.StubOutWithMock(self.vmops.firewall_driver,
-                                 'prepare_instance_filter')
-        self.mox.StubOutWithMock(self.vmops, '_start')
-        self.mox.StubOutWithMock(self.vmops, '_wait_for_instance_to_start')
-        self.mox.StubOutWithMock(self.vmops,
-                                 '_configure_new_instance_with_agent')
-        self.mox.StubOutWithMock(self.vmops, '_remove_hostname')
-        self.mox.StubOutWithMock(self.vmops.firewall_driver,
-                                 'apply_instance_filter')
-        self.mox.StubOutWithMock(self.vmops, '_update_last_dom_id')
-        self.mox.StubOutWithMock(self.vmops._session, 'call_xenapi')
-        self.mox.StubOutWithMock(self.vmops, '_attach_vgpu')
+        self.mock_ensure_instance_name_unique = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_ensure_instance_name_unique')).mock
+        self.mock_ensure_enough_free_mem = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_ensure_enough_free_mem')).mock
+        self.mock_update_instance_progress = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_update_instance_progress')).mock
+        self.mock_determine_disk_image_type = self.useFixture(
+            fixtures.MockPatchObject(
+                vm_utils, 'determine_disk_image_type')).mock
+        self.mock_get_vdis_for_instance = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_get_vdis_for_instance')).mock
+        self.mock_safe_destroy_vdis = self.useFixture(
+            fixtures.MockPatchObject(
+                vm_utils, 'safe_destroy_vdis')).mock
+        self.mock_safe_cleanup_from_vdis = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops._volumeops, 'safe_cleanup_from_vdis')).mock
+        self.mock_resize_up_vdis = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_resize_up_vdis')).mock
+        self.mock_create_kernel_and_ramdisk = self.useFixture(
+            fixtures.MockPatchObject(
+                vm_utils, 'create_kernel_and_ramdisk')).mock
+        self.mock_destroy_kernel_ramdisk = self.useFixture(
+            fixtures.MockPatchObject(
+                vm_utils, 'destroy_kernel_ramdisk')).mock
+        self.mock_create_vm_record = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_create_vm_record')).mock
+        self.mock_destroy = self.useFixture(
+            fixtures.MockPatchObject(self.vmops, '_destroy')).mock
+        self.mock_attach_disks = self.useFixture(
+            fixtures.MockPatchObject(self.vmops, '_attach_disks')).mock
+        self.mock_save_device_metadata = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_save_device_metadata')).mock
+        self.mock_get_instance_pci_devs = self.useFixture(
+            fixtures.MockPatchObject(
+                pci_manager, 'get_instance_pci_devs')).mock
+        self.mock_set_other_config_pci = self.useFixture(
+            fixtures.MockPatchObject(
+                vm_utils, 'set_other_config_pci')).mock
+        self.mock_attach_orig_disks = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_attach_orig_disks')).mock
+        self.mock_inject_network_info = self.useFixture(
+            fixtures.MockPatchObject(self.vmops, 'inject_network_info')).mock
+        self.mock_inject_hostname = self.useFixture(
+            fixtures.MockPatchObject(self.vmops, '_inject_hostname')).mock
+        self.mock_inject_instance_metadata = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_inject_instance_metadata')).mock
+        self.mock_inject_auto_disk_config = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_inject_auto_disk_config')).mock
+        self.mock_file_inject_vm_settings = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_file_inject_vm_settings')).mock
+        self.mock_create_vifs = self.useFixture(
+            fixtures.MockPatchObject(self.vmops, '_create_vifs')).mock
+        self.mock_setup_basic_filtering = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops.firewall_driver, 'setup_basic_filtering')).mock
+        self.mock_prepare_instance_filter = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops.firewall_driver, 'prepare_instance_filter')).mock
+        self.mock_start = self.useFixture(
+            fixtures.MockPatchObject(self.vmops, '_start')).mock
+        self.mock_wait_for_instance_to_start = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_wait_for_instance_to_start')).mock
+        self.mock_configure_new_instance_w_agent = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops, '_configure_new_instance_with_agent')).mock
+        self.mock_remove_hostname = self.useFixture(
+            fixtures.MockPatchObject(self.vmops, '_remove_hostname')).mock
+        self.mock_apply_instance_filter = self.useFixture(
+            fixtures.MockPatchObject(
+                self.vmops.firewall_driver, 'apply_instance_filter')).mock
+        self.mock_update_last_dom_id = self.useFixture(
+            fixtures.MockPatchObject(self.vmops, '_update_last_dom_id')).mock
+        self.mock_call_xenapi = self.useFixture(
+            fixtures.MockPatchObject(self.vmops._session, 'call_xenapi')).mock
+        self.mock_attach_vgpu = self.useFixture(
+            fixtures.MockPatchObject(self.vmops, '_attach_vgpu')).mock
 
     @staticmethod
     def _new_instance(obj):
@@ -375,40 +510,35 @@ class SpawnTestCase(VMOpsTestBase):
                                                 self.vmops.default_root_dev
 
         di_type = "di_type"
-        vm_utils.determine_disk_image_type(image_meta).AndReturn(di_type)
+        self.mock_determine_disk_image_type.return_value = di_type
+
+        expected_update_instance_progress_calls = []
         step = 1
-        self.vmops._update_instance_progress(context, instance, step, steps)
+        expected_update_instance_progress_calls.append(
+            mock.call(context, instance, step, steps))
 
         vdis = {"other": {"ref": "fake_ref_2", "osvol": True}}
         if include_root_vdi:
             vdis["root"] = {"ref": "fake_ref"}
-        self.vmops._get_vdis_for_instance(context, instance,
-                name_label, image_meta, di_type,
-                block_device_info).AndReturn(vdis)
-        self.vmops._resize_up_vdis(instance, vdis)
+        self.mock_get_vdis_for_instance.return_value = vdis
         step += 1
-        self.vmops._update_instance_progress(context, instance, step, steps)
+        expected_update_instance_progress_calls.append(
+            mock.call(context, instance, step, steps))
 
         kernel_file = "kernel"
         ramdisk_file = "ramdisk"
-        vm_utils.create_kernel_and_ramdisk(context, session,
-                instance, name_label).AndReturn((kernel_file, ramdisk_file))
+        self.mock_create_kernel_and_ramdisk.return_value = (kernel_file,
+                                                            ramdisk_file)
         step += 1
-        self.vmops._update_instance_progress(context, instance, step, steps)
+        expected_update_instance_progress_calls.append(
+            mock.call(context, instance, step, steps))
 
         vm_ref = "fake_vm_ref"
-        self.vmops._ensure_instance_name_unique(name_label)
-        self.vmops._ensure_enough_free_mem(instance)
-        self.vmops._create_vm_record(context, instance, name_label,
-                di_type, kernel_file,
-                ramdisk_file, image_meta, rescue).AndReturn(vm_ref)
+        self.mock_create_vm_record.return_value = vm_ref
         step += 1
-        self.vmops._update_instance_progress(context, instance, step, steps)
+        expected_update_instance_progress_calls.append(
+            mock.call(context, instance, step, steps))
 
-        self.vmops._save_device_metadata(context, instance, block_device_info)
-        self.vmops._attach_disks(context, instance, image_meta, vm_ref,
-                            name_label, vdis, di_type, network_info, rescue,
-                            admin_password, injected_files)
         if attach_pci_dev:
             fake_dev = {
                 'created_at': None,
@@ -427,86 +557,137 @@ class SpawnTestCase(VMOpsTestBase):
                 'instance_uuid': None,
                 'extra_info': '{}',
             }
-            pci_manager.get_instance_pci_devs(instance).AndReturn([fake_dev])
-            vm_utils.set_other_config_pci(self.vmops._session,
-                                          vm_ref,
-                                          "0/0000:00:00.0")
+            self.mock_get_instance_pci_devs.return_value = [fake_dev]
         else:
-            pci_manager.get_instance_pci_devs(instance).AndReturn([])
-
-        self.vmops._attach_vgpu(vm_ref, vgpu_info, instance)
+            self.mock_get_instance_pci_devs.return_value = []
 
         step += 1
-        self.vmops._update_instance_progress(context, instance, step, steps)
+        expected_update_instance_progress_calls.append(
+            mock.call(context, instance, step, steps))
 
-        self.vmops._inject_instance_metadata(instance, vm_ref)
-        self.vmops._inject_auto_disk_config(instance, vm_ref)
-        self.vmops._inject_hostname(instance, vm_ref, rescue)
-        self.vmops._file_inject_vm_settings(instance, vm_ref, vdis,
-                                            network_info)
-        self.vmops.inject_network_info(instance, network_info, vm_ref)
         step += 1
-        self.vmops._update_instance_progress(context, instance, step, steps)
+        expected_update_instance_progress_calls.append(
+            mock.call(context, instance, step, steps))
 
         if neutron_exception:
             events = [('network-vif-plugged', 1)]
-            self.vmops._get_neutron_events(network_info,
-                                           True, True, False).AndReturn(events)
-            self.mox.StubOutWithMock(self.vmops, '_neutron_failed_callback')
-            self.mox.StubOutWithMock(self.vmops._virtapi,
-                                     'wait_for_instance_event')
-            self.vmops._virtapi.wait_for_instance_event(instance, events,
-                deadline=300,
-                error_callback=self.vmops._neutron_failed_callback).\
-                AndRaise(exception.VirtualInterfaceCreateException)
+            self.stub_out('nova.virt.xenapi.vmops.VMOps.'
+                          '_neutron_failed_callback',
+                          lambda event_name, instance: None)
+            self.stub_out('nova.virt.xenapi.vmops.VMOps.'
+                          'wait_for_instance_event',
+                          lambda instance, event_names,
+                              deadline, error_callback: None)
+            mock_wait_for_instance_event = self.useFixture(
+                fixtures.MockPatchObject(
+                    self.vmops._virtapi, 'wait_for_instance_event',
+                    side_effect=(
+                        exception.VirtualInterfaceCreateException))).mock
         else:
-            self.vmops._create_vifs(instance, vm_ref, network_info)
-            self.vmops.firewall_driver.setup_basic_filtering(instance,
-                    network_info).AndRaise(NotImplementedError)
-            self.vmops.firewall_driver.prepare_instance_filter(instance,
-                                                               network_info)
+            self.mock_setup_basic_filtering.side_effect = NotImplementedError
             step += 1
-            self.vmops._update_instance_progress(context, instance,
-                                                 step, steps)
+            expected_update_instance_progress_calls.append(
+                mock.call(context, instance, step, steps))
 
             if rescue:
-                self.vmops._attach_orig_disks(instance, vm_ref)
                 step += 1
-                self.vmops._update_instance_progress(context, instance, step,
-                                                     steps)
+                expected_update_instance_progress_calls.append(
+                    mock.call(context, instance, step, steps))
             start_pause = True
-            self.vmops._start(instance, vm_ref, start_pause=start_pause)
             step += 1
-            self.vmops._update_instance_progress(context, instance,
-                                                 step, steps)
-            self.vmops.firewall_driver.apply_instance_filter(instance,
-                                                             network_info)
+            expected_update_instance_progress_calls.append(
+                mock.call(context, instance, step, steps))
             step += 1
-            self.vmops._update_instance_progress(context, instance,
-                                                step, steps)
-            self.vmops._session.call_xenapi('VM.unpause', vm_ref)
-            self.vmops._wait_for_instance_to_start(instance, vm_ref)
-            self.vmops._update_last_dom_id(vm_ref)
-            self.vmops._configure_new_instance_with_agent(instance, vm_ref,
-                    injected_files, admin_password)
-            self.vmops._remove_hostname(instance, vm_ref)
+            expected_update_instance_progress_calls.append(
+                mock.call(context, instance, step, steps))
             step += 1
-            last_call = self.vmops._update_instance_progress(context, instance,
-                                                 step, steps)
+            expected_update_instance_progress_calls.append(
+                mock.call(context, instance, step, steps))
 
         if throw_exception:
-            last_call.AndRaise(throw_exception)
-        if throw_exception or neutron_exception:
-            self.vmops._destroy(instance, vm_ref, network_info=network_info)
-            vm_utils.destroy_kernel_ramdisk(self.vmops._session, instance,
-                                            kernel_file, ramdisk_file)
-            vm_utils.safe_destroy_vdis(self.vmops._session, ["fake_ref"])
-            self.vmops._volumeops.safe_cleanup_from_vdis(["fake_ref_2"])
+            self.mock_update_instance_progress.side_effect = [
+                None, None, None, None, None, None, None, None, None,
+                throw_exception]
 
-        self.mox.ReplayAll()
         self.vmops.spawn(context, instance, image_meta, injected_files,
                          admin_password, network_info, block_device_info_param,
                          vgpu_info, name_label_param, rescue)
+
+        self.mock_ensure_instance_name_unique.assert_called_once_with(
+            name_label)
+        self.mock_ensure_enough_free_mem.assert_called_once_with(instance)
+        self.mock_update_instance_progress.assert_has_calls(
+            expected_update_instance_progress_calls)
+        self.mock_determine_disk_image_type.assert_called_once_with(image_meta)
+        self.mock_get_vdis_for_instance.assert_called_once_with(
+            context, instance, name_label, image_meta, di_type,
+            block_device_info)
+        self.mock_resize_up_vdis.assert_called_once_with(instance, vdis)
+        self.mock_create_kernel_and_ramdisk.assert_called_once_with(
+            context, session, instance, name_label)
+        self.mock_create_vm_record.assert_called_once_with(
+            context, instance, name_label, di_type, kernel_file, ramdisk_file,
+            image_meta, rescue)
+        self.mock_attach_disks.assert_called_once_with(
+            context, instance, image_meta, vm_ref, name_label, vdis, di_type,
+            network_info, rescue, admin_password, injected_files)
+        self.mock_save_device_metadata.assert_called_once_with(
+            context, instance, block_device_info)
+        self.mock_get_instance_pci_devs.assert_called_once_with(instance)
+        self.mock_inject_network_info.assert_called_once_with(
+            instance, network_info, vm_ref)
+        self.mock_inject_hostname.assert_called_once_with(instance, vm_ref,
+                                                          rescue)
+        self.mock_inject_instance_metadata.assert_called_once_with(instance,
+                                                                   vm_ref)
+        self.mock_inject_auto_disk_config.assert_called_once_with(instance,
+                                                                  vm_ref)
+        self.mock_file_inject_vm_settings.assert_called_once_with(
+            instance, vm_ref, vdis, network_info)
+        self.mock_start.assert_called_once_with(instance, vm_ref,
+                                                start_pause=start_pause)
+        self.mock_attach_vgpu.assert_called_once_with(vm_ref, vgpu_info,
+                                                      instance)
+
+        if throw_exception or neutron_exception:
+            self.mock_safe_destroy_vdis.assert_called_once_with(
+                self.vmops._session, ["fake_ref"])
+            self.mock_safe_cleanup_from_vdis.assert_called_once_with(
+                ["fake_ref_2"])
+            self.mock_destroy_kernel_ramdisk.assert_called_once_with(
+                self.vmops._session, instance, kernel_file, ramdisk_file)
+            self.mock_destroy.assert_called_once_with(
+                instance, vm_ref, network_info=network_info)
+
+        if attach_pci_dev:
+            self.mock_set_other_config_pci.assert_called_once_with(
+                self.vmops._session, vm_ref, "0/0000:00:00.0")
+
+        if neutron_exception:
+            mock_wait_for_instance_event.assert_called_once_with(
+                instance, events, deadline=300,
+                error_callback=self.vmops._neutron_failed_callback)
+        else:
+            self.mock_create_vifs.assert_called_once_with(instance, vm_ref,
+                                                          network_info)
+            self.mock_setup_basic_filtering.assert_called_once_with(
+                instance, network_info)
+            self.mock_prepare_instance_filter.assert_called_once_with(
+                instance, network_info)
+            self.mock_wait_for_instance_to_start.assert_called_once_with(
+                instance, vm_ref)
+            self.mock_configure_new_instance_w_agent.assert_called_once_with(
+                instance, vm_ref, injected_files, admin_password)
+            self.mock_remove_hostname.assert_called_once_with(
+                instance, vm_ref)
+            self.mock_apply_instance_filter.assert_called_once_with(
+                instance, network_info)
+            self.mock_update_last_dom_id.assert_called_once_with(vm_ref)
+            self.mock_call_xenapi.assert_called_once_with('VM.unpause', vm_ref)
+
+            if rescue:
+                self.mock_attach_orig_disks.assert_called_once_with(instance,
+                                                                    vm_ref)
 
     def test_spawn(self):
         self._test_spawn()
@@ -528,16 +709,19 @@ class SpawnTestCase(VMOpsTestBase):
         self.assertRaises(test.TestingException, self._test_spawn,
                           throw_exception=test.TestingException())
 
-    def test_spawn_with_neutron(self):
+    @mock.patch.object(vmops.VMOps, '_get_neutron_events',
+                       return_value=[('network-vif-plugged', 1)])
+    def test_spawn_with_neutron(self, mock_get_neutron_events):
         self.flags(use_neutron=True)
-        self.mox.StubOutWithMock(self.vmops, '_get_neutron_events')
-        events = [('network-vif-plugged', 1)]
         network_info = [{'id': 1, 'active': True}]
-        self.vmops._get_neutron_events(network_info,
-                                       True, True, False).AndReturn(events)
-        self.mox.StubOutWithMock(self.vmops,
-                                 '_neutron_failed_callback')
+        self.stub_out('nova.virt.xenapi.vmops.VMOps.'
+                      '_neutron_failed_callback',
+                      lambda event_name, instance: None)
+
         self._test_spawn(network_info=network_info)
+
+        mock_get_neutron_events.assert_called_once_with(
+            network_info, True, True, False)
 
     @staticmethod
     def _dev_mock(obj):
@@ -658,18 +842,24 @@ class SpawnTestCase(VMOpsTestBase):
         mock_get_bdms.assert_not_called()
         mock_prepare_disk_metadata.assert_not_called()
 
-    def test_spawn_with_neutron_exception(self):
-        self.mox.StubOutWithMock(self.vmops, '_get_neutron_events')
+    @mock.patch.object(vmops.VMOps, '_get_neutron_events')
+    def test_spawn_with_neutron_exception(self, mock_get_neutron_events):
+        mock_get_neutron_events.return_value = [('network-vif-plugged', 1)]
         self.assertRaises(exception.VirtualInterfaceCreateException,
                           self._test_spawn, neutron_exception=True)
+        mock_get_neutron_events.assert_called_once_with(
+            [], True, True, False)
 
-    def _test_finish_migration(self, power_on=True, resize_instance=True,
+    @mock.patch.object(vmops.VMOps, '_attach_mapped_block_devices')
+    @mock.patch.object(vm_utils, 'import_all_migrated_disks')
+    @mock.patch.object(volumeops.VolumeOps, 'connect_volume')
+    def _test_finish_migration(self, mock_connect_volume,
+                               mock_import_all_migrated_disks,
+                               mock_attach_mapped_block_devices,
+                               power_on=True, resize_instance=True,
                                throw_exception=None, booted_from_volume=False,
                                vgpu_info=None):
         self._stub_out_common()
-        self.mox.StubOutWithMock(volumeops.VolumeOps, "connect_volume")
-        self.mox.StubOutWithMock(vm_utils, "import_all_migrated_disks")
-        self.mox.StubOutWithMock(self.vmops, "_attach_mapped_block_devices")
 
         context = "context"
         migration = {}
@@ -681,87 +871,114 @@ class SpawnTestCase(VMOpsTestBase):
         image_meta = objects.ImageMeta.from_dict({"id": uuids.image_id})
         block_device_info = {}
         import_root = True
+
+        expected_call_xenapi = []
         if booted_from_volume:
             block_device_info = {'block_device_mapping': [
                 {'mount_device': '/dev/xvda',
                  'connection_info': {'data': 'fake-data'}}]}
             import_root = False
-            volumeops.VolumeOps.connect_volume(
-                    {'data': 'fake-data'}).AndReturn(('sr', 'vol-vdi-uuid'))
-            self.vmops._session.call_xenapi('VDI.get_by_uuid',
-                    'vol-vdi-uuid').AndReturn('vol-vdi-ref')
+            mock_connect_volume.return_value = ('sr', 'vol-vdi-uuid')
+            expected_call_xenapi.append(mock.call('VDI.get_by_uuid',
+                                                  'vol-vdi-uuid'))
+            self.mock_call_xenapi.return_value = 'vol-vdi-ref'
         session = self.vmops._session
 
-        self.vmops._ensure_instance_name_unique(name_label)
-        self.vmops._ensure_enough_free_mem(instance)
-
         di_type = "di_type"
-        vm_utils.determine_disk_image_type(image_meta).AndReturn(di_type)
+        self.mock_determine_disk_image_type.return_value = di_type
 
         root_vdi = {"ref": "fake_ref"}
         ephemeral_vdi = {"ref": "fake_ref_e"}
         vdis = {"root": root_vdi, "ephemerals": {4: ephemeral_vdi}}
-        vm_utils.import_all_migrated_disks(self.vmops._session, instance,
-                import_root=import_root).AndReturn(vdis)
+        mock_import_all_migrated_disks.return_value = vdis
 
         kernel_file = "kernel"
         ramdisk_file = "ramdisk"
-        vm_utils.create_kernel_and_ramdisk(context, session,
-                instance, name_label).AndReturn((kernel_file, ramdisk_file))
+        self.mock_create_kernel_and_ramdisk.return_value = (kernel_file,
+                                                            ramdisk_file)
 
         vm_ref = "fake_vm_ref"
         rescue = False
-        self.vmops._create_vm_record(context, instance, name_label,
-                di_type, kernel_file,
-                ramdisk_file, image_meta, rescue).AndReturn(vm_ref)
-
-        if resize_instance:
-            self.vmops._resize_up_vdis(instance, vdis)
-        self.vmops._save_device_metadata(context, instance, block_device_info)
-        self.vmops._attach_disks(context, instance, image_meta, vm_ref,
-                            name_label, vdis, di_type, network_info, False,
-                            None, None)
-        self.vmops._attach_mapped_block_devices(instance, block_device_info)
-        pci_manager.get_instance_pci_devs(instance).AndReturn([])
-
-        self.vmops._attach_vgpu(vm_ref, vgpu_info, instance)
-
-        self.vmops._inject_instance_metadata(instance, vm_ref)
-        self.vmops._inject_auto_disk_config(instance, vm_ref)
-        self.vmops._file_inject_vm_settings(instance, vm_ref, vdis,
-                                            network_info)
-        self.vmops.inject_network_info(instance, network_info, vm_ref)
-
-        self.vmops._create_vifs(instance, vm_ref, network_info)
-        self.vmops.firewall_driver.setup_basic_filtering(instance,
-                network_info).AndRaise(NotImplementedError)
-        self.vmops.firewall_driver.prepare_instance_filter(instance,
-                                                           network_info)
+        self.mock_create_vm_record.return_value = vm_ref
+        self.mock_get_instance_pci_devs.return_value = []
+        self.mock_setup_basic_filtering.side_effect = NotImplementedError
 
         if power_on:
-            self.vmops._start(instance, vm_ref, start_pause=True)
+            expected_call_xenapi.append(mock.call('VM.unpause', vm_ref))
 
-        self.vmops.firewall_driver.apply_instance_filter(instance,
-                                                         network_info)
-        if power_on:
-            self.vmops._session.call_xenapi('VM.unpause', vm_ref)
-            self.vmops._wait_for_instance_to_start(instance, vm_ref)
-            self.vmops._update_last_dom_id(vm_ref)
-
-        last_call = self.vmops._update_instance_progress(context, instance,
-                                                        step=5, total_steps=5)
         if throw_exception:
-            last_call.AndRaise(throw_exception)
-            self.vmops._destroy(instance, vm_ref, network_info=network_info)
-            vm_utils.destroy_kernel_ramdisk(self.vmops._session, instance,
-                                            kernel_file, ramdisk_file)
-            vm_utils.safe_destroy_vdis(self.vmops._session,
-                                       ["fake_ref_e", "fake_ref"])
+            self.mock_update_instance_progress.side_effect = throw_exception
 
-        self.mox.ReplayAll()
         self.vmops.finish_migration(context, migration, instance, disk_info,
                                     network_info, image_meta, resize_instance,
                                     block_device_info, power_on)
+
+        self.mock_ensure_instance_name_unique.assert_called_once_with(
+            name_label)
+        self.mock_ensure_enough_free_mem.assert_called_once_with(instance)
+        self.mock_update_instance_progress.assert_called_once_with(
+            context, instance, step=5, total_steps=5)
+        self.mock_determine_disk_image_type.assert_called_once_with(image_meta)
+        self.mock_create_kernel_and_ramdisk.assert_called_once_with(
+            context, session, instance, name_label)
+        self.mock_create_vm_record.assert_called_once_with(
+            context, instance, name_label, di_type, kernel_file, ramdisk_file,
+            image_meta, rescue)
+        self.mock_attach_disks.assert_called_once_with(
+            context, instance, image_meta, vm_ref, name_label, vdis, di_type,
+            network_info, False, None, None)
+        self.mock_save_device_metadata.assert_called_once_with(
+            context, instance, block_device_info)
+        self.mock_get_instance_pci_devs.assert_called_once_with(instance)
+        self.mock_inject_network_info.assert_called_once_with(
+            instance, network_info, vm_ref)
+        self.mock_inject_instance_metadata.assert_called_once_with(instance,
+                                                                   vm_ref)
+        self.mock_inject_auto_disk_config.assert_called_once_with(instance,
+                                                                  vm_ref)
+        self.mock_file_inject_vm_settings.assert_called_once_with(
+            instance, vm_ref, vdis, network_info)
+        self.mock_create_vifs.assert_called_once_with(
+            instance, vm_ref, network_info)
+        self.mock_setup_basic_filtering.assert_called_once_with(instance,
+                                                                network_info)
+        self.mock_prepare_instance_filter.assert_called_once_with(
+            instance, network_info)
+        self.mock_apply_instance_filter.assert_called_once_with(
+            instance, network_info)
+        self.mock_attach_vgpu.assert_called_once_with(vm_ref, vgpu_info,
+                                                      instance)
+        mock_import_all_migrated_disks.assert_called_once_with(
+            self.vmops._session, instance, import_root=import_root)
+        mock_attach_mapped_block_devices.assert_called_once_with(
+            instance, block_device_info)
+
+        if resize_instance:
+            self.mock_resize_up_vdis.assert_called_once_with(
+                instance, vdis)
+
+        if throw_exception:
+            self.mock_safe_destroy_vdis.assert_called_once_with(
+                self.vmops._session, ["fake_ref_e", "fake_ref"])
+            self.mock_destroy_kernel_ramdisk.assert_called_once_with(
+                self.vmops._session, instance, kernel_file, ramdisk_file)
+            self.mock_destroy.assert_called_once_with(
+                instance, vm_ref, network_info=network_info)
+
+        if power_on:
+            self.mock_start.assert_called_once_with(instance, vm_ref,
+                                                    start_pause=True)
+            self.mock_wait_for_instance_to_start.assert_called_once_with(
+                instance, vm_ref)
+            self.mock_update_last_dom_id.assert_called_once_with(vm_ref)
+
+        if expected_call_xenapi:
+            self.mock_call_xenapi.assert_has_calls(expected_call_xenapi)
+        else:
+            self.mock_call_xenapi.assert_not_called()
+
+        if booted_from_volume:
+            mock_connect_volume.assert_called_once_with({'data': 'fake-data'})
 
     def test_finish_migration(self):
         self._test_finish_migration()
@@ -777,90 +994,83 @@ class SpawnTestCase(VMOpsTestBase):
                           power_on=False, resize_instance=False,
                           throw_exception=test.TestingException())
 
-    def test_remove_hostname(self):
+    @mock.patch.object(xenapi_fake.SessionBase, 'call_xenapi')
+    def test_remove_hostname(self, mock_call_xenapi):
         vm, vm_ref = self.create_vm("dummy")
         instance = {"name": "dummy", "uuid": "1234", "auto_disk_config": None}
-        self.mox.StubOutWithMock(self._session, 'call_xenapi')
-        self._session.call_xenapi("VM.remove_from_xenstore_data", vm_ref,
-                                  "vm-data/hostname")
 
-        self.mox.ReplayAll()
         self.vmops._remove_hostname(instance, vm_ref)
-        self.mox.VerifyAll()
 
-    def test_reset_network(self):
-        class mock_agent(object):
-            def __init__(self):
-                self.called = False
+        mock_call_xenapi.assert_called_once_with(
+            "VM.remove_from_xenstore_data", vm_ref, "vm-data/hostname")
 
-            def resetnetwork(self):
-                self.called = True
-
+    @mock.patch.object(vmops.VMOps, '_remove_hostname')
+    @mock.patch.object(vmops.VMOps, '_inject_hostname')
+    @mock.patch.object(vmops.VMOps, '_get_agent')
+    @mock.patch.object(vmops.VMOps, 'agent_enabled', return_value=True)
+    def test_reset_network(self, mock_agent_enabled, mock_get_agent,
+                           mock_inject_hostname, mock_remove_hostname):
         vm, vm_ref = self.create_vm("dummy")
         instance = {"name": "dummy", "uuid": "1234", "auto_disk_config": None}
-        agent = mock_agent()
+        agent = mock.Mock()
+        mock_get_agent.return_value = agent
 
-        self.mox.StubOutWithMock(self.vmops, 'agent_enabled')
-        self.mox.StubOutWithMock(self.vmops, '_get_agent')
-        self.mox.StubOutWithMock(self.vmops, '_inject_hostname')
-        self.mox.StubOutWithMock(self.vmops, '_remove_hostname')
-
-        self.vmops.agent_enabled(instance).AndReturn(True)
-        self.vmops._get_agent(instance, vm_ref).AndReturn(agent)
-        self.vmops._inject_hostname(instance, vm_ref, False)
-        self.vmops._remove_hostname(instance, vm_ref)
-        self.mox.ReplayAll()
         self.vmops.reset_network(instance)
-        self.assertTrue(agent.called)
-        self.mox.VerifyAll()
 
-    def test_inject_hostname(self):
+        agent.resetnetwork.assert_called_once_with()
+        mock_agent_enabled.assert_called_once_with(instance)
+        mock_get_agent.assert_called_once_with(instance, vm_ref)
+        mock_inject_hostname.assert_called_once_with(instance, vm_ref, False)
+        mock_remove_hostname.assert_called_once_with(instance, vm_ref)
+
+    @mock.patch.object(vmops.VMOps, '_add_to_param_xenstore')
+    def test_inject_hostname(self, mock_add_to_param_xenstore):
         instance = {"hostname": "dummy", "os_type": "fake", "uuid": "uuid"}
         vm_ref = "vm_ref"
 
-        self.mox.StubOutWithMock(self.vmops, '_add_to_param_xenstore')
-        self.vmops._add_to_param_xenstore(vm_ref, 'vm-data/hostname', 'dummy')
-
-        self.mox.ReplayAll()
         self.vmops._inject_hostname(instance, vm_ref, rescue=False)
 
-    def test_inject_hostname_with_rescue_prefix(self):
+        mock_add_to_param_xenstore.assert_called_once_with(
+            vm_ref, 'vm-data/hostname', 'dummy')
+
+    @mock.patch.object(vmops.VMOps, '_add_to_param_xenstore')
+    def test_inject_hostname_with_rescue_prefix(
+            self, mock_add_to_param_xenstore):
         instance = {"hostname": "dummy", "os_type": "fake", "uuid": "uuid"}
         vm_ref = "vm_ref"
 
-        self.mox.StubOutWithMock(self.vmops, '_add_to_param_xenstore')
-        self.vmops._add_to_param_xenstore(vm_ref, 'vm-data/hostname',
-                                          'RESCUE-dummy')
-
-        self.mox.ReplayAll()
         self.vmops._inject_hostname(instance, vm_ref, rescue=True)
 
-    def test_inject_hostname_with_windows_name_truncation(self):
+        mock_add_to_param_xenstore.assert_called_once_with(
+            vm_ref, 'vm-data/hostname', 'RESCUE-dummy')
+
+    @mock.patch.object(vmops.VMOps, '_add_to_param_xenstore')
+    def test_inject_hostname_with_windows_name_truncation(
+            self, mock_add_to_param_xenstore):
         instance = {"hostname": "dummydummydummydummydummy",
                     "os_type": "windows", "uuid": "uuid"}
         vm_ref = "vm_ref"
 
-        self.mox.StubOutWithMock(self.vmops, '_add_to_param_xenstore')
-        self.vmops._add_to_param_xenstore(vm_ref, 'vm-data/hostname',
-                                          'RESCUE-dummydum')
-
-        self.mox.ReplayAll()
         self.vmops._inject_hostname(instance, vm_ref, rescue=True)
 
-    def test_wait_for_instance_to_start(self):
+        mock_add_to_param_xenstore.assert_called_once_with(
+            vm_ref, 'vm-data/hostname', 'RESCUE-dummydum')
+
+    @mock.patch.object(greenthread, 'sleep')
+    @mock.patch.object(vm_utils, 'get_power_state',
+                       side_effect=[power_state.SHUTDOWN,
+                                    power_state.RUNNING])
+    def test_wait_for_instance_to_start(self, mock_get_power_state,
+                                        mock_sleep):
         instance = {"uuid": "uuid"}
         vm_ref = "vm_ref"
 
-        self.mox.StubOutWithMock(vm_utils, 'get_power_state')
-        self.mox.StubOutWithMock(greenthread, 'sleep')
-        vm_utils.get_power_state(self._session, vm_ref).AndReturn(
-                                             power_state.SHUTDOWN)
-        greenthread.sleep(0.5)
-        vm_utils.get_power_state(self._session, vm_ref).AndReturn(
-                                            power_state.RUNNING)
-
-        self.mox.ReplayAll()
         self.vmops._wait_for_instance_to_start(instance, vm_ref)
+
+        mock_get_power_state.assert_has_calls(
+            [mock.call(self._session, vm_ref),
+             mock.call(self._session, vm_ref)])
+        mock_sleep.assert_called_once_with(0.5)
 
     @mock.patch.object(vm_utils, 'lookup', return_value='ref')
     @mock.patch.object(vm_utils, 'create_vbd')
@@ -878,29 +1088,32 @@ class SpawnTestCase(VMOpsTestBase):
                 self.vmops._session, vm_ref, 'vdi_ref', vmops.DEVICE_RESCUE,
                 bootable=False)
 
-    def test_agent_update_setup(self):
+    @mock.patch.object(xenapi_agent.XenAPIBasedAgent, 'update_if_needed')
+    @mock.patch.object(xenapi_agent.XenAPIBasedAgent, 'resetnetwork')
+    @mock.patch.object(xenapi_agent.XenAPIBasedAgent, 'get_version',
+                       return_value='1.2.3')
+    @mock.patch.object(vmops.VMOps, '_get_agent')
+    @mock.patch.object(xenapi_agent, 'should_use_agent',
+                       return_value=True)
+    def test_agent_update_setup(self, mock_should_use_agent, mock_get_agent,
+                                mock_get_version, mock_resetnetwork,
+                                mock_update_if_needed):
         # agent updates need to occur after networking is configured
         instance = {'name': 'betelgeuse',
                     'uuid': '1-2-3-4-5-6'}
         vm_ref = 'vm_ref'
         agent = xenapi_agent.XenAPIBasedAgent(self.vmops._session,
                 self.vmops._virtapi, instance, vm_ref)
+        mock_get_agent.return_value = agent
 
-        self.mox.StubOutWithMock(xenapi_agent, 'should_use_agent')
-        self.mox.StubOutWithMock(self.vmops, '_get_agent')
-        self.mox.StubOutWithMock(agent, 'get_version')
-        self.mox.StubOutWithMock(agent, 'resetnetwork')
-        self.mox.StubOutWithMock(agent, 'update_if_needed')
-
-        xenapi_agent.should_use_agent(instance).AndReturn(True)
-        self.vmops._get_agent(instance, vm_ref).AndReturn(agent)
-        agent.get_version().AndReturn('1.2.3')
-        agent.resetnetwork()
-        agent.update_if_needed('1.2.3')
-
-        self.mox.ReplayAll()
         self.vmops._configure_new_instance_with_agent(instance, vm_ref,
                 None, None)
+
+        mock_should_use_agent.assert_called_once_with(instance)
+        mock_get_agent.assert_called_once_with(instance, vm_ref)
+        mock_get_version.assert_called_once_with()
+        mock_resetnetwork.assert_called_once_with()
+        mock_update_if_needed.assert_called_once_with('1.2.3')
 
     @mock.patch.object(utils, 'is_neutron', return_value=True)
     def test_get_neutron_event(self, mock_is_neutron):
@@ -1110,11 +1323,11 @@ class MigrateDiskResizingUpTestCase(VMOpsTestBase):
             yield [leaf, parent]
 
     @mock.patch.object(volume_utils, 'is_booted_from_volume',
-            return_value=False)
+                       return_value=False)
     def test_migrate_disk_resizing_up_works_no_ephemeral(self,
-            mock_is_booted_from_volume,
-            mock_apply_orig, mock_update_progress, mock_get_all_vdi_uuids,
-            mock_shutdown, mock_migrate_vhd, mock_get_vdi_for_vm):
+            mock_is_booted_from_volume, mock_apply_orig, mock_update_progress,
+            mock_get_all_vdi_uuids, mock_shutdown, mock_migrate_vhd,
+            mock_get_vdi_for_vm):
         context = "ctxt"
         instance = {"name": "fake", "uuid": "uuid"}
         dest = "dest"
@@ -1152,11 +1365,11 @@ class MigrateDiskResizingUpTestCase(VMOpsTestBase):
         self.assertEqual(prog_expected, mock_update_progress.call_args_list)
 
     @mock.patch.object(volume_utils, 'is_booted_from_volume',
-            return_value=False)
-    def test_migrate_disk_resizing_up_works_with_two_ephemeral(self,
-            mock_is_booted_from_volume,
-            mock_apply_orig, mock_update_progress, mock_get_all_vdi_uuids,
-            mock_shutdown, mock_migrate_vhd, mock_get_vdi_for_vm):
+                       return_value=False)
+    def test_migrate_disk_resizing_up_ephemerals_no_volume(self,
+            mock_is_booted_from_volume, mock_apply_orig, mock_update_progress,
+            mock_get_all_vdi_uuids, mock_shutdown, mock_migrate_vhd,
+            mock_get_vdi_for_vm):
         context = "ctxt"
         instance = {"name": "fake", "uuid": "uuid"}
         dest = "dest"
@@ -1203,12 +1416,11 @@ class MigrateDiskResizingUpTestCase(VMOpsTestBase):
             ]
         self.assertEqual(prog_expected, mock_update_progress.call_args_list)
 
-    @mock.patch.object(volume_utils, 'is_booted_from_volume',
-            return_value=True)
-    def test_migrate_disk_resizing_up_booted_from_volume(self,
-            mock_is_booted_from_volume,
-            mock_apply_orig, mock_update_progress, mock_get_all_vdi_uuids,
-            mock_shutdown, mock_migrate_vhd, mock_get_vdi_for_vm):
+    @mock.patch.object(volume_utils, 'is_booted_from_volume')
+    def test_migrate_disk_resizing_up_ephemerals_mixed_volumes(self,
+            mock_is_booted_from_volume, mock_apply_orig, mock_update_progress,
+            mock_get_all_vdi_uuids, mock_shutdown, mock_migrate_vhd,
+            mock_get_vdi_for_vm):
         context = "ctxt"
         instance = {"name": "fake", "uuid": "uuid"}
         dest = "dest"
@@ -1218,6 +1430,10 @@ class MigrateDiskResizingUpTestCase(VMOpsTestBase):
         mock_get_all_vdi_uuids.return_value = ["vdi-eph1", "vdi-eph2"]
         mock_get_vdi_for_vm.side_effect = [({}, {"uuid": "4-root"}),
                                            ({}, {"uuid": "5-root"})]
+        # Here we mock the is_booted_from_volume call to emulate the
+        # 4-root and 4-parent VDI's being volume based, while 5-root
+        # and 5-Parent are local ephemeral drives that should be migrated.
+        mock_is_booted_from_volume.side_effect = [True, False, True, False]
 
         with mock.patch.object(vm_utils, '_snapshot_attached_here_impl',
                 self._fake_snapshot_attached_here):
@@ -1228,15 +1444,11 @@ class MigrateDiskResizingUpTestCase(VMOpsTestBase):
                 vm_ref, min_userdevice=4)
         mock_apply_orig.assert_called_once_with(instance, vm_ref)
         mock_shutdown.assert_called_once_with(instance, vm_ref)
-
         m_vhd_expected = [mock.call(self.vmops._session, instance,
                                     "4-parent", dest, sr_path, 1, 1),
                           mock.call(self.vmops._session, instance,
-                                    "5-parent", dest, sr_path, 1, 2),
-                          mock.call(self.vmops._session, instance,
-                                    "4-root", dest, sr_path, 0, 1),
-                          mock.call(self.vmops._session, instance,
-                                    "5-root", dest, sr_path, 0, 2)]
+                                    "4-root", dest, sr_path, 0, 1)]
+
         self.assertEqual(m_vhd_expected, mock_migrate_vhd.call_args_list)
 
         prog_expected = [
@@ -1504,19 +1716,26 @@ class XenstoreCallsTestCase(VMOpsTestBase):
 class LiveMigrateTestCase(VMOpsTestBase):
 
     @mock.patch.object(vmops.VMOps, '_get_network_ref')
-    @mock.patch.object(vmops.VMOps, '_ensure_host_in_aggregate')
+    @mock.patch.object(vm_utils, 'host_in_this_pool')
     def _test_check_can_live_migrate_destination_shared_storage(
                                                 self,
                                                 shared,
-                                                mock_ensure_host,
+                                                mock_is_same_pool,
                                                 mock_net_ref):
-        fake_instance = {"name": "fake_instance", "host": "fake_host"}
+        fake_instance = objects.Instance(host="fake_host")
         block_migration = None
         disk_over_commit = False
         ctxt = 'ctxt'
         mock_net_ref.return_value = 'fake_net_ref'
+        if shared:
+            mock_is_same_pool.return_value = True
+        else:
+            mock_is_same_pool.return_value = False
 
-        with mock.patch.object(self._session, 'get_rec') as fake_sr_rec:
+        with mock.patch.object(self._session, 'get_rec') as fake_sr_rec, \
+                mock.patch.object(self._session, 'host.get_by_name_label') \
+                as fake_get_ref:
+            fake_get_ref.return_value = ['fake_host_ref']
             fake_sr_rec.return_value = {'shared': shared}
             migrate_data_ret = self.vmops.check_can_live_migrate_destination(
                 ctxt, fake_instance, block_migration, disk_over_commit)
@@ -1535,50 +1754,83 @@ class LiveMigrateTestCase(VMOpsTestBase):
         self._test_check_can_live_migrate_destination_shared_storage(False)
 
     @mock.patch.object(vmops.VMOps, '_get_network_ref')
-    @mock.patch.object(vmops.VMOps, '_ensure_host_in_aggregate',
-                       side_effect=exception.MigrationPreCheckError(reason=""))
     def test_check_can_live_migrate_destination_block_migration(
-                                                self,
-                                                mock_ensure_host,
-                                                mock_net_ref):
-        fake_instance = {"name": "fake_instance", "host": "fake_host"}
+                                                                self,
+                                                                mock_net_ref):
+        fake_instance = objects.Instance(host="fake_host")
         block_migration = None
         disk_over_commit = False
         ctxt = 'ctxt'
         mock_net_ref.return_value = 'fake_net_ref'
 
-        migrate_data_ret = self.vmops.check_can_live_migrate_destination(
-            ctxt, fake_instance, block_migration, disk_over_commit)
+        with mock.patch.object(self._session, 'host.get_by_name_label') \
+                as fake_get_ref:
+            fake_get_ref.return_value = ['fake_host_ref']
+            migrate_data_ret = self.vmops.check_can_live_migrate_destination(
+                ctxt, fake_instance, block_migration, disk_over_commit)
 
-        self.assertTrue(migrate_data_ret.block_migration)
-        self.assertEqual(vm_utils.safe_find_sr(self._session),
-                         migrate_data_ret.destination_sr_ref)
-        self.assertEqual({'value': 'fake_migrate_data'},
-                         migrate_data_ret.migrate_send_data)
-        self.assertEqual({'': 'fake_net_ref'},
-                         migrate_data_ret.vif_uuid_map)
+            self.assertTrue(migrate_data_ret.block_migration)
+            self.assertEqual(vm_utils.safe_find_sr(self._session),
+                             migrate_data_ret.destination_sr_ref)
+            self.assertEqual({'value': 'fake_migrate_data'},
+                             migrate_data_ret.migrate_send_data)
+            self.assertEqual({'': 'fake_net_ref'},
+                             migrate_data_ret.vif_uuid_map)
 
-    @mock.patch.object(vmops.objects.AggregateList, 'get_by_host')
-    def test_get_host_uuid_from_aggregate_no_aggr(self, mock_get_by_host):
-        mock_get_by_host.return_value = objects.AggregateList(objects=[])
-        context = "ctx"
-        hostname = "other_host"
-        self.assertRaises(exception.MigrationPreCheckError,
-                          self.vmops._get_host_uuid_from_aggregate,
-                          context, hostname)
+    @mock.patch.object(vmops.VMOps, '_migrate_receive')
+    @mock.patch.object(vm_utils, 'safe_find_sr')
+    @mock.patch.object(vmops.VMOps, '_get_network_ref')
+    def test_no_hosts_found_with_the_name_label(self,
+                                                mock_get_network_ref,
+                                                mock_safe_find_sr,
+                                                mock_migrate_receive):
+        # Can find the dest host in current pool, do block live migrate
+        fake_instance = objects.Instance(host="fake_host")
+        mock_migrate_receive.return_value = {'fake_key': 'fake_data'}
+        mock_safe_find_sr.return_value = 'fake_destination_sr_ref'
+        mock_get_network_ref.return_value = 'fake_net_ref'
+        block_migration = None
+        disk_over_commit = False
+        ctxt = 'ctxt'
+        with mock.patch.object(self._session, 'host.get_by_name_label') \
+                as fake_get_ref:
+            fake_get_ref.return_value = []
+            migrate_data_ret = self.vmops.check_can_live_migrate_destination(
+                ctxt, fake_instance, block_migration, disk_over_commit)
+            self.assertTrue(migrate_data_ret.block_migration)
+            self.assertEqual(migrate_data_ret.vif_uuid_map,
+                             {'': 'fake_net_ref'})
 
-    @mock.patch.object(vmops.objects.AggregateList, 'get_by_host')
-    def test_get_host_uuid_from_aggregate_bad_aggr(self, mock_get_by_host):
-        context = "ctx"
-        hostname = "other_host"
-        fake_aggregate_obj = objects.Aggregate(hosts=['fake'],
-                                               metadata={'this': 'that'})
-        fake_aggr_list = objects.AggregateList(objects=[fake_aggregate_obj])
-        mock_get_by_host.return_value = fake_aggr_list
+    def test_multiple_hosts_found_with_same_name(self):
+        # More than one host found with the dest host name, raise exception
+        fake_instance = objects.Instance(host="fake_host")
+        block_migration = None
+        disk_over_commit = False
+        ctxt = 'ctxt'
+        with mock.patch.object(self._session, 'host.get_by_name_label') \
+                as fake_get_ref:
+            fake_get_ref.return_value = ['fake_host_ref1', 'fake_host_ref2']
+            self.assertRaises(exception.MigrationPreCheckError,
+                              self.vmops.check_can_live_migrate_destination,
+                              ctxt, fake_instance, block_migration,
+                              disk_over_commit)
 
-        self.assertRaises(exception.MigrationPreCheckError,
-                          self.vmops._get_host_uuid_from_aggregate,
-                          context, hostname)
+    @mock.patch.object(vm_utils, 'host_in_this_pool')
+    def test_request_pool_migrate_to_outer_pool_host(self, mock_is_same_pool):
+        # Caller asks for no block live migrate while the dest host is not in
+        # the same pool with the src host, raise exception
+        fake_instance = objects.Instance(host="fake_host")
+        block_migration = False
+        disk_over_commit = False
+        ctxt = 'ctxt'
+        mock_is_same_pool.return_value = False
+        with mock.patch.object(self._session, 'host.get_by_name_label') \
+                as fake_get_ref:
+            fake_get_ref.return_value = ['fake_host_ref1']
+            self.assertRaises(exception.MigrationPreCheckError,
+                              self.vmops.check_can_live_migrate_destination,
+                              ctxt, fake_instance, block_migration,
+                              disk_over_commit)
 
     @mock.patch.object(vmops.VMOps, 'create_interim_networks')
     @mock.patch.object(vmops.VMOps, 'connect_block_device_volumes')
@@ -1746,12 +1998,15 @@ class LiveMigrateHelperTestCase(VMOpsTestBase):
                                "_generate_vdi_map") as mock_gen_vdi_map, \
                 mock.patch.object(self.vmops._session,
                                   'call_xenapi') as mock_call_xenapi, \
+                mock.patch.object(vm_utils, 'host_in_this_pool'
+                                  ) as mock_host_in_this_pool, \
                 mock.patch.object(self.vmops,
                                   "_generate_vif_network_map") as mock_vif_map:
             mock_call_xenapi.side_effect = side_effect
             mock_gen_vdi_map.side_effect = [
                     {"vdi": "sr_ref"}, {"vdi": "sr_ref_2"}]
             mock_vif_map.return_value = {"vif_ref1": "dest_net_ref"}
+            mock_host_in_this_pool.return_value = False
 
             self.vmops._call_live_migrate_command(command_name,
                                                   vm_ref, migrate_data)
@@ -1924,7 +2179,7 @@ class LiveMigrateHelperTestCase(VMOpsTestBase):
 
     def test_delete_networks_and_bridges(self):
         self.vmops.vif_driver = mock.Mock()
-        network_info = ['fake_vif']
+        network_info = [{'id': 'fake_vif'}]
         self.vmops._delete_networks_and_bridges('fake_instance', network_info)
         self.vmops.vif_driver.delete_network_and_bridge.\
             assert_called_once_with('fake_instance', 'fake_vif')
@@ -2172,12 +2427,26 @@ class AttachInterfaceTestCase(VMOpsTestBase):
         self.vmops.vif_driver.unplug.assert_called_once_with(
             self.fake_instance, self.fake_vif, 'fake_vm_ref')
 
+    @mock.patch('nova.virt.xenapi.vmops.LOG.exception')
     @mock.patch.object(vmops.VMOps, '_get_vm_opaque_ref')
-    def test_detach_interface_exception(self, mock_get_vm_opaque_ref):
+    def test_detach_interface_exception(self, mock_get_vm_opaque_ref,
+                                        mock_log_exception):
         mock_get_vm_opaque_ref.return_value = 'fake_vm_ref'
         self.vmops.vif_driver.unplug.side_effect =\
             exception.VirtualInterfaceUnplugException('Failed to unplug VIF')
 
         self.assertRaises(exception.VirtualInterfaceUnplugException,
+                          self.vmops.detach_interface,
+                          self.fake_instance, self.fake_vif)
+        mock_log_exception.assert_called()
+
+    @mock.patch('nova.virt.xenapi.vmops.LOG.exception',
+                new_callable=mock.NonCallableMock)
+    @mock.patch.object(vmops.VMOps, '_get_vm_opaque_ref',
+                       side_effect=exception.InstanceNotFound(
+                           instance_id='fake_vm_ref'))
+    def test_detach_interface_instance_not_found(
+            self, mock_get_vm_opaque_ref, mock_log_exception):
+        self.assertRaises(exception.InstanceNotFound,
                           self.vmops.detach_interface,
                           self.fake_instance, self.fake_vif)

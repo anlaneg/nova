@@ -31,21 +31,22 @@
 # Andreas Jaeger <jaegerandi@gmail.com>, 2016. #zanata
 # zzxwill <zzxwill@gmail.com>, 2016. #zanata
 # blkart <blkart.org@gmail.com>, 2017. #zanata
+# Yikun Jiang <yikunkero@gmail.com>, 2018. #zanata
 msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2018-02-17 16:08+0000\n"
+"POT-Creation-Date: 2018-09-21 04:59+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"PO-Revision-Date: 2017-06-24 04:35+0000\n"
-"Last-Translator: blkart <blkart.org@gmail.com>\n"
-"Language: zh-CN\n"
+"PO-Revision-Date: 2018-06-25 11:53+0000\n"
+"Last-Translator: Yikun Jiang <yikunkero@gmail.com>\n"
+"Language: zh_CN\n"
 "Language-Team: Chinese (China)\n"
 "Plural-Forms: nplurals=1; plural=0\n"
 "Generated-By: Babel 2.2.0\n"
-"X-Generator: Zanata 3.9.6\n"
+"X-Generator: Zanata 4.3.3\n"
 
 msgid "\"Look for the VDIs failed"
 msgstr "查找VDI失败"
@@ -86,14 +87,6 @@ msgstr ""
 "标准错误输出: %(stderr)r"
 
 #, python-format
-msgid ""
-"%(event_type)s is not a versioned notification and not whitelisted. See ./"
-"doc/source/notification.rst"
-msgstr ""
-"%(event_type)s 并非版本化通知，并且未列入白名单。请参阅 ./doc/source/"
-"notification.rst"
-
-#, python-format
 msgid "%(field)s should not be part of the updates."
 msgstr "%(field)s应该是更新的部分。"
 
@@ -104,14 +97,6 @@ msgstr "%(key)s 必须为整数。"
 #, python-format
 msgid "%(memsize)d MB of memory assigned, but expected %(memtotal)d MB"
 msgstr "已分配 %(memsize)d MB 内存，但需要 %(memtotal)d MB"
-
-#, python-format
-msgid "%(name)s has a minimum character requirement of %(min_length)s."
-msgstr "%(name)s最小字符串长度%(min_length)s。"
-
-#, python-format
-msgid "%(name)s has more than %(max_length)s characters."
-msgstr "%(name)s 包含的字符超过 %(max_length)s 个。"
 
 #, python-format
 msgid "%(path)s is not on local storage: %(reason)s"
@@ -152,10 +137,6 @@ msgstr "%s 不支持磁盘热插。"
 #, python-format
 msgid "%s format is not supported"
 msgstr "不支持格式%s"
-
-#, python-format
-msgid "%s is not a string or unicode"
-msgstr "%s 不是字符串或 Unicode"
 
 #, python-format
 msgid "%s is not supported."
@@ -486,14 +467,6 @@ msgid "Cannot attach one or more volumes to multiple instances"
 msgstr "无法将一个或多个卷连接至多个实例"
 
 #, python-format
-msgid ""
-"Cannot block migrate instance %(uuid)s with mapped volumes. Selective block "
-"device migration feature requires libvirt version %(libvirt_ver)s"
-msgstr ""
-"无法对带有映射卷的实例 %(uuid)s 进行块迁移。选择性块设备迁移功能需要 libvirt "
-"V%(libvirt_ver)s"
-
-#, python-format
 msgid "Cannot call %(method)s on orphaned %(objtype)s object"
 msgstr "对于孤立对象 %(objtype)s 无法调用 %(method)s"
 
@@ -729,9 +702,6 @@ msgstr "未能访存映像 %(image_id)s"
 msgid "Could not find a handler for %(driver_type)s volume."
 msgstr "无法为 %(driver_type)s 卷找到句柄。"
 
-msgid "Could not find another compute"
-msgstr "无法找到另一个计算节点"
-
 #, python-format
 msgid "Could not find binary %(binary)s on host %(host)s."
 msgstr "没有找到二进制 %(binary)s 在主机 %(host)s 上。"
@@ -778,9 +748,6 @@ msgstr "创建网络失败"
 msgid "Creation of virtual interface with unique mac address failed"
 msgstr "为使用特殊MAC地址的vm的创建失败"
 
-msgid "DNS entries not found."
-msgstr "找不到 DNS 条目。"
-
 msgid "DNS1"
 msgstr "DNS1"
 
@@ -803,13 +770,6 @@ msgstr "如果PBM启用，缺省的PBM策略是必须的。"
 #, python-format
 msgid "Deleted %(records)d records from table '%(table_name)s'."
 msgstr "从表格 '%(table_name)s'删除%(records)d记录。"
-
-msgid "Deleting by fixed_range is not supported with the NeutronManager"
-msgstr "不支持使用NeutronManager删除fixed_range"
-
-#, python-format
-msgid "Destination host:%s must be in the same aggregate as the source server"
-msgstr "目的主机：%s 必须与源服务器在同一个聚合中"
 
 #, python-format
 msgid "Detected existing vlan with id %(vlan)d"
@@ -1193,20 +1153,8 @@ msgid "Fixed IP %(ip)s is not a valid ip address for network %(network_id)s."
 msgstr "对于网络%(network_id)s，固定IP %(ip)s 不是一个有效的ip地址。"
 
 #, python-format
-msgid "Fixed IP %s has been deleted"
-msgstr "已删除固定 IP %s"
-
-#, python-format
 msgid "Fixed IP %s is already in use."
 msgstr "固定IP%s已在使用。"
-
-#, python-format
-msgid "Fixed IP %s not found"
-msgstr "找不到固定 IP %s"
-
-#, python-format
-msgid "Fixed IP %s not valid"
-msgstr "固定IP %s无效"
 
 #, python-format
 msgid ""
@@ -1355,10 +1303,6 @@ msgid ""
 "meta."
 msgstr "传入镜像元数据的串口数不能超过云主机类型中的设定。"
 
-#, python-format
-msgid "Found no PIF for device %s"
-msgstr "没有找到设备 %s 的PIF"
-
 msgid "Found no disk to snapshot."
 msgstr "发现没有盘来做快照。"
 
@@ -1494,22 +1438,6 @@ msgstr ""
 
 msgid "Image that the instance was started with could not be found."
 msgstr "实例启动的镜像没有找到。"
-
-#, python-format
-msgid ""
-"Image vCPU limits %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"镜像 vCPU 限制 %(sockets)d:%(cores)d:%(threads)d 超过许可的%(maxsockets)d:"
-"%(maxcores)d:%(maxthreads)d"
-
-#, python-format
-msgid ""
-"Image vCPU topology %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"映像 vCPU 拓扑 %(sockets)d:%(cores)d:%(threads)d 超过许可的%(maxsockets)d:"
-"%(maxcores)d:%(maxthreads)d"
 
 #, python-format
 msgid "Image's config drive option '%(config_drive)s' is invalid"
@@ -1677,15 +1605,9 @@ msgstr "实例并不是指定网络的成员"
 msgid "Instance network is not ready yet"
 msgstr "云主机网络尚未就绪"
 
-msgid "Instance recreate is not supported."
-msgstr "不支持实例重创建"
-
 #, python-format
 msgid "Instance rollback performed due to: %s"
 msgstr "由于%s，实例回滚已被执行"
-
-msgid "Instance snapshots are not permitted at this time."
-msgstr "该时刻实例快照是不允许的。"
 
 #, python-format
 msgid ""
@@ -1829,10 +1751,6 @@ msgid "Invalid key_name provided."
 msgstr "提供了无效的key_name。"
 
 #, python-format
-msgid "Invalid libvirt version %(version)s"
-msgstr "无效的libvirt版本%(version)s"
-
-#, python-format
 msgid "Invalid memory page size '%(pagesize)s'"
 msgstr "内存页大小“%(pagesize)s”无效"
 
@@ -1909,10 +1827,6 @@ msgid "Invalid usage_type: %s"
 msgstr "usage_type： %s无效"
 
 #, python-format
-msgid "Invalid uuid value: %(uuid)s"
-msgstr "无效的 uuid: %(uuid)s"
-
-#, python-format
 msgid "Invalid value for Config Drive option: %(option)s"
 msgstr "非法的Config Drive值： %(option)s"
 
@@ -1948,9 +1862,6 @@ msgstr "无效volume_size."
 #, python-format
 msgid "Ironic node uuid not supplied to driver for instance %s."
 msgstr "Ironic节点uuid不提供实例 %s的驱动。"
-
-msgid "Is the appropriate service running?"
-msgstr "正确的服务在运行吗？"
 
 #, python-format
 msgid ""
@@ -1996,17 +1907,9 @@ msgstr "仅 vCenter 6.0 及以上版本支持限制"
 msgid "Link Local address is not found.:%s"
 msgstr "本地IP地址没有找到：%s"
 
-msgid "Listing virtual interfaces is not supported by this cloud."
-msgstr "此云不支持列示虚拟接口。"
-
 #, python-format
 msgid "Live migration %(id)s for server %(uuid)s is not in progress."
 msgstr "对应服务器 %(uuid)s 的实时迁移 %(id)s 未在进行。"
-
-msgid ""
-"Live migration with API v2.25 requires all the Mitaka upgrade to be complete "
-"before it is available."
-msgstr "使用 API V2.25 进行的实时迁移要求所有 Mitaka 升级完成才可用。"
 
 #, python-format
 msgid "Malformed message body: %(reason)s"
@@ -2504,12 +2407,6 @@ msgid "Number of Rows Archived"
 msgstr "已归档行数"
 
 #, python-format
-msgid ""
-"Number of serial ports '%(num_ports)s' specified in '%(property)s' isn't "
-"valid."
-msgstr "“%(property)s”中指定的串口数“%(num_ports)s”无效。"
-
-#, python-format
 msgid "OVS configuration failed with: %(inner_exception)s."
 msgstr "OVS 配置失败，产生以下异常：%(inner_exception)s。"
 
@@ -2583,13 +2480,6 @@ msgstr "无法找到PCI设备 %(id)s"
 #, python-format
 msgid "PCI device request %(requests)s failed"
 msgstr "PCI 设备请求 %(requests)s 失败"
-
-#, python-format
-msgid ""
-"PIF %(pif_uuid)s for network %(bridge)s has VLAN id %(pif_vlan)d. Expected "
-"%(vlan_num)d"
-msgstr ""
-"网络%(bridge)s的PIF %(pif_uuid)s 用VLAN号 %(pif_vlan)d。期望%(vlan_num)d"
 
 #, python-format
 msgid "PIF %s does not contain IP address"
@@ -2783,9 +2673,6 @@ msgstr ""
 "实时策略要求 vCPU 掩码配置有至少一个 1 个 RT vCPU 和 1 个普通 vCPU。请参阅hw:"
 "cpu_realtime_mask 或 hw_cpu_realtime_mask"
 
-msgid "Realtime policy not supported by hypervisor"
-msgstr "hypervisor 不支持实时策略"
-
 msgid "Request body and URI mismatch"
 msgstr "请求主体和URI不匹配"
 
@@ -2864,18 +2751,6 @@ msgstr "根元素名应该是 '%(name)s' 而不是'%(tag)s'"
 #, python-format
 msgid "Rule (%s) not found"
 msgstr "没有找到规则 (%s)"
-
-#, python-format
-msgid "Running Nova with parallels virt_type requires libvirt version %s"
-msgstr "运行串行virt_type的nova串行virt_type需要libvirt版本%s"
-
-#, python-format
-msgid ""
-"Running Nova with qemu/kvm virt_type on %(arch)s requires libvirt version "
-"%(libvirt_ver)s and qemu version %(qemu_ver)s, or greater"
-msgstr ""
-"对 %(arch)s 运行配置为 qemu/kvm virt_type 的 Nova 需要 libvirt V"
-"%(libvirt_ver)s 和 qemu V%(qemu_ver)s 或更高版本"
 
 #, python-format
 msgid "Running batches of %i until complete"
@@ -3151,9 +3026,6 @@ msgstr "%s 的防火墙过滤器不存在"
 msgid "The floating IP request failed with a BadRequest"
 msgstr "由于坏的请求，浮动IP请求失败"
 
-msgid "The input is not a string or unicode"
-msgstr "输入不是字符串或unicode"
-
 msgid ""
 "The instance requires a newer hypervisor version than has been provided."
 msgstr "该实例需要比当前版本更新的虚拟机管理程序。"
@@ -3362,9 +3234,6 @@ msgstr "UEFI 不受支持"
 msgid "UUID"
 msgstr "UUID"
 
-msgid "UUID is required to delete Neutron Networks"
-msgstr "删除Neutron网络需要UUID"
-
 #, python-format
 msgid ""
 "Unable to associate floating IP %(address)s to any fixed IPs for instance "
@@ -3414,9 +3283,6 @@ msgstr "无法销毁 VBD %s"
 #, python-format
 msgid "Unable to destroy VDI %s"
 msgstr "无法销毁 VDI %s"
-
-msgid "Unable to detach from guest transient domain."
-msgstr "无法与访客瞬态域拆离。"
 
 #, python-format
 msgid "Unable to determine disk bus for '%s'"
@@ -3762,7 +3628,11 @@ msgstr "VlanID"
 
 #, python-format
 msgid "Volume %(volume_id)s could not be attached. Reason: %(reason)s"
-msgstr "无法附加卷 %(volume_id)s。原因：%(reason)s"
+msgstr "无法挂载卷 %(volume_id)s。原因：%(reason)s"
+
+#, python-format
+msgid "Volume %(volume_id)s could not be detached. Reason: %(reason)s"
+msgstr "无法卸载卷 %(volume_id)s 。原因：%(reason)s"
 
 #, python-format
 msgid "Volume %(volume_id)s could not be found."
@@ -3870,9 +3740,6 @@ msgstr "没有浮动 IP。"
 msgid "admin password can't be changed on existing disk"
 msgstr "无法在现有磁盘上更改管理员密码"
 
-msgid "admin required"
-msgstr "需要管理员身份"
-
 msgid "aggregate deleted"
 msgstr "删除的聚合"
 
@@ -3956,9 +3823,6 @@ msgstr "找不到浮动 IP"
 #, python-format
 msgid "fmt=%(fmt)s backed by: %(backing_file)s"
 msgstr "fmt=%(fmt)s 由 %(backing_file)s 支持"
-
-msgid "fping utility is not found."
-msgstr "找不到 fping 实用程序。"
 
 #, python-format
 msgid "href %s does not contain version"
@@ -4190,10 +4054,6 @@ msgid "volume %s already attached"
 msgstr "卷%s已经绑定"
 
 #, python-format
-msgid "volume '%(vol)s' status must be 'available'. Currently in '%(status)s'"
-msgstr "卷 '%(vol)s' 状态必须是‘可用‘。当前处于 '%(status)s' 状态"
-
-#, python-format
 msgid ""
 "volume '%(vol)s' status must be 'in-use'. Currently in '%(status)s' status"
 msgstr "卷 '%(vol)s' 状态必须是‘使用中‘。当前处于 '%(status)s' 状态"
@@ -4207,9 +4067,3 @@ msgid ""
 "xenapi.fake does not have an implementation for %s or it has been called "
 "with the wrong number of arguments"
 msgstr "xenapi.fake 没有 %s 的实现或者调用时用了错误数目的参数"
-
-msgid "you can not pass av_zone if the scope is public"
-msgstr "如范围是公共的，您不能跨过av_zone"
-
-msgid "you can not pass project if the scope is private"
-msgstr "如果范围是私有的，您不能跨过这个项目"

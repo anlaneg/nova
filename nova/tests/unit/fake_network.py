@@ -13,15 +13,15 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from six.moves import range
 
 from nova.compute import api as compute_api
 from nova.compute import manager as compute_manager
 import nova.conf
 import nova.context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova.network import manager as network_manager
 from nova.network import model as network_model
@@ -34,7 +34,6 @@ from nova.tests.unit.objects import test_fixed_ip
 from nova.tests.unit.objects import test_instance_info_cache
 from nova.tests.unit.objects import test_pci_device
 from nova.tests.unit import utils
-from nova.tests import uuidsentinel as uuids
 
 
 HOST = "testhost"
@@ -322,8 +321,8 @@ def fake_get_instance_nw_info(test, num_networks=1, ips_per_vif=2,
             }
         return fake_info_cache
 
-    test.stub_out('nova.db.fixed_ip_get_by_instance', fixed_ips_fake)
-    test.stub_out('nova.db.instance_info_cache_update', update_cache_fake)
+    test.stub_out('nova.db.api.fixed_ip_get_by_instance', fixed_ips_fake)
+    test.stub_out('nova.db.api.instance_info_cache_update', update_cache_fake)
 
     class FakeContext(nova.context.RequestContext):
         def is_admin(self):
@@ -348,11 +347,6 @@ def stub_out_nw_api_get_instance_nw_info(test, func=None,
     if func is None:
         func = get_instance_nw_info
     test.stub_out('nova.network.api.API.get_instance_nw_info', func)
-
-
-def stub_out_network_cleanup(test):
-    test.stub_out('nova.network.api.API.deallocate_for_instance',
-              lambda *args, **kwargs: None)
 
 
 _real_functions = {}
@@ -386,7 +380,7 @@ def unset_stub_network_methods(test):
                           _real_functions[name])
 
 
-def stub_compute_with_ips(stubs):
+def stub_compute_with_ips(test):
     orig_get = compute_api.API.get
     orig_get_all = compute_api.API.get_all
     orig_create = compute_api.API.create
@@ -403,10 +397,11 @@ def stub_compute_with_ips(stubs):
     def fake_pci_device_get_by_addr(context, node_id, dev_addr):
         return test_pci_device.fake_db_dev
 
-    stubs.Set(db, 'pci_device_get_by_addr', fake_pci_device_get_by_addr)
-    stubs.Set(compute_api.API, 'get', fake_get)
-    stubs.Set(compute_api.API, 'get_all', fake_get_all)
-    stubs.Set(compute_api.API, 'create', fake_create)
+    test.stub_out('nova.db.api.pci_device_get_by_addr',
+                  fake_pci_device_get_by_addr)
+    test.stub_out('nova.compute.api.API.get', fake_get)
+    test.stub_out('nova.compute.api.API.get_all', fake_get_all)
+    test.stub_out('nova.compute.api.API.create', fake_create)
 
 
 def _get_fake_cache():

@@ -11,7 +11,6 @@
 #    under the License.
 
 from nova import context
-from nova import db
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import api_models
 from nova import exception
@@ -48,13 +47,7 @@ class FlavorObjectTestCase(test.NoDBTestCase):
         self.useFixture(fixtures.Database(database='api'))
         self.context = context.RequestContext('fake-user', 'fake-project')
 
-    def _delete_main_flavors(self):
-        flavors = db_api.flavor_get_all(self.context)
-        for flavor in flavors:
-            db_api.flavor_destroy(self.context, flavor['flavorid'])
-
     def test_create(self):
-        self._delete_main_flavors()
         flavor = objects.Flavor(context=self.context, **fake_api_flavor)
         flavor.create()
         self.assertIn('id', flavor)
@@ -63,15 +56,7 @@ class FlavorObjectTestCase(test.NoDBTestCase):
         flavor2 = objects.Flavor._flavor_get_from_db(self.context, flavor.id)
         self.assertEqual(flavor.id, flavor2['id'])
 
-        # Make sure we don't find it in the main database
-        self.assertRaises(exception.FlavorNotFoundByName,
-                          db.flavor_get_by_name, self.context, flavor.name)
-        self.assertRaises(exception.FlavorNotFound,
-                          db.flavor_get_by_flavor_id, self.context,
-                          flavor.flavorid)
-
     def test_get_with_no_projects(self):
-        self._delete_main_flavors()
         fields = dict(fake_api_flavor, projects=[])
         flavor = objects.Flavor(context=self.context, **fields)
         flavor.create()
@@ -79,7 +64,6 @@ class FlavorObjectTestCase(test.NoDBTestCase):
         self.assertEqual([], flavor.projects)
 
     def test_get_with_projects_and_specs(self):
-        self._delete_main_flavors()
         flavor = objects.Flavor(context=self.context, **fake_api_flavor)
         flavor.create()
         flavor = objects.Flavor.get_by_id(self.context, flavor.id)
@@ -98,7 +82,6 @@ class FlavorObjectTestCase(test.NoDBTestCase):
         self.assertEqual(flavor.id, flavor2.id)
 
     def test_query_api(self):
-        self._delete_main_flavors()
         flavor = objects.Flavor(context=self.context, **fake_api_flavor)
         flavor.create()
         self._test_query(flavor)
@@ -147,7 +130,6 @@ class FlavorObjectTestCase(test.NoDBTestCase):
                           flavor.name)
 
     def test_destroy_api(self):
-        self._delete_main_flavors()
         flavor = objects.Flavor(context=self.context, **fake_api_flavor)
         flavor.create()
         self._test_destroy(flavor)
@@ -170,18 +152,7 @@ class FlavorObjectTestCase(test.NoDBTestCase):
         self.assertEqual(expect_len, len(flavors))
         return flavors
 
-    def test_get_all(self):
-        expect_len = len(db_api.flavor_get_all(self.context))
-        self._test_get_all(expect_len)
-
-    def test_get_all_with_some_api_flavors(self):
-        expect_len = len(db_api.flavor_get_all(self.context))
-        flavor = objects.Flavor(context=self.context, **fake_api_flavor)
-        flavor.create()
-        self._test_get_all(expect_len + 1)
-
     def test_get_all_with_all_api_flavors(self):
-        self._delete_main_flavors()
         flavor = objects.Flavor(context=self.context, **fake_api_flavor)
         flavor.create()
         self._test_get_all(1)

@@ -57,7 +57,8 @@ class MigrateServerController(wsgi.Controller):
         except (exception.TooManyInstances, exception.QuotaError) as e:
             raise exc.HTTPForbidden(explanation=e.format_message())
         except (exception.InstanceIsLocked,
-                exception.CannotMigrateWithTargetHost) as e:
+                exception.CannotMigrateWithTargetHost,
+                exception.AllocationMoveFailed) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
@@ -82,7 +83,7 @@ class MigrateServerController(wsgi.Controller):
         host = body["os-migrateLive"]["host"]
         block_migration = body["os-migrateLive"]["block_migration"]
         force = None
-        async = api_version_request.is_supported(req, min_version='2.34')
+        async_ = api_version_request.is_supported(req, min_version='2.34')
         if api_version_request.is_supported(req, min_version='2.30'):
             force = self._get_force_param_for_live_migration(body, host)
         if api_version_request.is_supported(req, min_version='2.25'):
@@ -103,7 +104,8 @@ class MigrateServerController(wsgi.Controller):
         instance = common.get_instance(self.compute_api, context, id)
         try:
             self.compute_api.live_migrate(context, instance, block_migration,
-                                          disk_over_commit, host, force, async)
+                                          disk_over_commit, host, force,
+                                          async_)
         except exception.InstanceUnknownCell as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
         except (exception.NoValidHost,
@@ -115,9 +117,8 @@ class MigrateServerController(wsgi.Controller):
                 exception.InvalidLocalStorage,
                 exception.InvalidSharedStorage,
                 exception.HypervisorUnavailable,
-                exception.MigrationPreCheckError,
-                exception.LiveMigrationWithOldNovaNotSupported) as ex:
-            if async:
+                exception.MigrationPreCheckError) as ex:
+            if async_:
                 with excutils.save_and_reraise_exception():
                     LOG.error("Unexpected exception received from "
                               "conductor during pre-live-migration checks "

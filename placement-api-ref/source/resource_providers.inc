@@ -33,9 +33,9 @@ of all filters are merged with a boolean `AND`.
   - name: resource_provider_name_query
   - uuid: resource_provider_uuid_query
   - member_of: member_of
-  - resources: resources_query
-  - required: resource_provider_required_query
+  - resources: resources_query_1_4
   - in_tree: resource_provider_tree_query
+  - required: resource_provider_required_query
 
 Response
 --------
@@ -47,7 +47,7 @@ Response
   - uuid: resource_provider_uuid
   - links: resource_provider_links
   - name: resource_provider_name
-  - parent_provider_uuid: resource_provider_parent_provider_uuid_required
+  - parent_provider_uuid: resource_provider_parent_provider_uuid_response_1_14
   - root_provider_uuid: resource_provider_root_provider_uuid_required
 
 Response Example
@@ -63,7 +63,8 @@ Create resource provider
 
 Create a new resource provider.
 
-Normal Response Codes: 201
+Normal Response Codes: 201 (microversions 1.0 - 1.19), 200 (microversions
+1.20 - )
 
 Error response codes: conflict(409)
 
@@ -78,7 +79,7 @@ Request
 
   - name: resource_provider_name
   - uuid: resource_provider_uuid_opt
-  - parent_provider_uuid: resource_provider_parent_provider_uuid
+  - parent_provider_uuid: resource_provider_parent_provider_uuid_request
 
 Request example
 ---------------
@@ -86,11 +87,30 @@ Request example
 .. literalinclude:: ./samples/resource_providers/create-resource_providers-request.json
    :language: javascript
 
-Response
---------
+Response (microversions 1.0 - 1.19)
+-----------------------------------
 
 .. rest_parameters:: parameters.yaml
 
   - Location: location
 
 No body content is returned on a successful POST.
+
+Response (microversions 1.20 - )
+--------------------------------
+
+.. rest_parameters:: parameters.yaml
+
+  - Location: location
+  - generation: resource_provider_generation
+  - uuid: resource_provider_uuid
+  - links: resource_provider_links_v1_20
+  - name: resource_provider_name
+  - parent_provider_uuid: resource_provider_parent_provider_uuid_required_no_min
+  - root_provider_uuid: resource_provider_root_provider_uuid_no_min
+
+Response Example (microversions 1.20 - )
+----------------------------------------
+
+.. literalinclude:: ./samples/resource_providers/create-resource_provider.json
+   :language: javascript

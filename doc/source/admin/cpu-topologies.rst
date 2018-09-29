@@ -31,52 +31,18 @@ Simultaneous Multi-Threading (SMT)
   CPUs on the system and can execute workloads in parallel. However, as with
   NUMA, threads compete for shared resources.
 
+Non-Uniform I/O Access (NUMA I/O)
+  In a NUMA system, I/O to a device mapped to a local memory region is more
+  efficient than I/O to a remote device. A device connected to the same socket
+  providing the CPU and memory offers lower latencies for I/O operations due to
+  its physical proximity. This generally manifests itself in devices connected
+  to the PCIe bus, such as NICs or vGPUs, but applies to any device support
+  memory-mapped I/O.
+
 In OpenStack, SMP CPUs are known as *cores*, NUMA cells or nodes are known as
 *sockets*, and SMT CPUs are known as *threads*. For example, a quad-socket,
 eight core system with Hyper-Threading would have four sockets, eight cores per
 socket and two threads per core, for a total of 64 CPUs.
-
-Configuring compute nodes for instances with NUMA placement policies
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Hyper-V is configured by default to allow instances to span multiple NUMA
-nodes, regardless if the instances have been configured to only span N NUMA
-nodes. This behaviour allows Hyper-V instances to have up to 64 vCPUs and 1 TB
-of memory.
-
-Checking NUMA spanning can easily be done by running this following powershell
-command:
-
-.. code-block:: console
-
-   (Get-VMHost).NumaSpanningEnabled
-
-In order to disable this behaviour, the host will have to be configured to
-disable NUMA spanning. This can be done by executing these following
-powershell commands:
-
-.. code-block:: console
-
-   Set-VMHost -NumaSpanningEnabled $false
-   Restart-Service vmms
-
-In order to restore this behaviour, execute these powershell commands:
-
-.. code-block:: console
-
-   Set-VMHost -NumaSpanningEnabled $true
-   Restart-Service vmms
-
-The ``vmms`` service (Virtual Machine Management Service) is responsible for
-managing the Hyper-V VMs. The VMs will still run while the service is down
-or restarting, but they will not be manageable by the ``nova-compute``
-service. In order for the effects of the Host NUMA spanning configuration
-to take effect, the VMs will have to be restarted.
-
-Hyper-V does not allow instances with a NUMA topology to have dynamic
-memory allocation turned on. The Hyper-V driver will ignore the configured
-``dynamic_memory_ratio`` from the given ``nova.conf`` file when spawning
-instances with a NUMA topology.
 
 Customizing instance NUMA placement policies
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -84,7 +50,8 @@ Customizing instance NUMA placement policies
 .. important::
 
    The functionality described below is currently only supported by the
-   libvirt/KVM and Hyper-V driver.
+   libvirt/KVM and Hyper-V driver. The Hyper-V driver may require :ref:`some
+   host configuration <configure-hyperv-numa>` for this to work.
 
 When running workloads on NUMA hosts, it is important that the vCPUs executing
 processes are on the same NUMA node as the memory used by these processes.
@@ -285,6 +252,49 @@ an exception will be raised.
 For more information about image metadata, refer to the `Image metadata`_
 guide.
 
+Customizing instance emulator thread pinning policies
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When guests need dedicated vCPU allocation, it may not be acceptable to allow
+emulator threads to steal time from real-time vCPUs.
+
+In order to achieve emulator thread pinning, configure the
+``hw:emulator_threads_policy`` flavor extra spec. Additionally,
+``hw:cpu_policy`` needs to be set to ``dedicated``. The default value for
+``hw:emulator_threads_policy`` is ``share``.
+
+If you want to tell nova to reserve a dedicated CPU per instance for emulator
+thread pinning, configure ``hw:emulator_threads_policy`` as ``isolate``.
+
+.. code-block:: console
+
+   $ openstack flavor set m1.large \
+     --property hw:cpu_policy=dedicated \
+     --property hw:emulator_threads_policy=isolate
+
+An instance spawned with these settings will have a dedicated physical CPU
+which is chosen from the ``vcpu_pin_set`` in addition to the physical CPUs
+which are reserved for the vCPUs.
+
+If you want to tell nova to pin the emulator threads to a shared set of
+dedicated CPUs, configure ``hw:emulator_threads_policy`` as ``share``.
+
+.. code-block:: console
+
+   $ openstack flavor set m1.large \
+     --property hw:cpu_policy=dedicated \
+     --property hw:emulator_threads_policy=share
+
+Additionally, set ``[compute]/cpu_shared_set`` in ``/etc/nova/nova.conf`` to
+the set of host CPUs that should be used for best-effort CPU resources.
+
+.. code-block:: console
+
+   # crudini --set /etc/nova/nova.conf compute cpu_shared_set 4,5,8-11
+
+For more information about the syntax for ``hw:emulator_threads_policy``,
+refer to the :doc:`/admin/flavors` guide.
+
 Customizing instance CPU topologies
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -383,6 +393,50 @@ topologies that might, for example, incur an additional licensing fees.
 
 For more information about image metadata, refer to the `Image metadata`_
 guide.
+
+.. _configure-hyperv-numa:
+
+Configuring Hyper-V compute nodes for instance NUMA policies
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Hyper-V is configured by default to allow instances to span multiple NUMA
+nodes, regardless if the instances have been configured to only span N NUMA
+nodes. This behaviour allows Hyper-V instances to have up to 64 vCPUs and 1 TB
+of memory.
+
+Checking NUMA spanning can easily be done by running this following PowerShell
+command:
+
+.. code-block:: console
+
+   (Get-VMHost).NumaSpanningEnabled
+
+In order to disable this behaviour, the host will have to be configured to
+disable NUMA spanning. This can be done by executing these following
+PowerShell commands:
+
+.. code-block:: console
+
+   Set-VMHost -NumaSpanningEnabled $false
+   Restart-Service vmms
+
+In order to restore this behaviour, execute these PowerShell commands:
+
+.. code-block:: console
+
+   Set-VMHost -NumaSpanningEnabled $true
+   Restart-Service vmms
+
+The *Virtual Machine Management Service* (*vmms*) is responsible for managing
+the Hyper-V VMs. The VMs will still run while the service is down or
+restarting, but they will not be manageable by the ``nova-compute`` service. In
+order for the effects of the host NUMA spanning configuration to take effect,
+the VMs will have to be restarted.
+
+Hyper-V does not allow instances with a NUMA topology to have dynamic
+memory allocation turned on. The Hyper-V driver will ignore the configured
+``dynamic_memory_ratio`` from the given ``nova.conf`` file when spawning
+instances with a NUMA topology.
 
 .. Links
 .. _`Image metadata`: https://docs.openstack.org/image-guide/image-metadata.html

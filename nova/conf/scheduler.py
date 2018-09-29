@@ -15,26 +15,13 @@
 
 from oslo_config import cfg
 
+from nova.virt import arch
+
 
 scheduler_group = cfg.OptGroup(name="scheduler",
                                title="Scheduler configuration")
 
 scheduler_opts = [
-    cfg.StrOpt("host_manager",
-        default="host_manager",
-        choices=("host_manager", "ironic_host_manager"),
-        deprecated_name="scheduler_host_manager",
-        deprecated_group="DEFAULT",
-        help="""
-The scheduler host manager to use.
-
-The host manager manages the in-memory picture of the hosts that the scheduler
-uses. The options values are chosen from the entry points under the namespace
-'nova.scheduler.host_manager' in 'setup.cfg'.
-
-NOTE: The "ironic_host_manager" option is deprecated as of the 17.0.0 Queens
-release.
-"""),
     cfg.StrOpt("driver",
         default="filter_scheduler",
         deprecated_name="scheduler_driver",
@@ -50,19 +37,23 @@ Other options are:
 * 'caching_scheduler' which aggressively caches the system state for better
   individual scheduler performance at the risk of more retries when running
   multiple schedulers. [DEPRECATED]
-* 'chance_scheduler' which simply picks a host at random. [DEPRECATED]
 * 'fake_scheduler' which is used for testing.
 
 Possible values:
 
 * Any of the drivers included in Nova:
-** filter_scheduler
-** caching_scheduler
-** chance_scheduler
-** fake_scheduler
+
+  * filter_scheduler
+  * caching_scheduler
+  * fake_scheduler
+
 * You may also set this to the entry point name of a custom scheduler driver,
   but you will be responsible for creating and maintaining it in your setup.cfg
   file.
+
+Related options:
+
+* workers
 """),
     cfg.IntOpt("periodic_task_interval",
         default=60,
@@ -140,6 +131,57 @@ etc. of the scheduler.
 This option is only used by the FilterScheduler; if you use a different
 scheduler, this option has no effect.
 """),
+    cfg.IntOpt("workers",
+        min=0,
+        help="""
+Number of workers for the nova-scheduler service. The default will be the
+number of CPUs available if using the "filter_scheduler" scheduler driver,
+otherwise the default will be 1.
+"""),
+    cfg.BoolOpt("limit_tenants_to_placement_aggregate",
+                default=False,
+                help="""
+This setting causes the scheduler to look up a host aggregate with the
+metadata key of `filter_tenant_id` set to the project of an incoming
+request, and request results from placement be limited to that aggregate.
+Multiple tenants may be added to a single aggregate by appending a serial
+number to the key, such as `filter_tenant_id:123`.
+
+The matching aggregate UUID must be mirrored in placement for proper
+operation. If no host aggregate with the tenant id is found, or that
+aggregate does not match one in placement, the result will be the same
+as not finding any suitable hosts for the request.
+
+See also the placement_aggregate_required_for_tenants option.
+"""),
+    cfg.BoolOpt("placement_aggregate_required_for_tenants",
+                default=False,
+                help="""
+This setting, when limit_tenants_to_placement_aggregate=True, will control
+whether or not a tenant with no aggregate affinity will be allowed to schedule
+to any available node. If aggregates are used to limit some tenants but
+not all, then this should be False. If all tenants should be confined via
+aggregate, then this should be True to prevent them from receiving unrestricted
+scheduling to any available node.
+
+See also the limit_tenants_to_placement_aggregate option.
+"""),
+    cfg.BoolOpt("query_placement_for_availability_zone",
+                default=False,
+                help="""
+This setting causes the scheduler to look up a host aggregate with the
+metadata key of `availability_zone` set to the value provided by an
+incoming request, and request results from placement be limited to that
+aggregate.
+
+The matching aggregate UUID must be mirrored in placement for proper
+operation. If no host aggregate with the `availability_zone` key is
+found, or that aggregate does not match one in placement, the result will
+be the same as not finding any suitable hosts.
+
+Note that if you enable this flag, you can disable the (less efficient)
+AvailabilityZoneFilter in the scheduler.
+"""),
 ]
 
 filter_scheduler_group = cfg.OptGroup(name="filter_scheduler",
@@ -198,13 +240,14 @@ Possible values:
 Maximum number of instances that be active on a host.
 
 If you need to limit the number of instances on any given host, set this option
-to the maximum number of instances you want to allow. The num_instances_filter
-will reject any host that has at least as many instances as this option's
-value.
+to the maximum number of instances you want to allow. The NumInstancesFilter
+and AggregateNumInstancesFilter will reject any host that has at least as many
+instances as this option's value.
 
 This option is only used by the FilterScheduler and its subclasses; if you use
 a different scheduler, this option has no effect. Also note that this setting
-only affects scheduling if the 'num_instances_filter' filter is enabled.
+only affects scheduling if the 'NumInstancesFilter' or
+'AggregateNumInstancesFilter' filter is enabled.
 
 Possible values:
 
@@ -295,76 +338,6 @@ Related options:
   'available_filters' option, or a SchedulerHostFilterNotFound
   exception will be raised.
 """),
-    cfg.ListOpt("baremetal_enabled_filters",
-        default=[
-            "RetryFilter",
-            "AvailabilityZoneFilter",
-            "ComputeFilter",
-            "ComputeCapabilitiesFilter",
-            "ImagePropertiesFilter",
-            "ExactRamFilter",
-            "ExactDiskFilter",
-            "ExactCoreFilter",
-        ],
-        deprecated_name="baremetal_scheduler_default_filters",
-        deprecated_group="DEFAULT",
-        deprecated_for_removal=True,
-        deprecated_reason="""
-These filters were used to overcome some of the baremetal scheduling
-limitations in Nova prior to the use of the Placement API. Now scheduling will
-use the custom resource class defined for each baremetal node to make its
-selection.
-""",
-        help="""
-Filters used for filtering baremetal hosts.
-
-Filters are applied in order, so place your most restrictive filters first to
-make the filtering process more efficient.
-
-This option is only used by the FilterScheduler and its subclasses; if you use
-a different scheduler, this option has no effect.
-
-Possible values:
-
-* A list of zero or more strings, where each string corresponds to the name of
-  a filter to be used for selecting a baremetal host
-
-Related options:
-
-* If the 'scheduler_use_baremetal_filters' option is False, this option has
-  no effect.
-"""),
-    cfg.BoolOpt("use_baremetal_filters",
-        deprecated_name="scheduler_use_baremetal_filters",
-        deprecated_group="DEFAULT",
-        # NOTE(mriedem): We likely can't remove this option until the
-        # IronicHostManager is removed, and we likely can't remove that
-        # until all filters can at least not fail on ironic nodes, like the
-        # NUMATopologyFilter.
-        deprecated_for_removal=True,
-        deprecated_reason="""
-These filters were used to overcome some of the baremetal scheduling
-limitations in Nova prior to the use of the Placement API. Now scheduling will
-use the custom resource class defined for each baremetal node to make its
-selection.
-""",
-        default=False,
-        help="""
-Enable baremetal filters.
-
-Set this to True to tell the nova scheduler that it should use the filters
-specified in the 'baremetal_enabled_filters' option. If you are not
-scheduling baremetal nodes, leave this at the default setting of False.
-
-This option is only used by the FilterScheduler and its subclasses; if you use
-a different scheduler, this option has no effect.
-
-Related options:
-
-* If this option is set to True, then the filters specified in the
-  'baremetal_enabled_filters' are used instead of the filters
-  specified in 'enabled_filters'.
-"""),
     cfg.ListOpt("weight_classes",
         default=["nova.scheduler.weights.all_weighers"],
         deprecated_name="scheduler_weight_classes",
@@ -392,7 +365,7 @@ Possible values:
         default=1.0,
         deprecated_group="DEFAULT",
         help="""
-Ram weight multipler ratio.
+RAM weight multipler ratio.
 
 This option determines how hosts with more or less available RAM are weighed. A
 positive value will result in the scheduler preferring hosts with more
@@ -411,6 +384,29 @@ Possible values:
 
 * An integer or float value, where the value corresponds to the multipler
   ratio for this weigher.
+"""),
+    cfg.FloatOpt("cpu_weight_multiplier",
+         default=1.0,
+         help="""
+CPU weight multiplier ratio.
+
+Multiplier used for weighting free vCPUs. Negative numbers indicate stacking
+rather than spreading.
+
+This option is only used by the FilterScheduler and its subclasses; if you use
+a different scheduler, this option has no effect. Also note that this setting
+only affects scheduling if the 'cpu' weigher is enabled.
+
+Possible values:
+
+* An integer or float value, where the value corresponds to the multipler
+  ratio for this weigher.
+
+Related options:
+
+* ``filter_scheduler.weight_classes``: This weigher must be added to list of
+  enabled weight classes if the ``weight_classes`` setting is set to a
+  non-default value.
 """),
     cfg.FloatOpt("disk_weight_multiplier",
         default=1.0,
@@ -499,6 +495,34 @@ Possible values:
   meaningful, as negative values would make this behave as a soft affinity
   weigher.
 """),
+    cfg.FloatOpt(
+        "build_failure_weight_multiplier",
+        default=1000000.0,
+        help="""
+Multiplier used for weighing hosts that have had recent build failures.
+
+This option determines how much weight is placed on a compute node with
+recent build failures. Build failures may indicate a failing, misconfigured,
+or otherwise ailing compute node, and avoiding it during scheduling may be
+beneficial. The weight is inversely proportional to the number of recent
+build failures the compute node has experienced. This value should be
+set to some high value to offset weight given by other enabled weighers
+due to available resources. To disable weighing compute hosts by the
+number of recent failures, set this to zero.
+
+This option is only used by the FilterScheduler and its subclasses; if you use
+a different scheduler, this option has no effect.
+
+Possible values:
+
+* An integer or float value, where the value corresponds to the multiplier
+  ratio for this weigher.
+
+Related options:
+
+* [compute]/consecutive_build_service_disable_threshold - Must be nonzero
+  for a compute to report data considered by this weigher.
+"""),
     cfg.BoolOpt(
         "shuffle_best_same_weighed_hosts",
         default=False,
@@ -513,6 +537,21 @@ In such case enabling this option will reduce contention and chances for
 rescheduling events.
 At the same time it will make the instance packing (even in unweighed case)
 less dense.
+"""),
+    cfg.StrOpt(
+        "image_properties_default_architecture",
+        choices=arch.ALL,
+        help="""
+The default architecture to be used when using the image properties filter.
+
+When using the ImagePropertiesFilter, it is possible that you want to define
+a default architecture to make the user experience easier and avoid having
+something like x86_64 images landing on aarch64 compute nodes because the
+user did not specify the 'hw_architecture' property in Glance.
+
+Possible values:
+
+* CPU Architectures such as x86_64, aarch64, s390x.
 """),
     # TODO(mikal): replace this option with something involving host aggregates
     cfg.ListOpt("isolated_images",

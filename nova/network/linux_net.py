@@ -37,6 +37,7 @@ import six
 import nova.conf
 from nova import exception
 from nova.i18n import _
+from nova.network import linux_utils as linux_net_utils
 from nova import objects
 from nova.pci import utils as pci_utils
 from nova import utils
@@ -931,7 +932,7 @@ def get_dhcp_opts(context, network_ref, fixedips):
 
 
 def release_dhcp(dev, address, mac_address):
-    if device_exists(dev):
+    if linux_net_utils.device_exists(dev):
         try:
             utils.execute('dhcp_release', dev, address, mac_address,
                           run_as_root=True)
@@ -1163,11 +1164,6 @@ def _execute(*cmd, **kwargs):
         return utils.execute(*cmd, **kwargs)
 
 
-def device_exists(device):
-    """Check if ethernet device exists."""
-    return os.path.exists('/sys/class/net/%s' % device)
-
-
 def _dhcp_file(dev, kind):
     """Return path to a pid, leases, hosts or conf file for a bridge/device."""
     fileutils.ensure_tree(CONF.networks_path)
@@ -1225,30 +1221,6 @@ def _ip_bridge_cmd(action, params, device):
     return cmd
 
 
-def _set_device_mtu(dev, mtu=None):
-    """Set the device MTU."""
-    if mtu:
-        utils.execute('ip', 'link', 'set', dev, 'mtu',
-                      mtu, run_as_root=True,
-                      check_exit_code=[0, 2, 254])
-
-
-def _create_veth_pair(dev1_name, dev2_name, mtu=None):
-    """Create a pair of veth devices with the specified names,
-    deleting any previous devices with those names.
-    """
-    for dev in [dev1_name, dev2_name]:
-        delete_net_dev(dev)
-
-    utils.execute('ip', 'link', 'add', dev1_name, 'type', 'veth', 'peer',
-                  'name', dev2_name, run_as_root=True)
-    for dev in [dev1_name, dev2_name]:
-        utils.execute('ip', 'link', 'set', dev, 'up', run_as_root=True)
-        utils.execute('ip', 'link', 'set', dev, 'promisc', 'on',
-                      run_as_root=True)
-        _set_device_mtu(dev, mtu)
-
-
 def _ovs_vsctl(args):
     full_args = ['ovs-vsctl', '--timeout=%s' % CONF.ovs_vsctl_timeout] + args
     try:
@@ -1259,72 +1231,23 @@ def _ovs_vsctl(args):
         raise exception.OvsConfigurationFailure(inner_exception=e)
 
 
-def create_ivs_vif_port(dev, iface_id, mac, instance_id):
-    utils.execute('ivs-ctl', 'add-port',
-                   dev, run_as_root=True)
-
-
-def delete_ivs_vif_port(dev):
-    utils.execute('ivs-ctl', 'del-port', dev,
-                  run_as_root=True)
-    utils.execute('ip', 'link', 'delete', dev,
-                  run_as_root=True)
-
-
-def create_tap_dev(dev, mac_address=None, multiqueue=False):
-    if not device_exists(dev):
-        try:
-            # First, try with 'ip'
-            cmd = ('ip', 'tuntap', 'add', dev, 'mode', 'tap')
-            if multiqueue:
-                cmd = cmd + ('multi_queue', )
-            utils.execute(*cmd, run_as_root=True, check_exit_code=[0, 2, 254])
-        except processutils.ProcessExecutionError:
-            if multiqueue:
-                LOG.warning(
-                    'Failed to create a tap device with ip tuntap. '
-                    'tunctl does not support creation of multi-queue '
-                    'enabled devices, skipping fallback.')
-                raise
-
-            # Second option: tunctl
-            utils.execute('tunctl', '-b', '-t', dev, run_as_root=True)
-        if mac_address:
-            utils.execute('ip', 'link', 'set', dev, 'address', mac_address,
-                          run_as_root=True, check_exit_code=[0, 2, 254])
-        utils.execute('ip', 'link', 'set', dev, 'up', run_as_root=True,
-                      check_exit_code=[0, 2, 254])
-
-
 def create_fp_dev(dev, sockpath, sockmode):
-    if not device_exists(dev):
+    if not linux_net_utils.device_exists(dev):
         utils.execute('fp-vdev', 'add', dev, '--sockpath', sockpath,
                       '--sockmode', sockmode, run_as_root=True)
-        _set_device_mtu(dev)
+        linux_net_utils.set_device_mtu(dev)
         utils.execute('ip', 'link', 'set', dev, 'up', run_as_root=True,
                     check_exit_code=[0, 2, 254])
 
 
 def delete_fp_dev(dev):
-    if device_exists(dev):
+    if linux_net_utils.device_exists(dev):
         utils.execute('fp-vdev', 'del', dev, run_as_root=True)
-
-
-def delete_net_dev(dev):
-    """Delete a network device only if it exists."""
-    if device_exists(dev):
-        try:
-            utils.execute('ip', 'link', 'delete', dev, run_as_root=True,
-                          check_exit_code=[0, 2, 254])
-            LOG.debug("Net device removed: '%s'", dev)
-        except processutils.ProcessExecutionError:
-            with excutils.save_and_reraise_exception():
-                LOG.error("Failed removing net device: '%s'", dev)
 
 
 def delete_bridge_dev(dev):
     """Delete a network bridge."""
-    if device_exists(dev):
+    if linux_net_utils.device_exists(dev):
         try:
             utils.execute('ip', 'link', 'set', dev, 'down', run_as_root=True)
             utils.execute('brctl', 'delbr', dev, run_as_root=True)
@@ -1451,7 +1374,7 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
         """Create a vlan unless it already exists."""
         if interface is None:
             interface = 'vlan%s' % vlan_num
-        if not device_exists(interface):
+        if not linux_net_utils.device_exists(interface):
             LOG.debug('Starting VLAN interface %s', interface)
             _execute('ip', 'link', 'add', 'link', bridge_interface,
                      'name', interface, 'type', 'vlan',
@@ -1467,7 +1390,7 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
                      check_exit_code=[0, 2, 254])
         # NOTE(vish): set mtu every time to ensure that changes to mtu get
         #             propagated
-        _set_device_mtu(interface, mtu)
+        linux_net_utils.set_device_mtu(interface, mtu)
         return interface
 
     @staticmethod
@@ -1475,7 +1398,7 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
     def remove_vlan(vlan_num):
         """Delete a vlan."""
         vlan_interface = 'vlan%s' % vlan_num
-        delete_net_dev(vlan_interface)
+        linux_net_utils.delete_net_dev(vlan_interface)
 
     @staticmethod
     @utils.synchronized('lock_bridge', external=True)
@@ -1496,7 +1419,7 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
         interface onto the bridge and reset the default gateway if necessary.
 
         """
-        if not device_exists(bridge):
+        if not linux_net_utils.device_exists(bridge):
             LOG.debug('Starting Bridge %s', bridge)
             out, err = _execute('brctl', 'addbr', bridge,
                                 check_exit_code=False, run_as_root=True)
@@ -1582,7 +1505,7 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
     @utils.synchronized('lock_bridge', external=True)
     def remove_bridge(bridge, gateway=True, filtering=True):
         """Delete a bridge."""
-        if not device_exists(bridge):
+        if not linux_net_utils.device_exists(bridge):
             return
         else:
             if filtering:
@@ -1736,7 +1659,7 @@ class LinuxOVSInterfaceDriver(LinuxNetInterfaceDriver):
 
     def plug(self, network, mac_address, gateway=True):
         dev = self.get_dev(network)
-        if not device_exists(dev):
+        if not linux_net_utils.device_exists(dev):
             bridge = CONF.linuxnet_ovs_integration_bridge
             _ovs_vsctl(['--', '--may-exist', 'add-port', bridge, dev,
                         '--', 'set', 'Interface', dev, 'type=internal',
@@ -1748,7 +1671,7 @@ class LinuxOVSInterfaceDriver(LinuxNetInterfaceDriver):
                         'external-ids:attached-mac=%s' % mac_address])
             _execute('ip', 'link', 'set', dev, 'address', mac_address,
                      run_as_root=True)
-            _set_device_mtu(dev, network.get('mtu'))
+            linux_net_utils.set_device_mtu(dev, network.get('mtu'))
             _execute('ip', 'link', 'set', dev, 'up', run_as_root=True)
             if not gateway:
                 # If we weren't instructed to act as a gateway then add the
@@ -1807,9 +1730,9 @@ class NeutronLinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
             for rule in get_gateway_rules(bridge):
                 iptables_manager.ipv4['filter'].add_rule(*rule)
 
-        create_tap_dev(dev, mac_address)
+        linux_net_utils.create_tap_dev(dev, mac_address)
 
-        if not device_exists(bridge):
+        if not linux_net_utils.device_exists(bridge):
             LOG.debug("Starting bridge %s ", bridge)
             utils.execute('brctl', 'addbr', bridge, run_as_root=True)
             utils.execute('brctl', 'setfd', bridge, str(0), run_as_root=True)
@@ -1829,10 +1752,10 @@ class NeutronLinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
 
     def unplug(self, network):
         dev = self.get_dev(network)
-        if not device_exists(dev):
+        if not linux_net_utils.device_exists(dev):
             return None
         else:
-            delete_net_dev(dev)
+            linux_net_utils.delete_net_dev(dev)
             return dev
 
     def get_dev(self, network):
@@ -1847,27 +1770,18 @@ class NeutronLinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
 iptables_manager = IptablesManager()
 
 
-def set_vf_interface_vlan(pci_addr, mac_addr, vlan=0):
+def set_vf_trusted(pci_addr, trusted):
+    """Configures the VF to be trusted or not
+
+    :param pci_addr: PCI slot of the device
+    :param trusted: Boolean value to indicate whether to
+                    enable/disable 'trusted' capability
+    """
     pf_ifname = pci_utils.get_ifname_by_pci_address(pci_addr,
                                                     pf_interface=True)
-    vf_ifname = pci_utils.get_ifname_by_pci_address(pci_addr)
     vf_num = pci_utils.get_vf_num_by_pci_address(pci_addr)
-
-    # Set the VF's mac address and vlan
-    exit_code = [0, 2, 254]
-    port_state = 'up' if vlan > 0 else 'down'
     utils.execute('ip', 'link', 'set', pf_ifname,
                   'vf', vf_num,
-                  'mac', mac_addr,
-                  'vlan', vlan,
+                  'trust', bool(trusted) and 'on' or 'off',
                   run_as_root=True,
-                  check_exit_code=exit_code)
-    # Bring up/down the VF's interface
-    # TODO(edand): The mac is assigned as a workaround for the following issue
-    #              https://bugzilla.redhat.com/show_bug.cgi?id=1372944
-    #              once resolved it will be removed
-    utils.execute('ip', 'link', 'set', vf_ifname,
-                  'address', mac_addr,
-                  port_state,
-                  run_as_root=True,
-                  check_exit_code=exit_code)
+                  check_exit_code=[0, 2, 254])

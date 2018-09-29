@@ -14,11 +14,11 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova import exception
 from nova import test
 from nova.tests.unit.virt.libvirt import fakelibvirt
-from nova.tests import uuidsentinel as uuids
 from nova.virt import fake
 from nova.virt.libvirt import driver
 from nova.virt.libvirt import host
@@ -118,8 +118,18 @@ class LibvirtISCSIVolumeBaseTestCase(LibvirtVolumeBaseTestCase):
                     'target_lun': 1,
                     'device_path': dev_path,
                     'qos_specs': {
+                        # Note that read/write iops/bytes values cannot
+                        # be used with total values.
+                        # These are only here for illustrative purposes.
                         'total_bytes_sec': '102400',
                         'read_iops_sec': '200',
+                        'read_bytes_sec_max': '150000',
+                        'read_iops_sec_max': '2000',
+                        'write_bytes_sec_max': '250000',
+                        'write_iops_sec_max': '3000',
+                        'total_bytes_sec_max': '400000',
+                        'total_iops_sec_max': '4000',
+                        'size_iops_sec': '16',
                         }
                 }
         }

@@ -19,13 +19,15 @@ databases, service credentials, and API endpoints.
 
         # mysql
 
-   * Create the ``nova_api``, ``nova``, and ``nova_cell0`` databases:
+   * Create the ``nova_api``, ``nova``, ``nova_cell0``, and ``placement``
+     databases:
 
      .. code-block:: console
 
         MariaDB [(none)]> CREATE DATABASE nova_api;
         MariaDB [(none)]> CREATE DATABASE nova;
         MariaDB [(none)]> CREATE DATABASE nova_cell0;
+        MariaDB [(none)]> CREATE DATABASE placement;
 
    * Grant proper access to the databases:
 
@@ -45,6 +47,11 @@ databases, service credentials, and API endpoints.
           IDENTIFIED BY 'NOVA_DBPASS';
         MariaDB [(none)]> GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'%' \
           IDENTIFIED BY 'NOVA_DBPASS';
+
+        MariaDB [(none)]> GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'localhost' \
+          IDENTIFIED BY 'PLACEMENT_DBPASS';
+        MariaDB [(none)]> GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'%' \
+          IDENTIFIED BY 'PLACEMENT_DBPASS';
 
      Replace ``NOVA_DBPASS`` with a suitable password.
 
@@ -269,13 +276,13 @@ Install and configure components
 
    .. code-block:: console
 
-      # apt install nova-api nova-conductor nova-consoleauth \
-        nova-novncproxy nova-scheduler nova-placement-api
+      # apt install nova-api nova-conductor nova-novncproxy nova-scheduler \
+        nova-placement-api
 
 #. Edit the ``/etc/nova/nova.conf`` file and complete the following actions:
 
-   * In the ``[api_database]`` and ``[database]`` sections, configure database
-     access:
+   * In the ``[api_database]``, ``[database]``, and ``[placement_database]``
+     sections, configure database access:
 
      .. path /etc/nova/nova.conf
      .. code-block:: ini
@@ -288,8 +295,12 @@ Install and configure components
         # ...
         connection = mysql+pymysql://nova:NOVA_DBPASS@controller/nova
 
+        [placement_database]
+        # ...
+        connection = mysql+pymysql://placement:PLACEMENT_DBPASS@controller/placement
+
      Replace ``NOVA_DBPASS`` with the password you chose for the Compute
-     databases.
+     databases and ``PLACEMENT_DBPASS`` for Placement database.
 
    * In the ``[DEFAULT]`` section, configure ``RabbitMQ`` message queue access:
 
@@ -315,8 +326,7 @@ Install and configure components
 
         [keystone_authtoken]
         # ...
-        auth_uri = http://controller:5000
-        auth_url = http://controller:35357
+        auth_url = http://controller:5000/v3
         memcached_servers = controller:11211
         auth_type = password
         project_domain_name = default
@@ -350,7 +360,7 @@ Install and configure components
 
         [DEFAULT]
         # ...
-        use_neutron = True
+        use_neutron = true
         firewall_driver = nova.virt.firewall.NoopFirewallDriver
 
      .. note::
@@ -359,6 +369,11 @@ Install and configure components
         Networking service includes a firewall driver, you must disable the
         Compute firewall driver by using the
         ``nova.virt.firewall.NoopFirewallDriver`` firewall driver.
+
+   * Configure the ``[neutron]`` section of **/etc/nova/nova.conf**. Refer to
+     the :neutron-doc:`Networking service install guide
+     <install/controller-install-ubuntu.html#configure-the-compute-service-to-use-the-networking-service>`
+     for more information.
 
    * In the ``[vnc]`` section, configure the VNC proxy to use the management
      interface IP address of the controller node:
@@ -401,12 +416,12 @@ Install and configure components
 
          [placement]
          # ...
-         os_region_name = RegionOne
+         region_name = RegionOne
          project_domain_name = Default
          project_name = service
          auth_type = password
          user_domain_name = Default
-         auth_url = http://controller:35357/v3
+         auth_url = http://controller:5000/v3
          username = placement
          password = PLACEMENT_PASS
 
@@ -414,7 +429,7 @@ Install and configure components
       ``placement`` user in the Identity service. Comment out any other options
       in the ``[placement]`` section.
 
-#. Populate the nova-api database:
+#. Populate the ``nova-api`` and ``placement`` databases:
 
    .. code-block:: console
 
@@ -447,7 +462,7 @@ Install and configure components
 
    .. code-block:: console
 
-      # nova-manage cell_v2 list_cells
+      # su -s /bin/sh -c "nova-manage cell_v2 list_cells" nova
       +-------+--------------------------------------+
       | Name  | UUID                                 |
       +-------+--------------------------------------+
@@ -463,7 +478,6 @@ Finalize installation
   .. code-block:: console
 
      # service nova-api restart
-     # service nova-consoleauth restart
      # service nova-scheduler restart
      # service nova-conductor restart
      # service nova-novncproxy restart

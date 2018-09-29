@@ -19,11 +19,14 @@ from distutils import versionpredicate
 from oslo_log import log as logging
 from oslo_utils import versionutils
 
+import nova.conf
 from nova.objects import fields
 from nova.scheduler import filters
 
 
 LOG = logging.getLogger(__name__)
+
+CONF = nova.conf.CONF
 
 
 class ImagePropertiesFilter(filters.BaseHostFilter):
@@ -41,9 +44,14 @@ class ImagePropertiesFilter(filters.BaseHostFilter):
     # a request
     run_filter_once_per_request = True
 
+    def _get_default_architecture(self):
+        return CONF.filter_scheduler.image_properties_default_architecture
+
     def _instance_supported(self, host_state, image_props,
                             hypervisor_version):
-        img_arch = image_props.get('hw_architecture')
+        default_img_arch = self._get_default_architecture()
+
+        img_arch = image_props.get('hw_architecture', default_img_arch)
         img_h_type = image_props.get('img_hv_type')
         img_vm_mode = image_props.get('hw_vm_mode')
         checked_img_props = (
@@ -61,8 +69,8 @@ class ImagePropertiesFilter(filters.BaseHostFilter):
         # advertised by the host.
         if not supp_instances:
             LOG.debug("Instance contains properties %(image_props)s, "
-                        "but no corresponding supported_instances are "
-                        "advertised by the compute node",
+                      "but no corresponding supported_instances are "
+                      "advertised by the compute node",
                       {'image_props': image_props})
             return False
 
@@ -87,9 +95,9 @@ class ImagePropertiesFilter(filters.BaseHostFilter):
                     return True
 
         LOG.debug("Instance contains properties %(image_props)s "
-                    "that are not provided by the compute node "
-                    "supported_instances %(supp_instances)s or "
-                    "hypervisor version %(hypervisor_version)s do not match",
+                  "that are not provided by the compute node "
+                  "supported_instances %(supp_instances)s or "
+                  "hypervisor version %(hypervisor_version)s do not match",
                   {'image_props': image_props,
                    'supp_instances': supp_instances,
                    'hypervisor_version': hypervisor_version})
@@ -106,6 +114,6 @@ class ImagePropertiesFilter(filters.BaseHostFilter):
         if not self._instance_supported(host_state, image_props,
                                         host_state.hypervisor_version):
             LOG.debug("%(host_state)s does not support requested "
-                        "instance_properties", {'host_state': host_state})
+                      "instance_properties", {'host_state': host_state})
             return False
         return True

@@ -11,6 +11,7 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.compute import rpcapi as compute_rpcapi
 from nova.conductor.tasks import migrate
@@ -23,7 +24,6 @@ from nova import test
 from nova.tests.unit.conductor.test_conductor import FakeContext
 from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
-from nova.tests import uuidsentinel as uuids
 
 
 class MigrationTaskTestCase(test.NoDBTestCase):
@@ -50,6 +50,14 @@ class MigrationTaskTestCase(test.NoDBTestCase):
                                   'hosts': [['host1', 'node1']]}}
         self.reservations = []
         self.clean_shutdown = True
+
+        _p = mock.patch('nova.compute.utils.heal_reqspec_is_bfv')
+        self.heal_reqspec_is_bfv_mock = _p.start()
+        self.addCleanup(_p.stop)
+
+        _p = mock.patch('nova.objects.RequestSpec.ensure_network_metadata')
+        self.ensure_network_metadata_mock = _p.start()
+        self.addCleanup(_p.stop)
 
     def _generate_task(self):
         return migrate.MigrationTask(self.context, self.instance, self.flavor,
@@ -131,6 +139,10 @@ class MigrationTaskTestCase(test.NoDBTestCase):
 
         task.execute()
 
+        self.ensure_network_metadata_mock.assert_called_once_with(
+            self.instance)
+        self.heal_reqspec_is_bfv_mock.assert_called_once_with(
+            self.context, self.request_spec, self.instance)
         sig_mock.assert_called_once_with(self.context, self.request_spec)
         task.scheduler_client.select_destinations.assert_called_once_with(
             self.context, self.request_spec, [self.instance.uuid],
@@ -215,8 +227,7 @@ class MigrationTaskTestCase(test.NoDBTestCase):
         task._migration.save.assert_called_once_with()
         self.assertEqual('error', task._migration.status)
         mock_ra.assert_called_once_with(task.context, task._source_cn,
-                                        task.instance, task._migration,
-                                        task._held_allocations)
+                                        task.instance, task._migration)
 
 
 class MigrationTaskAllocationUtils(test.NoDBTestCase):

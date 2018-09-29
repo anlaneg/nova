@@ -38,7 +38,7 @@ extensions = ['sphinx.ext.autodoc',
               'openstackdocstheme',
               'sphinx.ext.coverage',
               'sphinx.ext.graphviz',
-              'ext.support_matrix',
+              'sphinx_feature_classification.support_matrix',
               'oslo_config.sphinxconfiggen',
               'oslo_config.sphinxext',
               'oslo_policy.sphinxpolicygen',
@@ -57,8 +57,10 @@ bug_tag = ''
 config_generator_config_file = '../../etc/nova/nova-config-generator.conf'
 sample_config_basename = '_static/nova'
 
-policy_generator_config_file = '../../etc/nova/nova-policy-generator.conf'
-sample_policy_basename = '_static/nova'
+policy_generator_config_file = [
+    ('../../etc/nova/nova-policy-generator.conf', '_static/nova'),
+    ('../../etc/nova/placement-policy-generator.conf', '_static/placement')
+]
 
 actdiag_html_image_format = 'SVG'
 actdiag_antialias = True
@@ -167,6 +169,27 @@ latex_documents = [
      u'OpenStack Foundation', 'manual'),
 ]
 
+# -- Options for openstackdocstheme -------------------------------------------
+
+# keep this ordered to keep mriedem happy
+openstack_projects = [
+    'ceilometer',
+    'cinder',
+    'glance',
+    'horizon',
+    'ironic',
+    'keystone',
+    'neutron',
+    'nova',
+    'oslo.log',
+    'oslo.messaging',
+    'oslo.i18n',
+    'oslo.versionedobjects',
+    'python-novaclient',
+    'python-openstackclient',
+    'reno',
+    'watcher',
+]
 # -- Custom extensions --------------------------------------------------------
 
 
@@ -177,12 +200,25 @@ def monkey_patch_blockdiag():
     text width rather than on word boundaries. There's a patch submitted to
     resolve this [1]_ but it's unlikely to merge anytime soon.
 
+    In addition, blockdiag monkey patches a core library function,
+    ``codecs.getreader`` [2]_, to work around some Python 3 issues. Because
+    this operates in the same environment as other code that uses this library,
+    it ends up causing issues elsewhere. We undo these destructive changes
+    pending a fix.
+
     TODO: Remove this once blockdiag is bumped to 1.6, which will hopefully
     include the fix.
 
     .. [1] https://bitbucket.org/blockdiag/blockdiag/pull-requests/16/
+    .. [2] https://bitbucket.org/blockdiag/blockdiag/src/1.5.3/src/blockdiag/utils/compat.py # noqa
     """
+    import codecs
+    from codecs import getreader
+
     from blockdiag.imagedraw import textfolder
+
+    # oh, blockdiag. Let's undo the mess you made.
+    codecs.getreader = getreader
 
     def splitlabel(text):
         """Split text to lines as generator.

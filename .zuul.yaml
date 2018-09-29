@@ -11,7 +11,7 @@
       - openstack-infra/devstack-gate
       - openstack/nova
       - openstack/tempest
-    irrelevant-files:
+    irrelevant-files: &dsvm-irrelevant-files
       - ^(placement-)?api-.*$
       - ^(test-|)requirements.txt$
       - ^.*\.rst$
@@ -27,13 +27,28 @@
       - ^tox.ini$
 
 - job:
+    name: nova-dsvm-multinode-base
+    parent: legacy-dsvm-base-multinode
+    description: |
+      Base job for multinode nova devstack/tempest jobs.
+      Will setup firewall rules on all the nodes allowing them to talk to
+      each other.
+    timeout: 10800
+    required-projects:
+      - openstack-infra/devstack-gate
+      - openstack/nova
+      - openstack/tempest
+    irrelevant-files: *dsvm-irrelevant-files
+    nodeset: legacy-ubuntu-xenial-2-node
+
+- job:
     name: nova-tox-functional
     parent: openstack-tox
     description: |
       Run tox-based functional tests for the OpenStack Nova project with Nova
       specific irrelevant-files list. Uses tox with the ``functional``
       environment.
-    irrelevant-files:
+    irrelevant-files: &functional-irrelevant-files
       - ^.*\.rst$
       - ^api-.*$
       - ^doc/source/.*$
@@ -51,13 +66,7 @@
       Run tox-based functional tests for the OpenStack Nova project
       under cPython version 3.5. with Nova specific irrelevant-files list.
       Uses tox with the ``functional-py35`` environment.
-    irrelevant-files:
-      - ^.*\.rst$
-      - ^api-.*$
-      - ^doc/source/.*$
-      - ^nova/locale/.*$
-      - ^placement-api-ref/.*$
-      - ^releasenotes/.*$
+    irrelevant-files: *functional-irrelevant-files
     vars:
       tox_envlist: functional-py35
     timeout: 3600
@@ -71,13 +80,46 @@
     post-run: playbooks/legacy/nova-caching-scheduler/post.yaml
 
 - job:
+    name: nova-cells-v1
+    parent: nova-dsvm-base
+    run: playbooks/legacy/nova-cells-v1/run.yaml
+    post-run: playbooks/legacy/nova-cells-v1/post.yaml
+
+- job:
+    name: nova-live-migration
+    parent: nova-dsvm-multinode-base
+    run: playbooks/legacy/nova-live-migration/run.yaml
+    post-run: playbooks/legacy/nova-live-migration/post.yaml
+
+- job:
     name: nova-lvm
     parent: nova-dsvm-base
     description: |
-      Run standard integration tests using LVM image backend. This is useful if
-      there are tests touching this code.
+      Run tempest compute API tests using LVM image backend. This only runs
+      against nova/virt/libvirt/* changes.
     run: playbooks/legacy/nova-lvm/run.yaml
     post-run: playbooks/legacy/nova-lvm/post.yaml
+    # Copy irrelevant-files from nova-dsvm-base and then exclude anything
+    # that is not in the nova/virt/libvirt/* tree (besides the actual zuul
+    # playbook and tempest rc files so this can be self-testing).
+    irrelevant-files:
+      - ^(?!.zuul.yaml)(?!playbooks/legacy/nova-lvm/)(?!devstack/tempest-dsvm-lvm-rc)(?!nova/virt/libvirt/).*$
+      - ^(placement-)?api-.*$
+      - ^(test-|)requirements.txt$
+      - ^.*\.rst$
+      - ^.git.*$
+      - ^doc/.*$
+      - ^nova/hacking/.*$
+      - ^nova/locale/.*$
+      - ^nova/tests/.*$
+      - ^releasenotes/.*$
+      - ^setup.cfg$
+      - ^tests-py3.txt$
+      - ^tools/.*$
+      - ^tox.ini$
+    # TODO(mriedem): Make this voting and gating once bug 1771700 is fixed
+    # and we've had enough runs to feel comfortable with this setup.
+    voting: false
 
 - job:
     name: nova-multiattach
@@ -86,11 +128,7 @@
       Run tempest integration tests with volume multiattach support enabled.
       This job will only work starting with Queens.
       It uses the default Cinder volume type in devstack (lvm) and the
-      default compute driver in devstack (libvirt). It also disables the
-      Pike Ubuntu Cloud Archive because volume multiattach support with
-      the libvirt driver only works with qemu<2.10 or libvirt>=3.10 which
-      won't work with the Pike UCA.
-    branches: ^(?!stable/(newton|ocata|pike)).*$
+      default compute driver in devstack (libvirt).
     run: playbooks/legacy/nova-multiattach/run.yaml
     post-run: playbooks/legacy/nova-multiattach/post.yaml
 
@@ -110,19 +148,100 @@
 
 - project:
     # Please try to keep the list of job names sorted alphabetically.
+    templates:
+      - check-requirements
+      - integrated-gate
+      - integrated-gate-py35
+      - openstack-cover-jobs
+      - openstack-lower-constraints-jobs
+      - openstack-python-jobs
+      - openstack-python35-jobs
+      - openstack-python36-jobs
+      - periodic-stable-jobs
+      - publish-openstack-docs-pti
+      - release-notes-jobs-python3
     check:
       jobs:
+        # We define our own irrelevant-files so we don't run the job
+        # on things like nova docs-only changes.
+        - ironic-tempest-dsvm-ipa-wholedisk-bios-agent_ipmitool-tinyipa:
+            voting: false
+            irrelevant-files: *dsvm-irrelevant-files
+        - devstack-plugin-ceph-tempest:
+            voting: false
+            irrelevant-files: *dsvm-irrelevant-files
+        - legacy-grenade-dsvm-neutron-multinode-live-migration:
+            voting: false
+            irrelevant-files: *dsvm-irrelevant-files
+        - neutron-grenade:
+            irrelevant-files: *dsvm-irrelevant-files
+        - neutron-grenade-multinode:
+            irrelevant-files: *dsvm-irrelevant-files
+        - neutron-tempest-linuxbridge:
+            irrelevant-files: *dsvm-irrelevant-files
+        - nova-cells-v1
+        - nova-live-migration
+        - nova-lvm
         - nova-multiattach
         - nova-next
         - nova-tox-functional
         - nova-tox-functional-py35
+        - tempest-full:
+            irrelevant-files: *dsvm-irrelevant-files
+        - tempest-full-py3:
+            irrelevant-files: *dsvm-irrelevant-files
+        - tempest-multinode-full:
+            voting: false
+            irrelevant-files: *dsvm-irrelevant-files
+        - tempest-slow:
+            irrelevant-files: *dsvm-irrelevant-files
     gate:
       jobs:
+        - neutron-grenade:
+            irrelevant-files: *dsvm-irrelevant-files
+        - nova-cells-v1
+        - nova-live-migration
         - nova-multiattach
-        - nova-next
         - nova-tox-functional
         - nova-tox-functional-py35
+        - nova-next
+        - tempest-full:
+            irrelevant-files: *dsvm-irrelevant-files
+        - tempest-full-py3:
+            irrelevant-files: *dsvm-irrelevant-files
+        - tempest-slow:
+            irrelevant-files: *dsvm-irrelevant-files
     experimental:
       jobs:
-        - nova-caching-scheduler
-        - nova-lvm
+        - ironic-tempest-dsvm-bfv:
+            irrelevant-files: *dsvm-irrelevant-files
+        - ironic-tempest-dsvm-ipa-wholedisk-agent_ipmitool-tinyipa-multinode:
+            irrelevant-files: *dsvm-irrelevant-files
+        - legacy-barbican-simple-crypto-dsvm-tempest-nova:
+            irrelevant-files: *dsvm-irrelevant-files
+        - devstack-plugin-ceph-tempest-py3:
+            irrelevant-files: *dsvm-irrelevant-files
+        - legacy-grenade-dsvm-neutron-multinode-zero-downtime:
+            irrelevant-files: *dsvm-irrelevant-files
+        - legacy-tempest-dsvm-full-devstack-plugin-nfs:
+            irrelevant-files: *dsvm-irrelevant-files
+        - legacy-tempest-dsvm-multinode-full:
+            irrelevant-files: *dsvm-irrelevant-files
+        - legacy-tempest-dsvm-neutron-full-opensuse-423:
+            irrelevant-files: *dsvm-irrelevant-files
+        - legacy-tempest-dsvm-neutron-pg-full:
+            irrelevant-files: *dsvm-irrelevant-files
+        - legacy-tempest-dsvm-neutron-src-oslo.versionedobjects:
+            irrelevant-files: *dsvm-irrelevant-files
+        - legacy-tempest-dsvm-nova-libvirt-kvm-apr:
+            irrelevant-files: *dsvm-irrelevant-files
+        - legacy-tempest-dsvm-nova-v20-api:
+            irrelevant-files: *dsvm-irrelevant-files
+        - legacy-tempest-dsvm-neutron-dvr-multinode-full:
+            irrelevant-files: *dsvm-irrelevant-files
+        - neutron-tempest-dvr-ha-multinode-full:
+            irrelevant-files: *dsvm-irrelevant-files
+        - nova-caching-scheduler:
+            irrelevant-files: *dsvm-irrelevant-files
+        - os-vif-ovs:
+            irrelevant-files: *dsvm-irrelevant-files

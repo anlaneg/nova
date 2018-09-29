@@ -141,7 +141,7 @@ system as metadata (named 'windows'):
 
 .. code-block:: console
 
-   $ openstack aggregate show MyWinAgg
+   $ openstack aggregate show myWinAgg
    +-------------------+----------------------------+
    | Field             | Value                      |
    +-------------------+----------------------------+
@@ -151,8 +151,8 @@ system as metadata (named 'windows'):
    | deleted_at        | None                       |
    | hosts             | [u'sf-devel']              |
    | id                | 1                          |
-   | name              | test                       |
-   | properties        |                            |
+   | name              | myWinAgg                   |
+   | properties        | os_distro='windows'        |
    | updated_at        | None                       |
    +-------------------+----------------------------+
 
@@ -169,7 +169,11 @@ property, it boots on the ``sf-devel`` host (all other filters being equal):
    | container_format | bare                                                 |
    | created_at       | 2016-12-13T09:30:30Z                                 |
    | disk_format      | qcow2                                                |
-   | ...
+   | ...                                                                     |
+   | name             | Win-2012                                             |
+   | ...                                                                     |
+   | properties       | os_distro='windows'                                  |
+   | ...                                                                     |
 
 You can configure the ``AggregateImagePropertiesIsolation`` filter by using the
 following options in the ``nova.conf`` file:
@@ -209,14 +213,20 @@ use this filter, see :ref:`host-aggregates`. See also :ref:`IoOpsFilter`.
 AggregateMultiTenancyIsolation
 ------------------------------
 
-Ensures that the tenant (or list of tenants) creates all instances only on
-specific :ref:`host-aggregates`. If a host is in an aggregate that has the
-``filter_tenant_id`` metadata key, the host creates instances from only that
-tenant or list of tenants. A host can be in different aggregates. If a host
-does not belong to an aggregate with the metadata key, the host can create
-instances from all tenants. This setting does not isolate the aggregate from
-other tenants. Any other tenant can continue to build instances on the
-specified aggregate.
+Ensures hosts in tenant-isolated :ref:`host-aggregates` will only be available
+to a specified set of tenants. If a host is in an aggregate that has the
+``filter_tenant_id`` metadata key, the host can build instances from only that
+tenant or comma-separated list of tenants. A host can be in different
+aggregates. If a host does not belong to an aggregate with the metadata key,
+the host can build instances from all tenants. This does not restrict the
+tenant from creating servers on hosts outside the tenant-isolated aggregate.
+
+For example, consider there are two available hosts for scheduling, HostA and
+HostB. HostB is in an aggregate isolated to tenant X. A server create request
+from tenant X will result in either HostA *or* HostB as candidates during
+scheduling. A server create request from another tenant Y will result in only
+HostA being a scheduling candidate since HostA is not part of the
+tenant-isolated aggregate.
 
 AggregateNumInstancesFilter
 ---------------------------
@@ -274,6 +284,15 @@ extra specs key as the key to be matched if no namespace is present; this
 action is highly discouraged because it conflicts with
 :ref:`AggregateInstanceExtraSpecsFilter` filter when you enable both filters.
 
+Some virt drivers support reporting CPU traits to the Placement service. With that
+feature available, you should consider using traits in flavors instead of
+ComputeCapabilitiesFilter, because traits provide consistent naming for CPU
+features in some virt drivers and querying traits is efficient. For more detail, please see
+`Support Matrix <https://docs.openstack.org/nova/latest/user/support-matrix.html>`_,
+:ref:`Required traits <extra-specs-required-traits>`,
+:ref:`Forbidden traits <extra-specs-forbidden-traits>` and
+`Report CPU features to the Placement service <https://specs.openstack.org/openstack/nova-specs/specs/rocky/approved/report-cpu-features-as-traits.html>`_.
+
 .. _ComputeFilter:
 
 ComputeFilter
@@ -287,6 +306,15 @@ In general, you should always enable this filter.
 
 CoreFilter
 ----------
+
+.. deprecated:: 19.0.0
+
+   ``CoreFilter`` is deprecated since the 19.0.0 Stein release. VCPU
+   filtering is performed natively using the Placement service when using the
+   ``filter_scheduler`` driver. Users of the ``caching_scheduler`` driver may
+   still rely on this filter but the ``caching_scheduler`` driver is itself
+   deprecated. Furthermore, enabling CoreFilter may incorrectly filter out
+   `baremetal nodes`_ which must be scheduled using custom resource classes.
 
 Only schedules instances on hosts if sufficient CPU cores are available.  If
 this filter is not set, the scheduler might over-provision a host based on
@@ -358,6 +386,15 @@ With the API, use the ``os:scheduler_hints`` key. For example:
 DiskFilter
 ----------
 
+.. deprecated:: 19.0.0
+
+   ``DiskFilter`` is deprecated since the 19.0.0 Stein release. DISK_GB
+   filtering is performed natively using the Placement service when using the
+   ``filter_scheduler`` driver. Users of the ``caching_scheduler`` driver may
+   still rely on this filter but the ``caching_scheduler`` driver is itself
+   deprecated. Furthermore, enabling DiskFilter may incorrectly filter out
+   `baremetal nodes`_ which must be scheduled using custom resource classes.
+
 Only schedules instances on hosts if there is sufficient disk space available
 for root and ephemeral storage.
 
@@ -415,23 +452,6 @@ greater than ``1.0``:
    If the value is set to ``>1``, we recommend keeping track of the free disk
    space, as the value approaching ``0`` may result in the incorrect
    functioning of instances using it at the moment.
-
-ExactCoreFilter
----------------
-
-Only schedules instances on hosts if host has the exact number of CPU cores.
-
-ExactDiskFilter
----------------
-
-Only schedules instances on hosts if host has the exact amount of disk
-available.
-
-ExactRamFilter
---------------
-
-Only schedules instances on hosts if host has the exact number of RAM
-available.
 
 .. _ImagePropertiesFilter:
 
@@ -496,6 +516,12 @@ Allows the admin to define a special (isolated) set of images and a special
 isolated hosts, and the isolated hosts can only run isolated images.  The flag
 ``restrict_isolated_hosts_to_isolated_images`` can be used to force isolated
 hosts to only run isolated images.
+
+The logic within the filter depends on the
+``restrict_isolated_hosts_to_isolated_images`` config option, which defaults
+to True. When True, a volume-backed instance will not be put on an isolated
+host. When False, a volume-backed instance can go on any host, isolated or
+not.
 
 The admin must specify the isolated set of images and hosts in the
 ``nova.conf`` file using the ``isolated_hosts`` and ``isolated_images``
@@ -581,8 +607,8 @@ properties, as described in detail in the `related nova-spec document
 <http://specs.openstack.org/openstack/
 nova-specs/specs/juno/implemented/virt-driver-numa-placement.html>`_.  Filter
 will try to match the exact NUMA cells of the instance to those of the host. It
-will consider the standard over-subscription limits each cell, and provide
-limits to the compute host accordingly.
+will consider the standard over-subscription limits for each host NUMA cell,
+and provide limits to the compute host accordingly.
 
 .. note::
 
@@ -609,6 +635,17 @@ device requests in the ``extra_specs`` attribute for the flavor.
 
 RamFilter
 ---------
+
+.. deprecated:: 19.0.0
+
+   ``RamFilter`` is deprecated since the 19.0.0 Stein release. MEMORY_MB
+   filtering is performed natively using the Placement service when using the
+   ``filter_scheduler`` driver. Users of the ``caching_scheduler`` driver may
+   still rely on this filter but the ``caching_scheduler`` driver is itself
+   deprecated. Furthermore, enabling RamFilter may incorrectly filter out
+   `baremetal nodes`_ which must be scheduled using custom resource classes.
+
+.. _baremetal nodes: https://docs.openstack.org/ironic/latest/install/configure-nova-flavors.html
 
 Only schedules instances on hosts that have sufficient RAM available.  If this
 filter is not set, the scheduler may over provision a host based on RAM (for
@@ -748,6 +785,10 @@ Cell filters
 
 The following sections describe the available cell filters.
 
+.. note::
+
+   These filters are only available for cellsv1 which is deprecated.
+
 DifferentCellFilter
 -------------------
 
@@ -829,6 +870,11 @@ Hosts and cells are weighted based on the following options in the
      - Multiplier used for weighing hosts for group soft-anti-affinity.  Only a
        positive value is meaningful. Negative means that the behavior will
        change to the opposite, which is soft-affinity.
+   * - [filter_scheduler]
+     - ``build_failure_weight_multiplier``
+     - Multiplier used for weighing hosts which have recent build failures. A
+       positive value increases the significance of build failures reported by
+       the host recently, making them less likely to be chosen.
    * - [metrics]
      - ``weight_multiplier``
      - Multiplier for weighting meters. Use a floating-point value.
@@ -905,14 +951,6 @@ For example:
    mute_weight_multiplier = -10.0
    ram_weight_multiplier = 1.0
    offset_weight_multiplier = 1.0
-
-Chance scheduler
-~~~~~~~~~~~~~~~~
-
-As an administrator, you work with the filter scheduler.  However, the Compute
-service also uses the Chance Scheduler,
-``nova.scheduler.chance.ChanceScheduler``, which randomly selects from lists of
-filtered hosts.
 
 Utilization aware scheduling
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -993,14 +1031,14 @@ nova aggregate-update [--name <name>] [--availability-zone <availability-zone>] 
   Update the name and/or availability zone for the aggregate.
 
 nova host-list
-  List all hosts by service. It has been depricated since microversion 2.43.
+  List all hosts by service. It has been deprecated since microversion 2.43.
   Use :command:`nova hypervisor-list` instead.
 
 nova hypervisor-list [--matching <hostname>] [--marker <marker>] [--limit <limit>]
   List hypervisors.
 
 nova host-update [--status <enable|disable>] [--maintenance <enable|disable>] <hostname>
-  Put/resume host into/from maintenance. It has been depricated since
+  Put/resume host into/from maintenance. It has been deprecated since
   microversion 2.43. To enable or disable a service,
   use :command:`nova service-enable` or :command:`nova service-disable` instead.
 
@@ -1035,15 +1073,16 @@ drives if they need access to faster disk I/O, or access to compute hosts that
 have GPU cards to take advantage of GPU-accelerated code.
 
 To configure the scheduler to support host aggregates, the
-``scheduler_default_filters`` configuration option must contain the
-``AggregateInstanceExtraSpecsFilter`` in addition to the other filters used by
-the scheduler. Add the following line to ``/etc/nova/nova.conf`` on the host
-that runs the ``nova-scheduler`` service to enable host aggregates filtering,
+:oslo.config:option:`filter_scheduler.enabled_filters` configuration option must
+contain the ``AggregateInstanceExtraSpecsFilter`` in addition to the other filters
+used by the scheduler. Add the following line to ``/etc/nova/nova.conf`` on the
+host that runs the ``nova-scheduler`` service to enable host aggregates filtering,
 as well as the other filters that are typically enabled:
 
 .. code-block:: ini
 
-   scheduler_default_filters=AggregateInstanceExtraSpecsFilter,RetryFilter,AvailabilityZoneFilter,ComputeCapabilitiesFilter,ImagePropertiesFilter,ServerGroupAntiAffinityFilter,ServerGroupAffinityFilter
+   [filter_scheduler]
+   enabled_filters=AggregateInstanceExtraSpecsFilter,RetryFilter,AvailabilityZoneFilter,ComputeCapabilitiesFilter,ImagePropertiesFilter,ServerGroupAntiAffinityFilter,ServerGroupAffinityFilter
 
 Example: Specify compute hosts with SSDs
 ----------------------------------------
@@ -1172,9 +1211,158 @@ Now, when a user requests an instance with the ``ssd.large`` flavor,
 the scheduler only considers hosts with the ``ssd=true`` key-value pair.
 In this example, these are ``node1`` and ``node2``.
 
+Aggregates in Placement
+-----------------------
+
+Aggregates also exist in placement and are not the same thing as host
+aggregates in nova. These aggregates are defined (purely) as groupings
+of related resource providers. Since compute nodes in nova are
+represented in placement as resource providers, they can be added to a
+placement aggregate as well. For example, get the uuid of the compute
+node using :command:`openstack hypervisor list` and add it to an
+aggregate in placement using :command:`openstack placement aggregate
+set`.
+
+.. code-block:: console
+
+  $ openstack --os-compute-api-version=2.53 hypervisor list
+  +--------------------------------------+---------------------+-----------------+-----------------+-------+
+  | ID                                   | Hypervisor Hostname | Hypervisor Type | Host IP         | State |
+  +--------------------------------------+---------------------+-----------------+-----------------+-------+
+  | 815a5634-86fb-4e1e-8824-8a631fee3e06 | node1               | QEMU            | 192.168.1.123   | up    |
+  +--------------------------------------+---------------------+-----------------+-----------------+-------+
+
+  $ openstack --os-placement-api-version=1.2 resource provider aggregate set --aggregate df4c74f3-d2c4-4991-b461-f1a678e1d161 815a5634-86fb-4e1e-8824-8a631fee3e06
+
+Some scheduling filter operations can be performed by placement for
+increased speed and efficiency.
+
+.. note::
+
+    The nova-api service attempts (as of nova 18.0.0) to automatically mirror
+    the association of a compute host with an aggregate when an administrator
+    adds or removes a host to/from a nova host aggregate. This should alleviate
+    the need to manually create those association records in the placement API
+    using the ``openstack resource provider aggregate set`` CLI invocation.
+
+Tenant Isolation with Placement
+-------------------------------
+
+In order to use placement to isolate tenants, there must be placement
+aggregates that match the membership and UUID of nova host aggregates
+that you want to use for isolation. The same key pattern in aggregate
+metadata used by the `AggregateMultiTenancyIsolation` filter controls
+this function, and is enabled by setting
+`[scheduler]/limit_tenants_to_placement_aggregate=True`.
+
+.. code-block:: console
+
+  $ openstack --os-compute-api-version=2.53 aggregate create myagg
+  +-------------------+--------------------------------------+
+  | Field             | Value                                |
+  +-------------------+--------------------------------------+
+  | availability_zone | None                                 |
+  | created_at        | 2018-03-29T16:22:23.175884           |
+  | deleted           | False                                |
+  | deleted_at        | None                                 |
+  | id                | 4                                    |
+  | name              | myagg                                |
+  | updated_at        | None                                 |
+  | uuid              | 019e2189-31b3-49e1-aff2-b220ebd91c24 |
+  +-------------------+--------------------------------------+
+
+  $ openstack --os-compute-api-version=2.53 aggregate add host myagg node1
+  +-------------------+--------------------------------------+
+  | Field             | Value                                |
+  +-------------------+--------------------------------------+
+  | availability_zone | None                                 |
+  | created_at        | 2018-03-29T16:22:23.175884           |
+  | deleted           | False                                |
+  | deleted_at        | None                                 |
+  | hosts             | [u'node1']                           |
+  | id                | 4                                    |
+  | name              | myagg                                |
+  | updated_at        | None                                 |
+  | uuid              | 019e2189-31b3-49e1-aff2-b220ebd91c24 |
+  +-------------------+--------------------------------------+
+
+  $ openstack project list -f value | grep 'demo'
+  9691591f913949818a514f95286a6b90 demo
+
+  $ openstack aggregate set --property filter_tenant_id=9691591f913949818a514f95286a6b90 myagg
+
+  $ openstack --os-placement-api-version=1.2 resource provider aggregate set --aggregate 019e2189-31b3-49e1-aff2-b220ebd91c24 815a5634-86fb-4e1e-8824-8a631fee3e06
+
+Availability Zones with Placement
+---------------------------------
+
+In order to use placement to honor availability zone requests, there must be
+placement aggregates that match the membership and UUID of nova host aggregates
+that you assign as availability zones. The same key in aggregate metadata used
+by the `AvailabilityZoneFilter` filter controls this function, and is enabled by
+setting `[scheduler]/query_placement_for_availability_zone=True`.
+
+.. code-block:: console
+
+  $ openstack --os-compute-api-version=2.53 aggregate create myaz
+  +-------------------+--------------------------------------+
+  | Field             | Value                                |
+  +-------------------+--------------------------------------+
+  | availability_zone | None                                 |
+  | created_at        | 2018-03-29T16:22:23.175884           |
+  | deleted           | False                                |
+  | deleted_at        | None                                 |
+  | id                | 4                                    |
+  | name              | myaz                                 |
+  | updated_at        | None                                 |
+  | uuid              | 019e2189-31b3-49e1-aff2-b220ebd91c24 |
+  +-------------------+--------------------------------------+
+
+  $ openstack --os-compute-api-version=2.53 aggregate add host myaz node1
+  +-------------------+--------------------------------------+
+  | Field             | Value                                |
+  +-------------------+--------------------------------------+
+  | availability_zone | None                                 |
+  | created_at        | 2018-03-29T16:22:23.175884           |
+  | deleted           | False                                |
+  | deleted_at        | None                                 |
+  | hosts             | [u'node1']                           |
+  | id                | 4                                    |
+  | name              | myagg                                |
+  | updated_at        | None                                 |
+  | uuid              | 019e2189-31b3-49e1-aff2-b220ebd91c24 |
+  +-------------------+--------------------------------------+
+
+  $ openstack aggregate set --property availability_zone=az002 myaz
+
+  $ openstack --os-placement-api-version=1.2 resource provider aggregate set --aggregate 019e2189-31b3-49e1-aff2-b220ebd91c24 815a5634-86fb-4e1e-8824-8a631fee3e06
+
+With the above configuration, the `AvailabilityZoneFilter` filter can be disabled
+in `[filter_scheduler]/enabled_filters` while retaining proper behavior (and doing
+so with the higher performance of placement's implementation).
+
 XenServer hypervisor pools to support live migration
 ----------------------------------------------------
 
 When using the XenAPI-based hypervisor, the Compute service uses host
 aggregates to manage XenServer Resource pools, which are used in supporting
 live migration.
+
+Cells considerations
+~~~~~~~~~~~~~~~~~~~~
+
+By default cells are enabled for scheduling new instances but they can be
+disabled (new schedulings to the cell are blocked). This may be useful for
+users while performing cell maintenance, failures or other interventions. It is
+to be noted that creating pre-disabled cells and enabling/disabling existing
+cells should either be followed by a restart or SIGHUP of the nova-scheduler
+service for the changes to take effect.
+
+Command-line interface
+----------------------
+
+The :command:`nova-manage` command-line client supports the cell-disable
+related commands. To enable or disable a cell, use
+:command:`nova-manage cell_v2 update_cell` and to create pre-disabled cells,
+use :command:`nova-manage cell_v2 create_cell`. See the
+:ref:`man-page-cells-v2` man page for details on command usage.

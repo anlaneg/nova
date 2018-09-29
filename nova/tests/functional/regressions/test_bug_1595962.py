@@ -78,7 +78,7 @@ class TestSerialConsoleLiveMigrate(test.TestCase):
 
     @mock.patch('nova.virt.libvirt.LibvirtDriver.get_volume_connector')
     @mock.patch('nova.virt.libvirt.guest.Guest.get_job_info')
-    @mock.patch.object(fakelibvirt.Domain, 'migrateToURI2')
+    @mock.patch.object(fakelibvirt.Domain, 'migrateToURI3')
     @mock.patch('nova.virt.libvirt.host.Host.get_connection')
     @mock.patch('nova.virt.disk.api.get_disk_size', return_value=1024)
     @mock.patch('os.path.getsize', return_value=1024)
@@ -109,8 +109,8 @@ class TestSerialConsoleLiveMigrate(test.TestCase):
         mock_get_job_info.return_value = libvirt_guest.JobInfo(
                     type=fakelibvirt.VIR_DOMAIN_JOB_COMPLETED)
         fake_connection = fakelibvirt.Connection('qemu:///system',
-                                                 version=1002007,
-                                                 hv_version=2001000)
+                                version=fakelibvirt.FAKE_LIBVIRT_VERSION,
+                                hv_version=fakelibvirt.FAKE_QEMU_VERSION)
         mock_host_get_connection.return_value = fake_connection
 
         server_attr = dict(name='server1',

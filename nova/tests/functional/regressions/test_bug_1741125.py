@@ -11,10 +11,10 @@
 # limitations under the License.
 
 from nova.compute import manager as compute_manager
-from nova.tests.functional.test_servers import ProviderUsageBaseTestCase
+from nova.tests.functional import integrated_helpers
 
 
-class TestServerResizeReschedule(ProviderUsageBaseTestCase):
+class TestServerResizeReschedule(integrated_helpers.ProviderUsageBaseTestCase):
     """Regression test for bug #1741125
 
     During testing in the alternate host series, it was found that retries
@@ -36,6 +36,9 @@ class TestServerResizeReschedule(ProviderUsageBaseTestCase):
         self.compute3 = self._start_compute(host='host3')
         self.compute4 = self._start_compute(host='host4')
 
+        # Restart the scheduler to reset the host state cache.
+        self.restart_scheduler_service(self.scheduler_service)
+
         flavors = self.api.get_flavors()
         self.flavor1 = flavors[0]
         self.flavor2 = flavors[1]
@@ -50,7 +53,7 @@ class TestServerResizeReschedule(ProviderUsageBaseTestCase):
         server_req = self._build_minimal_create_server_request(
                 self.api, 'some-server', flavor_id=self.flavor1['id'],
                 image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
-                networks=[])
+                networks='none')
 
         self.first_attempt = True
         created_server = self.api.post_server({'server': server_req})
@@ -78,3 +81,12 @@ class TestServerResizeReschedule(ProviderUsageBaseTestCase):
                 'VERIFY_RESIZE')
         self.assertEqual(self.flavor2['name'],
                          server['flavor']['original_name'])
+
+
+class TestServerResizeRescheduleWithCachingScheduler(
+        TestServerResizeReschedule):
+    """Tests the reschedule scenario using the CachingScheduler."""
+
+    def setUp(self):
+        self.flags(driver='caching_scheduler', group='scheduler')
+        super(TestServerResizeRescheduleWithCachingScheduler, self).setUp()

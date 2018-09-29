@@ -14,6 +14,7 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel
 import testtools
 import webob.exc
 
@@ -21,13 +22,12 @@ from nova.api.openstack.compute import hosts as os_hosts_v21
 from nova.compute import power_state
 from nova.compute import vm_states
 from nova import context as context_maker
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import test
 from nova.tests import fixtures
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_hosts
-from nova.tests import uuidsentinel
 
 
 def stub_service_get_all(context, disabled=None):
@@ -40,7 +40,7 @@ def stub_service_get_by_host_and_binary(context, host_name, binary):
             return service
 
 
-def stub_set_host_enabled(context, host_name, enabled):
+def stub_set_host_enabled(self, context, host_name, enabled):
     """Simulates three possible behaviours for VM drivers or compute
     drivers when enabling or disabling a host.
 
@@ -65,7 +65,7 @@ def stub_set_host_enabled(context, host_name, enabled):
         return results[enabled]
 
 
-def stub_set_host_maintenance(context, host_name, mode):
+def stub_set_host_maintenance(self, context, host_name, mode):
     # We'll simulate success and failure by assuming
     # that 'host_c1' always succeeds, and 'host_c2'
     # always fails
@@ -87,7 +87,7 @@ def stub_set_host_maintenance(context, host_name, mode):
         return results[mode]
 
 
-def stub_host_power_action(context, host_name, action):
+def stub_host_power_action(self, context, host_name, action):
     if host_name == "notimplemented":
         raise NotImplementedError()
     elif host_name == "dummydest":
@@ -136,19 +136,19 @@ class HostTestCaseV21(test.TestCase):
 
     def _setup_stubs(self):
         # Pretend we have fake_hosts.HOST_LIST in the DB
-        self.stub_out('nova.db.service_get_all',
+        self.stub_out('nova.db.api.service_get_all',
                       stub_service_get_all)
         # Only hosts in our fake DB exist
-        self.stub_out('nova.db.service_get_by_host_and_binary',
+        self.stub_out('nova.db.api.service_get_by_host_and_binary',
                       stub_service_get_by_host_and_binary)
         # 'host_c1' always succeeds, and 'host_c2'
-        self.stubs.Set(self.hosts_api, 'set_host_enabled',
-                       stub_set_host_enabled)
+        self.stub_out('nova.compute.api.HostAPI.set_host_enabled',
+                      stub_set_host_enabled)
         # 'host_c1' always succeeds, and 'host_c2'
-        self.stubs.Set(self.hosts_api, 'set_host_maintenance',
-                       stub_set_host_maintenance)
-        self.stubs.Set(self.hosts_api, 'host_power_action',
-                       stub_host_power_action)
+        self.stub_out('nova.compute.api.HostAPI.set_host_maintenance',
+                      stub_set_host_maintenance)
+        self.stub_out('nova.compute.api.HostAPI.host_power_action',
+                      stub_host_power_action)
 
     def setUp(self):
         super(HostTestCaseV21, self).setUp()
@@ -234,7 +234,7 @@ class HostTestCaseV21(test.TestCase):
         def stub_service_get_all_notimpl(self, req):
             return [{'host': 'notimplemented', 'topic': None,
                      'availability_zone': None}]
-        self.stub_out('nova.db.service_get_all',
+        self.stub_out('nova.db.api.service_get_all',
                       stub_service_get_all_notimpl)
         body = {key: val}
         self.assertRaises(webob.exc.HTTPNotImplemented,

@@ -40,8 +40,8 @@ See `Comparison with Cells V1`_ for more detail.
 Status
 ~~~~~~
 
-.. warning:: Cells v1 is deprecated in favor of Cells v2 as of the
-             16.0.0 Pike release.
+.. deprecated:: 16.0.0
+    Cells v1 is deprecated in favor of Cells v2 as of the 16.0.0 Pike release.
 
 Cells v1 is considered experimental and receives much less testing than the
 rest of Nova. For example, there is no job for testing cells v1 with Neutron.
@@ -245,6 +245,14 @@ scheduled are relegated to the cell0 database, which is effectively a
 graveyard of instances that failed to start. All successful/running
 instances are stored in "cell1".
 
+
+.. note:: Since Nova services make use of both configuration file and some
+          databases records, starting or restarting those services with an
+          incomplete configuration could lead to an incorrect deployment.
+          Please only restart the services once you are done with the described
+          steps below.
+
+
 First Time Setup
 ~~~~~~~~~~~~~~~~
 
@@ -337,6 +345,100 @@ instances. Any time you add more compute hosts to a cell, you need to
 re-run this command to map them from the top-level so they can be
 utilized.
 
+Template URLs in Cell Mappings
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Starting in the Rocky release, the URLs provided in the cell mappings
+for ``--database_connection`` and ``--transport-url`` can contain
+variables which are evaluated each time they are loaded from the
+database, and the values of which are taken from the corresponding
+base options in the host's configuration file.  The base URL is parsed
+and the following elements may be substituted into the cell mapping
+URL (using ``rabbit://bob:s3kret@myhost:123/nova?sync=true#extra``):
+
+.. list-table:: Cell Mapping URL Variables
+   :header-rows: 1
+   :widths: 15, 50, 15
+
+   * - Variable
+     - Meaning
+     - Part of example URL
+   * - ``scheme``
+     - The part before the `://`
+     - ``rabbit``
+   * - ``username``
+     - The username part of the credentials
+     - ``bob``
+   * - ``password``
+     - The password part of the credentials
+     - ``s3kret``
+   * - ``hostname``
+     - The hostname or address
+     - ``myhost``
+   * - ``port``
+     - The port number (must be specified)
+     - ``123``
+   * - ``path``
+     - The "path" part of the URL (without leading slash)
+     - ``nova``
+   * - ``query``
+     - The full query string arguments (without leading question mark)
+     - ``sync=true``
+   * - ``fragment``
+     - Everything after the first hash mark
+     - ``extra``
+
+Variables are provided in curly brackets, like ``{username}``. A simple template
+of ``rabbit://{username}:{password}@otherhost/{path}`` will generate a full URL
+of ``rabbit://bob:s3kret@otherhost/nova`` when used with the above example.
+
+.. note:: The ``[database]/connection`` and
+   ``[DEFAULT]/transport_url`` values are not reloaded from the
+   configuration file during a SIGHUP, which means that a full service
+   restart will be required to notice changes in a cell mapping record
+   if variables are changed.
+
+.. note:: The ``[DEFAULT]/transport_url`` option can contain an
+   extended syntax for the "netloc" part of the url
+   (i.e. `userA:passwordA@hostA:portA,userB:passwordB:hostB:portB`). In this
+   case, substitions of the form ``username1``, ``username2``, etc will be
+   honored and can be used in the template URL.
+
+The templating of these URLs may be helpful in order to provide each service host
+with its own credentials for, say, the database. Without templating, all hosts
+will use the same URL (and thus credentials) for accessing services like the
+database and message queue. By using a URL with a template that results in the
+credentials being taken from the host-local configuration file, each host will
+use different values for those connections.
+
+Assuming you have two service hosts that are normally configured with the cell0
+database as their primary connection, their (abbreviated) configurations would
+look like this::
+
+ [database]
+ connection = mysql+pymysql://service1:foo@myapidbhost/nova_cell0
+
+and::
+
+ [database]
+ connection = mysql+pymysql://service2:bar@myapidbhost/nova_cell0
+
+Without cell mapping template URLs, they would still use the same credentials
+(as stored in the mapping) to connect to the cell databases. However, consider
+template URLs like the following::
+
+ mysql+pymysql://{username}:{password}@mycell1dbhost/nova
+
+and::
+
+ mysql+pymysql://{username}:{password}@mycell2dbhost/nova
+
+Using the first service and cell1 mapping, the calculated URL that will actually
+be used for connecting to that database will be::
+
+ mysql+pymysql://service1:foo@mycell1dbhost/nova
+
+
 References
 ~~~~~~~~~~
 
@@ -399,7 +501,7 @@ database yet. This will set up a single cell Nova deployment.
    matches the transport URL for the cell created in step 5, and start the
    nova-compute service. Before step 7, make sure you have compute hosts in the
    database by running::
-  
+
      nova service-list --binary nova-compute
 
 7. Run the ``discover_hosts`` command to map compute hosts to the single cell
@@ -466,6 +568,11 @@ deployment. At this time, it is recommended to keep Cells V1 enabled during and
 after the upgrade as multiple Cells V2 cell support is not fully finished and
 may not work properly in all scenarios. These upgrade steps will help ensure a
 simple cutover from Cells V1 to Cells V2 in the future.
+
+.. note:: There is a Rocky summit video from CERN about how they did their
+          upgrade from cells v1 to v2 here:
+
+          https://www.openstack.org/videos/vancouver-2018/moving-from-cellsv1-to-cellsv2-at-cern
 
 1. If you haven't already created a cell0 database in a prior release,
    create a database for cell0. If you are going to pass the database
@@ -576,8 +683,11 @@ FAQs
    There are a couple of ways to do this.
 
    1. Run ``nova-manage --config-file <cell config> host list``. This will
-      only lists hosts in the provided cell nova.conf. Note, however, that
-      this command is deprecated as of the 16.0.0 Pike release.
+      only lists hosts in the provided cell nova.conf.
+
+      .. deprecated:: 16.0.0
+         The ``nova-manage host list`` command is deprecated as of the
+         16.0.0 Pike release.
 
    2. Run ``nova-manage cell_v2 discover_hosts --verbose``. This does not
       produce a report but if you are trying to determine if a host is in a
@@ -617,3 +727,27 @@ FAQs
    **NO**. Those options are for Cells v1 usage only and are not used at all
    for Cells v2. That includes the ``nova-cells`` service - it has nothing
    to do with Cells v2.
+
+#. Can I create a cell but have it disabled from scheduling?
+
+   Yes. It is possible to create a pre-disabled cell such that it does not
+   become a candidate for scheduling new VMs. This can be done by running the
+   ``nova-manage cell_v2 create_cell`` command with the ``--disabled`` option.
+
+#. How can I disable a cell so that the new server create requests do not go to
+   it while I perform maintenance?
+
+   Existing cells can be disabled by running ``nova-manage cell_v2 update_cell
+   --cell_uuid <cell_uuid> --disable`` and can be re-enabled once the
+   maintenance period is over by running ``nova-manage cell_v2 update_cell
+   --cell_uuid <cell_uuid> --enable``
+
+#. I disabled (or enabled) a cell using the ``nova-manage cell_v2 update_cell``
+   or I created a new (pre-disabled) cell(mapping) using the
+   ``nova-manage cell_v2 create_cell`` command but the scheduler is still using
+   the old settings.
+
+   The cell mappings are cached in the scheduler worker so you will either need
+   to restart the scheduler process to refresh the cache, or send a SIGHUP
+   signal to the scheduler by which it will automatically refresh the cells
+   cache and the changes will take effect.

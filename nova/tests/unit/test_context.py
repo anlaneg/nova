@@ -15,13 +15,13 @@
 import mock
 from oslo_context import context as o_context
 from oslo_context import fixture as o_fixture
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova import context
 from nova import exception
 from nova import objects
 from nova import test
 from nova.tests import fixtures as nova_fixtures
-from nova.tests import uuidsentinel as uuids
 
 
 class ContextTestCase(test.NoDBTestCase):
@@ -181,7 +181,6 @@ class ContextTestCase(test.NoDBTestCase):
         values2 = ctx.to_dict()
         expected_values = {'auth_token': None,
                            'domain': None,
-                           'instance_lock_checked': False,
                            'is_admin': False,
                            'is_admin_project': True,
                            'project_id': 222,
@@ -241,7 +240,7 @@ class ContextTestCase(test.NoDBTestCase):
                                                mock.sentinel.target)
 
     @mock.patch('nova.rpc.create_transport')
-    @mock.patch('nova.db.create_context_manager')
+    @mock.patch('nova.db.api.create_context_manager')
     def test_target_cell(self, mock_create_ctxt_mgr, mock_rpc):
         mock_create_ctxt_mgr.return_value = mock.sentinel.cdb
         mock_rpc.return_value = mock.sentinel.cmq
@@ -257,11 +256,18 @@ class ContextTestCase(test.NoDBTestCase):
         with context.target_cell(ctxt, mapping) as cctxt:
             self.assertEqual(cctxt.db_connection, mock.sentinel.cdb)
             self.assertEqual(cctxt.mq_connection, mock.sentinel.cmq)
+            self.assertEqual(cctxt.cell_uuid, mapping.uuid)
         self.assertEqual(mock.sentinel.db_conn, ctxt.db_connection)
         self.assertEqual(mock.sentinel.mq_conn, ctxt.mq_connection)
+        self.assertIsNone(ctxt.cell_uuid)
+        # Test again now that we have populated the cache
+        with context.target_cell(ctxt, mapping) as cctxt:
+            self.assertEqual(cctxt.db_connection, mock.sentinel.cdb)
+            self.assertEqual(cctxt.mq_connection, mock.sentinel.cmq)
+            self.assertEqual(cctxt.cell_uuid, mapping.uuid)
 
     @mock.patch('nova.rpc.create_transport')
-    @mock.patch('nova.db.create_context_manager')
+    @mock.patch('nova.db.api.create_context_manager')
     def test_target_cell_unset(self, mock_create_ctxt_mgr, mock_rpc):
         """Tests that passing None as the mapping will temporarily
         untarget any previously set cell context.
@@ -306,7 +312,7 @@ class ContextTestCase(test.NoDBTestCase):
         self.assertFalse(ctxt.is_admin)
 
     @mock.patch('nova.rpc.create_transport')
-    @mock.patch('nova.db.create_context_manager')
+    @mock.patch('nova.db.api.create_context_manager')
     def test_target_cell_caching(self, mock_create_cm, mock_create_tport):
         mock_create_cm.return_value = mock.sentinel.db_conn_obj
         mock_create_tport.return_value = mock.sentinel.mq_conn_obj

@@ -57,7 +57,8 @@ from nova.virt import configdrive
 from nova.virt import driver as virt_driver
 from nova.virt import firewall
 from nova.virt.xenapi import agent as xapi_agent
-from nova.virt.xenapi import pool_states
+from nova.virt.xenapi.image import utils as image_utils
+from nova.virt.xenapi import vif as xapi_vif
 from nova.virt.xenapi import vm_utils
 from nova.virt.xenapi import volume_utils
 from nova.virt.xenapi import volumeops
@@ -147,14 +148,26 @@ class VMOps(object):
         self.firewall_driver = firewall.load_driver(
             DEFAULT_FIREWALL_DRIVER,
             xenapi_session=self._session)
-        vif_impl = importutils.import_class(CONF.xenserver.vif_driver)
-        self.vif_driver = vif_impl(xenapi_session=self._session)
+        self.vif_driver = xapi_vif.XenAPIOpenVswitchDriver(
+            xenapi_session=self._session)
         self.default_root_dev = '/dev/sda'
 
-        LOG.debug("Importing image upload handler: %s",
-                  CONF.xenserver.image_upload_handler)
-        self.image_upload_handler = importutils.import_object(
-                                CONF.xenserver.image_upload_handler)
+        image_handler_cfg = CONF.xenserver.image_handler
+        self.image_handler = image_utils.get_image_handler(image_handler_cfg)
+        # TODO(jianghuaw): Remove these lines relative to the deprecated
+        # option of "image_upload_handler" in the next release - Stein.
+        self.image_upload_handler = None
+        image_upload_handler_cfg = CONF.xenserver.image_upload_handler
+        if image_upload_handler_cfg:
+            # If *image_upload_handler* is explicitly configured, it
+            # means it indends to use non-default image upload handler.
+            # In order to avoid mis-using the default image_handler which
+            # may have different behavor than the explicitly configured
+            # handler, we keep using *image_upload_handler*.
+            LOG.warning("Deprecated: importing image upload handler: %s",
+                        image_upload_handler_cfg)
+            self.image_upload_handler = importutils.import_object(
+                image_upload_handler_cfg)
 
     def agent_enabled(self, instance):
         if CONF.xenserver.disable_agent:
@@ -357,8 +370,9 @@ class VMOps(object):
         # If we didn't get a root VDI from volumes,
         # then use the Glance image as the root device
         if 'root' not in vdis:
-            create_image_vdis = vm_utils.create_image(context, self._session,
-                    instance, name_label, image_meta.id, image_type)
+            create_image_vdis = vm_utils.create_image(
+                context, self._session, instance, name_label, image_meta.id,
+                image_type, self.image_handler)
             vdis.update(create_image_vdis)
 
         # Fetch VDI refs now so we don't have to fetch the ref multiple times
@@ -1030,12 +1044,23 @@ class VMOps(object):
                 post_snapshot_callback=update_task_state) as vdi_uuids:
             update_task_state(task_state=task_states.IMAGE_UPLOADING,
                               expected_state=task_states.IMAGE_PENDING_UPLOAD)
-            self.image_upload_handler.upload_image(context,
-                                                   self._session,
-                                                   instance,
-                                                   image_id,
-                                                   vdi_uuids,
-                                                   )
+            if self.image_upload_handler:
+                # TODO(jianghuaw): remove this branch once the
+                # deprecated option of "image_upload_handler"
+                # gets removed in the next release - Stein.
+                self.image_upload_handler.upload_image(context,
+                                                       self._session,
+                                                       instance,
+                                                       image_id,
+                                                       vdi_uuids,
+                                                       )
+            else:
+                self.image_handler.upload_image(context,
+                                                self._session,
+                                                instance,
+                                                image_id,
+                                                vdi_uuids,
+                                                )
 
         duration = timeutils.delta_seconds(start_time, timeutils.utcnow())
         LOG.debug("Finished snapshot and upload for VM, duration: "
@@ -1185,7 +1210,8 @@ class VMOps(object):
             LOG.debug("Migrated root base vhds", instance=instance)
 
         def _process_ephemeral_chain_recursive(ephemeral_chains,
-                                               active_vdi_uuids):
+                                               active_vdi_uuids,
+                                               ephemeral_disk_index=0):
             # This method is called several times, recursively.
             # The first phase snapshots the ephemeral disks, and
             # migrates the read only VHD files.
@@ -1198,48 +1224,55 @@ class VMOps(object):
                 # all the ephemeral disks, so its time to power down
                 # and complete the migration of the diffs since the snapshot
                 LOG.debug("Migrated all base vhds.", instance=instance)
-                return power_down_and_transfer_leaf_vhds(
-                            active_root_vdi_uuid,
-                            active_vdi_uuids)
+                return power_down_and_transfer_leaf_vhds(active_root_vdi_uuid,
+                                                         active_vdi_uuids)
 
             remaining_chains = []
             if number_of_chains > 1:
                 remaining_chains = ephemeral_chains[1:]
 
-            ephemeral_disk_index = len(active_vdi_uuids)
             userdevice = int(DEVICE_EPHEMERAL) + ephemeral_disk_index
 
-            # Here we take a snapshot of the ephemeral disk,
-            # and migrate all VHDs in the chain that are not being written to
-            # Once that is completed, we call back into this method to either:
-            # - migrate any remaining ephemeral disks
-            # - or, if all disks are migrated, we power down and complete
-            #   the migration but copying the diffs since all the snapshots
-            #   were taken
-            with vm_utils.snapshot_attached_here(self._session, instance,
-                    vm_ref, label, str(userdevice)) as chain_vdi_uuids:
+            # Ensure we are not snapshotting a volume
+            if not volume_utils.is_booted_from_volume(self._session, vm_ref,
+                                                      userdevice):
 
-                # remember active vdi, we will migrate these later
-                vdi_ref, vm_vdi_rec = vm_utils.get_vdi_for_vm_safely(
+                # Here we take a snapshot of the ephemeral disk,
+                # and migrate all VHDs in the chain that are not being written
+                # to. Once that is completed, we call back into this method to
+                # either:
+                # - migrate any remaining ephemeral disks
+                # - or, if all disks are migrated, we power down and complete
+                #   the migration but copying the diffs since all the snapshots
+                #   were taken
+
+                with vm_utils.snapshot_attached_here(self._session, instance,
+                            vm_ref, label, str(userdevice)) as chain_vdi_uuids:
+
+                    # remember active vdi, we will migrate these later
+                    vdi_ref, vm_vdi_rec = vm_utils.get_vdi_for_vm_safely(
                         self._session, vm_ref, str(userdevice))
-                active_uuid = vm_vdi_rec['uuid']
-                active_vdi_uuids.append(active_uuid)
+                    active_uuid = vm_vdi_rec['uuid']
+                    active_vdi_uuids.append(active_uuid)
 
-                # migrate inactive vhds
-                inactive_vdi_uuids = chain_vdi_uuids[1:]
-                ephemeral_disk_number = ephemeral_disk_index + 1
-                for seq_num, vdi_uuid in enumerate(inactive_vdi_uuids,
-                                                   start=1):
-                    vm_utils.migrate_vhd(self._session, instance, vdi_uuid,
-                                         dest, sr_path, seq_num,
-                                         ephemeral_disk_number)
+                    # migrate inactive vhds
+                    inactive_vdi_uuids = chain_vdi_uuids[1:]
+                    ephemeral_disk_number = ephemeral_disk_index + 1
+                    for seq_num, vdi_uuid in enumerate(inactive_vdi_uuids,
+                                                       start=1):
+                        vm_utils.migrate_vhd(self._session, instance, vdi_uuid,
+                                             dest, sr_path, seq_num,
+                                             ephemeral_disk_number)
 
-                LOG.debug("Read-only migrated for disk: %s", userdevice,
-                          instance=instance)
-                # This is recursive to simplify the taking and cleaning up
-                # of all the ephemeral disk snapshots
-                return _process_ephemeral_chain_recursive(remaining_chains,
-                                                          active_vdi_uuids)
+                    LOG.debug("Read-only migrated for disk: %s", userdevice,
+                              instance=instance)
+
+            # This method is recursive, so we will increment our index
+            # and process again until the chains are empty.
+            ephemeral_disk_index = ephemeral_disk_index + 1
+            return _process_ephemeral_chain_recursive(remaining_chains,
+                                                      active_vdi_uuids,
+                                                      ephemeral_disk_index)
 
         @step
         def transfer_ephemeral_disks_then_all_leaf_vdis():
@@ -2208,25 +2241,18 @@ class VMOps(object):
         self.firewall_driver.unfilter_instance(instance_ref,
                                                network_info=network_info)
 
-    def _get_host_uuid_from_aggregate(self, context, hostname):
-        aggregate_list = objects.AggregateList.get_by_host(
-            context, CONF.host, key=pool_states.POOL_FLAG)
-
-        reason = _('Destination host:%s must be in the same '
-                   'aggregate as the source server') % hostname
-        if len(aggregate_list) == 0:
+    def _get_host_opaque_ref(self, hostname):
+        host_ref_set = self._session.host.get_by_name_label(hostname)
+        # If xenapi can't get host ref by the name label, it means the
+        # destination host is not in the same pool with the source host.
+        if host_ref_set is None or host_ref_set == []:
+            return None
+        # It should be only one host with the name, or there would be
+        # a confuse on which host is required
+        if len(host_ref_set) > 1:
+            reason = _('Multiple hosts have the same hostname: %s.') % hostname
             raise exception.MigrationPreCheckError(reason=reason)
-        if hostname not in aggregate_list[0].metadata:
-            raise exception.MigrationPreCheckError(reason=reason)
-
-        return aggregate_list[0].metadata[hostname]
-
-    def _ensure_host_in_aggregate(self, context, hostname):
-        self._get_host_uuid_from_aggregate(context, hostname)
-
-    def _get_host_opaque_ref(self, context, hostname):
-        host_uuid = self._get_host_uuid_from_aggregate(context, hostname)
-        return self._session.call_xenapi("host.get_by_uuid", host_uuid)
+        return host_ref_set[0]
 
     def _get_host_ref_no_aggr(self):
         # Pull the current host ref from Dom0's resident_on field.  This
@@ -2249,7 +2275,8 @@ class VMOps(object):
         # This is the one associated with the pif marked management. From cli:
         # uuid=`xe pif-list --minimal management=true`
         # xe pif-param-get param-name=network-uuid uuid=$uuid
-        expr = 'field "management" = "true"'
+        expr = ('field "management" = "true" and field "host" = "%s"' %
+                self._session.host_ref)
         pifs = self._session.call_xenapi('PIF.get_all_records_where',
                                          expr)
         if len(pifs) != 1:
@@ -2311,13 +2338,20 @@ class VMOps(object):
         """
         dest_check_data = objects.XenapiLiveMigrateData()
 
+        src = instance_ref.host
+
+        def _host_in_this_pool(host_name_label):
+            host_ref = self._get_host_opaque_ref(host_name_label)
+            if not host_ref:
+                return False
+            return vm_utils.host_in_this_pool(self._session, host_ref)
+
+        # Check if migrate happen in a xapi pool
+        pooled_migrate = _host_in_this_pool(src)
         # Notes(eliqiao): if block_migration is None, we calculate it
-        # by checking if src and dest node are in same aggregate
+        # by checking if src and dest node are in same xapi pool
         if block_migration is None:
-            src = instance_ref['host']
-            try:
-                self._ensure_host_in_aggregate(ctxt, src)
-            except exception.MigrationPreCheckError:
+            if not pooled_migrate:
                 block_migration = True
             else:
                 sr_ref = vm_utils.safe_find_sr(self._session)
@@ -2331,11 +2365,13 @@ class VMOps(object):
                 self._session)
         else:
             dest_check_data.block_migration = False
-            src = instance_ref['host']
             # TODO(eilqiao): There is still one case that block_migration is
             # passed from admin user, so we need this check until
             # block_migration flag is removed from API
-            self._ensure_host_in_aggregate(ctxt, src)
+            if not pooled_migrate:
+                reason = _("Destination host is not in the same shared storage"
+                           "pool as source host %s.") % src
+                raise exception.MigrationPreCheckError(reason=reason)
             # TODO(johngarbutt) we currently assume
             # instance is on a SR shared with other destination
             # block migration work will be able to resolve this
@@ -2492,12 +2528,15 @@ class VMOps(object):
                     self._generate_vdi_map(
                         sr_uuid_map[sr_uuid], vm_ref, sr_ref))
         vif_map = {}
-        vif_uuid_map = None
-        if 'vif_uuid_map' in migrate_data:
-            vif_uuid_map = migrate_data.vif_uuid_map
-        if vif_uuid_map:
-            vif_map = self._generate_vif_network_map(vm_ref, vif_uuid_map)
-            LOG.debug("Generated vif_map for live migration: %s", vif_map)
+        # For block migration, need to pass vif map to the destination hosts.
+        if not vm_utils.host_in_this_pool(self._session,
+                                          migrate_send_data.get('host')):
+            vif_uuid_map = None
+            if 'vif_uuid_map' in migrate_data:
+                vif_uuid_map = migrate_data.vif_uuid_map
+            if vif_uuid_map:
+                vif_map = self._generate_vif_network_map(vm_ref, vif_uuid_map)
+                LOG.debug("Generated vif_map for live migration: %s", vif_map)
         options = {}
         self._session.call_xenapi(command_name, vm_ref,
                                   migrate_send_data, True,
@@ -2576,8 +2615,14 @@ class VMOps(object):
                 for sr_ref in iscsi_srs:
                     volume_utils.forget_sr(self._session, sr_ref)
             else:
-                host_ref = self._get_host_opaque_ref(context,
-                                                     destination_hostname)
+                host_ref = self._get_host_opaque_ref(destination_hostname)
+                if not host_ref:
+                    LOG.exception(_("Destination host %s was not found in the"
+                                    " same shared storage pool as source "
+                                    "host."), destination_hostname)
+                    raise exception.MigrationError(
+                        reason=_('No host with name %s found')
+                        % destination_hostname)
                 self._session.call_xenapi("VM.pool_migrate", vm_ref,
                                           host_ref, {"live": "true"})
             post_method(context, instance, destination_hostname,
@@ -2641,7 +2686,7 @@ class VMOps(object):
         # Unplug VIFs and delete networks
         for vif in network_info:
             try:
-                self.vif_driver.delete_network_and_bridge(instance, vif)
+                self.vif_driver.delete_network_and_bridge(instance, vif['id'])
             except Exception:
                 LOG.exception(_('Failed to delete networks and bridges with '
                                 'VIF %s'), vif['id'], instance=instance)
@@ -2725,6 +2770,10 @@ class VMOps(object):
         try:
             vm_ref = self._get_vm_opaque_ref(instance)
             self.vif_driver.unplug(instance, vif, vm_ref)
+        except exception.InstanceNotFound:
+            # Let this go up to the compute manager which will log a message
+            # for it.
+            raise
         except exception.NovaException:
             with excutils.save_and_reraise_exception():
                 LOG.exception(_('detach network interface %s failed.'),

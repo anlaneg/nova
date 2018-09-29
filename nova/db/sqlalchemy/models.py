@@ -390,6 +390,7 @@ class InstanceExtra(BASE, NovaBase, models.SoftDeleteMixin):
     vcpu_model = orm.deferred(Column(Text))
     migration_context = orm.deferred(Column(Text))
     keypairs = orm.deferred(Column(Text))
+    trusted_certs = orm.deferred(Column(Text))
     instance = orm.relationship(Instance,
                             backref=orm.backref('extra',
                                                 uselist=False),
@@ -1135,6 +1136,7 @@ class AggregateMetadata(BASE, NovaBase, models.SoftDeleteMixin):
             name="uniq_aggregate_metadata0aggregate_id0key0deleted"
             ),
         Index('aggregate_metadata_key_idx', 'key'),
+        Index('aggregate_metadata_value_idx', 'value'),
     )
     id = Column(Integer, primary_key=True)
     key = Column(String(255), nullable=False)

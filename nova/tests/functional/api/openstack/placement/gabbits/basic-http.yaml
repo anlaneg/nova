@@ -26,6 +26,14 @@ tests:
   response_json_paths:
       $.errors[0].request_id: /req-[a-fA-F0-9-]+/
 
+- name: error message has default code 1.23
+  GET: /barnabas
+  status: 404
+  request_headers:
+      openstack-api-version: placement 1.23
+  response_json_paths:
+      $.errors[0].code: placement.undefined_code
+
 - name: 404 at no resource provider
   GET: /resource_providers/fd0dd55c-6330-463b-876c-31c54e95cb95
   status: 404
@@ -176,3 +184,24 @@ tests:
   response_forbidden_headers:
       - last-modified
       - cache-control
+
+- name: test starred accept and errors
+  GET: /resource_providers/foo
+  request_headers:
+      accept: "*/*"
+  status: 404
+  response_headers:
+      content-type: application/json
+  response_json_paths:
+      $.errors[0].title: Not Found
+
+- name: bad content length not int
+  POST: /resource_providers
+  request_headers:
+      content-type: application/json
+      content-length: hi mom
+  data:
+      uuid: ce13d7f1-9988-4dfd-8e16-ce071802eb36
+  status: 400
+  response_strings:
+      - content-length header must be an integer

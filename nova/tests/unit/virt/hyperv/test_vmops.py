@@ -70,6 +70,7 @@ class VMOpsTestCase(test_base.HyperVBaseTestCase):
         self._vmops._vhdutils = mock.MagicMock()
         self._vmops._pathutils = mock.MagicMock()
         self._vmops._hostutils = mock.MagicMock()
+        self._vmops._migrutils = mock.MagicMock()
         self._vmops._serial_console_ops = mock.MagicMock()
         self._vmops._block_dev_man = mock.MagicMock()
         self._vmops._vif_driver = mock.MagicMock()
@@ -373,6 +374,7 @@ class VMOpsTestCase(test_base.HyperVBaseTestCase):
         self._vmops._vmutils.set_boot_order.assert_called_once_with(
             mock.sentinel.instance_name, mock_get_boot_order.return_value)
 
+    @mock.patch.object(vmops.VMOps, 'plug_vifs')
     @mock.patch('nova.virt.hyperv.vmops.VMOps.destroy')
     @mock.patch('nova.virt.hyperv.vmops.VMOps.power_on')
     @mock.patch('nova.virt.hyperv.vmops.VMOps.set_boot_order')
@@ -394,8 +396,8 @@ class VMOpsTestCase(test_base.HyperVBaseTestCase):
                     mock_configdrive_required,
                     mock_create_config_drive, mock_attach_config_drive,
                     mock_set_boot_order,
-                    mock_power_on, mock_destroy, exists,
-                    configdrive_required, fail,
+                    mock_power_on, mock_destroy, mock_plug_vifs,
+                    exists, configdrive_required, fail,
                     fake_vm_gen=constants.VM_GEN_2):
         mock_instance = fake_instance.fake_instance_obj(self.context)
         mock_image_meta = mock.MagicMock()
@@ -445,6 +447,8 @@ class VMOpsTestCase(test_base.HyperVBaseTestCase):
             mock_create_instance.assert_called_once_with(
                 mock_instance, mock.sentinel.network_info, root_device_info,
                 block_device_info, fake_vm_gen, mock_image_meta)
+            mock_plug_vifs.assert_called_once_with(mock_instance,
+                                                   mock.sentinel.network_info)
             mock_save_device_metadata.assert_called_once_with(
                 self.context, mock_instance, block_device_info)
             mock_configdrive_required.assert_called_once_with(mock_instance)
@@ -458,7 +462,9 @@ class VMOpsTestCase(test_base.HyperVBaseTestCase):
             mock_set_boot_order.assert_called_once_with(
                 mock_instance.name, fake_vm_gen, block_device_info)
             mock_power_on.assert_called_once_with(
-                mock_instance, network_info=mock.sentinel.network_info)
+                mock_instance,
+                network_info=mock.sentinel.network_info,
+                should_plug_vifs=False)
 
     def test_spawn(self):
         self._test_spawn(exists=False, configdrive_required=True, fail=None)
@@ -1087,29 +1093,42 @@ class VMOpsTestCase(test_base.HyperVBaseTestCase):
         self._vmops._pathutils.get_instance_dir.assert_called_once_with(
             mock_instance.name, create_dir=False, remove_dir=True)
 
-    @ddt.data(True, False)
+    @ddt.data({},
+              {'vm_exists': True},
+              {'planned_vm_exists': True})
+    @ddt.unpack
     @mock.patch('nova.virt.hyperv.volumeops.VolumeOps.disconnect_volumes')
     @mock.patch('nova.virt.hyperv.vmops.VMOps._delete_disk_files')
     @mock.patch('nova.virt.hyperv.vmops.VMOps.power_off')
     @mock.patch('nova.virt.hyperv.vmops.VMOps.unplug_vifs')
-    def test_destroy(self, vm_exists, mock_unplug_vifs, mock_power_off,
-                     mock_delete_disk_files, mock_disconnect_volumes):
+    def test_destroy(self, mock_unplug_vifs, mock_power_off,
+                     mock_delete_disk_files, mock_disconnect_volumes,
+                     vm_exists=False, planned_vm_exists=False):
         mock_instance = fake_instance.fake_instance_obj(self.context)
         self._vmops._vmutils.vm_exists.return_value = vm_exists
+        self._vmops._migrutils.planned_vm_exists.return_value = (
+            planned_vm_exists)
 
         self._vmops.destroy(instance=mock_instance,
                             block_device_info=mock.sentinel.FAKE_BD_INFO,
                             network_info=mock.sentinel.fake_network_info)
 
+        mock_destroy_planned_vms = (
+            self._vmops._migrutils.destroy_existing_planned_vm)
         if vm_exists:
             self._vmops._vmutils.stop_vm_jobs.assert_called_once_with(
                 mock_instance.name)
             mock_power_off.assert_called_once_with(mock_instance)
             self._vmops._vmutils.destroy_vm.assert_called_once_with(
                 mock_instance.name)
+        elif planned_vm_exists:
+            self._vmops._migrutils.planned_vm_exists.assert_called_once_with(
+                mock_instance.name)
+            mock_destroy_planned_vms.assert_called_once_with(
+                mock_instance.name)
         else:
-            self.assertFalse(mock_power_off.called)
             self.assertFalse(self._vmops._vmutils.destroy_vm.called)
+            self.assertFalse(mock_destroy_planned_vms.called)
 
         self._vmops._vmutils.vm_exists.assert_called_with(
             mock_instance.name)
@@ -1325,6 +1344,14 @@ class VMOpsTestCase(test_base.HyperVBaseTestCase):
                              network_info=mock.sentinel.fake_network_info)
         mock_plug_vifs.assert_called_once_with(
             mock_instance, mock.sentinel.fake_network_info)
+
+    @mock.patch.object(vmops.VMOps, 'plug_vifs')
+    def test_power_on_vifs_already_plugged(self, mock_plug_vifs):
+        mock_instance = fake_instance.fake_instance_obj(self.context)
+
+        self._vmops.power_on(mock_instance,
+                             should_plug_vifs=False)
+        self.assertFalse(mock_plug_vifs.called)
 
     def _test_set_vm_state(self, state):
         mock_instance = fake_instance.fake_instance_obj(self.context)

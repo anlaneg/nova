@@ -1,18 +1,16 @@
 .. -*- rst -*-
 
-======================================================
- Floating IPs bulk (os-floating-ips-bulk) (DEPRECATED)
-======================================================
+=========================================
+ Floating IPs bulk (os-floating-ips-bulk)
+=========================================
 
 .. warning::
 
-   These APIs are proxy calls to the Network service. Nova has
-   deprecated all the proxy APIs and users should use the native APIs
-   instead. These will fail with a 404 starting from microversion 2.36.
-   See: `Relevant Network APIs
-   <https://developer.openstack.org/api-ref/networking/v2/#networks>`__.
+   Since these APIs are only implemented for **nova-network**, they are
+   deprecated. These will fail with a 404 starting from microversion 2.36.
+   They were removed in the 18.0.0 Rocky release.
 
-(nova-network only) Bulk-creates, deletes, and lists floating IPs.
+Bulk-creates, deletes, and lists floating IPs.
 Default pool name is ``nova``.
 
 To view available pools, use the ``os-floating-ip-pools`` extension.
@@ -27,7 +25,8 @@ Lists all floating IPs.
 
 Normal response codes: 200
 
-Error response codes: unauthorized(401), forbidden(403), itemNotFound(404)
+Error response codes: unauthorized(401), forbidden(403), itemNotFound(404),
+gone(410)
 
 Response
 --------
@@ -57,7 +56,7 @@ Bulk-creates floating IPs.
 Normal response codes: 200
 
 Error response codes: badRequest(400), unauthorized(401), forbidden(403),
-conflict(409)
+conflict(409), gone(410)
 
 Request
 -------
@@ -99,7 +98,8 @@ Bulk-deletes floating IPs.
 
 Normal response codes: 200
 
-Error response codes: badRequest(400), unauthorized(401), forbidden(403), itemNotFound(404)
+Error response codes: badRequest(400), unauthorized(401), forbidden(403),
+itemNotFound(404), gone(410)
 
 Request
 -------
@@ -134,7 +134,8 @@ Lists all floating IPs for a host.
 
 Normal response codes: 200
 
-Error response codes: unauthorized(401), forbidden(403), itemNotFound(404)
+Error response codes: unauthorized(401), forbidden(403), itemNotFound(404),
+gone(410)
 
 Request
 -------

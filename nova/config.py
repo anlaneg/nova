@@ -18,6 +18,7 @@
 from oslo_log import log
 from oslo_utils import importutils
 
+from nova.api.openstack.placement import db_api as placement_db
 from nova.common import config
 import nova.conf
 from nova.db.sqlalchemy import api as sqlalchemy_api
@@ -39,6 +40,11 @@ def parse_args(argv, default_config_files=None, configure_db=True,
         extra_default_log_levels = ['glanceclient=DEBUG']
     else:
         extra_default_log_levels = ['glanceclient=WARN']
+
+    # NOTE(danms): DEBUG logging in privsep will result in some large
+    # and potentially sensitive things being logged.
+    extra_default_log_levels.append('oslo.privsep.daemon=INFO')
+
     log.set_defaults(default_log_levels=log.get_default_log_levels() +
                      extra_default_log_levels)
     rpc.set_defaults(control_exchange='nova')
@@ -57,3 +63,4 @@ def parse_args(argv, default_config_files=None, configure_db=True,
 
     if configure_db:
         sqlalchemy_api.configure(CONF)
+        placement_db.configure(CONF)

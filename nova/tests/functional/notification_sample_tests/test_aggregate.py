@@ -105,3 +105,64 @@ class TestAggregateNotificationSample(
             actual=fake_notifier.VERSIONED_NOTIFICATIONS[3])
 
         self.admin_api.delete_aggregate(aggregate['id'])
+
+    def test_aggregate_update_metadata(self):
+        aggregate_req = {
+            "aggregate": {
+                "name": "my-aggregate",
+                "availability_zone": "nova"}}
+        aggregate = self.admin_api.post_aggregate(aggregate_req)
+
+        set_metadata_req = {
+            "set_metadata": {
+                "metadata": {
+                    "availability_zone": "AZ-1"
+                }
+            }
+        }
+        fake_notifier.reset()
+        self.admin_api.post_aggregate_action(aggregate['id'], set_metadata_req)
+
+        self.assertEqual(2, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        self._verify_notification(
+            'aggregate-update_metadata-start',
+            replacements={
+                'uuid': aggregate['uuid'],
+                'id': aggregate['id']},
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[0])
+        self._verify_notification(
+            'aggregate-update_metadata-end',
+            replacements={
+                'uuid': aggregate['uuid'],
+                'id': aggregate['id']},
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[1])
+
+    def test_aggregate_updateprops(self):
+        aggregate_req = {
+            "aggregate": {
+                "name": "my-aggregate",
+                "availability_zone": "nova"}}
+        aggregate = self.admin_api.post_aggregate(aggregate_req)
+
+        update_req = {
+            "aggregate": {
+                "name": "my-new-aggregate"}}
+        self.admin_api.put_aggregate(aggregate['id'], update_req)
+
+        # 0. aggregate-create-start
+        # 1. aggregate-create-end
+        # 2. aggregate-update_prop-start
+        # 3. aggregate-update_prop-end
+        self.assertEqual(4, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        self._verify_notification(
+            'aggregate-update_prop-start',
+            replacements={
+                'uuid': aggregate['uuid'],
+                'id': aggregate['id']},
+            actual=fake_notifier.VERSIONED_NOTIFICATIONS[2])
+        self._verify_notification(
+            'aggregate-update_prop-end',
+            replacements={
+                'uuid': aggregate['uuid'],
+                'id': aggregate['id']},
+                actual=fake_notifier.VERSIONED_NOTIFICATIONS[3])

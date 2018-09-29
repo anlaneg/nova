@@ -23,7 +23,6 @@ import contextlib
 import math
 import os
 import time
-import urllib
 from xml.dom import minidom
 from xml.parsers import expat
 
@@ -34,7 +33,6 @@ from os_xenapi.client import vm_management
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_utils import excutils
-from oslo_utils import importutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
 from oslo_utils import units
@@ -43,6 +41,7 @@ from oslo_utils import versionutils
 import six
 from six.moves import range
 import six.moves.urllib.parse as urlparse
+import six.moves.urllib.request as urlrequest
 
 from nova.api.metadata import base as instance_metadata
 from nova.compute import power_state
@@ -54,6 +53,7 @@ from nova.network import model as network_model
 from nova.objects import diagnostics
 from nova.objects import fields as obj_fields
 import nova.privsep.fs
+import nova.privsep.xenapi
 from nova import utils
 from nova.virt import configdrive
 from nova.virt.disk import api as disk
@@ -813,9 +813,14 @@ def _find_cached_images(session, sr_ref):
 def _find_cached_image(session, image_id, sr_ref):
     """Returns the vdi-ref of the cached image."""
     name_label = _get_image_vdi_label(image_id)
-    recs = session.call_xenapi("VDI.get_all_records_where",
-                               'field "name__label"="%s"'
-                               % name_label)
+    # For not pooled hosts, only name_lable is enough to get a cached image.
+    # When in a xapi pool, each host may have a cached image using the
+    # same name while xapi api will search all of them. Add SR to the filter
+    # to ensure only one image returns.
+    expr = ('field "name__label"="%(name_label)s" and field "SR" = "%(SR)s"'
+            % {'name_label': name_label, 'SR': sr_ref})
+    recs = session.call_xenapi("VDI.get_all_records_where", expr)
+
     number_found = len(recs)
     if number_found > 0:
         if number_found > 1:
@@ -1221,7 +1226,7 @@ def _get_image_vdi_label(image_id):
 
 
 def _create_cached_image(context, session, instance, name_label,
-                         image_id, image_type):
+                         image_id, image_type, image_handler):
     sr_ref = safe_find_sr(session)
     sr_type = session.call_xenapi('SR.get_type', sr_ref)
 
@@ -1238,7 +1243,7 @@ def _create_cached_image(context, session, instance, name_label,
         if cache_vdi_ref is None:
             downloaded = True
             vdis = _fetch_image(context, session, instance, name_label,
-                                image_id, image_type)
+                                image_id, image_type, image_handler)
 
             cache_vdi_ref = session.call_xenapi(
                     'VDI.get_by_uuid', vdis['root']['uuid'])
@@ -1283,7 +1288,7 @@ def _create_cached_image(context, session, instance, name_label,
 
 
 def create_image(context, session, instance, name_label, image_id,
-                 image_type):
+                 image_type, image_handler):
     """Creates VDI from the image stored in the local cache. If the image
     is not present in the cache, it streams it from glance.
 
@@ -1314,10 +1319,10 @@ def create_image(context, session, instance, name_label, image_id,
     if cache:
         downloaded, vdis = _create_cached_image(context, session, instance,
                                                 name_label, image_id,
-                                                image_type)
+                                                image_type, image_handler)
     else:
         vdis = _fetch_image(context, session, instance, name_label,
-                            image_id, image_type)
+                            image_id, image_type, image_handler)
         downloaded = True
     duration = timeutils.delta_seconds(start_time, timeutils.utcnow())
 
@@ -1335,14 +1340,16 @@ def create_image(context, session, instance, name_label, image_id,
     return vdis
 
 
-def _fetch_image(context, session, instance, name_label, image_id, image_type):
+def _fetch_image(context, session, instance, name_label, image_id, image_type,
+                 image_handler):
     """Fetch image from glance based on image type.
 
     Returns: A single filename if image_type is KERNEL or RAMDISK
              A list of dictionaries that describe VDIs, otherwise
     """
     if image_type == ImageType.DISK_VHD:
-        vdis = _fetch_vhd_image(context, session, instance, image_id)
+        vdis = _fetch_vhd_image(context, session, instance, image_id,
+                                image_handler)
     else:
         if CONF.xenserver.independent_compute:
             raise exception.NotSupportedWithOption(
@@ -1369,12 +1376,6 @@ def _make_uuid_stack():
     return [uuidutils.generate_uuid() for i in range(MAX_VDI_CHAIN_SIZE)]
 
 
-def _default_download_handler():
-    # TODO(sirp):  This should be configurable like upload_handler
-    return importutils.import_object(
-            'nova.virt.xenapi.image.glance.GlanceStore')
-
-
 def get_compression_level():
     level = CONF.xenserver.image_compression_level
     if level is not None and (level < 1 or level > 9):
@@ -1383,20 +1384,15 @@ def get_compression_level():
     return level
 
 
-def _fetch_vhd_image(context, session, instance, image_id):
+def _fetch_vhd_image(context, session, instance, image_id, image_handler):
     """Tell glance to download an image and put the VHDs into the SR
 
     Returns: A list of dictionaries that describe VDIs
     """
     LOG.debug("Asking xapi to fetch vhd image %s", image_id,
               instance=instance)
-
-    handler = _default_download_handler()
-
-    try:
-        vdis = handler.download_image(context, session, instance, image_id)
-    except Exception:
-        raise
+    vdis = image_handler.download_image(
+        context, session, instance, image_id)
 
     # Ensure we can see the import VHDs as VDIs
     scan_default_sr(session)
@@ -1954,7 +1950,7 @@ def _get_rrd_server():
 def _get_rrd(server, vm_uuid):
     """Return the VM RRD XML as a string."""
     try:
-        xml = urllib.urlopen("%s://%s:%s@%s/vm_rrd?uuid=%s" % (
+        xml = urlrequest.urlopen("%s://%s:%s@%s/vm_rrd?uuid=%s" % (
             server[0],
             CONF.xenserver.connection_username,
             CONF.xenserver.connection_password,
@@ -2235,10 +2231,9 @@ def get_this_vm_uuid(session):
         # Some guest kernels (without 5c13f8067745efc15f6ad0158b58d57c44104c25)
         # cannot read from uuid after a reboot.  Fall back to trying xenstore.
         # See https://bugs.launchpad.net/ubuntu/+source/xen-api/+bug/1081182
-        domid, _ = utils.execute('xenstore-read', 'domid', run_as_root=True)
-        vm_key, _ = utils.execute('xenstore-read',
-                                 '/local/domain/%s/vm' % domid.strip(),
-                                 run_as_root=True)
+        domid, _ = nova.privsep.xenapi.xenstore_read('domid')
+        vm_key, _ = nova.privsep.xenapi.xenstore_read(
+            '/local/domain/%s/vm' % domid.strip())
         return vm_key.strip()[4:]
 
 
@@ -2278,13 +2273,6 @@ def _write_partition(session, virtual_size, dev):
     LOG.debug('Writing partition table %s done.', dev_path)
 
 
-def _repair_filesystem(partition_path):
-    # Exit Code 1 = File system errors corrected
-    #           2 = File system errors corrected, system needs a reboot
-    utils.execute('e2fsck', '-f', '-y', partition_path, run_as_root=True,
-        check_exit_code=[0, 1, 2])
-
-
 def _resize_part_and_fs(dev, start, old_sectors, new_sectors, flags):
     """Resize partition and fileystem.
 
@@ -2298,7 +2286,7 @@ def _resize_part_and_fs(dev, start, old_sectors, new_sectors, flags):
     partition_path = utils.make_dev_path(dev, partition=1)
 
     # Replay journal if FS wasn't cleanly unmounted
-    _repair_filesystem(partition_path)
+    nova.privsep.fs.e2fsck(partition_path)
 
     # Remove ext3 journal (making it ext2)
     nova.privsep.fs.ext_journal_disable(partition_path)
@@ -2306,8 +2294,7 @@ def _resize_part_and_fs(dev, start, old_sectors, new_sectors, flags):
     if new_sectors < old_sectors:
         # Resizing down, resize filesystem before partition resize
         try:
-            utils.execute('resize2fs', partition_path, '%ds' % size,
-                          run_as_root=True)
+            nova.privsep.fs.resize2fs(partition_path, [0], size='%ds' % size)
         except processutils.ProcessExecutionError as exc:
             LOG.error(six.text_type(exc))
             reason = _("Shrinking the filesystem down with resize2fs "
@@ -2320,7 +2307,7 @@ def _resize_part_and_fs(dev, start, old_sectors, new_sectors, flags):
 
     if new_sectors > old_sectors:
         # Resizing up, resize filesystem after partition resize
-        utils.execute('resize2fs', partition_path, run_as_root=True)
+        nova.privsep.fs.resize2fs(partition_path, [0])
 
     # Add back journal
     nova.privsep.fs.ext_journal_enable(partition_path)
@@ -2402,14 +2389,8 @@ def _copy_partition(session, src_ref, dst_ref, partition, virtual_size):
                 _sparse_copy(src_path, dst_path, virtual_size)
             else:
                 num_blocks = virtual_size / SECTOR_SIZE
-                utils.execute('dd',
-                              'if=%s' % src_path,
-                              'of=%s' % dst_path,
-                              'bs=%d' % DD_BLOCKSIZE,
-                              'count=%d' % num_blocks,
-                              'iflag=direct,sync',
-                              'oflag=direct,sync',
-                              run_as_root=True)
+                nova.privsep.xenapi.block_copy(
+                    src_path, dst_path, DD_BLOCKSIZE, num_blocks)
 
 
 def _mount_filesystem(dev_path, mount_point):
@@ -2618,3 +2599,8 @@ def set_other_config_pci(session, vm_ref, params):
     other_config = session.call_xenapi("VM.get_other_config", vm_ref)
     other_config['pci'] = params
     session.call_xenapi("VM.set_other_config", vm_ref, other_config)
+
+
+def host_in_this_pool(session, host_ref):
+    rec_dict = session.host.get_all_records()
+    return host_ref in rec_dict.keys()

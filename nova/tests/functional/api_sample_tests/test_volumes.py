@@ -15,6 +15,8 @@
 
 import datetime
 
+from oslo_utils.fixture import uuidsentinel as uuids
+
 from nova.compute import api as compute_api
 from nova import context
 from nova import objects
@@ -24,7 +26,7 @@ from nova.tests.functional.api_sample_tests import test_servers
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_instance
-from nova.tests import uuidsentinel as uuids
+
 
 COMPUTE_VERSION_OLD_ATTACH_FLOW = \
     compute_api.CINDER_V3_ATTACH_MIN_COMPUTE_VERSION - 1
@@ -220,7 +222,7 @@ class VolumeAttachmentsSample(test_servers.ServersSampleBase):
             ]
             return bdms
 
-        self.stub_out('nova.db.block_device_mapping_get_all_by_instance',
+        self.stub_out('nova.db.api.block_device_mapping_get_all_by_instance',
                       fake_bdms_get_all_by_instance)
 
     def fake_bdm_get_by_volume_and_instance(

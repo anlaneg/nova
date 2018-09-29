@@ -15,6 +15,7 @@
 
 import mock
 from oslo_config import cfg
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 import webob
 
@@ -23,7 +24,7 @@ from nova import context
 from nova import objects
 from nova import test
 from nova.tests.unit.api.openstack import fakes
-from nova.tests import uuidsentinel as uuids
+
 
 CONF = cfg.CONF
 
@@ -147,25 +148,20 @@ class ServerGroupQuotasTestV21(test.TestCase):
         self._assert_server_groups_in_use(context.project_id,
                                           context.user_id, 0)
 
-    def test_delete_server_group_by_id(self):
+    @mock.patch('nova.objects.InstanceGroup.destroy')
+    def test_delete_server_group_by_id(self, mock_destroy):
         self._setup_quotas()
         sg = server_group_template(id=uuids.sg1_id)
-        self.called = False
 
-        def server_group_delete(context, id):
-            self.called = True
-
-        def return_server_group(context, group_id):
+        def return_server_group(_cls, context, group_id):
             self.assertEqual(sg['id'], group_id)
-            return server_group_db(sg)
+            return objects.InstanceGroup(**server_group_db(sg))
 
-        self.stub_out('nova.db.instance_group_delete',
-                      server_group_delete)
-        self.stub_out('nova.db.instance_group_get',
+        self.stub_out('nova.objects.InstanceGroup.get_by_uuid',
                       return_server_group)
 
         resp = self.controller.delete(self.req, uuids.sg1_id)
-        self.assertTrue(self.called)
+        mock_destroy.assert_called_once_with()
 
         # NOTE: on v2.1, http status code is set as wsgi_code of API
         # method instead of status_int in a response object.

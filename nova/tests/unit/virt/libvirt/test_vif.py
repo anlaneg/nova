@@ -12,8 +12,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import os
-
 import fixtures
 from lxml import etree
 import mock
@@ -23,6 +21,7 @@ from os_vif import objects as osv_objects
 from os_vif.objects import fields as osv_fields
 from oslo_concurrency import processutils
 from oslo_config import cfg
+from oslo_utils.fixture import uuidsentinel as uuids
 import six
 
 from nova import exception
@@ -34,15 +33,12 @@ from nova import test
 from nova.tests.unit import matchers
 from nova.tests.unit.virt import fakelibosinfo
 from nova.tests.unit.virt.libvirt import fakelibvirt
-from nova.tests import uuidsentinel as uuids
 from nova import utils
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt import host
 from nova.virt.libvirt import vif
 
 CONF = cfg.CONF
-
-MIN_LIBVIRT_VHOSTUSER_MQ = vif.MIN_LIBVIRT_VHOSTUSER_MQ
 
 
 class LibvirtVifTestCase(test.NoDBTestCase):
@@ -174,31 +170,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         devname='tap-xxx-yyy-zzz',
         ovs_interfaceid=uuids.ovs)
 
-    vif_ivs_filter_cap = network_model.VIF(id=uuids.vif,
-        address='ca:fe:de:ad:be:ef',
-        network=network_ivs,
-        type=network_model.VIF_TYPE_IVS,
-        details={'port_filter': True},
-        devname='tap-xxx-yyy-zzz',
-        ovs_interfaceid=uuids.ovs)
-
-    vif_ivs_hybrid = network_model.VIF(id=uuids.vif,
-        address='ca:fe:de:ad:be:ef',
-        network=network_ivs,
-        type=network_model.VIF_TYPE_IVS,
-        details={
-            'port_filter': True,
-            'ovs_hybrid_plug': True},
-        devname='tap-xxx-yyy-zzz',
-        ovs_interfaceid=uuids.ovs)
-
-    vif_ivs_legacy = network_model.VIF(id=uuids.vif,
-        address='ca:fe:de:ad:be:ef',
-        network=network_ovs,
-        type=None,
-        devname=None,
-        ovs_interfaceid='aaa')
-
     vif_none = network_model.VIF(id=uuids.vif,
         address='ca:fe:de:ad:be:ef',
         network=network_bridge,
@@ -238,6 +209,19 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         profile={'pci_vendor_info': '1137:0043',
                  'pci_slot': '0000:0a:00.1',
                  'physical_network': 'phynet1'})
+
+    vif_hw_veb_trusted = network_model.VIF(id=uuids.vif,
+        address='ca:fe:de:ad:be:ef',
+        network=network_8021,
+        type=network_model.VIF_TYPE_HW_VEB,
+        vnic_type=network_model.VNIC_TYPE_DIRECT,
+        ovs_interfaceid=None,
+        details={
+            network_model.VIF_DETAILS_VLAN: 100},
+        profile={'pci_vendor_info': '1137:0043',
+                 'pci_slot': '0000:0a:00.1',
+                 'physical_network': 'phynet1',
+                 'trusted': 'True'})
 
     vif_hostdev_physical = network_model.VIF(id=uuids.vif,
         address='ca:fe:de:ad:be:ef',
@@ -385,7 +369,8 @@ class LibvirtVifTestCase(test.NoDBTestCase):
             id="b82c1929-051e-481d-8110-4669916c7915",
             label="Demo Net",
             subnets=osv_objects.subnet.SubnetList(
-                objects=[]))
+                objects=[]),
+            mtu=9000)
 
         self.os_vif_bridge = osv_objects.vif.VIFBridge(
             id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
@@ -645,8 +630,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
     def test_virtio_multiqueue_in_kernel_4(self, mock_uname):
         self._test_virtio_multiqueue(10, '10')
 
-    @mock.patch.object(host.Host, "has_min_version")
-    def test_vhostuser_os_vif_multiqueue(self, has_min_version):
+    def test_vhostuser_os_vif_multiqueue(self):
         d = vif.LibvirtGenericVIFDriver()
         hostimpl = host.Host("qemu:///system")
         image_meta = objects.ImageMeta.from_dict(
@@ -664,22 +648,83 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                     is_public=True, vcpu_weight=None,
                     id=2, disabled=False, rxtx_factor=1.0)
         conf = d.get_base_config(None, 'ca:fe:de:ad:be:ef', image_meta,
-                                 flavor, 'kvm', 'normal')
+                                 flavor, 'kvm', 'normal', hostimpl)
         self.assertEqual(4, conf.vhost_queues)
         self.assertEqual('vhost', conf.driver_name)
 
-        has_min_version.return_value = True
         d._set_config_VIFVHostUser(self.instance, self.os_vif_vhostuser,
                                    conf, hostimpl)
         self.assertEqual(4, conf.vhost_queues)
-        self.assertEqual('vhost', conf.driver_name)
-        has_min_version.assert_called_once_with(MIN_LIBVIRT_VHOSTUSER_MQ)
-
-        has_min_version.return_value = False
-        d._set_config_VIFVHostUser(self.instance, self.os_vif_vhostuser,
-                                   conf, hostimpl)
-        self.assertIsNone(conf.vhost_queues)
         self.assertIsNone(conf.driver_name)
+
+    def _test_virtio_config_queue_sizes(
+            self, vnic_type=network_model.VNIC_TYPE_NORMAL):
+        self.flags(rx_queue_size=512, group='libvirt')
+        self.flags(tx_queue_size=1024, group='libvirt')
+        hostimpl = host.Host("qemu:///system")
+        v = vif.LibvirtGenericVIFDriver()
+        conf = v.get_base_config(
+            None, 'ca:fe:de:ad:be:ef', {}, objects.Flavor(), 'kvm', vnic_type,
+            hostimpl)
+        return hostimpl, v, conf
+
+    @mock.patch.object(host.Host, "has_min_version", return_value=True)
+    def test_virtio_vhost_queue_sizes(self, has_min_version):
+        _, _, conf = self._test_virtio_config_queue_sizes()
+        self.assertEqual(512, conf.vhost_rx_queue_size)
+        self.assertIsNone(conf.vhost_tx_queue_size)
+
+    @mock.patch.object(host.Host, "has_min_version", return_value=True)
+    def test_virtio_vhost_queue_sizes_vnic_type_direct(self, has_min_version):
+        _, _, conf = self._test_virtio_config_queue_sizes(
+            vnic_type=network_model.VNIC_TYPE_DIRECT)
+        self.assertIsNone(conf.vhost_rx_queue_size)
+        self.assertIsNone(conf.vhost_tx_queue_size)
+
+    @mock.patch.object(host.Host, "has_min_version", return_value=True)
+    def test_virtio_vhost_queue_sizes_vnic_type_direct_physical(
+            self, has_min_version):
+        _, _, conf = self._test_virtio_config_queue_sizes(
+            vnic_type=network_model.VNIC_TYPE_DIRECT_PHYSICAL)
+        self.assertIsNone(conf.vhost_rx_queue_size)
+        self.assertIsNone(conf.vhost_tx_queue_size)
+
+    @mock.patch.object(host.Host, "has_min_version", return_value=True)
+    def test_virtio_vhost_queue_sizes_vnic_type_macvtap(self, has_min_version):
+        _, _, conf = self._test_virtio_config_queue_sizes(
+            vnic_type=network_model.VNIC_TYPE_MACVTAP)
+        self.assertEqual(512, conf.vhost_rx_queue_size)
+        self.assertIsNone(conf.vhost_tx_queue_size)
+
+    @mock.patch.object(host.Host, "has_min_version", return_value=True)
+    def test_virtio_vhost_queue_sizes_vnic_type_virtio_forwarder(
+            self, has_min_version):
+        _, _, conf = self._test_virtio_config_queue_sizes(
+            vnic_type=network_model.VNIC_TYPE_VIRTIO_FORWARDER)
+        self.assertEqual(512, conf.vhost_rx_queue_size)
+        self.assertIsNone(conf.vhost_tx_queue_size)
+
+    @mock.patch.object(host.Host, "has_min_version", return_value=False)
+    def test_virtio_vhost_queue_sizes_nover(self, has_min_version):
+        _, _, conf = self._test_virtio_config_queue_sizes()
+        self.assertIsNone(conf.vhost_rx_queue_size)
+        self.assertIsNone(conf.vhost_tx_queue_size)
+
+    @mock.patch.object(host.Host, "has_min_version", return_value=True)
+    def test_virtio_vhostuser_osvif_queue_sizes(self, has_min_version):
+        hostimpl, v, conf = self._test_virtio_config_queue_sizes()
+        v._set_config_VIFVHostUser(self.instance, self.os_vif_vhostuser,
+                                   conf, hostimpl)
+        self.assertEqual(512, conf.vhost_rx_queue_size)
+        self.assertEqual(1024, conf.vhost_tx_queue_size)
+
+    @mock.patch.object(host.Host, "has_min_version", return_value=False)
+    def test_virtio_vhostuser_osvif_queue_sizes_ver_err(self, has_min_version):
+        hostimpl, v, conf = self._test_virtio_config_queue_sizes()
+        v._set_config_VIFVHostUser(self.instance, self.os_vif_vhostuser,
+                                   conf, hostimpl)
+        self.assertIsNone(conf.vhost_rx_queue_size)
+        self.assertIsNone(conf.vhost_tx_queue_size)
 
     def test_multiple_nics(self):
         conf = self._get_conf()
@@ -783,15 +828,16 @@ class LibvirtVifTestCase(test.NoDBTestCase):
             'nova.virt.osinfo.libosinfo',
             fakelibosinfo))
         d = vif.LibvirtGenericVIFDriver()
+        hostimpl = host.Host("qemu:///system")
         image_meta = {'properties': {'os_name': 'fedora22'}}
         image_meta = objects.ImageMeta.from_dict(image_meta)
         d.get_base_config(None, 'ca:fe:de:ad:be:ef', image_meta,
-                          None, 'kvm', 'normal')
+                          None, 'kvm', 'normal', hostimpl)
         mock_set.assert_called_once_with(mock.ANY, 'ca:fe:de:ad:be:ef',
-                                         'virtio', None, None)
+                                         'virtio', None, None, None)
 
     @mock.patch.object(vif.designer, 'set_vif_guest_frontend_config')
-    def test_model_sriov_multi_queue_not_set(self, mock_set):
+    def test_model_sriov_direct_multi_queue_not_set(self, mock_set):
         self.flags(use_virtio_for_bridges=True,
                    virt_type='kvm',
                    group='libvirt')
@@ -799,12 +845,14 @@ class LibvirtVifTestCase(test.NoDBTestCase):
             'nova.virt.osinfo.libosinfo',
             fakelibosinfo))
         d = vif.LibvirtGenericVIFDriver()
+        hostimpl = host.Host("qemu:///system")
         image_meta = {'properties': {'os_name': 'fedora22'}}
         image_meta = objects.ImageMeta.from_dict(image_meta)
         conf = d.get_base_config(None, 'ca:fe:de:ad:be:ef', image_meta,
-                                 None, 'kvm', 'direct')
+                                 None, 'kvm', network_model.VNIC_TYPE_DIRECT,
+                                 hostimpl)
         mock_set.assert_called_once_with(mock.ANY, 'ca:fe:de:ad:be:ef',
-                                         'virtio', None, None)
+                                         None, None, None, None)
         self.assertIsNone(conf.vhost_queues)
         self.assertIsNone(conf.driver_name)
 
@@ -858,7 +906,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self._test_model_qemu(
             self.vif_bridge,
             self.vif_ovs,
-            self.vif_ivs,
             self.vif_8021qbg,
             self.vif_iovisor
         )
@@ -890,25 +937,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self._check_bridge_driver(d,
                                   self.vif_bridge,
                                   self.vif_bridge['network']['bridge'])
-
-    def _check_ivs_ethernet_driver(self, d, vif, dev_prefix):
-        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
-        xml = self._get_instance_xml(d, vif)
-        node = self._get_node(xml)
-        self._assertTypeAndMacEquals(node, "ethernet", "target", "dev",
-                                     self.vif_ivs, prefix=dev_prefix)
-        script = node.find("script")
-        self.assertIsNone(script)
-
-    @mock.patch('nova.privsep.libvirt.bridge_delete_interface')
-    @mock.patch('nova.privsep.libvirt.toggle_interface')
-    @mock.patch('nova.privsep.libvirt.delete_bridge')
-    def test_unplug_ivs_ethernet(self, delete_bridge, toggle_interface,
-                                 bridge_delete_interface):
-        d = vif.LibvirtGenericVIFDriver()
-        with mock.patch.object(linux_net, 'delete_ivs_vif_port') as delete:
-            delete.side_effect = processutils.ProcessExecutionError
-            d.unplug(self.instance, self.vif_ivs)
 
     @mock.patch.object(utils, 'execute')
     @mock.patch.object(pci_utils, 'get_ifname_by_pci_address')
@@ -953,86 +981,17 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         d = vif.LibvirtGenericVIFDriver()
         self._test_hw_veb_op(d.unplug, 0)
 
-    def test_plug_ivs_hybrid(self):
-        with test.nested(
-                mock.patch.object(linux_net, 'device_exists',
-                                  return_value=False),
-                mock.patch.object(linux_net, '_create_veth_pair'),
-                mock.patch.object(linux_net, 'create_ivs_vif_port'),
-                mock.patch.object(os.path, 'exists', return_value=True),
-                mock.patch('nova.privsep.libvirt.disable_multicast_snooping'),
-                mock.patch('nova.privsep.libvirt.disable_ipv6'),
-                mock.patch('nova.privsep.libvirt.add_bridge'),
-                mock.patch('nova.privsep.libvirt.zero_bridge_forward_delay'),
-                mock.patch('nova.privsep.libvirt.disable_bridge_stp'),
-                mock.patch('nova.privsep.libvirt.toggle_interface'),
-                mock.patch('nova.privsep.libvirt.bridge_add_interface')
-        ) as (device_exists, _create_veth_pair, create_ivs_vif_port,
-              path_exists, disable_multicast_snooping, disable_ipv6,
-              add_bridge, zero_bridge_forward_delay, disable_bridge_stp,
-              toggle_interface, bridge_add_interface):
-            d = vif.LibvirtGenericVIFDriver()
-            d.plug(self.instance, self.vif_ivs)
-
-            qvo_want = "qvo" + self.vif_ivs['id']
-            qvo_want = qvo_want[:network_model.NIC_NAME_LEN]
-            qbr_want = "qbr" + self.vif_ivs['id']
-            qbr_want = qbr_want[:network_model.NIC_NAME_LEN]
-            qvb_want = "qvb" + self.vif_ivs['id']
-            qvb_want = qvb_want[:network_model.NIC_NAME_LEN]
-
-            device_exists.assert_has_calls([mock.call(qbr_want),
-                                            mock.call(qvo_want)])
-            _create_veth_pair.assert_has_calls(
-                [mock.call(qvb_want, qvo_want, None)])
-            create_ivs_vif_port.assert_has_calls(
-                [mock.call(qvo_want, uuids.ovs,
-                           'ca:fe:de:ad:be:ef',
-                           'f0000000-0000-0000-0000-000000000001')])
-
-            disable_multicast_snooping.assert_has_calls(
-                [mock.call(qbr_want)])
-            disable_ipv6.assert_has_calls([mock.call(qbr_want)])
-            add_bridge.assert_has_calls([mock.call(qbr_want)])
-            zero_bridge_forward_delay.assert_has_calls(
-                [mock.call(qbr_want)])
-            disable_bridge_stp.assert_has_calls([mock.call(qbr_want)])
-            toggle_interface.assert_has_calls(
-                [mock.call(qbr_want, 'up')])
-            bridge_add_interface.assert_has_calls(
-                [mock.call(qbr_want, qvb_want)])
-
-    def test_unplug_ivs_hybrid(self):
-        with test.nested(
-                mock.patch.object(utils, 'execute'),
-                mock.patch.object(linux_net, 'delete_ivs_vif_port'),
-                mock.patch('nova.privsep.libvirt.bridge_delete_interface'),
-                mock.patch('nova.privsep.libvirt.toggle_interface'),
-                mock.patch('nova.privsep.libvirt.delete_bridge')
-        ) as (execute, delete_ivs_vif_port, bridge_delete_interface,
-              toggle_interface, delete_bridge):
-            d = vif.LibvirtGenericVIFDriver()
-            d.unplug(self.instance, self.vif_ivs)
-
-            qvo_want = "qvo" + self.vif_ivs['id']
-            qvo_want = qvo_want[:network_model.NIC_NAME_LEN]
-            qbr_want = "qbr" + self.vif_ivs['id']
-            qbr_want = qbr_want[:network_model.NIC_NAME_LEN]
-            qvb_want = "qvb" + self.vif_ivs['id']
-            qvb_want = qvb_want[:network_model.NIC_NAME_LEN]
-
-            delete_ivs_vif_port.assert_has_calls([mock.call(qvo_want)])
-            bridge_delete_interface.assert_has_calls(
-                [mock.call(qbr_want, qvb_want)])
-            toggle_interface.assert_has_calls(
-                [mock.call(qbr_want, 'down')])
-            delete_bridge.assert_has_calls([mock.call(qbr_want)])
-
-    @mock.patch('nova.privsep.libvirt.bridge_delete_interface',
-                side_effect=processutils.ProcessExecutionError)
-    def test_unplug_ivs_hybrid_bridge_does_not_exist(self, bdi):
+    @mock.patch('nova.network.linux_net.set_vf_trusted')
+    def test_plug_hw_veb_trusted(self, mset_vf_trusted):
         d = vif.LibvirtGenericVIFDriver()
-        d.unplug(self.instance, self.vif_ivs)
+        d.plug(self.instance, self.vif_hw_veb_trusted)
+        mset_vf_trusted.assert_called_once_with('0000:0a:00.1', True)
+
+    @mock.patch('nova.network.linux_net.set_vf_trusted')
+    def test_unplug_hw_veb_trusted(self, mset_vf_trusted):
+        d = vif.LibvirtGenericVIFDriver()
+        d.unplug(self.instance, self.vif_hw_veb_trusted)
+        mset_vf_trusted.assert_called_once_with('0000:0a:00.1', False)
 
     @mock.patch('nova.privsep.libvirt.unplug_plumgrid_vif',
                 side_effect=processutils.ProcessExecutionError)
@@ -1040,7 +999,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         d = vif.LibvirtGenericVIFDriver()
         d.unplug(self.instance, self.vif_iovisor)
 
-    @mock.patch('nova.network.linux_net.device_exists')
+    @mock.patch('nova.network.linux_utils.device_exists')
     @mock.patch('nova.privsep.libvirt.plug_plumgrid_vif')
     def test_plug_iovisor(self, mock_plug, device_exists):
         device_exists.return_value = True
@@ -1081,7 +1040,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                 'NovaVMPort', self.vif_vrouter['devname'],
                 self.vif_vrouter['address'], '0.0.0.0', None)
 
-    @mock.patch('nova.network.linux_net.create_tap_dev')
+    @mock.patch('nova.network.linux_utils.create_tap_dev')
     @mock.patch('nova.privsep.libvirt.plug_contrail_vif')
     def test_plug_vrouter_with_details_multiqueue(
             self, mock_plug_contrail, mock_create_tap_dev):
@@ -1103,19 +1062,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                 self.vif_vrouter['id'], self.vif_vrouter['network']['id'],
                 'NovaVMPort', self.vif_vrouter['devname'],
                 self.vif_vrouter['address'], '0.0.0.0', None)
-
-    def test_ivs_ethernet_driver(self):
-        d = vif.LibvirtGenericVIFDriver()
-        self._check_ivs_ethernet_driver(d,
-                                        self.vif_ivs,
-                                        "tap")
-
-    def _check_ivs_virtualport_driver(self, d, vif, want_iface_id):
-        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
-        xml = self._get_instance_xml(d, vif)
-        node = self._get_node(xml)
-        self._assertTypeAndMacEquals(node, "ethernet", "target", "dev",
-                                     vif, vif['devname'])
 
     def _check_ovs_virtualport_driver(self, d, vif, want_iface_id):
         self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
@@ -1141,41 +1087,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                                            self.vif_ovs,
                                            want_iface_id)
 
-    def test_generic_ivs_virtualport_driver(self):
-        d = vif.LibvirtGenericVIFDriver()
-        want_iface_id = self.vif_ivs['ovs_interfaceid']
-        self._check_ivs_virtualport_driver(d,
-                                           self.vif_ivs,
-                                           want_iface_id)
-
-    def test_ivs_plug_with_nova_firewall(self):
-        d = vif.LibvirtGenericVIFDriver()
-        br_want = "qbr" + self.vif_ivs['id']
-        br_want = br_want[:network_model.NIC_NAME_LEN]
-        xml = self._get_instance_xml(d, self.vif_ivs)
-        node = self._get_node(xml)
-        self._assertTypeAndMacEquals(node, "bridge", "source", "bridge",
-                                     self.vif_ivs, br_want, 1)
-
-    def test_ivs_plug_with_port_filter_direct_no_nova_firewall(self):
-        d = vif.LibvirtGenericVIFDriver()
-        br_want = "qbr" + self.vif_ivs_hybrid['id']
-        br_want = br_want[:network_model.NIC_NAME_LEN]
-        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
-        xml = self._get_instance_xml(d, self.vif_ivs_hybrid)
-        node = self._get_node(xml)
-        self._assertTypeAndMacEquals(node, "bridge", "source", "bridge",
-                                     self.vif_ivs_hybrid, br_want, 0)
-
-    def test_ivs_plug_with_port_hybrid_no_nova_firewall(self):
-        d = vif.LibvirtGenericVIFDriver()
-        br_want = self.vif_ivs_filter_cap['devname']
-        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
-        xml = self._get_instance_xml(d, self.vif_ivs_filter_cap)
-        node = self._get_node(xml)
-        self._assertTypeAndMacEquals(node, "ethernet", "target", "dev",
-                                     self.vif_ivs_filter_cap, br_want, 0)
-
     def test_direct_plug_with_port_filter_cap_no_nova_firewall(self):
         d = vif.LibvirtGenericVIFDriver()
         br_want = self.vif_midonet['devname']
@@ -1191,20 +1102,20 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self._assertTypeAndMacEquals(node, "bridge", "source", "bridge",
                                      vif, br_want, 1)
 
-    def test_generic_hybrid_driver(self):
-        d = vif.LibvirtGenericVIFDriver()
-        br_want = "qbr" + self.vif_ovs['id']
-        br_want = br_want[:network_model.NIC_NAME_LEN]
-        self._check_neutron_hybrid_driver(d,
-                                          self.vif_ovs,
-                                          br_want)
-
     def test_ivs_hybrid_driver(self):
         d = vif.LibvirtGenericVIFDriver()
         br_want = "qbr" + self.vif_ivs['id']
         br_want = br_want[:network_model.NIC_NAME_LEN]
         self._check_neutron_hybrid_driver(d,
                                           self.vif_ivs,
+                                          br_want)
+
+    def test_generic_hybrid_driver(self):
+        d = vif.LibvirtGenericVIFDriver()
+        br_want = "qbr" + self.vif_ovs['id']
+        br_want = br_want[:network_model.NIC_NAME_LEN]
+        self._check_neutron_hybrid_driver(d,
+                                          self.vif_ovs,
                                           br_want)
 
     def test_ib_hostdev_driver(self):
@@ -1232,7 +1143,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self._assertTypeAndMacEquals(node, "ethernet", "target", "dev",
                                      self.vif_tap, br_want)
 
-    @mock.patch('nova.network.linux_net.device_exists')
+    @mock.patch('nova.network.linux_utils.device_exists')
     def test_plug_tap(self, device_exists):
         device_exists.return_value = True
         d = vif.LibvirtGenericVIFDriver()
@@ -1363,11 +1274,11 @@ class LibvirtVifTestCase(test.NoDBTestCase):
     def test_generic_iovisor_driver(self):
         d = vif.LibvirtGenericVIFDriver()
         self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
-        br_want = self.vif_ivs['devname']
-        xml = self._get_instance_xml(d, self.vif_ivs)
+        br_want = self.vif_iovisor['devname']
+        xml = self._get_instance_xml(d, self.vif_iovisor)
         node = self._get_node(xml)
         self._assertTypeAndMacEquals(node, "ethernet", "target", "dev",
-                                     self.vif_ivs, br_want)
+                                     self.vif_iovisor, br_want)
 
     def test_generic_8021qbg_driver(self):
         d = vif.LibvirtGenericVIFDriver()
@@ -1427,19 +1338,29 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self._assertMacEquals(node, self.vif_vhostuser)
         self._assertModel(xml, network_model.VIF_MODEL_VIRTIO)
 
-    def test_vhostuser_no_queues(self):
+    def test_vhostuser_driver_queue_sizes(self):
+        self.flags(rx_queue_size=512, group='libvirt')
+        self.flags(tx_queue_size=1024, group='libvirt')
         d = vif.LibvirtGenericVIFDriver()
-        image_meta = objects.ImageMeta.from_dict(
-            {'properties': {'hw_vif_model': 'virtio',
-                            'hw_vif_multiqueue_enabled': 'true'}})
-        xml = self._get_instance_xml(d, self.vif_vhostuser, image_meta,
-                                     has_min_libvirt_version=False)
-        node = self._get_node(xml)
-        self.assertEqual(node.get("type"),
-                         network_model.VIF_TYPE_VHOSTUSER)
-        self._assertMacEquals(node, self.vif_vhostuser)
-        driver = node.find("driver")
-        self.assertIsNone(driver, None)
+        xml = self._get_instance_xml(d, self.vif_vhostuser)
+        self._assertXmlEqual("""
+         <domain type="qemu">
+          <uuid>fake-uuid</uuid>
+          <name>fake-name</name>
+          <memory>102400</memory>
+          <vcpu>4</vcpu>
+          <os>
+           <type>None</type>
+          </os>
+          <devices>
+           <interface type="vhostuser">
+            <mac address="ca:fe:de:ad:be:ef"/>
+            <model type="virtio"/>
+            <driver rx_queue_size="512" tx_queue_size="1024"/>
+            <source mode="client" path="/tmp/vif-xxx-yyy-zzz" type="unix"/>
+           </interface>
+          </devices>
+        </domain>""", xml)
 
     def test_vhostuser_driver_no_path(self):
         d = vif.LibvirtGenericVIFDriver()
@@ -1501,6 +1422,17 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self._assertMacEquals(node, self.vif_agilio_ovs_forwarder)
         self._assertModel(xml, network_model.VIF_MODEL_VIRTIO)
 
+    def test_ivs_ethernet_driver(self):
+        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
+        d = vif.LibvirtGenericVIFDriver()
+        xml = self._get_instance_xml(d, self.vif_ivs)
+        node = self._get_node(xml)
+        dev_want = self.vif_ivs['devname']
+        self._assertTypeAndMacEquals(node, "ethernet", "target", "dev",
+                                     self.vif_ivs, dev_want)
+        script = node.find("script")
+        self.assertIsNone(script)
+
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
     @mock.patch.object(os_vif, "plug")
@@ -1555,29 +1487,60 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
-    def test_config_os_vif_bridge(self, mock_convert_vif, mock_convert_inst):
+    def test_config_os_vif_bridge(self, mock_convert_vif,
+                                  mock_convert_inst):
         mock_convert_vif.return_value = self.os_vif_bridge
         mock_convert_inst.return_value = self.os_vif_inst_info
 
-        d = vif.LibvirtGenericVIFDriver()
         hostimpl = host.Host("qemu:///system")
         flavor = objects.Flavor(name='m1.small')
         image_meta = objects.ImageMeta.from_dict({})
         d = vif.LibvirtGenericVIFDriver()
-        cfg = d.get_config(self.instance, self.vif_bridge,
-                           image_meta, flavor,
-                           CONF.libvirt.virt_type,
-                           hostimpl)
+        with mock.patch.object(d, "_has_min_version_for_mtu",
+                               return_value=True):
+            cfg = d.get_config(self.instance, self.vif_bridge,
+                            image_meta, flavor,
+                            CONF.libvirt.virt_type,
+                            hostimpl)
 
-        self._assertXmlEqual("""
-            <interface type="bridge">
-                <mac address="22:52:25:62:e2:aa"/>
-                <model type="virtio"/>
-                <source bridge="br100"/>
-                <target dev="nicdc065497-3c"/>
-                <filterref
-                 filter="nova-instance-instance-00000001-22522562e2aa"/>
-            </interface>""", cfg.to_xml())
+            self._assertXmlEqual("""
+                <interface type="bridge">
+                    <mac address="22:52:25:62:e2:aa"/>
+                    <model type="virtio"/>
+                    <source bridge="br100"/>
+                    <mtu size="9000"/>
+                    <target dev="nicdc065497-3c"/>
+                    <filterref
+                    filter="nova-instance-instance-00000001-22522562e2aa"/>
+                </interface>""", cfg.to_xml())
+
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
+    def test_config_os_vif_bridge_no_mtu(self, mock_convert_vif,
+                                         mock_convert_inst):
+        mock_convert_vif.return_value = self.os_vif_bridge
+        mock_convert_inst.return_value = self.os_vif_inst_info
+
+        hostimpl = host.Host("qemu:///system")
+        flavor = objects.Flavor(name='m1.small')
+        image_meta = objects.ImageMeta.from_dict({})
+        d = vif.LibvirtGenericVIFDriver()
+        with mock.patch.object(d, "_has_min_version_for_mtu",
+                               return_value=False):
+            cfg = d.get_config(self.instance, self.vif_bridge,
+                            image_meta, flavor,
+                            CONF.libvirt.virt_type,
+                            hostimpl)
+
+            self._assertXmlEqual("""
+                <interface type="bridge">
+                    <mac address="22:52:25:62:e2:aa"/>
+                    <model type="virtio"/>
+                    <source bridge="br100"/>
+                    <target dev="nicdc065497-3c"/>
+                    <filterref
+                        filter="nova-instance-instance-00000001-22522562e2aa"/>
+                </interface>""", cfg.to_xml())
 
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
@@ -1588,23 +1551,53 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         mock_convert_vif.return_value = self.os_vif_bridge
         mock_convert_inst.return_value = self.os_vif_inst_info
 
-        d = vif.LibvirtGenericVIFDriver()
         hostimpl = host.Host("qemu:///system")
         flavor = objects.Flavor(name='m1.small')
         image_meta = objects.ImageMeta.from_dict({})
         d = vif.LibvirtGenericVIFDriver()
-        cfg = d.get_config(self.instance, self.vif_bridge,
-                           image_meta, flavor,
-                           CONF.libvirt.virt_type,
-                           hostimpl)
+        with mock.patch.object(d, "_has_min_version_for_mtu",
+                               return_value=True):
+            cfg = d.get_config(self.instance, self.vif_bridge,
+                            image_meta, flavor,
+                            CONF.libvirt.virt_type,
+                            hostimpl)
 
-        self._assertXmlEqual("""
-            <interface type="bridge">
-                <mac address="22:52:25:62:e2:aa"/>
-                <model type="virtio"/>
-                <source bridge="br100"/>
-                <target dev="nicdc065497-3c"/>
-            </interface>""", cfg.to_xml())
+            self._assertXmlEqual("""
+                <interface type="bridge">
+                    <mac address="22:52:25:62:e2:aa"/>
+                    <model type="virtio"/>
+                    <source bridge="br100"/>
+                    <mtu size="9000"/>
+                    <target dev="nicdc065497-3c"/>
+                </interface>""", cfg.to_xml())
+
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
+    def test_config_os_vif_bridge_nofw_no_mtu(self, mock_convert_vif,
+                                              mock_convert_inst):
+        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
+
+        mock_convert_vif.return_value = self.os_vif_bridge
+        mock_convert_inst.return_value = self.os_vif_inst_info
+
+        hostimpl = host.Host("qemu:///system")
+        flavor = objects.Flavor(name='m1.small')
+        image_meta = objects.ImageMeta.from_dict({})
+        d = vif.LibvirtGenericVIFDriver()
+        with mock.patch.object(d, "_has_min_version_for_mtu",
+                               return_value=False):
+            cfg = d.get_config(self.instance, self.vif_bridge,
+                            image_meta, flavor,
+                            CONF.libvirt.virt_type,
+                            hostimpl)
+
+            self._assertXmlEqual("""
+                <interface type="bridge">
+                    <mac address="22:52:25:62:e2:aa"/>
+                    <model type="virtio"/>
+                    <source bridge="br100"/>
+                    <target dev="nicdc065497-3c"/>
+                </interface>""", cfg.to_xml())
 
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
@@ -1613,27 +1606,60 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         mock_convert_vif.return_value = self.os_vif_agilio_ovs
         mock_convert_inst.return_value = self.os_vif_inst_info
 
-        d = vif.LibvirtGenericVIFDriver()
         hostimpl = host.Host("qemu:///system")
         flavor = objects.Flavor(name='m1.small')
         image_meta = objects.ImageMeta.from_dict({})
         d = vif.LibvirtGenericVIFDriver()
-        cfg = d.get_config(self.instance, self.vif_agilio_ovs,
-                           image_meta, flavor,
-                           CONF.libvirt.virt_type,
-                           hostimpl)
+        with mock.patch.object(d, "_has_min_version_for_mtu",
+                               return_value=True):
+            cfg = d.get_config(self.instance, self.vif_agilio_ovs,
+                            image_meta, flavor,
+                            CONF.libvirt.virt_type,
+                            hostimpl)
 
-        self._assertXmlEqual("""
-            <interface type="bridge">
-                <mac address="22:52:25:62:e2:aa"/>
-                <model type="virtio"/>
-                <source bridge="br0"/>
-                <target dev="nicdc065497-3c"/>
-                <virtualport type="openvswitch">
-                    <parameters
-                     interfaceid="07bd6cea-fb37-4594-b769-90fc51854ee9"/>
-                </virtualport>
-            </interface>""", cfg.to_xml())
+            self._assertXmlEqual("""
+                <interface type="bridge">
+                    <mac address="22:52:25:62:e2:aa"/>
+                    <model type="virtio"/>
+                    <source bridge="br0"/>
+                    <mtu size="9000"/>
+                    <target dev="nicdc065497-3c"/>
+                    <virtualport type="openvswitch">
+                        <parameters
+                        interfaceid="07bd6cea-fb37-4594-b769-90fc51854ee9"/>
+                    </virtualport>
+                </interface>""", cfg.to_xml())
+
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
+    def test_config_os_vif_agilio_ovs_fallthrough_no_mtu(self,
+                                                         mock_convert_vif,
+                                                         mock_convert_inst):
+        mock_convert_vif.return_value = self.os_vif_agilio_ovs
+        mock_convert_inst.return_value = self.os_vif_inst_info
+
+        hostimpl = host.Host("qemu:///system")
+        flavor = objects.Flavor(name='m1.small')
+        image_meta = objects.ImageMeta.from_dict({})
+        d = vif.LibvirtGenericVIFDriver()
+        with mock.patch.object(d, "_has_min_version_for_mtu",
+                               return_value=False):
+            cfg = d.get_config(self.instance, self.vif_agilio_ovs,
+                            image_meta, flavor,
+                            CONF.libvirt.virt_type,
+                            hostimpl)
+
+            self._assertXmlEqual("""
+                <interface type="bridge">
+                    <mac address="22:52:25:62:e2:aa"/>
+                    <model type="virtio"/>
+                    <source bridge="br0"/>
+                    <target dev="nicdc065497-3c"/>
+                    <virtualport type="openvswitch">
+                        <parameters
+                        interfaceid="07bd6cea-fb37-4594-b769-90fc51854ee9"/>
+                    </virtualport>
+                </interface>""", cfg.to_xml())
 
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
@@ -1688,31 +1714,64 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
-    def test_config_os_vif_ovs(self, mock_convert_vif, mock_convert_inst):
+    def test_config_os_vif_ovs(self, mock_convert_vif,
+                               mock_convert_inst):
         mock_convert_vif.return_value = self.os_vif_ovs
         mock_convert_inst.return_value = self.os_vif_inst_info
 
-        d = vif.LibvirtGenericVIFDriver()
         hostimpl = host.Host("qemu:///system")
         flavor = objects.Flavor(name='m1.small')
         image_meta = objects.ImageMeta.from_dict({})
         d = vif.LibvirtGenericVIFDriver()
-        cfg = d.get_config(self.instance, self.vif_ovs,
-                           image_meta, flavor,
-                           CONF.libvirt.virt_type,
-                           hostimpl)
+        with mock.patch.object(d, "_has_min_version_for_mtu",
+                               return_value=True):
+            cfg = d.get_config(self.instance, self.vif_ovs,
+                            image_meta, flavor,
+                            CONF.libvirt.virt_type,
+                            hostimpl)
 
-        self._assertXmlEqual("""
-            <interface type="bridge">
-                <mac address="22:52:25:62:e2:aa"/>
-                <model type="virtio"/>
-                <source bridge="br0"/>
-                <target dev="nicdc065497-3c"/>
-                <virtualport type="openvswitch">
-                    <parameters
-                     interfaceid="07bd6cea-fb37-4594-b769-90fc51854ee9"/>
-                </virtualport>
-            </interface>""", cfg.to_xml())
+            self._assertXmlEqual("""
+                <interface type="bridge">
+                    <mac address="22:52:25:62:e2:aa"/>
+                    <model type="virtio"/>
+                    <source bridge="br0"/>
+                    <mtu size="9000"/>
+                    <target dev="nicdc065497-3c"/>
+                    <virtualport type="openvswitch">
+                        <parameters
+                        interfaceid="07bd6cea-fb37-4594-b769-90fc51854ee9"/>
+                    </virtualport>
+                </interface>""", cfg.to_xml())
+
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
+    def test_config_os_vif_ovs_no_mtu(self, mock_convert_vif,
+                                      mock_convert_inst):
+        mock_convert_vif.return_value = self.os_vif_ovs
+        mock_convert_inst.return_value = self.os_vif_inst_info
+
+        hostimpl = host.Host("qemu:///system")
+        flavor = objects.Flavor(name='m1.small')
+        image_meta = objects.ImageMeta.from_dict({})
+        d = vif.LibvirtGenericVIFDriver()
+        with mock.patch.object(d, "_has_min_version_for_mtu",
+                               return_value=False):
+            cfg = d.get_config(self.instance, self.vif_ovs,
+                            image_meta, flavor,
+                            CONF.libvirt.virt_type,
+                            hostimpl)
+
+            self._assertXmlEqual("""
+                <interface type="bridge">
+                    <mac address="22:52:25:62:e2:aa"/>
+                    <model type="virtio"/>
+                    <source bridge="br0"/>
+                    <target dev="nicdc065497-3c"/>
+                    <virtualport type="openvswitch">
+                        <parameters
+                        interfaceid="07bd6cea-fb37-4594-b769-90fc51854ee9"/>
+                    </virtualport>
+                </interface>""", cfg.to_xml())
 
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
@@ -1721,25 +1780,55 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         mock_convert_vif.return_value = self.os_vif_ovs_hybrid
         mock_convert_inst.return_value = self.os_vif_inst_info
 
-        d = vif.LibvirtGenericVIFDriver()
         hostimpl = host.Host("qemu:///system")
         flavor = objects.Flavor(name='m1.small')
         image_meta = objects.ImageMeta.from_dict({})
         d = vif.LibvirtGenericVIFDriver()
-        cfg = d.get_config(self.instance, self.vif_ovs,
-                           image_meta, flavor,
-                           CONF.libvirt.virt_type,
-                           hostimpl)
+        with mock.patch.object(d, "_has_min_version_for_mtu",
+                               return_value=True):
+            cfg = d.get_config(self.instance, self.vif_ovs,
+                            image_meta, flavor,
+                            CONF.libvirt.virt_type,
+                            hostimpl)
 
-        self._assertXmlEqual("""
-            <interface type="bridge">
-                <mac address="22:52:25:62:e2:aa"/>
-                <model type="virtio"/>
-                <source bridge="br0"/>
-                <target dev="nicdc065497-3c"/>
-                <filterref
-                 filter="nova-instance-instance-00000001-22522562e2aa"/>
-            </interface>""", cfg.to_xml())
+            self._assertXmlEqual("""
+                <interface type="bridge">
+                    <mac address="22:52:25:62:e2:aa"/>
+                    <model type="virtio"/>
+                    <source bridge="br0"/>
+                    <mtu size="9000"/>
+                    <target dev="nicdc065497-3c"/>
+                    <filterref
+                    filter="nova-instance-instance-00000001-22522562e2aa"/>
+                </interface>""", cfg.to_xml())
+
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
+    def test_config_os_vif_ovs_hybrid_no_mtu(self, mock_convert_vif,
+                                             mock_convert_inst):
+        mock_convert_vif.return_value = self.os_vif_ovs_hybrid
+        mock_convert_inst.return_value = self.os_vif_inst_info
+
+        hostimpl = host.Host("qemu:///system")
+        flavor = objects.Flavor(name='m1.small')
+        image_meta = objects.ImageMeta.from_dict({})
+        d = vif.LibvirtGenericVIFDriver()
+        with mock.patch.object(d, "_has_min_version_for_mtu",
+                               return_value=False):
+            cfg = d.get_config(self.instance, self.vif_ovs,
+                            image_meta, flavor,
+                            CONF.libvirt.virt_type,
+                            hostimpl)
+
+            self._assertXmlEqual("""
+                <interface type="bridge">
+                    <mac address="22:52:25:62:e2:aa"/>
+                    <model type="virtio"/>
+                    <source bridge="br0"/>
+                    <target dev="nicdc065497-3c"/>
+                    <filterref
+                    filter="nova-instance-instance-00000001-22522562e2aa"/>
+                </interface>""", cfg.to_xml())
 
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")

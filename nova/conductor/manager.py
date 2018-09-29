@@ -17,12 +17,14 @@
 import contextlib
 import copy
 import functools
+import sys
 
 from oslo_config import cfg
 from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
+from oslo_utils import timeutils
 from oslo_utils import versionutils
 import six
 
@@ -45,6 +47,7 @@ from nova import network
 from nova import notifications
 from nova import objects
 from nova.objects import base as nova_object
+from nova.objects import fields
 from nova import profiler
 from nova import rpc
 from nova.scheduler import client as scheduler_client
@@ -231,6 +234,8 @@ class ComputeTaskManager(base.Base):
         self.scheduler_client = scheduler_client.SchedulerClient()
         self.report_client = self.scheduler_client.reportclient
         self.notifier = rpc.get_notifier('compute', CONF.host)
+        # Help us to record host in EventReporter
+        self.host = CONF.host
 
     def reset(self):
         LOG.info('Reloading compute RPC API')
@@ -254,7 +259,6 @@ class ComputeTaskManager(base.Base):
         exception.HypervisorUnavailable,
         exception.InstanceInvalidState,
         exception.MigrationPreCheckError,
-        exception.LiveMigrationWithOldNovaNotSupported,
         exception.UnsupportedPolicyException)
     @targets_cell
     @wrap_instance_event(prefix='conductor')
@@ -280,7 +284,7 @@ class ComputeTaskManager(base.Base):
         elif not live and not rebuild and flavor:
             instance_uuid = instance.uuid
             with compute_utils.EventReporter(context, 'cold_migrate',
-                                             instance_uuid):
+                                             self.host, instance_uuid):
                 self._cold_migrate(context, instance, flavor,
                                    scheduler_hint['filter_properties'],
                                    clean_shutdown, request_spec,
@@ -302,7 +306,8 @@ class ComputeTaskManager(base.Base):
             request_spec = objects.RequestSpec.from_components(
                 context, instance.uuid, image,
                 flavor, instance.numa_topology, instance.pci_requests,
-                filter_properties, None, instance.availability_zone)
+                filter_properties, None, instance.availability_zone,
+                project_id=instance.project_id, user_id=instance.user_id)
         else:
             # NOTE(sbauza): Resizes means new flavor, so we need to update the
             # original RequestSpec object for make sure the scheduler verifies
@@ -431,7 +436,6 @@ class ComputeTaskManager(base.Base):
                 exception.HypervisorUnavailable,
                 exception.InstanceInvalidState,
                 exception.MigrationPreCheckError,
-                exception.LiveMigrationWithOldNovaNotSupported,
                 exception.MigrationSchedulerRPCError) as ex:
             with excutils.save_and_reraise_exception():
                 # TODO(johngarbutt) - eventually need instance actions here
@@ -587,6 +591,13 @@ class ComputeTaskManager(base.Base):
                 host_lists = self._schedule_instances(context, spec_obj,
                         instance_uuids, return_alternates=True)
         except Exception as exc:
+            # NOTE(mriedem): If we're rescheduling from a failed build on a
+            # compute, "retry" will be set and num_attempts will be >1 because
+            # populate_retry above will increment it. If the server build was
+            # forced onto a host/node or [scheduler]/max_attempts=1, "retry"
+            # won't be in filter_properties and we won't get here because
+            # nova-compute will just abort the build since reschedules are
+            # disabled in those cases.
             #未找到合适的hosts列表
             num_attempts = filter_properties.get(
                 'retry', {}).get('num_attempts', 1)
@@ -718,9 +729,12 @@ class ComputeTaskManager(base.Base):
                             instance_uuids=None, return_alternates=False):
         scheduler_utils.setup_instance_group(context, request_spec)
         #通过rpc向scheduler进程发送消息，获取可调度的主机列表
-        host_lists = self.scheduler_client.select_destinations(context,
-                request_spec, instance_uuids, return_objects=True,
-                return_alternates=return_alternates)
+        with timeutils.StopWatch() as timer:
+            host_lists = self.scheduler_client.select_destinations(context,
+                    request_spec, instance_uuids, return_objects=True,
+                    return_alternates=return_alternates)
+        LOG.debug('Took %0.2f seconds to select destinations for %s '
+                  'instance(s).', timer.elapsed(), len(instance_uuids))
         return host_lists
 
     @targets_cell
@@ -745,10 +759,10 @@ class ComputeTaskManager(base.Base):
             # instance during the shelve process
             if image_id:
                 with compute_utils.EventReporter(
-                    context, 'get_image_info', instance.uuid):
+                        context, 'get_image_info', self.host, instance.uuid):
                     try:
                         image = safe_image_show(context, image_id)
-                    except exception.ImageNotFound:
+                    except exception.ImageNotFound as error:
                         instance.vm_state = vm_states.ERROR
                         instance.save()
 
@@ -756,12 +770,15 @@ class ComputeTaskManager(base.Base):
                                    'cannot be found.') % image_id
 
                         LOG.error(reason, instance=instance)
+                        compute_utils.add_instance_fault_from_exc(
+                            context, instance, error, sys.exc_info(),
+                            fault_message=reason)
                         raise exception.UnshelveException(
                             instance_id=instance.uuid, reason=reason)
 
             try:
                 with compute_utils.EventReporter(context, 'schedule_instances',
-                                                 instance.uuid):
+                                                 self.host, instance.uuid):
                     if not request_spec:
                         # NOTE(sbauza): We were unable to find an original
                         # RequestSpec object - probably because the instance is
@@ -769,22 +786,17 @@ class ComputeTaskManager(base.Base):
                         filter_properties = {}
                         request_spec = scheduler_utils.build_request_spec(
                             image, [instance])
+                        request_spec = objects.RequestSpec.from_primitives(
+                            context, request_spec, filter_properties)
                     else:
                         # NOTE(sbauza): Force_hosts/nodes needs to be reset
                         # if we want to make sure that the next destination
                         # is not forced to be the original host
                         request_spec.reset_forced_destinations()
                         # TODO(sbauza): Provide directly the RequestSpec object
-                        # when populate_filter_properties and populate_retry()
-                        # accept it
+                        # when populate_filter_properties accepts it
                         filter_properties = request_spec.\
                             to_legacy_filter_properties_dict()
-                        request_spec = request_spec.\
-                            to_legacy_request_spec_dict()
-                    scheduler_utils.populate_retry(filter_properties,
-                                                   instance.uuid)
-                    request_spec = objects.RequestSpec.from_primitives(
-                        context, request_spec, filter_properties)
                     # NOTE(cfriesen): Ensure that we restrict the scheduler to
                     # the cell specified by the instance mapping.
                     instance_mapping = \
@@ -802,7 +814,10 @@ class ComputeTaskManager(base.Base):
                             objects.Destination(
                                 cell=instance_mapping.cell_mapping))
 
-                    request_spec.ensure_project_id(instance)
+                    request_spec.ensure_project_and_user_id(instance)
+                    request_spec.ensure_network_metadata(instance)
+                    compute_utils.heal_reqspec_is_bfv(
+                        context, request_spec, instance)
                     host_lists = self._schedule_instances(context,
                             request_spec, [instance.uuid],
                             return_alternates=False)
@@ -891,7 +906,7 @@ class ComputeTaskManager(base.Base):
                          request_spec=None):
 
         with compute_utils.EventReporter(context, 'rebuild_server',
-                                          instance.uuid):
+                                         self.host, instance.uuid):
             node = limits = None
 
             try:
@@ -950,7 +965,16 @@ class ComputeTaskManager(base.Base):
                     # is not forced to be the original host
                     request_spec.reset_forced_destinations()
                 try:
-                    request_spec.ensure_project_id(instance)
+                    # if this is a rebuild of instance on the same host with
+                    # new image.
+                    if not recreate and orig_image_ref != image_ref:
+                        self._validate_image_traits_for_rebuild(context,
+                                                                instance,
+                                                                image_ref)
+                    request_spec.ensure_project_and_user_id(instance)
+                    request_spec.ensure_network_metadata(instance)
+                    compute_utils.heal_reqspec_is_bfv(
+                        context, request_spec, instance)
                     host_lists = self._schedule_instances(context,
                             request_spec, [instance.uuid],
                             return_alternates=False)
@@ -978,6 +1002,10 @@ class ComputeTaskManager(base.Base):
 
             compute_utils.notify_about_instance_usage(
                 self.notifier, context, instance, "rebuild.scheduled")
+            compute_utils.notify_about_instance_rebuild(
+                context, instance, host,
+                action=fields.NotificationAction.REBUILD_SCHEDULED,
+                source=fields.NotificationSource.CONDUCTOR)
 
             instance.availability_zone = (
                 availability_zones.get_host_availability_zone(
@@ -997,6 +1025,77 @@ class ComputeTaskManager(base.Base):
                     migration=migration,
                     host=host, node=node, limits=limits,
                     request_spec=request_spec)
+
+    def _validate_image_traits_for_rebuild(self, context, instance, image_ref):
+        """Validates that the traits specified in the image can be satisfied
+        by the providers of the current allocations for the instance during
+        rebuild of the instance. If the traits cannot be
+        satisfied, fails the action by raising a NoValidHost exception.
+
+        :raises: NoValidHost exception in case the traits on the providers
+                 of the allocated resources for the instance do not match
+                 the required traits on the image.
+        """
+        image_meta = objects.ImageMeta.from_image_ref(
+            context, self.image_api, image_ref)
+        if ('properties' not in image_meta or
+                'traits_required' not in image_meta.properties or not
+                image_meta.properties.traits_required):
+            return
+
+        image_traits = set(image_meta.properties.traits_required)
+
+        # check any of the image traits are forbidden in flavor traits.
+        # if so raise an exception
+        extra_specs = instance.flavor.extra_specs
+        forbidden_flavor_traits = set()
+        for key, val in extra_specs.items():
+            if key.startswith('trait'):
+                # get the actual key.
+                prefix, parsed_key = key.split(':', 1)
+                if val == 'forbidden':
+                    forbidden_flavor_traits.add(parsed_key)
+
+        forbidden_traits = image_traits & forbidden_flavor_traits
+
+        if forbidden_traits:
+            raise exception.NoValidHost(
+                reason=_("Image traits are part of forbidden "
+                         "traits in flavor associated with the server. "
+                         "Either specify a different image during rebuild "
+                         "or create a new server with the specified image "
+                         "and a compatible flavor."))
+            return
+
+        # If image traits are present, then validate against allocations.
+        allocations = self.report_client.get_allocations_for_consumer(
+            context, instance.uuid)
+        instance_rp_uuids = list(allocations)
+
+        # Get provider tree for the instance. We use the uuid of the host
+        # on which the instance is rebuilding to get the provider tree.
+        compute_node = objects.ComputeNode.get_by_host_and_nodename(
+            context, instance.host, instance.node)
+
+        # TODO(karimull): Call with a read-only version, when available.
+        instance_rp_tree = (
+            self.report_client.get_provider_tree_and_ensure_root(
+                context, compute_node.uuid))
+
+        traits_in_instance_rps = set()
+
+        for rp_uuid in instance_rp_uuids:
+            traits_in_instance_rps.update(
+                instance_rp_tree.data(rp_uuid).traits)
+
+        missing_traits = image_traits - traits_in_instance_rps
+
+        if missing_traits:
+            raise exception.NoValidHost(
+                reason=_("Image traits cannot be "
+                         "satisfied by the current resource providers. "
+                         "Either specify a different image during rebuild "
+                         "or create a new server with the specified image."))
 
     # TODO(avolkov): move method to bdm
     @staticmethod
@@ -1130,6 +1229,7 @@ class ComputeTaskManager(base.Base):
         host_mapping_cache = {}
         cell_mapping_cache = {}
         instances = []
+        host_az = {}  # host=az cache to optimize multi-create
 
         for (build_request, request_spec, host_list) in six.moves.zip(
                 build_requests, request_specs, host_lists):
@@ -1175,9 +1275,11 @@ class ComputeTaskManager(base.Base):
                 rc.delete_allocation_for_instance(context, instance.uuid)
                 continue
             else:
-                instance.availability_zone = (
-                    availability_zones.get_host_availability_zone(
-                        context, host.service_host))
+                if host.service_host not in host_az:
+                    host_az[host.service_host] = (
+                        availability_zones.get_host_availability_zone(
+                            context, host.service_host))
+                instance.availability_zone = host_az[host.service_host]
                 with obj_target_cell(instance, cell):
                     instance.create()
                     instances.append(instance)
@@ -1336,7 +1438,8 @@ class ComputeTaskManager(base.Base):
             # bdm, tags and instance record.
             with obj_target_cell(instance, cell) as cctxt:
                 with compute_utils.notify_about_instance_delete(
-                        self.notifier, cctxt, instance):
+                        self.notifier, cctxt, instance, CONF.host,
+                        source=fields.NotificationSource.CONDUCTOR):
                     try:
                         instance.destroy()
                     except exception.InstanceNotFound:

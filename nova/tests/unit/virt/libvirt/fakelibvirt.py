@@ -17,9 +17,9 @@ import time
 
 import fixtures
 from lxml import etree
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.objects import fields as obj_fields
-from nova.tests import uuidsentinel as uuids
 from nova.virt.libvirt import config as vconfig
 
 # Allow passing None to the various connect methods
@@ -115,6 +115,7 @@ VIR_FROM_RPC = 345
 VIR_FROM_NODEDEV = 666
 VIR_ERR_INVALID_ARG = 8
 VIR_ERR_NO_SUPPORT = 3
+VIR_ERR_XML_ERROR = 27
 VIR_ERR_XML_DETAIL = 350
 VIR_ERR_NO_DOMAIN = 420
 VIR_ERR_OPERATION_FAILED = 510
@@ -128,6 +129,7 @@ VIR_ERR_NO_NODE_DEVICE = 667
 VIR_ERR_NO_SECRET = 66
 VIR_ERR_AGENT_UNRESPONSIVE = 86
 VIR_ERR_ARGUMENT_UNSUPPORTED = 74
+VIR_ERR_OPERATION_UNSUPPORTED = 84
 # Readonly
 VIR_CONNECT_RO = 1
 
@@ -156,9 +158,9 @@ VIR_SECRET_USAGE_TYPE_CEPH = 2
 VIR_SECRET_USAGE_TYPE_ISCSI = 3
 
 # Libvirt version to match MIN_LIBVIRT_VERSION in driver.py
-FAKE_LIBVIRT_VERSION = 1002009
+FAKE_LIBVIRT_VERSION = 1003001
 # Libvirt version to match MIN_QEMU_VERSION in driver.py
-FAKE_QEMU_VERSION = 2001000
+FAKE_QEMU_VERSION = 2005000
 
 PF_CAP_TYPE = 'virt_functions'
 VF_CAP_TYPE = 'phys_function'
@@ -440,6 +442,25 @@ def _parse_disk_info(element):
     return disk_info
 
 
+def _parse_nic_info(element):
+    nic_info = {}
+    nic_info['type'] = element.get('type', 'bridge')
+
+    driver = element.find('./mac')
+    if driver is not None:
+        nic_info['mac'] = driver.get('address')
+
+    source = element.find('./source')
+    if source is not None:
+        nic_info['source'] = source.get('bridge')
+
+    target = element.find('./target')
+    if target is not None:
+        nic_info['target_dev'] = target.get('dev')
+
+    return nic_info
+
+
 def disable_event_thread(self):
     """Disable nova libvirt driver event thread.
 
@@ -460,9 +481,9 @@ def disable_event_thread(self):
     def evloop(*args, **kwargs):
         pass
 
-    self.useFixture(fixtures.MonkeyPatch(
+    self.useFixture(fixtures.MockPatch(
         'nova.virt.libvirt.host.Host._init_events',
-        evloop))
+        side_effect=evloop))
 
 
 class libvirtError(Exception):
@@ -752,21 +773,7 @@ class Domain(object):
                 self._def['vcpu'],
                 123456789]
 
-    def migrateToURI(self, desturi, flags, dname, bandwidth):
-        raise make_libvirtError(
-                libvirtError,
-                "Migration always fails for fake libvirt!",
-                error_code=VIR_ERR_INTERNAL_ERROR,
-                error_domain=VIR_FROM_QEMU)
-
-    def migrateToURI2(self, dconnuri, miguri, dxml, flags, dname, bandwidth):
-        raise make_libvirtError(
-                libvirtError,
-                "Migration always fails for fake libvirt!",
-                error_code=VIR_ERR_INTERNAL_ERROR,
-                error_domain=VIR_FROM_QEMU)
-
-    def migrateToURI3(self, dconnuri, params, logical_sum):
+    def migrateToURI3(self, dconnuri, params, flags):
         raise make_libvirtError(
                 libvirtError,
                 "Migration always fails for fake libvirt!",
@@ -776,14 +783,20 @@ class Domain(object):
     def migrateSetMaxDowntime(self, downtime):
         pass
 
-    def migrateSetMaxSpeed(self, bandwidth):
-        pass
-
     def attachDevice(self, xml):
-        disk_info = _parse_disk_info(etree.fromstring(xml))
-        disk_info['_attached'] = True
-        self._def['devices']['disks'] += [disk_info]
-        return True
+        result = False
+        if xml.startswith("<disk"):
+            disk_info = _parse_disk_info(etree.fromstring(xml))
+            disk_info['_attached'] = True
+            self._def['devices']['disks'] += [disk_info]
+            result = True
+        elif xml.startswith("<interface"):
+            nic_info = _parse_nic_info(etree.fromstring(xml))
+            nic_info['_attached'] = True
+            self._def['devices']['nics'] += [nic_info]
+            result = True
+
+        return result
 
     def attachDeviceFlags(self, xml, flags):
         if (flags & VIR_DOMAIN_AFFECT_LIVE and
@@ -1539,6 +1552,9 @@ class FakeLibvirtFixture(fixtures.Fixture):
             # NOTE(mdbooth): The strange incantation below means 'this module'
             self.useFixture(fixtures.MonkeyPatch(i, sys.modules[__name__]))
 
+        self.useFixture(
+            fixtures.MockPatch('nova.virt.libvirt.utils.get_fs_info'))
+
         disable_event_thread(self)
 
         if self.stub_os_vif:
@@ -1548,3 +1564,10 @@ class FakeLibvirtFixture(fixtures.Fixture):
             self.useFixture(fixtures.MonkeyPatch(
                 'nova.virt.libvirt.vif.LibvirtGenericVIFDriver._plug_os_vif',
                 lambda *a, **kw: None))
+
+        # os_vif.initialize is typically done in nova-compute startup
+        # even if we are not planning to plug anything with os_vif in the test
+        # we still need the object model initialized to be able to generate
+        # guest config xml properly
+        import os_vif
+        os_vif.initialize()

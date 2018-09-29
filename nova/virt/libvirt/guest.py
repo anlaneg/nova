@@ -180,7 +180,7 @@ class Guest(object):
             if code == libvirt.VIR_ERR_AGENT_UNRESPONSIVE:
                 LOG.debug('Failed to set time: QEMU agent unresponsive',
                           instance_uuid=self.uuid)
-            elif code == libvirt.VIR_ERR_NO_SUPPORT:
+            elif code == libvirt.VIR_ERR_OPERATION_UNSUPPORTED:
                 LOG.debug('Failed to set time: not supported',
                           instance_uuid=self.uuid)
             elif code == libvirt.VIR_ERR_ARGUMENT_UNSUPPORTED:
@@ -409,9 +409,11 @@ class Guest(object):
             # Raise DeviceNotFound if the device isn't found during detach
             try:
                 self.detach_device(conf, persistent=persistent, live=live)
-                LOG.debug('Successfully detached device %s from guest. '
-                          'Persistent? %s. Live? %s',
-                          device, persistent, live)
+                if get_device_conf_func(device) is None:
+                    LOG.debug('Successfully detached device %s from guest. '
+                              'Persistent? %s. Live? %s',
+                              device, persistent, live)
+
             except libvirt.libvirtError as ex:
                 with excutils.save_and_reraise_exception():
                     errcode = ex.get_error_code()
@@ -462,11 +464,11 @@ class Guest(object):
         def _do_wait_and_retry_detach():
             config = get_device_conf_func(device)
             if config is not None:
-                # Device is already detached from persistent domain
-                # and only transient domain needs update
+                # Device is already detached from persistent config
+                # and only the live config needs to be updated.
                 _try_detach_device(config, persistent=False, live=live)
 
-                reason = _("Unable to detach from guest transient domain.")
+                reason = _("Unable to detach the device from the live config.")
                 raise exception.DeviceDetachFailed(
                     device=alternative_device_name, reason=reason)
 
@@ -623,12 +625,14 @@ class Guest(object):
         #虚拟机挂起
         self._domain.suspend()
 
-    def migrate(self, destination, migrate_uri=None, params=None, flags=0,
-                domain_xml=None, bandwidth=0):
+    def migrate(self, destination, migrate_uri=None, migrate_disks=None,
+                destination_xml=None, flags=0, bandwidth=0):
         """Migrate guest object from its current host to the destination
 
         :param destination: URI of host destination where guest will be migrate
         :param migrate_uri: URI for invoking the migration
+        :param migrate_disks: List of disks to be migrated
+        :param destination_xml: The guest XML to be used on the target host
         :param flags: May be one of more of the following:
            VIR_MIGRATE_LIVE Do not pause the VM during migration
            VIR_MIGRATE_PEER2PEER Direct connection between source &
@@ -656,45 +660,41 @@ class Guest(object):
            VIR_MIGRATE_UNSAFE Force migration even if it is considered
                               unsafe.
            VIR_MIGRATE_OFFLINE Migrate offline
-        :param domain_xml: Changing guest configuration during migration
-        :param bandwidth: The maximun bandwidth in MiB/s
+        :param bandwidth: The maximum bandwidth in MiB/s
         """
-        if domain_xml is None:
-            self._domain.migrateToURI(
-                destination, flags=flags, bandwidth=bandwidth)
-        else:
-            if params:
-                # Due to a quirk in the libvirt python bindings,
-                # VIR_MIGRATE_NON_SHARED_INC with an empty migrate_disks is
-                # interpreted as "block migrate all writable disks" rather than
-                # "don't block migrate any disks". This includes attached
-                # volumes, which will potentially corrupt data on those
-                # volumes. Consequently we need to explicitly unset
-                # VIR_MIGRATE_NON_SHARED_INC if there are no disks to be block
-                # migrated.
-                if (flags & libvirt.VIR_MIGRATE_NON_SHARED_INC != 0 and
-                        not params.get('migrate_disks')):
-                    flags &= ~libvirt.VIR_MIGRATE_NON_SHARED_INC
+        params = {}
+        # In migrateToURI3 these parameters are extracted from the
+        # `params` dict
+        params['bandwidth'] = bandwidth
 
-                # In migrateToURI3 these parameters are extracted from the
-                # `params` dict
-                if migrate_uri:
-                    params['migrate_uri'] = migrate_uri
-                params['bandwidth'] = bandwidth
+        if destination_xml:
+            params['destination_xml'] = destination_xml
+        if migrate_disks:
+            params['migrate_disks'] = migrate_disks
+        if migrate_uri:
+            params['migrate_uri'] = migrate_uri
 
-                # In the python2 libvirt bindings, strings passed to
-                # migrateToURI3 via params must not be unicode.
-                if six.PY2:
-                    params = {key: str(value) if isinstance(value, unicode)
-                                              else value
-                              for key, value in params.items()}
+        # Due to a quirk in the libvirt python bindings,
+        # VIR_MIGRATE_NON_SHARED_INC with an empty migrate_disks is
+        # interpreted as "block migrate all writable disks" rather than
+        # "don't block migrate any disks". This includes attached
+        # volumes, which will potentially corrupt data on those
+        # volumes. Consequently we need to explicitly unset
+        # VIR_MIGRATE_NON_SHARED_INC if there are no disks to be block
+        # migrated.
+        if (flags & libvirt.VIR_MIGRATE_NON_SHARED_INC != 0 and
+                not params.get('migrate_disks')):
+            flags &= ~libvirt.VIR_MIGRATE_NON_SHARED_INC
 
-                self._domain.migrateToURI3(
-                    destination, params=params, flags=flags)
-            else:
-                self._domain.migrateToURI2(
-                    destination, miguri=migrate_uri, dxml=domain_xml,
-                    flags=flags, bandwidth=bandwidth)
+        # In the Python2 libvirt bindings, strings passed to
+        # migrateToURI3 via params must not be unicode.
+        if six.PY2:
+            params = {key: encodeutils.to_utf8(value)
+                      if isinstance(value, six.text_type) else value
+                      for key, value in params.items()}
+
+        self._domain.migrateToURI3(
+            destination, params=params, flags=flags)
 
     def abort_job(self):
         """Requests to abort current background job"""
@@ -706,13 +706,6 @@ class Guest(object):
         :param mstime: Downtime in milliseconds.
         """
         self._domain.migrateSetMaxDowntime(mstime)
-
-    def migrate_configure_max_speed(self, bandwidth):
-        """The maximum bandwidth that will be used to do migration
-
-        :param bw: Bandwidth in MiB/s
-        """
-        self._domain.migrateSetMaxSpeed(bandwidth)
 
     def migrate_start_postcopy(self):
         """Switch running live migration to post-copy mode"""
@@ -765,18 +758,18 @@ class BlockDevice(object):
         self._guest = guest
         self._disk = disk
 
-    def abort_job(self, async=False, pivot=False):
+    def abort_job(self, async_=False, pivot=False):
         """Request to cancel a live block device job
 
-        :param async: Cancel the block device job (e.g. 'copy' or
-                      'commit'), and return as soon as possible, without
-                      waiting for job completion
+        :param async_: Cancel the block device job (e.g. 'copy' or
+                       'commit'), and return as soon as possible, without
+                       waiting for job completion
         :param pivot: Pivot to the destination image when ending a
                       'copy' or "active commit" (meaning: merging the
                       contents of current active disk into its backing
                       file) job
         """
-        flags = async and libvirt.VIR_DOMAIN_BLOCK_JOB_ABORT_ASYNC or 0
+        flags = async_ and libvirt.VIR_DOMAIN_BLOCK_JOB_ABORT_ASYNC or 0
         flags |= pivot and libvirt.VIR_DOMAIN_BLOCK_JOB_ABORT_PIVOT or 0
         self._guest._domain.blockJobAbort(self._disk, flags=flags)
 
@@ -884,6 +877,10 @@ class BlockDevice(object):
                 return disk.mirror.ready == 'yes'
 
         return False
+
+    def blockStats(self):
+        """Extracts block device statistics for a domain"""
+        return self._guest._domain.blockStats(self._disk)
 
 
 class VCPUInfo(object):

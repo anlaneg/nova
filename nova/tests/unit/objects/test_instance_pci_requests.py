@@ -12,12 +12,12 @@
 
 import mock
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_versionedobjects import base as ovo_base
 
 from nova import objects
 from nova.objects import fields
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 FAKE_UUID = '79a53d6b-0893-4838-a971-15f4f382e7c2'
@@ -54,7 +54,7 @@ fake_legacy_pci_requests = [
 
 
 class _TestInstancePCIRequests(object):
-    @mock.patch('nova.db.instance_extra_get_by_instance_uuid')
+    @mock.patch('nova.db.api.instance_extra_get_by_instance_uuid')
     def test_get_by_instance_uuid(self, mock_get):
         mock_get.return_value = {
             'instance_uuid': FAKE_UUID,

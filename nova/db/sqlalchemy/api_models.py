@@ -12,6 +12,7 @@
 
 
 from oslo_db.sqlalchemy import models
+from oslo_log import log as logging
 from sqlalchemy import Boolean
 from sqlalchemy import Column
 from sqlalchemy import DateTime
@@ -28,6 +29,8 @@ from sqlalchemy import schema
 from sqlalchemy import String
 from sqlalchemy import Text
 from sqlalchemy import Unicode
+
+LOG = logging.getLogger(__name__)
 
 
 def MediumText():
@@ -117,6 +120,7 @@ class CellMapping(API_BASE):
     name = Column(String(255))
     transport_url = Column(Text())
     database_connection = Column(Text())
+    disabled = Column(Boolean, default=False)
     host_mapping = orm.relationship('HostMapping',
                             backref=backref('cell_mapping', uselist=False),
                             foreign_keys=id,
@@ -137,6 +141,7 @@ class InstanceMapping(API_BASE):
     cell_id = Column(Integer, ForeignKey('cell_mappings.id'),
             nullable=True)
     project_id = Column(String(255), nullable=False)
+    queued_for_delete = Column(Boolean)
     cell_mapping = orm.relationship('CellMapping',
             backref=backref('instance_mapping', uselist=False),
             foreign_keys=cell_id,
@@ -416,6 +421,7 @@ class InstanceGroupPolicy(API_BASE):
     policy = Column(String(255))
     group_id = Column(Integer, ForeignKey('instance_groups.id'),
                       nullable=False)
+    rules = Column(Text)
 
 
 class InstanceGroup(API_BASE):
@@ -441,8 +447,14 @@ class InstanceGroup(API_BASE):
             primaryjoin='InstanceGroup.id == InstanceGroupMember.group_id')
 
     @property
-    def policies(self):
-        return [p.policy for p in self._policies]
+    def policy(self):
+        if len(self._policies) > 1:
+            msg = ("More than one policy (%(policies)s) is associated with "
+                   "group %(group_name)s, only the first one in the list "
+                   "would be returned.")
+            LOG.warning(msg, {"policies": [p.policy for p in self._policies],
+                              "group_name": self.name})
+        return self._policies[0] if self._policies else None
 
     @property
     def members(self):
@@ -641,3 +653,6 @@ class Consumer(API_BASE):
     uuid = Column(String(36), nullable=False)
     project_id = Column(Integer, nullable=False)
     user_id = Column(Integer, nullable=False)
+    # FIXME(mriedem): Change this to server_default=text("0") to match the
+    # 059_add_consumer_generation script once bug 1776527 is fixed.
+    generation = Column(Integer, nullable=False, server_default="0", default=0)

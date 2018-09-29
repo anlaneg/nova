@@ -7,9 +7,7 @@ Websocket Proxy for OpenStack Nova SPICE HTML5 consoles
 -------------------------------------------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-09-27
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,9 +21,9 @@ Synopsis
 Description
 ===========
 
-`nova-spicehtml5proxy` is a server daemon that serves the Nova SPICE HTML5
-Websocket Proxy service, which provides a websocket proxy that is compatible
-with OpenStack Nova SPICE HTML5 consoles.
+:program:`nova-spicehtml5proxy` is a server daemon that serves the Nova SPICE
+HTML5 Websocket Proxy service, which provides a websocket proxy that is
+compatible with OpenStack Nova SPICE HTML5 consoles.
 
 Options
 =======
@@ -43,7 +41,7 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

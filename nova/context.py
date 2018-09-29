@@ -19,6 +19,7 @@
 
 from contextlib import contextmanager
 import copy
+import warnings
 
 import eventlet.queue
 import eventlet.timeout
@@ -51,6 +52,8 @@ raised_exception_sentinel = object()
 # first time we look. This needs to be refreshed on a timer or
 # trigger.
 CELLS = []
+# Timeout value for waiting for cells to respond
+CELL_TIMEOUT = 60
 
 
 class _ContextAuthPlugin(plugin.BaseAuthPlugin):
@@ -89,7 +92,7 @@ class RequestContext(context.RequestContext):
     def __init__(self, user_id=None, project_id=None, is_admin=None,
                  read_deleted="no", remote_address=None, timestamp=None,
                  quota_class=None, service_catalog=None,
-                 instance_lock_checked=False, user_auth_plugin=None, **kwargs):
+                 user_auth_plugin=None, **kwargs):
         """:param read_deleted: 'no' indicates deleted records are hidden,
                 'yes' indicates deleted records are visible,
                 'only' indicates that *only* deleted records are visible.
@@ -97,13 +100,22 @@ class RequestContext(context.RequestContext):
            :param overwrite: Set to False to ensure that the greenthread local
                 copy of the index is not overwritten.
 
+           :param instance_lock_checked: This is not used and will be removed
+                in a future release.
+
            :param user_auth_plugin: The auth plugin for the current request's
                 authentication data.
         """
         if user_id:
-            kwargs['user'] = user_id
+            kwargs['user_id'] = user_id
         if project_id:
-            kwargs['tenant'] = project_id
+            kwargs['project_id'] = project_id
+
+        if kwargs.pop('instance_lock_checked', None) is not None:
+            # TODO(mriedem): Let this be a hard failure in 19.0.0 (S).
+            warnings.warn("The 'instance_lock_checked' kwarg to "
+                          "nova.context.RequestContext is no longer used and "
+                          "will be removed in a future version.")
 
         super(RequestContext, self).__init__(is_admin=is_admin, **kwargs)
 
@@ -124,8 +136,6 @@ class RequestContext(context.RequestContext):
             # if list is empty or none
             self.service_catalog = []
 
-        self.instance_lock_checked = instance_lock_checked
-
         # NOTE(markmc): this attribute is currently only used by the
         # rs_limits turnstile pre-processor.
         # See https://lists.launchpad.net/openstack/msg12200.html
@@ -137,6 +147,7 @@ class RequestContext(context.RequestContext):
         # provided by this module
         self.db_connection = None
         self.mq_connection = None
+        self.cell_uuid = None
 
         self.user_auth_plugin = user_auth_plugin
         if self.is_admin is None:
@@ -181,8 +192,6 @@ class RequestContext(context.RequestContext):
             'user_name': getattr(self, 'user_name', None),
             'service_catalog': getattr(self, 'service_catalog', None),
             'project_name': getattr(self, 'project_name', None),
-            'instance_lock_checked': getattr(self, 'instance_lock_checked',
-                                             False)
         })
         # NOTE(tonyb): This can be removed once we're certain to have a
         # RequestContext contains 'is_admin_project', We can only get away with
@@ -207,7 +216,6 @@ class RequestContext(context.RequestContext):
             timestamp=values.get('timestamp'),
             quota_class=values.get('quota_class'),
             service_catalog=values.get('service_catalog'),
-            instance_lock_checked=values.get('instance_lock_checked', False),
         )
 
     def elevated(self, read_deleted=None):
@@ -351,7 +359,7 @@ def set_target_cell(context, cell_mapping):
     global CELL_CACHE
     if cell_mapping is not None:
         # avoid circular import
-        from nova import db
+        from nova.db import api as db
         from nova import rpc
 
         # Synchronize access to the cache by multiple API workers.
@@ -366,16 +374,19 @@ def set_target_cell(context, cell_mapping):
                 if not cell_mapping.transport_url.startswith('none'):
                     context.mq_connection = rpc.create_transport(
                         cell_mapping.transport_url)
+                context.cell_uuid = cell_mapping.uuid
                 CELL_CACHE[cell_mapping.uuid] = (context.db_connection,
                                                  context.mq_connection)
             else:
                 context.db_connection = cell_tuple[0]
                 context.mq_connection = cell_tuple[1]
+                context.cell_uuid = cell_mapping.uuid
 
         get_or_set_cached_cell_and_set_connections()
     else:
         context.db_connection = None
         context.mq_connection = None
+        context.cell_uuid = None
 
 
 @contextmanager
@@ -480,9 +491,9 @@ def load_cells():
 def scatter_gather_skip_cell0(context, fn, *args, **kwargs):
     """Target all cells except cell0 in parallel and return their results.
 
-    The first parameter in the signature of the function to call for each cell
-    should be of type RequestContext. There is a 60 second timeout for waiting
-    on all results to be gathered.
+    The first parameter in the signature of the function to call for
+    each cell should be of type RequestContext. There is a timeout for
+    waiting on all results to be gathered.
 
     :param context: The RequestContext for querying cells
     :param fn: The function to call for each cell
@@ -497,16 +508,16 @@ def scatter_gather_skip_cell0(context, fn, *args, **kwargs):
     """
     load_cells()
     cell_mappings = [cell for cell in CELLS if not cell.is_cell0()]
-    return scatter_gather_cells(context, cell_mappings, 60, fn, *args,
-                                **kwargs)
+    return scatter_gather_cells(context, cell_mappings, CELL_TIMEOUT,
+                                fn, *args, **kwargs)
 
 
 def scatter_gather_all_cells(context, fn, *args, **kwargs):
     """Target all cells in parallel and return their results.
 
-    The first parameter in the signature of the function to call for each cell
-    should be of type RequestContext. There is a 60 second timeout for waiting
-    on all results to be gathered.
+    The first parameter in the signature of the function to call for
+    each cell should be of type RequestContext. There is a timeout for
+    waiting on all results to be gathered.
 
     :param context: The RequestContext for querying cells
     :param fn: The function to call for each cell
@@ -520,4 +531,5 @@ def scatter_gather_all_cells(context, fn, *args, **kwargs):
               exception will be logged.
     """
     load_cells()
-    return scatter_gather_cells(context, CELLS, 60, fn, *args, **kwargs)
+    return scatter_gather_cells(context, CELLS, CELL_TIMEOUT,
+                                fn, *args, **kwargs)

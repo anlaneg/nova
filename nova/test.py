@@ -35,7 +35,6 @@ import pprint
 import sys
 
 import fixtures
-import mock
 from oslo_cache import core as cache
 from oslo_concurrency import lockutils
 from oslo_config import cfg
@@ -43,14 +42,17 @@ from oslo_config import fixture as config_fixture
 from oslo_log.fixture import logging_error as log_fixture
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_versionedobjects import fixture as ovo_fixture
+from oslotest import mock_fixture
 from oslotest import moxstubout
 import six
 import testtools
 
+from nova.api.openstack.placement.objects import resource_provider
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova.network import manager as network_manager
 from nova.network.security_group import openstack_driver
@@ -59,7 +61,6 @@ from nova.objects import base as objects_base
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit import conf_fixture
 from nova.tests.unit import policy_fixture
-from nova.tests import uuidsentinel as uuids
 from nova import utils
 from nova.virt import images
 
@@ -148,29 +149,6 @@ class skipIf(object):
         else:
             raise TypeError('skipUnless can be used only with functions or '
                             'classes')
-
-
-def _patch_mock_to_raise_for_invalid_assert_calls():
-    def raise_for_invalid_assert_calls(wrapped):
-        def wrapper(_self, name):
-            valid_asserts = [
-                'assert_called_with',
-                'assert_called_once_with',
-                'assert_has_calls',
-                'assert_any_calls']
-
-            if name.startswith('assert') and name not in valid_asserts:
-                raise AttributeError('%s is not a valid mock assert method'
-                                     % name)
-
-            return wrapped(_self, name)
-        return wrapper
-    mock.Mock.__getattr__ = raise_for_invalid_assert_calls(
-        mock.Mock.__getattr__)
-
-# NOTE(gibi): needs to be called only once at import time
-# to patch the mock lib
-_patch_mock_to_raise_for_invalid_assert_calls()
 
 
 class NovaExceptionReraiseFormatError(object):
@@ -288,6 +266,7 @@ class TestCase(testtools.TestCase):
             # NOTE(danms): Full database setup involves a cell0, cell1,
             # and the relevant mappings.
             self.useFixture(nova_fixtures.Database(database='api'))
+            self.useFixture(nova_fixtures.Database(database='placement'))
             self._setup_cells()
             self.useFixture(nova_fixtures.DefaultFlavorsFixture())
         elif not self.USES_DB_SELF:
@@ -309,8 +288,11 @@ class TestCase(testtools.TestCase):
         utils._IS_NEUTRON = None
 
         # Reset the traits sync and rc cache flags
-        objects.resource_provider._TRAITS_SYNCED = False
-        objects.resource_provider._RC_CACHE = None
+        def _reset_traits():
+            resource_provider._TRAITS_SYNCED = False
+        _reset_traits()
+        self.addCleanup(_reset_traits)
+        resource_provider._RC_CACHE = None
         # Reset the global QEMU version flag.
         images.QEMU_VERSION = None
 
@@ -320,6 +302,8 @@ class TestCase(testtools.TestCase):
         self.addCleanup(self._clear_attrs)
         self.useFixture(fixtures.EnvironmentVariable('http_proxy'))
         self.policy = self.useFixture(policy_fixture.PolicyFixture())
+        self.placement_policy = self.useFixture(
+            policy_fixture.PlacementPolicyFixture())
 
         self.useFixture(nova_fixtures.PoisonFunctions())
 
@@ -329,6 +313,12 @@ class TestCase(testtools.TestCase):
 
         # NOTE(mikal): make sure we don't load a privsep helper accidentally
         self.useFixture(nova_fixtures.PrivsepNoHelperFixture())
+        self.useFixture(mock_fixture.MockAutospecFixture())
+
+        # FIXME(danms): Disable this for all tests by default to avoid breaking
+        # any that depend on default/previous ordering
+        self.flags(build_failure_weight_multiplier=0.0,
+                   group='filter_scheduler')
 
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.
@@ -404,12 +394,14 @@ class TestCase(testtools.TestCase):
             CONF.set_override(k, v, group)
 
     def start_service(self, name, host=None, **kwargs):
+        cell = None
         if name == 'compute' and self.USES_DB:
             # NOTE(danms): We need to create the HostMapping first, because
             # otherwise we'll fail to update the scheduler while running
             # the compute node startup routines below.
             ctxt = context.get_context()
-            cell = self.cell_mappings[kwargs.pop('cell', CELL1_NAME)]
+            cell_name = kwargs.pop('cell', CELL1_NAME) or CELL1_NAME
+            cell = self.cell_mappings[cell_name]
             hm = objects.HostMapping(context=ctxt,
                                      host=host or name,
                                      cell_mapping=cell)
@@ -419,7 +411,7 @@ class TestCase(testtools.TestCase):
                 # Make sure that CONF.host is relevant to the right hostname
                 self.useFixture(nova_fixtures.ConfPatcher(host=host))
         svc = self.useFixture(
-            nova_fixtures.ServiceFixture(name, host, **kwargs))
+            nova_fixtures.ServiceFixture(name, host, cell=cell, **kwargs))
 
         return svc.service
 
@@ -442,6 +434,25 @@ class TestCase(testtools.TestCase):
         compute.stop()
         compute.manager._resource_tracker = None
         compute.start()
+
+    @staticmethod
+    def restart_scheduler_service(scheduler):
+        """Restart a scheduler service in a realistic way.
+
+        Deals with resetting the host state cache in the case of using the
+        CachingScheduler driver.
+
+        :param scheduler: The nova-scheduler service to be restarted.
+        """
+        scheduler.stop()
+        if hasattr(scheduler.manager.driver, 'all_host_states'):
+            # On startup, the CachingScheduler runs a periodic task to pull
+            # the initial set of compute nodes out of the database which it
+            # then puts into a cache (hence the name of the driver). This can
+            # race with actually starting the compute services so we need to
+            # restart the scheduler to refresh the cache.
+            scheduler.manager.driver.all_host_states = None
+        scheduler.start()
 
     def assertJsonEqual(self, expected, observed, message=''):
         """Asserts that 2 complex data structures are json equivalent.
@@ -560,8 +571,8 @@ class TestCase(testtools.TestCase):
                          baseclass)
 
         for name in sorted(implmethods.keys()):
-            baseargs = inspect.getargspec(basemethods[name])
-            implargs = inspect.getargspec(implmethods[name])
+            baseargs = utils.getargspec(basemethods[name])
+            implargs = utils.getargspec(implmethods[name])
 
             self.assertEqual(baseargs, implargs,
                              "%s args don't match base class %s" %
@@ -585,7 +596,7 @@ class APICoverage(object):
 
 @six.add_metaclass(abc.ABCMeta)
 class SubclassSignatureTestCase(testtools.TestCase):
-    """Ensure all overriden methods of all subclasses of the class
+    """Ensure all overridden methods of all subclasses of the class
     under test exactly match the signature of the base class.
 
     A subclass of SubclassSignatureTestCase should define a method
@@ -635,7 +646,7 @@ class SubclassSignatureTestCase(testtools.TestCase):
                 # instead.
                 method = getattr(method, '__wrapped__')
 
-            argspecs[name] = inspect.getargspec(method)
+            argspecs[name] = utils.getargspec(method)
 
         return argspecs
 

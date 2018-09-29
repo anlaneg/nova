@@ -18,9 +18,9 @@
 import copy
 
 import mock
-from mox3 import mox
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_versionedobjects import exception as ovo_exc
 import six
@@ -37,7 +37,7 @@ from nova.conductor.tasks import live_migrate
 from nova.conductor.tasks import migrate
 from nova import conf
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import api_models
 from nova import exception as exc
@@ -45,7 +45,6 @@ from nova.image import api as image_api
 from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import fields
-from nova import rpc
 from nova.scheduler import client as scheduler_client
 from nova.scheduler import utils as scheduler_utils
 from nova import test
@@ -59,8 +58,8 @@ from nova.tests.unit import fake_notifier
 from nova.tests.unit import fake_request_spec
 from nova.tests.unit import fake_server_actions
 from nova.tests.unit import utils as test_utils
-from nova.tests import uuidsentinel as uuids
 from nova import utils
+
 
 CONF = conf.CONF
 
@@ -124,8 +123,8 @@ class _BaseTestCase(object):
             self.assertEqual(self.context.project_id, ctxt_dict['project_id'])
             return self.context
 
-        self.stubs.Set(rpc.RequestContextSerializer, 'deserialize_context',
-                       fake_deserialize_context)
+        self.stub_out('nova.rpc.RequestContextSerializer.deserialize_context',
+                      fake_deserialize_context)
 
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
 
@@ -286,6 +285,10 @@ class ConductorTestCase(_BaseTestCase, test.TestCase):
         result = self.conductor.provider_fw_rule_get_all(self.context)
         self.assertEqual([], result)
 
+    def test_conductor_host(self):
+        self.assertTrue(hasattr(self.conductor_manager, 'host'))
+        self.assertEqual(CONF.host, self.conductor_manager.host)
+
 
 class ConductorRPCAPITestCase(_BaseTestCase, test.TestCase):
     """Conductor RPC API Tests."""
@@ -310,13 +313,13 @@ class ConductorAPITestCase(_BaseTestCase, test.TestCase):
         timeouts = []
         calls = dict(count=0)
 
-        def fake_ping(context, message, timeout):
+        def fake_ping(self, context, message, timeout):
             timeouts.append(timeout)
             calls['count'] += 1
             if calls['count'] < 15:
                 raise messaging.MessagingTimeout("fake")
 
-        self.stubs.Set(self.conductor.base_rpcapi, 'ping', fake_ping)
+        self.stub_out('nova.baserpc.BaseAPI.ping', fake_ping)
 
         self.conductor.wait_until_ready(self.context)
 
@@ -337,10 +340,17 @@ class _BaseTaskTestCase(object):
             self.assertEqual(self.context.project_id, ctxt_dict['project_id'])
             return self.context
 
-        self.stubs.Set(rpc.RequestContextSerializer, 'deserialize_context',
-                       fake_deserialize_context)
+        self.stub_out('nova.rpc.RequestContextSerializer.deserialize_context',
+                      fake_deserialize_context)
 
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
+        _p = mock.patch('nova.compute.utils.heal_reqspec_is_bfv')
+        self.heal_reqspec_is_bfv_mock = _p.start()
+        self.addCleanup(_p.stop)
+
+        _p = mock.patch('nova.objects.RequestSpec.ensure_network_metadata')
+        self.ensure_network_metadata_mock = _p.start()
+        self.addCleanup(_p.stop)
 
     def _prepare_rebuild_args(self, update_args=None):
         # Args that don't get passed in to the method but do get passed to RPC
@@ -350,8 +360,8 @@ class _BaseTaskTestCase(object):
 
         rebuild_args = {'new_pass': 'admin_password',
                         'injected_files': 'files_to_inject',
-                        'image_ref': 'image_ref',
-                        'orig_image_ref': 'orig_image_ref',
+                        'image_ref': uuids.image_ref,
+                        'orig_image_ref': uuids.orig_image_ref,
                         'orig_sys_metadata': 'orig_sys_meta',
                         'bdms': {},
                         'recreate': False,
@@ -415,16 +425,22 @@ class _BaseTaskTestCase(object):
     def test_cold_migrate_forced_shutdown(self):
         self._test_cold_migrate(clean_shutdown=False)
 
+    @mock.patch.object(compute_rpcapi.ComputeAPI, 'build_and_run_instance')
+    @mock.patch.object(db, 'block_device_mapping_get_all_by_instance',
+                       return_value=[])
+    @mock.patch.object(conductor_manager.ComputeTaskManager,
+                       '_schedule_instances')
     @mock.patch('nova.objects.BuildRequest.get_by_instance_uuid')
     @mock.patch('nova.availability_zones.get_host_availability_zone')
     @mock.patch('nova.objects.Instance.save')
     @mock.patch.object(objects.RequestSpec, 'from_primitives')
     def test_build_instances(self, mock_fp, mock_save, mock_getaz,
-                             mock_buildreq):
+                             mock_buildreq, mock_schedule, mock_bdm,
+                             mock_build):
         """Tests creating two instances and the scheduler returns a unique
         host/node combo for each instance.
         """
-        fake_spec = objects.RequestSpec
+        fake_spec = objects.RequestSpec()
         mock_fp.return_value = fake_spec
         instance_type = flavors.get_default_flavor()
         # NOTE(danms): Avoid datetime timezone issues with converted flavors
@@ -438,58 +454,19 @@ class _BaseTaskTestCase(object):
         instance_properties['system_metadata'] = flavors.save_flavor_info(
             {}, instance_type)
 
-        self.mox.StubOutWithMock(self.conductor_manager, '_schedule_instances')
-        self.mox.StubOutWithMock(db,
-                                 'block_device_mapping_get_all_by_instance')
-        self.mox.StubOutWithMock(self.conductor_manager.compute_rpcapi,
-                                 'build_and_run_instance')
-
         spec = {'image': {'fake_data': 'should_pass_silently'},
                 'instance_properties': instance_properties,
                 'instance_type': instance_type_p,
                 'num_instances': 2}
         filter_properties = {'retry': {'num_attempts': 1, 'hosts': []}}
         sched_return = copy.deepcopy(fake_host_lists2)
-        self.conductor_manager._schedule_instances(self.context,
-                fake_spec, [uuids.fake, uuids.fake], return_alternates=True
-                ).AndReturn(sched_return)
-        db.block_device_mapping_get_all_by_instance(self.context,
-                instances[0].uuid).AndReturn([])
+        mock_schedule.return_value = sched_return
         filter_properties2 = {'retry': {'num_attempts': 1,
                                         'hosts': [['host1', 'node1']]},
                               'limits': {}}
-        self.conductor_manager.compute_rpcapi.build_and_run_instance(
-                self.context,
-                instance=mox.IgnoreArg(),
-                host='host1',
-                image={'fake_data': 'should_pass_silently'},
-                request_spec=fake_spec,
-                filter_properties=filter_properties2,
-                admin_password='admin_password',
-                injected_files='injected_files',
-                requested_networks=None,
-                security_groups='security_groups',
-                block_device_mapping=mox.IgnoreArg(),
-                node='node1', limits=None, host_list=sched_return[0])
-        db.block_device_mapping_get_all_by_instance(self.context,
-                instances[1].uuid).AndReturn([])
         filter_properties3 = {'limits': {},
                               'retry': {'num_attempts': 1,
                                         'hosts': [['host2', 'node2']]}}
-        self.conductor_manager.compute_rpcapi.build_and_run_instance(
-                self.context,
-                instance=mox.IgnoreArg(),
-                host='host2',
-                image={'fake_data': 'should_pass_silently'},
-                request_spec=fake_spec,
-                filter_properties=filter_properties3,
-                admin_password='admin_password',
-                injected_files='injected_files',
-                requested_networks=None,
-                security_groups='security_groups',
-                block_device_mapping=mox.IgnoreArg(),
-                node='node2', limits=None, host_list=sched_return[1])
-        self.mox.ReplayAll()
 
         # build_instances() is a cast, we need to wait for it to complete
         self.useFixture(cast_as_call.CastAsCall(self))
@@ -515,6 +492,32 @@ class _BaseTaskTestCase(object):
             mock.call(self.context, spec, filter_properties),
             mock.call(self.context, spec, filter_properties2),
             mock.call(self.context, spec, filter_properties3)])
+        mock_schedule.assert_called_once_with(
+            self.context, fake_spec, [uuids.fake, uuids.fake],
+            return_alternates=True)
+        mock_bdm.assert_has_calls([mock.call(self.context, instances[0].uuid),
+                                   mock.call(self.context, instances[1].uuid)])
+        mock_build.assert_has_calls([
+            mock.call(self.context, instance=mock.ANY, host='host1',
+                      image={'fake_data': 'should_pass_silently'},
+                      request_spec=fake_spec,
+                      filter_properties=filter_properties2,
+                      admin_password='admin_password',
+                      injected_files='injected_files',
+                      requested_networks=None,
+                      security_groups='security_groups',
+                      block_device_mapping=mock.ANY,
+                      node='node1', limits=None, host_list=sched_return[0]),
+            mock.call(self.context, instance=mock.ANY, host='host2',
+                      image={'fake_data': 'should_pass_silently'},
+                      request_spec=fake_spec,
+                      filter_properties=filter_properties3,
+                      admin_password='admin_password',
+                      injected_files='injected_files',
+                      requested_networks=None,
+                      security_groups='security_groups',
+                      block_device_mapping=mock.ANY,
+                      node='node2', limits=None, host_list=sched_return[1])])
 
     @mock.patch.object(scheduler_utils, 'build_request_spec')
     @mock.patch.object(scheduler_utils, 'setup_instance_group')
@@ -961,26 +964,22 @@ class _BaseTaskTestCase(object):
 
         do_test()
 
-    def test_unshelve_instance_on_host(self):
+    @mock.patch.object(compute_rpcapi.ComputeAPI, 'unshelve_instance')
+    @mock.patch.object(compute_rpcapi.ComputeAPI, 'start_instance')
+    def test_unshelve_instance_on_host(self, mock_start, mock_unshelve):
         instance = self._create_fake_instance_obj()
         instance.vm_state = vm_states.SHELVED
         instance.task_state = task_states.UNSHELVING
         instance.save()
         system_metadata = instance.system_metadata
 
-        self.mox.StubOutWithMock(self.conductor_manager.compute_rpcapi,
-                'start_instance')
-        self.mox.StubOutWithMock(self.conductor_manager.compute_rpcapi,
-                'unshelve_instance')
-
-        self.conductor_manager.compute_rpcapi.start_instance(self.context,
-                instance)
-        self.mox.ReplayAll()
-
         system_metadata['shelved_at'] = timeutils.utcnow()
         system_metadata['shelved_image_id'] = 'fake_image_id'
         system_metadata['shelved_host'] = 'fake-mini'
         self.conductor_manager.unshelve_instance(self.context, instance)
+
+        mock_start.assert_called_once_with(self.context, instance)
+        mock_unshelve.assert_not_called()
 
     def test_unshelve_offload_instance_on_host_with_request_spec(self):
         instance = self._create_fake_instance_obj()
@@ -1005,7 +1004,6 @@ class _BaseTaskTestCase(object):
         fake_spec.instance_group = None
 
         filter_properties = fake_spec.to_legacy_filter_properties_dict()
-        request_spec = fake_spec.to_legacy_request_spec_dict()
 
         host = {'host': 'host1', 'nodename': 'node1', 'limits': {}}
 
@@ -1016,24 +1014,18 @@ class _BaseTaskTestCase(object):
         @mock.patch.object(self.conductor_manager.compute_rpcapi,
                            'unshelve_instance')
         @mock.patch.object(scheduler_utils, 'populate_filter_properties')
-        @mock.patch.object(scheduler_utils, 'populate_retry')
         @mock.patch.object(self.conductor_manager, '_schedule_instances')
-        @mock.patch.object(objects.RequestSpec, 'from_primitives')
-        @mock.patch.object(objects.RequestSpec, 'to_legacy_request_spec_dict')
         @mock.patch.object(objects.RequestSpec,
                            'to_legacy_filter_properties_dict')
         @mock.patch.object(objects.RequestSpec, 'reset_forced_destinations')
         def do_test(reset_forced_destinations,
-                    to_filtprops, to_reqspec, from_primitives, sched_instances,
-                    populate_retry, populate_filter_properties,
+                    to_filtprops, sched_instances, populate_filter_properties,
                     unshelve_instance, get_by_instance_uuid):
             cell_mapping = objects.CellMapping.get_by_uuid(self.context,
                                                            uuids.cell1)
             get_by_instance_uuid.return_value = objects.InstanceMapping(
                 cell_mapping=cell_mapping)
             to_filtprops.return_value = filter_properties
-            to_reqspec.return_value = request_spec
-            from_primitives.return_value = fake_spec
             sched_instances.return_value = [[fake_selection1]]
             self.conductor.unshelve_instance(self.context, instance, fake_spec)
             # The fake_spec already has a project_id set which doesn't match
@@ -1041,12 +1033,30 @@ class _BaseTaskTestCase(object):
             # overridden using the instance.project_id.
             self.assertNotEqual(fake_spec.project_id, instance.project_id)
             reset_forced_destinations.assert_called_once_with()
-            from_primitives.assert_called_once_with(self.context, request_spec,
-                    filter_properties)
-            sched_instances.assert_called_once_with(self.context, fake_spec,
+            # The fake_spec is only going to modified by reference for
+            # ComputeTaskManager.
+            if isinstance(self.conductor,
+                          conductor_manager.ComputeTaskManager):
+                self.ensure_network_metadata_mock.assert_called_once_with(
+                    test.MatchType(objects.Instance))
+                self.heal_reqspec_is_bfv_mock.assert_called_once_with(
+                    self.context, fake_spec, instance)
+                sched_instances.assert_called_once_with(
+                    self.context, fake_spec, [instance.uuid],
+                    return_alternates=False)
+                self.assertEqual(cell_mapping,
+                                 fake_spec.requested_destination.cell)
+            else:
+                # RPC API tests won't have the same request spec or instance
+                # since they go over the wire.
+                self.ensure_network_metadata_mock.assert_called_once_with(
+                    test.MatchType(objects.Instance))
+                self.heal_reqspec_is_bfv_mock.assert_called_once_with(
+                    self.context, test.MatchType(objects.RequestSpec),
+                    test.MatchType(objects.Instance))
+                sched_instances.assert_called_once_with(
+                    self.context, test.MatchType(objects.RequestSpec),
                     [instance.uuid], return_alternates=False)
-            self.assertEqual(cell_mapping,
-                             fake_spec.requested_destination.cell)
             # NOTE(sbauza): Since the instance is dehydrated when passing
             # through the RPC API, we can only assert mock.ANY for it
             unshelve_instance.assert_called_once_with(
@@ -1056,31 +1066,34 @@ class _BaseTaskTestCase(object):
 
         do_test()
 
-    def test_unshelve_offloaded_instance_glance_image_not_found(self):
-        shelved_image_id = "image_not_found"
-
+    @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
+    @mock.patch.object(image_api.API, 'get',
+                       side_effect=exc.ImageNotFound(image_id=uuids.image))
+    def test_unshelve_offloaded_instance_glance_image_not_found(
+            self, mock_get, add_instance_fault_from_exc):
         instance = self._create_fake_instance_obj()
         instance.vm_state = vm_states.SHELVED_OFFLOADED
         instance.task_state = task_states.UNSHELVING
         instance.save()
         system_metadata = instance.system_metadata
 
-        self.mox.StubOutWithMock(self.conductor_manager.image_api, 'get')
-
-        e = exc.ImageNotFound(image_id=shelved_image_id)
-        self.conductor_manager.image_api.get(
-            self.context, shelved_image_id, show_deleted=False).AndRaise(e)
-        self.mox.ReplayAll()
-
         system_metadata['shelved_at'] = timeutils.utcnow()
         system_metadata['shelved_host'] = 'fake-mini'
-        system_metadata['shelved_image_id'] = shelved_image_id
+        system_metadata['shelved_image_id'] = uuids.image
+
+        reason = ('Unshelve attempted but the image %s '
+                  'cannot be found.') % uuids.image
 
         self.assertRaises(
             exc.UnshelveException,
             self.conductor_manager.unshelve_instance,
             self.context, instance)
+        add_instance_fault_from_exc.assert_called_once_with(
+            self.context, instance, mock_get.side_effect, mock.ANY,
+            fault_message=reason)
         self.assertEqual(instance.vm_state, vm_states.ERROR)
+        mock_get.assert_called_once_with(self.context, uuids.image,
+                                         show_deleted=False)
 
     def test_unshelve_offloaded_instance_image_id_is_none(self):
 
@@ -1105,9 +1118,20 @@ class _BaseTaskTestCase(object):
             self.conductor_manager.unshelve_instance(self.context, instance)
             self.assertEqual(1, unshelve_mock.call_count)
 
+    @mock.patch.object(compute_rpcapi.ComputeAPI, 'unshelve_instance')
+    @mock.patch.object(conductor_manager.ComputeTaskManager,
+                       '_schedule_instances',
+                       return_value=[[objects.Selection(
+                           service_host='fake_host', nodename='fake_node',
+                           limits=None)]])
+    @mock.patch.object(scheduler_utils, 'build_request_spec',
+                       return_value='req_spec')
+    @mock.patch.object(image_api.API, 'get', return_value='fake_image')
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
     @mock.patch.object(objects.RequestSpec, 'from_primitives')
-    def test_unshelve_instance_schedule_and_rebuild(self, fp, mock_im):
+    def test_unshelve_instance_schedule_and_rebuild(
+            self, fp, mock_im, mock_get, mock_build, mock_schedule,
+            mock_unshelve):
         fake_spec = objects.RequestSpec()
         # Set requested_destination to test setting cell_mapping in
         # existing object.
@@ -1123,36 +1147,20 @@ class _BaseTaskTestCase(object):
         instance.save()
         system_metadata = instance.system_metadata
 
-        self.mox.StubOutWithMock(self.conductor_manager.image_api, 'get')
-        self.mox.StubOutWithMock(scheduler_utils, 'build_request_spec')
-        self.mox.StubOutWithMock(self.conductor_manager, '_schedule_instances')
-        self.mox.StubOutWithMock(self.conductor_manager.compute_rpcapi,
-                'unshelve_instance')
-
-        self.conductor_manager.image_api.get(self.context,
-                'fake_image_id', show_deleted=False).AndReturn('fake_image')
-        scheduler_utils.build_request_spec('fake_image',
-                mox.IgnoreArg()).AndReturn('req_spec')
-        fake_selection = objects.Selection(service_host="fake_host",
-                nodename="fake_node", limits=None)
-        self.conductor_manager._schedule_instances(self.context,
-                fake_spec, [instance.uuid], return_alternates=False).AndReturn(
-                [[fake_selection]])
-        self.conductor_manager.compute_rpcapi.unshelve_instance(self.context,
-                instance, 'fake_host', image='fake_image',
-                filter_properties={'limits': {},
-                                   'retry': {'num_attempts': 1,
-                                             'hosts': [['fake_host',
-                                                        'fake_node']]}},
-                                    node='fake_node')
-        self.mox.ReplayAll()
-
         system_metadata['shelved_at'] = timeutils.utcnow()
         system_metadata['shelved_image_id'] = 'fake_image_id'
         system_metadata['shelved_host'] = 'fake-mini'
         self.conductor_manager.unshelve_instance(self.context, instance)
         fp.assert_called_once_with(self.context, 'req_spec', mock.ANY)
         self.assertEqual(cell_mapping, fake_spec.requested_destination.cell)
+        mock_get.assert_called_once_with(
+            self.context, 'fake_image_id', show_deleted=False)
+        mock_build.assert_called_once_with('fake_image', mock.ANY)
+        mock_schedule.assert_called_once_with(
+            self.context, fake_spec, [instance.uuid], return_alternates=False)
+        mock_unshelve.assert_called_once_with(
+            self.context, instance, 'fake_host', image='fake_image',
+            filter_properties={'limits': {}}, node='fake_node')
 
     def test_unshelve_instance_schedule_and_rebuild_novalid_host(self):
         instance = self._create_fake_instance_obj()
@@ -1213,10 +1221,18 @@ class _BaseTaskTestCase(object):
         self.assertEqual(vm_states.SHELVED_OFFLOADED, instance.vm_state)
         self.assertIsNone(instance.task_state)
 
+    @mock.patch.object(compute_rpcapi.ComputeAPI, 'unshelve_instance')
+    @mock.patch.object(conductor_manager.ComputeTaskManager,
+                       '_schedule_instances', return_value=[[
+                           objects.Selection(service_host='fake_host',
+                                             nodename='fake_node',
+                                             limits=None)]])
+    @mock.patch.object(scheduler_utils, 'build_request_spec',
+                       return_value='req_spec')
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
     @mock.patch.object(objects.RequestSpec, 'from_primitives')
     def test_unshelve_instance_schedule_and_rebuild_volume_backed(
-            self, fp, mock_im):
+            self, fp, mock_im, mock_build, mock_schedule, mock_unshelve):
         fake_spec = objects.RequestSpec()
         fp.return_value = fake_spec
         mock_im.return_value = objects.InstanceMapping(
@@ -1227,31 +1243,16 @@ class _BaseTaskTestCase(object):
         instance.save()
         system_metadata = instance.system_metadata
 
-        self.mox.StubOutWithMock(scheduler_utils, 'build_request_spec')
-        self.mox.StubOutWithMock(self.conductor_manager, '_schedule_instances')
-        self.mox.StubOutWithMock(self.conductor_manager.compute_rpcapi,
-                'unshelve_instance')
-
-        scheduler_utils.build_request_spec(None,
-                mox.IgnoreArg()).AndReturn('req_spec')
-        fake_selection = objects.Selection(service_host="fake_host",
-                nodename="fake_node", limits=None)
-        self.conductor_manager._schedule_instances(self.context,
-                fake_spec, [instance.uuid], return_alternates=False).AndReturn(
-                [[fake_selection]])
-        self.conductor_manager.compute_rpcapi.unshelve_instance(self.context,
-                instance, 'fake_host', image=None,
-                filter_properties={'limits': {},
-                                   'retry': {'num_attempts': 1,
-                                             'hosts': [['fake_host',
-                                                        'fake_node']]}},
-                node='fake_node')
-        self.mox.ReplayAll()
-
         system_metadata['shelved_at'] = timeutils.utcnow()
         system_metadata['shelved_host'] = 'fake-mini'
         self.conductor_manager.unshelve_instance(self.context, instance)
         fp.assert_called_once_with(self.context, 'req_spec', mock.ANY)
+        mock_build.assert_called_once_with(None, mock.ANY)
+        mock_schedule.assert_called_once_with(
+            self.context, fake_spec, [instance.uuid], return_alternates=False)
+        mock_unshelve.assert_called_once_with(
+            self.context, instance, 'fake_host', image=None,
+            filter_properties={'limits': {}}, node='fake_node')
 
     def test_rebuild_instance(self):
         inst_obj = self._create_fake_instance_obj()
@@ -1272,7 +1273,8 @@ class _BaseTaskTestCase(object):
                                instance=inst_obj,
                                **compute_args)
 
-    def test_rebuild_instance_with_scheduler(self):
+    @mock.patch('nova.compute.utils.notify_about_instance_rebuild')
+    def test_rebuild_instance_with_scheduler(self, mock_notify):
         inst_obj = self._create_fake_instance_obj()
         inst_obj.host = 'noselect'
         expected_host = 'thebesthost'
@@ -1306,6 +1308,10 @@ class _BaseTaskTestCase(object):
                 obj_base.obj_to_primitive(inst_obj.image_meta), [inst_obj])
             fp_mock.assert_called_once_with(self.context, request_spec,
                                             filter_properties)
+            self.ensure_network_metadata_mock.assert_called_once_with(
+                inst_obj)
+            self.heal_reqspec_is_bfv_mock.assert_called_once_with(
+                self.context, fake_spec, inst_obj)
             select_dest_mock.assert_called_once_with(self.context, fake_spec,
                     inst_uuids, return_objects=True, return_alternates=False)
             compute_args['host'] = expected_host
@@ -1316,6 +1322,9 @@ class _BaseTaskTestCase(object):
             self.assertEqual(inst_obj.project_id, fake_spec.project_id)
         self.assertEqual('compute.instance.rebuild.scheduled',
                          fake_notifier.NOTIFICATIONS[0].event_type)
+        mock_notify.assert_called_once_with(
+            self.context, inst_obj, 'thebesthost', action='rebuild_scheduled',
+            source='nova-conductor')
 
     def test_rebuild_instance_with_scheduler_no_host(self):
         inst_obj = self._create_fake_instance_obj()
@@ -1431,7 +1440,8 @@ class _BaseTaskTestCase(object):
                                instance=inst_obj,
                                **compute_args)
 
-    def test_rebuild_instance_with_request_spec(self):
+    @mock.patch('nova.compute.utils.notify_about_instance_rebuild')
+    def test_rebuild_instance_with_request_spec(self, mock_notify):
         inst_obj = self._create_fake_instance_obj()
         inst_obj.host = 'noselect'
         expected_host = 'thebesthost'
@@ -1470,6 +1480,9 @@ class _BaseTaskTestCase(object):
                                             **compute_args)
         self.assertEqual('compute.instance.rebuild.scheduled',
                          fake_notifier.NOTIFICATIONS[0].event_type)
+        mock_notify.assert_called_once_with(
+            self.context, inst_obj, 'thebesthost', action='rebuild_scheduled',
+            source='nova-conductor')
 
 
 class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
@@ -1613,7 +1626,9 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
     @mock.patch('nova.compute.rpcapi.ComputeAPI.build_and_run_instance')
     @mock.patch('nova.scheduler.rpcapi.SchedulerAPI.select_destinations')
     @mock.patch('nova.objects.HostMapping.get_by_host')
-    def test_schedule_and_build_multiple_instances(self,
+    @mock.patch('nova.availability_zones.get_host_availability_zone',
+                return_value='nova')
+    def test_schedule_and_build_multiple_instances(self, mock_get_az,
                                                    get_hostmapping,
                                                    select_destinations,
                                                    build_and_run_instance):
@@ -1666,6 +1681,11 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         build_and_run_instance.side_effect = _build_and_run_instance
         self.conductor.schedule_and_build_instances(**params)
         self.assertEqual(3, build_and_run_instance.call_count)
+        # We're processing 4 instances over 2 hosts, so we should only lookup
+        # the AZ per host once.
+        mock_get_az.assert_has_calls([
+            mock.call(self.ctxt, 'host1'), mock.call(self.ctxt, 'host2')],
+            any_order=True)
 
     @mock.patch('nova.compute.rpcapi.ComputeAPI.build_and_run_instance')
     @mock.patch('nova.scheduler.rpcapi.SchedulerAPI.select_destinations')
@@ -1728,6 +1748,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
 
     @mock.patch('nova.objects.TagList.destroy')
     @mock.patch('nova.objects.TagList.create')
+    @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch('nova.compute.utils.notify_about_instance_usage')
     @mock.patch('nova.compute.rpcapi.ComputeAPI.build_and_run_instance')
     @mock.patch('nova.scheduler.rpcapi.SchedulerAPI.select_destinations')
@@ -1738,6 +1759,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
                                                          br_destroy,
                                                          select_destinations,
                                                          build_and_run,
+                                                         legacy_notify,
                                                          notify,
                                                          taglist_create,
                                                          taglist_destroy):
@@ -1757,10 +1779,13 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         self.assertIsNotNone(taglist_destroy.call_args[0][0].db_connection)
 
         test_utils.assert_instance_delete_notification_by_uuid(
-            notify, self.params['build_requests'][0].instance_uuid,
+            legacy_notify, notify,
+            self.params['build_requests'][0].instance_uuid,
             self.conductor.notifier, test.MatchType(context.RequestContext),
-            expect_targeted_context=True)
+            expect_targeted_context=True, expected_source='nova-conductor',
+            expected_host='host1')
 
+    @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch('nova.objects.Instance.destroy')
     @mock.patch('nova.compute.utils.notify_about_instance_usage')
     @mock.patch('nova.compute.rpcapi.ComputeAPI.build_and_run_instance')
@@ -1769,7 +1794,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
     @mock.patch('nova.conductor.manager.ComputeTaskManager._bury_in_cell0')
     def test_schedule_and_build_delete_during_scheduling_host_changed(
             self, bury, br_destroy, select_destinations,
-            build_and_run, notify, instance_destroy):
+            build_and_run, legacy_notify, instance_destroy, notify):
 
         br_destroy.side_effect = exc.BuildRequestNotFound(uuid='foo')
         instance_destroy.side_effect = [
@@ -1785,11 +1810,15 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         self.assertFalse(bury.called)
         self.assertTrue(br_destroy.called)
         self.assertEqual(2, instance_destroy.call_count)
-        test_utils.assert_instance_delete_notification_by_uuid(
-            notify, self.params['build_requests'][0].instance_uuid,
-            self.conductor.notifier, test.MatchType(context.RequestContext),
-            expect_targeted_context=True)
 
+        test_utils.assert_instance_delete_notification_by_uuid(
+            legacy_notify, notify,
+            self.params['build_requests'][0].instance_uuid,
+            self.conductor.notifier, test.MatchType(context.RequestContext),
+            expect_targeted_context=True, expected_source='nova-conductor',
+            expected_host='host1')
+
+    @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch('nova.objects.Instance.destroy')
     @mock.patch('nova.compute.utils.notify_about_instance_usage')
     @mock.patch('nova.compute.rpcapi.ComputeAPI.build_and_run_instance')
@@ -1798,7 +1827,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
     @mock.patch('nova.conductor.manager.ComputeTaskManager._bury_in_cell0')
     def test_schedule_and_build_delete_during_scheduling_instance_not_found(
             self, bury, br_destroy, select_destinations,
-            build_and_run, notify, instance_destroy):
+            build_and_run, legacy_notify, instance_destroy, notify):
 
         br_destroy.side_effect = exc.BuildRequestNotFound(uuid='foo')
         instance_destroy.side_effect = [
@@ -1814,9 +1843,11 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         self.assertTrue(br_destroy.called)
         self.assertEqual(1, instance_destroy.call_count)
         test_utils.assert_instance_delete_notification_by_uuid(
-            notify, self.params['build_requests'][0].instance_uuid,
+            legacy_notify, notify,
+            self.params['build_requests'][0].instance_uuid,
             self.conductor.notifier, test.MatchType(context.RequestContext),
-            expect_targeted_context=True)
+            expect_targeted_context=True, expected_source='nova-conductor',
+            expected_host='host1')
 
     @mock.patch('nova.compute.rpcapi.ComputeAPI.build_and_run_instance')
     @mock.patch('nova.scheduler.rpcapi.SchedulerAPI.select_destinations')
@@ -2088,33 +2119,19 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
                  'expected_task_state': task_states.MIGRATING},
                 ex, self._build_request_spec(inst_obj))
 
+    @mock.patch.object(scheduler_utils, 'set_vm_state_and_notify')
+    @mock.patch.object(live_migrate.LiveMigrationTask, 'execute')
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
-    def test_migrate_server_deals_with_invalidcpuinfo_exception(self, get_im):
+    def test_migrate_server_deals_with_invalidcpuinfo_exception(
+            self, get_im, mock_execute, mock_set):
         get_im.return_value.cell_mapping = (
             objects.CellMappingList.get_all(self.context)[0])
         instance = fake_instance.fake_db_instance(uuid=uuids.instance,
                                                   vm_state=vm_states.ACTIVE)
         inst_obj = objects.Instance._from_db_object(
             self.context, objects.Instance(), instance, [])
-        self.mox.StubOutWithMock(live_migrate.LiveMigrationTask, 'execute')
-        self.mox.StubOutWithMock(scheduler_utils,
-                'set_vm_state_and_notify')
-
         ex = exc.InvalidCPUInfo(reason="invalid cpu info.")
-
-        task = self.conductor._build_live_migrate_task(
-            self.context, inst_obj, 'destination', 'block_migration',
-            'disk_over_commit', mox.IsA(objects.Migration))
-        task.execute().AndRaise(ex)
-
-        scheduler_utils.set_vm_state_and_notify(self.context,
-                inst_obj.uuid,
-                'compute_task', 'migrate_server',
-                {'vm_state': vm_states.ACTIVE,
-                 'task_state': None,
-                 'expected_task_state': task_states.MIGRATING},
-                ex, self._build_request_spec(inst_obj))
-        self.mox.ReplayAll()
+        mock_execute.side_effect = ex
 
         self.conductor = utils.ExceptionHelper(self.conductor)
 
@@ -2122,13 +2139,19 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
             self.conductor.migrate_server, self.context, inst_obj,
             {'host': 'destination'}, True, False, None, 'block_migration',
             'disk_over_commit')
+        mock_execute.assert_called_once_with()
+        mock_set.assert_called_once_with(
+            self.context, inst_obj.uuid, 'compute_task', 'migrate_server',
+            {'vm_state': vm_states.ACTIVE,
+             'task_state': None,
+             'expected_task_state': task_states.MIGRATING},
+            ex, self._build_request_spec(inst_obj))
 
     def test_migrate_server_deals_with_expected_exception(self):
         exs = [exc.InstanceInvalidState(instance_uuid="fake", attr='',
                                         state='', method=''),
                exc.DestinationHypervisorTooOld(),
                exc.HypervisorUnavailable(host='dummy'),
-               exc.LiveMigrationWithOldNovaNotSupported(),
                exc.MigrationPreCheckError(reason='dummy'),
                exc.InvalidSharedStorage(path='dummy', reason='dummy'),
                exc.NoValidHost(reason='dummy'),
@@ -2170,17 +2193,13 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
                         expected_ex, request_spec)
         self.assertEqual(ex.kwargs['reason'], six.text_type(expected_ex))
 
-    def test_set_vm_state_and_notify(self):
-        self.mox.StubOutWithMock(scheduler_utils,
-                                 'set_vm_state_and_notify')
-        scheduler_utils.set_vm_state_and_notify(
-                self.context, 1, 'compute_task', 'method', 'updates',
-                'ex', 'request_spec')
-
-        self.mox.ReplayAll()
-
+    @mock.patch.object(scheduler_utils, 'set_vm_state_and_notify')
+    def test_set_vm_state_and_notify(self, mock_set):
         self.conductor._set_vm_state_and_notify(
                 self.context, 1, 'method', 'updates', 'ex', 'request_spec')
+        mock_set.assert_called_once_with(
+            self.context, 1, 'compute_task', 'method', 'updates', 'ex',
+            'request_spec')
 
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
     @mock.patch.object(objects.RequestSpec, 'from_components')
@@ -2330,6 +2349,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
             instance_type_id=flavor['id'],
             system_metadata={},
             uuid=uuids.instance,
+            project_id=fakes.FAKE_PROJECT_ID,
             user_id=fakes.FAKE_USER_ID,
             flavor=flavor,
             numa_topology=None,
@@ -2351,6 +2371,10 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         set_vm_mock.assert_called_once_with(self.context, inst_obj.uuid,
                                             'migrate_server', updates,
                                             exception, fake_spec)
+        spec_fc_mock.assert_called_once_with(
+            self.context, inst_obj.uuid, image, flavor, inst_obj.numa_topology,
+            inst_obj.pci_requests, {}, None, inst_obj.availability_zone,
+            project_id=inst_obj.project_id, user_id=inst_obj.user_id)
 
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
     @mock.patch.object(scheduler_utils, 'setup_instance_group')
@@ -2487,50 +2511,35 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
                                     True, fake_spec, None)
             self.assertIn('resize', nvh.message)
 
+    @mock.patch.object(compute_rpcapi.ComputeAPI, 'build_and_run_instance')
+    @mock.patch.object(conductor_manager.ComputeTaskManager,
+                       '_schedule_instances')
+    @mock.patch.object(scheduler_utils, 'build_request_spec')
+    @mock.patch.object(objects.Instance, 'save')
     @mock.patch('nova.objects.BuildRequest.get_by_instance_uuid')
     @mock.patch.object(objects.RequestSpec, 'from_primitives')
-    def test_build_instances_instance_not_found(self, fp, _mock_buildreq):
+    def test_build_instances_instance_not_found(
+            self, fp, _mock_buildreq, mock_save, mock_build_rspec,
+            mock_schedule, mock_build_run):
         fake_spec = objects.RequestSpec()
         fp.return_value = fake_spec
         instances = [fake_instance.fake_instance_obj(self.context)
                 for i in range(2)]
-        self.mox.StubOutWithMock(instances[0], 'save')
-        self.mox.StubOutWithMock(instances[1], 'save')
         image = {'fake-data': 'should_pass_silently'}
         spec = {'fake': 'specs',
                 'instance_properties': instances[0]}
-        self.mox.StubOutWithMock(scheduler_utils, 'build_request_spec')
-        self.mox.StubOutWithMock(self.conductor_manager, '_schedule_instances')
-        self.mox.StubOutWithMock(self.conductor_manager.compute_rpcapi,
-                'build_and_run_instance')
 
-        scheduler_utils.build_request_spec(image,
-                mox.IgnoreArg()).AndReturn(spec)
+        mock_build_rspec.return_value = spec
         filter_properties = {'retry': {'num_attempts': 1, 'hosts': []}}
         inst_uuids = [inst.uuid for inst in instances]
 
         sched_return = copy.deepcopy(fake_host_lists2)
-        self.conductor_manager._schedule_instances(self.context,
-                fake_spec, inst_uuids, return_alternates=True).AndReturn(
-                sched_return)
-        instances[0].save().AndRaise(
-                exc.InstanceNotFound(instance_id=instances[0].uuid))
-        instances[1].save()
+        mock_schedule.return_value = sched_return
+        mock_save.side_effect = [
+            exc.InstanceNotFound(instance_id=instances[0].uuid), None]
         filter_properties2 = {'limits': {},
                               'retry': {'num_attempts': 1,
                                         'hosts': [['host2', 'node2']]}}
-        self.conductor_manager.compute_rpcapi.build_and_run_instance(
-                self.context, instance=instances[1], host='host2',
-                image={'fake-data': 'should_pass_silently'},
-                request_spec=fake_spec,
-                filter_properties=filter_properties2,
-                admin_password='admin_password',
-                injected_files='injected_files',
-                requested_networks=None,
-                security_groups='security_groups',
-                block_device_mapping=mox.IsA(objects.BlockDeviceMappingList),
-                node='node2', limits=None, host_list=[])
-        self.mox.ReplayAll()
 
         # build_instances() is a cast, we need to wait for it to complete
         self.useFixture(cast_as_call.CastAsCall(self))
@@ -2551,6 +2560,22 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         fp.assert_has_calls([
             mock.call(self.context, spec, filter_properties),
             mock.call(self.context, spec, filter_properties2)])
+        mock_build_rspec.assert_called_once_with(image, mock.ANY)
+        mock_schedule.assert_called_once_with(
+            self.context, fake_spec, inst_uuids, return_alternates=True)
+        mock_save.assert_has_calls([mock.call(), mock.call()])
+        mock_build_run.assert_called_once_with(
+            self.context, instance=instances[1], host='host2',
+            image={'fake-data': 'should_pass_silently'},
+            request_spec=fake_spec,
+            filter_properties=filter_properties2,
+            admin_password='admin_password',
+            injected_files='injected_files',
+            requested_networks=None,
+            security_groups='security_groups',
+            block_device_mapping=test.MatchType(
+                objects.BlockDeviceMappingList),
+            node='node2', limits=None, host_list=[])
 
     @mock.patch.object(scheduler_utils, 'setup_instance_group')
     @mock.patch.object(scheduler_utils, 'build_request_spec')

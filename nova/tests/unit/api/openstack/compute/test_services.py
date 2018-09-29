@@ -19,6 +19,7 @@ import datetime
 import iso8601
 import mock
 from oslo_utils import fixture as utils_fixture
+from oslo_utils.fixture import uuidsentinel
 import six
 import webob.exc
 
@@ -35,7 +36,7 @@ from nova import test
 from nova.tests import fixtures
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit.objects import test_service
-from nova.tests import uuidsentinel
+
 
 # This is tied into the os-services API samples functional tests.
 FAKE_UUID_COMPUTE_HOST1 = 'e81d66a4-ddd3-4aba-8a84-171d1cb4d339'
@@ -191,9 +192,9 @@ class ServicesTestV21(test.TestCase):
             mock.Mock(side_effect=fake_service_get_all(fake_services_list)))
 
         self.useFixture(utils_fixture.TimeFixture(fake_utcnow()))
-        self.stub_out('nova.db.service_get_by_host_and_binary',
+        self.stub_out('nova.db.api.service_get_by_host_and_binary',
                       fake_db_service_get_by_host_binary(fake_services_list))
-        self.stub_out('nova.db.service_update',
+        self.stub_out('nova.db.api.service_update',
                       fake_db_service_update(fake_services_list))
 
         self.req = fakes.HTTPRequest.blank('')
@@ -585,7 +586,7 @@ class ServicesTestV21(test.TestCase):
             self.assertIsNone(values['disabled_reason'])
             return dict(test_service.fake_service, id=service_id, **values)
 
-        self.stub_out('nova.db.service_update', _service_update)
+        self.stub_out('nova.db.api.service_update', _service_update)
 
         body = {'host': 'host1', 'binary': 'nova-compute'}
         res_dict = self.controller.update(self.req, "enable", body=body)
@@ -680,11 +681,9 @@ class ServicesTestV21(test.TestCase):
              'topic': 'compute',
              'report_count': 0})
 
-        with mock.patch.object(self.controller.host_api,
-                               'service_delete') as service_delete:
+        with mock.patch('nova.objects.Service.destroy') as service_delete:
             self.controller.delete(self.req, compute.id)
-            service_delete.assert_called_once_with(
-                self.req.environ['nova.context'], compute.id)
+            service_delete.assert_called_once_with()
             self.assertEqual(self.controller.delete.wsgi_code, 204)
 
     def test_services_delete_not_found(self):
@@ -699,10 +698,43 @@ class ServicesTestV21(test.TestCase):
 
     def test_services_delete_duplicate_service(self):
         with mock.patch.object(self.controller, 'host_api') as host_api:
-            host_api.service_delete.side_effect = exception.ServiceNotUnique()
+            host_api.service_get_by_id.side_effect = (
+                exception.ServiceNotUnique())
             self.assertRaises(webob.exc.HTTPBadRequest,
                               self.controller.delete, self.req, 1234)
-            self.assertTrue(host_api.service_delete.called)
+
+    @mock.patch('nova.objects.InstanceList.get_uuids_by_host',
+                return_value=objects.InstanceList())
+    @mock.patch('nova.objects.HostMapping.get_by_host',
+                side_effect=exception.HostMappingNotFound(name='host1'))
+    @mock.patch('nova.objects.Service.destroy')
+    def test_compute_service_delete_host_mapping_not_found(
+            self, service_delete, get_instances, get_hm):
+        """Tests that we are still able to successfully delete a nova-compute
+        service even if the HostMapping is not found.
+        """
+        @mock.patch.object(self.controller.host_api, 'service_get_by_id',
+                           return_value=objects.Service(
+                               host='host1', binary='nova-compute',
+                               compute_node=objects.ComputeNode()))
+        @mock.patch.object(self.controller.aggregate_api,
+                           'get_aggregates_by_host',
+                           return_value=objects.AggregateList())
+        @mock.patch.object(self.controller.placementclient,
+                           'delete_resource_provider')
+        def _test(delete_resource_provider,
+                  get_aggregates_by_host, service_get_by_id):
+            self.controller.delete(self.req, 2)
+            ctxt = self.req.environ['nova.context']
+            service_get_by_id.assert_called_once_with(ctxt, 2)
+            get_instances.assert_called_once_with(ctxt, 'host1')
+            get_aggregates_by_host.assert_called_once_with(ctxt, 'host1')
+            delete_resource_provider.assert_called_once_with(
+                ctxt, service_get_by_id.return_value.compute_node,
+                cascade=True)
+            get_hm.assert_called_once_with(ctxt, 'host1')
+            service_delete.assert_called_once_with()
+        _test()
 
     # This test is just to verify that the servicegroup API gets used when
     # calling the API
@@ -1102,11 +1134,9 @@ class ServicesTestV253(test.TestCase):
         """
         service = self.start_service(
             'compute', 'fake-compute-host').service_ref
-        with mock.patch.object(self.controller.host_api,
-                               'service_delete') as service_delete:
+        with mock.patch('nova.objects.Service.destroy') as service_delete:
             self.controller.delete(self.req, service.uuid)
-            service_delete.assert_called_once_with(
-                self.req.environ['nova.context'], service.uuid)
+            service_delete.assert_called_once_with()
             self.assertEqual(204, self.controller.delete.wsgi_code)
 
     def test_delete_uuid_not_found(self):

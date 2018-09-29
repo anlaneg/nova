@@ -170,8 +170,7 @@ server in the compute node that OpenStack Compute manages.
 **Preconditions**
 
 You can only confirm the resized server where the status is
-``VERIFY_RESIZED``, the vm_status is ``RESIZED``, and the
-migration_status is ``finished`` or ``confirming``.
+``VERIFY_RESIZE``.
 
 If the server is locked, you must have administrator privileges
 to confirm the server.
@@ -424,6 +423,29 @@ Reboots a server.
 
 Specify the ``reboot`` action in the request body.
 
+**Preconditions**
+
+The preconditions for rebooting a server depend on the type of reboot.
+
+You can only *SOFT* reboot a server when its status is ``ACTIVE``.
+
+You can only *HARD* reboot a server when its status is one of:
+
+* ``ACTIVE``
+* ``ERROR``
+* ``HARD_REBOOT``
+* ``PAUSED``
+* ``REBOOT``
+* ``SHUTOFF``
+* ``SUSPENDED``
+
+If the server is locked, you must have administrator privileges
+to reboot the server.
+
+**Asynchronous Postconditions**
+
+After you successfully reboot a server, its status changes to ``ACTIVE``.
+
 Normal response codes: 202
 
 Error response codes: unauthorized(401), forbidden(403), itemNotFound(404),
@@ -458,6 +480,19 @@ Rebuilds a server.
 
 Specify the ``rebuild`` action in the request body.
 
+This operation recreates the root disk of the server.
+For a volume-backed server, this operation keeps the contents of the volume.
+
+**Preconditions**
+
+The server status must be ``ACTIVE``, ``SHUTOFF`` or ``ERROR``.
+
+**Asynchronous Postconditions**
+
+If the server was in status ``SHUTOFF`` before the rebuild, it will be stopped
+and in status ``SHUTOFF`` after the rebuild, otherwise it will be ``ACTIVE``
+if the rebuild was successful or ``ERROR`` if the rebuild failed.
+
 .. note:: There is a `known limitation`_ where the root disk is not
    replaced for volume-backed instances during a rebuild.
 
@@ -489,10 +524,11 @@ Request
   - description: server_description
   - key_name: key_name_rebuild_req
   - user_data: user_data_rebuild_req
+  - trusted_image_certificates: server_trusted_image_certificates_rebuild_req
 
-**Example Rebuild Server (rebuild Action) (v2.54)**
+**Example Rebuild Server (rebuild Action) (v2.63)**
 
-.. literalinclude:: ../../doc/api_samples/servers/v2.54/server-action-rebuild.json
+.. literalinclude:: ../../doc/api_samples/servers/v2.63/server-action-rebuild.json
    :language: javascript
 
 Response
@@ -505,7 +541,6 @@ Response
   - accessIPv4: accessIPv4
   - accessIPv6: accessIPv6
   - addresses: addresses_obj
-  - adminPass: adminPass_response
   - created: created
   - flavor: flavor_server
   - flavor.id: flavor_id_body_2_46
@@ -528,20 +563,22 @@ Response
   - metadata: metadata_object
   - name: server_name
   - OS-DCF:diskConfig: disk_config
-  - progress: progress
   - status: server_status
   - tenant_id: tenant_id_body
   - updated: updated
   - user_id: user_id
+  - adminPass: adminPass_response
+  - progress: progress
   - locked: locked
   - description: server_description_resp
   - tags: tags
   - key_name: key_name_rebuild_resp
   - user_data: user_data_rebuild_resp
+  - trusted_image_certificates: server_trusted_image_certificates_resp
 
-**Example Rebuild Server (rebuild Action) (v2.54)**
+**Example Rebuild Server (rebuild Action) (v2.63)**
 
-.. literalinclude:: ../../doc/api_samples/servers/v2.54/server-action-rebuild-resp.json
+.. literalinclude:: ../../doc/api_samples/servers/v2.63/server-action-rebuild-resp.json
    :language: javascript
 
 Remove (Disassociate) Floating Ip (removeFloatingIp Action) (DEPRECATED)
@@ -627,6 +664,8 @@ Rescue Server (rescue Action)
 .. rest_method:: POST /servers/{server_id}/action
 
 Puts a server in rescue mode and changes its status to ``RESCUE``.
+
+.. note:: This API is not supported for volume-backed instances.
 
 Specify the ``rescue`` action in the request body.
 

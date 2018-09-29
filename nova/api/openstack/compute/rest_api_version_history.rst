@@ -308,7 +308,7 @@ Both the original form of header and the new form is supported.
 Nova API hypervisor.cpu_info change from string to JSON object.
 
 From this version of the API the hypervisor's 'cpu_info' field will be
-will returned as JSON object (not string) by sending GET request
+returned as JSON object (not string) by sending GET request
 to the /v2.1/os-hypervisors/{hypervisor_id}.
 
 2.29
@@ -382,6 +382,8 @@ request, the default sort_key was changed to 'name' field as ASC order,
 the generic request format is::
 
   GET /os-keypairs?limit={limit}&marker={kp_name}
+
+.. _2.36 microversion:
 
 2.36
 ----
@@ -758,6 +760,8 @@ Added pagination support for migrations, there are four changes:
 * The query parameter schema of the ``GET /os-migrations`` API no longer
   allows additional properties.
 
+.. _api-microversion-queens:
+
 2.60 (Maximum in Queens)
 ------------------------
 
@@ -765,3 +769,88 @@ From this version of the API users can attach a ``multiattach`` capable volume
 to multiple instances. The API request for creating the additional attachments
 is the same. The chosen virt driver and the volume back end has to support the
 functionality as well.
+
+2.61
+----
+
+Exposes flavor extra_specs in the flavor representation. Now users can see the
+flavor extra-specs in flavor APIs response and do not need to call
+``GET /flavors/{flavor_id}/os-extra_specs`` API. If the user is prevented by
+policy from indexing extra-specs, then the ``extra_specs`` field will not be
+included in the flavor information. Flavor extra_specs will be included in
+Response body of the following APIs:
+
+* ``GET /flavors/detail``
+* ``GET /flavors/{flavor_id}``
+* ``POST /flavors``
+* ``PUT /flavors/{flavor_id}``
+
+2.62
+----
+
+Adds ``host`` (hostname) and ``hostId`` (an obfuscated hashed host id string)
+fields to the instance action
+``GET /servers/{server_id}/os-instance-actions/{req_id}`` API. The display of
+the newly added ``host`` field will be controlled via policy rule
+``os_compute_api:os-instance-actions:events``, which is the same policy used
+for the ``events.traceback`` field. If the user is prevented by policy, only
+``hostId`` will be displayed.
+
+2.63
+----
+
+Adds support for the ``trusted_image_certificates`` parameter, which is used to
+define a list of trusted certificate IDs that can be used during image
+signature verification and certificate validation. The list is restricted to
+a maximum of 50 IDs. Note that ``trusted_image_certificates`` is not supported
+with volume-backed servers.
+
+The ``trusted_image_certificates`` request parameter can be passed to
+the server create and rebuild APIs:
+
+* ``POST /servers``
+* ``POST /servers/{server_id}/action (rebuild)``
+
+The ``trusted_image_certificates`` parameter will be in the response body of
+the following APIs:
+
+* ``GET /servers/detail``
+* ``GET /servers/{server_id}``
+* ``PUT /servers/{server_id}``
+* ``POST /servers/{server_id}/action (rebuild)``
+
+2.64
+----
+
+Enable users to define the policy rules on server group policy to meet more
+advanced policy requirement. This microversion brings the following changes
+in server group APIs:
+
+* Add  ``policy`` and ``rules`` fields in the request of POST
+  ``/os-server-groups``. The ``policy`` represents the name of policy. The
+  ``rules`` field, which is a dict, can be applied to the policy, which
+  currently only support ``max_server_per_host`` for ``anti-affinity`` policy.
+* The ``policy`` and ``rules`` fields will be returned in response
+  body of POST, GET ``/os-server-groups`` API and GET
+  ``/os-server-groups/{server_group_id}`` API.
+* The ``policies`` and ``metadata`` fields have been removed from the response
+  body of POST, GET ``/os-server-groups`` API and GET
+  ``/os-server-groups/{server_group_id}`` API.
+
+2.65 (Maximum in Rocky)
+-----------------------
+
+Add support for abort live migrations in ``queued`` and ``preparing`` status
+for API ``DELETE /servers/{server_id}/migrations/{migration_id}``.
+
+2.66
+----
+
+The ``changes-before`` filter can be included as a request parameter of the
+following APIs to filter by changes before or equal to the resource
+``updated_at`` time:
+
+* ``GET /servers``
+* ``GET /servers/detail``
+* ``GET /servers/{server_id}/os-instance-actions``
+* ``GET /os-migrations``

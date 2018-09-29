@@ -18,15 +18,15 @@ Tests for availability zones
 """
 
 import mock
+from oslo_utils.fixture import uuidsentinel
 import six
 
 from nova import availability_zones as az
 import nova.conf
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import objects
 from nova import test
-from nova.tests import uuidsentinel
 
 CONF = nova.conf.CONF
 

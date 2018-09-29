@@ -7,9 +7,7 @@ CLI interface for nova status commands
 --------------------------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2016-12-16
 :Copyright: OpenStack Foundation
-:Version: 15.0.0
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,13 +21,13 @@ Synopsis
 Description
 ===========
 
-`nova-status` is a tool that provides routines for checking the status of a
-Nova deployment.
+:program:`nova-status` is a tool that provides routines for checking the status
+of a Nova deployment.
 
 Options
 =======
 
-The standard pattern for executing a `nova-status` command is::
+The standard pattern for executing a :program:`nova-status` command is::
 
     nova-status <category> <command> [<args>]
 
@@ -49,10 +47,12 @@ all commands in that category::
     nova-status upgrade
 
 These sections describe the available categories and arguments for
-`nova-status`.
+:program:`nova-status`.
 
 Upgrade
 ~~~~~~~
+
+.. _nova-status-checks:
 
 ``nova-status upgrade check``
   Performs a release-specific readiness check before restarting services with
@@ -95,7 +95,7 @@ Upgrade
     make a successful request to the endpoint. The command also checks to
     see that there are compute node resource providers checking in with the
     Placement service. More information on the Placement service can be found
-    at: `<https://docs.openstack.org/nova/latest/user/placement.html>`_
+    at :nova-doc:`Placement API <user/placement.html>`.
 
   **16.0.0 (Pike)**
 
@@ -106,10 +106,26 @@ Upgrade
 
   * Checks for the Placement API are modified to require version 1.17.
 
+  **18.0.0 (Rocky)**
+
+  * Checks for the Placement API are modified to require version 1.28.
+  * Checks that ironic instances have had their embedded flavors migrated to
+    use custom resource classes.
+  * Checks for ``nova-osapi_compute`` service versions that are less than 15
+    across all cell mappings which might cause issues when querying instances
+    depending on how the **nova-api** service is configured.
+    See https://bugs.launchpad.net/nova/+bug/1759316 for details.
+  * Checks that existing instances have been migrated to have a matching
+    request spec in the API DB.
+
+  **19.0.0 (Stein)**
+
+  * Checks for the Placement API are modified to require version 1.30.
+
 See Also
 ========
 
-* OpenStack Nova Docs: `<https://docs.openstack.org/nova/latest/>`_
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

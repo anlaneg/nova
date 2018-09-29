@@ -32,6 +32,7 @@ from oslo_db.sqlalchemy import update_match
 from oslo_db.sqlalchemy import utils as sqlalchemyutils
 from oslo_serialization import jsonutils
 from oslo_utils import fixture as utils_fixture
+from oslo_utils.fixture import uuidsentinel
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
 import six
@@ -53,7 +54,7 @@ from nova.compute import task_states
 from nova.compute import vm_states
 import nova.conf
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova.db.sqlalchemy import api as sqlalchemy_api
 from nova.db.sqlalchemy import models
 from nova.db.sqlalchemy import types as col_types
@@ -64,8 +65,8 @@ from nova.objects import fields
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit import fake_console_auth_token
-from nova.tests import uuidsentinel
 from nova import utils
+
 
 CONF = nova.conf.CONF
 
@@ -305,6 +306,15 @@ class UnsupportedDbRegexpTestCase(DbTestCase):
                           db.instance_get_all_by_filters,
                           self.context, {'display_name': '%test%'},
                           marker=uuidsentinel.uuid1)
+
+    def test_instance_get_all_uuids_by_host(self, mock_get_regexp):
+        test1 = self.create_instance_with_args(display_name='test1')
+        test2 = self.create_instance_with_args(display_name='test2')
+        test3 = self.create_instance_with_args(display_name='test3')
+        uuids = [i.uuid for i in (test1, test2, test3)]
+        found_uuids = db.instance_get_all_uuids_by_host(self.context,
+                                                        test1.host)
+        self.assertEqual(sorted(uuids), sorted(found_uuids))
 
     def _assert_equals_inst_order(self, correct_order, filters,
                                   sort_keys=None, sort_dirs=None,
@@ -1365,6 +1375,19 @@ class MigrationTestCase(test.TestCase):
         self.assertEqual(migrations[0]['uuid'], uuidsentinel.uuid_time2)
         self.assertEqual(migrations[1]['uuid'], uuidsentinel.uuid_time3)
 
+    def test_get_migrations_by_filters_with_changes_before(self):
+        changes_time = timeutils.utcnow(with_timezone=True)
+        self._create_3_migration_after_time(changes_time)
+        after_3day_2hours = datetime.timedelta(days=3, hours=2)
+        filters = {"changes-before": changes_time + after_3day_2hours}
+        migrations = db.migration_get_all_by_filters(
+            self.ctxt, filters,
+            sort_keys=['updated_at'], sort_dirs=['asc'])
+        self.assertEqual(3, len(migrations))
+        self.assertEqual(migrations[0]['uuid'], uuidsentinel.uuid_time1)
+        self.assertEqual(migrations[1]['uuid'], uuidsentinel.uuid_time2)
+        self.assertEqual(migrations[2]['uuid'], uuidsentinel.uuid_time3)
+
 
 class ModelsObjectComparatorMixin(object):
     def _dict_from_object(self, obj, ignored_keys):
@@ -1787,7 +1810,7 @@ class SecurityGroupTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self.assertEqual(1, len(security_groups))
         self.assertEqual("default", security_groups[0]["name"])
 
-    @mock.patch.object(db.sqlalchemy.api, '_security_group_get_by_names')
+    @mock.patch.object(sqlalchemy_api, '_security_group_get_by_names')
     def test_security_group_ensure_default_called_concurrently(self, sg_mock):
         # make sure NotFound is always raised here to trick Nova to insert the
         # duplicate security group entry
@@ -1876,7 +1899,7 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         instance = self.create_instance_with_args()
         self.assertTrue(uuidutils.is_uuid_like(instance['uuid']))
 
-    @mock.patch.object(db.sqlalchemy.api, 'security_group_ensure_default')
+    @mock.patch.object(sqlalchemy_api, 'security_group_ensure_default')
     def test_instance_create_with_deadlock_retry(self, mock_sg):
         mock_sg.side_effect = [db_exc.DBDeadlock(), None]
         instance = self.create_instance_with_args()
@@ -2133,6 +2156,65 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         result = db.instance_get_all_by_filters(self.ctxt,
                                                 filters)
         self._assertEqualListsOfInstances([i2], result)
+
+    def test_instance_get_all_by_filters_changes_before(self):
+        i1 = self.create_instance_with_args(updated_at=
+                                            '2013-12-05T15:03:25.000000')
+        i2 = self.create_instance_with_args(updated_at=
+                                            '2013-12-05T15:03:26.000000')
+        changes_before = iso8601.parse_date('2013-12-05T15:03:26.000000')
+        result = db.instance_get_all_by_filters(self.ctxt,
+                                                {'changes-before':
+                                                 changes_before})
+        self._assertEqualListsOfInstances([i1, i2], result)
+
+        changes_before = iso8601.parse_date('2013-12-05T15:03:25.000000')
+        result = db.instance_get_all_by_filters(self.ctxt,
+                                                {'changes-before':
+                                                 changes_before})
+        self._assertEqualListsOfInstances([i1], result)
+
+        db.instance_destroy(self.ctxt, i2['uuid'])
+        filters = {}
+        filters['changes-before'] = changes_before
+        filters['marker'] = i2['uuid']
+        result = db.instance_get_all_by_filters(self.ctxt,
+                                                filters)
+        self._assertEqualListsOfInstances([i1], result)
+
+    def test_instance_get_all_by_filters_changes_time_period(self):
+        i1 = self.create_instance_with_args(updated_at=
+                                            '2013-12-05T15:03:25.000000')
+        i2 = self.create_instance_with_args(updated_at=
+                                            '2013-12-05T15:03:26.000000')
+        i3 = self.create_instance_with_args(updated_at=
+                                            '2013-12-05T15:03:27.000000')
+        changes_since = iso8601.parse_date('2013-12-05T15:03:25.000000')
+        changes_before = iso8601.parse_date('2013-12-05T15:03:27.000000')
+        result = db.instance_get_all_by_filters(self.ctxt,
+                                                {'changes-since':
+                                                 changes_since,
+                                                 'changes-before':
+                                                 changes_before})
+        self._assertEqualListsOfInstances([i1, i2, i3], result)
+
+        changes_since = iso8601.parse_date('2013-12-05T15:03:26.000000')
+        changes_before = iso8601.parse_date('2013-12-05T15:03:27.000000')
+        result = db.instance_get_all_by_filters(self.ctxt,
+                                                {'changes-since':
+                                                 changes_since,
+                                                 'changes-before':
+                                                 changes_before})
+        self._assertEqualListsOfInstances([i2, i3], result)
+
+        db.instance_destroy(self.ctxt, i1['uuid'])
+        filters = {}
+        filters['changes-since'] = changes_since
+        filters['changes-before'] = changes_before
+        filters['marker'] = i1['uuid']
+        result = db.instance_get_all_by_filters(self.ctxt,
+                                                filters)
+        self._assertEqualListsOfInstances([i2, i3], result)
 
     def test_instance_get_all_by_filters_exact_match(self):
         instance = self.create_instance_with_args(host='host1')
@@ -2475,23 +2557,6 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         faults = db.instance_fault_get_by_instance_uuids(ctxt, [uuid])
         # Make sure instance faults is deleted as well
         self.assertEqual(0, len(faults[uuid]))
-
-    def test_delete_instance_group_member_on_instance_destroy(self):
-        ctxt = context.get_admin_context()
-        uuid = uuidsentinel.uuid1
-        db.instance_create(ctxt, {'uuid': uuid})
-        values = {'name': 'fake_name', 'user_id': 'fake',
-                  'project_id': 'fake'}
-        group = db.instance_group_create(ctxt, values,
-                                         policies=None, members=[uuid])
-        self.assertEqual([uuid],
-                         db.instance_group_members_get(ctxt,
-                                                       group['uuid']))
-
-        db.instance_destroy(ctxt, uuid)
-        self.assertEqual([],
-                         db.instance_group_members_get(ctxt,
-                                                       group['uuid']))
 
     def test_delete_migrations_on_instance_destroy(self):
         ctxt = context.get_admin_context()
@@ -2872,6 +2937,20 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self.assertEqual({}, db.instance_metadata_get(ctxt, inst_uuid))
         self.assertEqual([], db.instance_tag_get_by_instance_uuid(
             ctxt, inst_uuid))
+
+        @sqlalchemy_api.pick_context_manager_reader
+        def _assert_instance_id_mapping(_ctxt):
+            # NOTE(mriedem): We can't use ec2_instance_get_by_uuid to assert
+            # the instance_id_mappings record is gone because it hard-codes
+            # read_deleted='yes' and will read the soft-deleted record. So we
+            # do the model_query directly here. See bug 1061166.
+            inst_id_mapping = sqlalchemy_api.model_query(
+                _ctxt, models.InstanceIdMapping).filter_by(
+                uuid=inst_uuid).first()
+            self.assertFalse(inst_id_mapping,
+                             'instance_id_mapping not deleted for '
+                             'instance: %s' % inst_uuid)
+        _assert_instance_id_mapping(ctxt)
         ctxt.read_deleted = 'yes'
         self.assertEqual(values['system_metadata'],
                          db.instance_system_metadata_get(ctxt, inst_uuid))
@@ -2987,10 +3066,15 @@ class InstanceExtraTestCase(test.TestCase):
 
     def test_instance_extra_update_by_uuid(self):
         db.instance_extra_update_by_uuid(self.ctxt, self.instance['uuid'],
-                                         {'numa_topology': 'changed'})
+                                         {'numa_topology': 'changed',
+                                          'trusted_certs': "['123', 'foo']",
+                                          })
         inst_extra = db.instance_extra_get_by_instance_uuid(
             self.ctxt, self.instance['uuid'])
         self.assertEqual('changed', inst_extra.numa_topology)
+        # NOTE(jackie-truong): trusted_certs is stored as a Text type in
+        # instance_extra and read as a list of strings
+        self.assertEqual("['123', 'foo']", inst_extra.trusted_certs)
 
     def test_instance_extra_update_by_uuid_and_create(self):
         @sqlalchemy_api.pick_context_manager_writer
@@ -3015,11 +3099,12 @@ class InstanceExtraTestCase(test.TestCase):
     def test_instance_extra_get_with_columns(self):
         extra = db.instance_extra_get_by_instance_uuid(
             self.ctxt, self.instance['uuid'],
-            columns=['numa_topology', 'vcpu_model'])
+            columns=['numa_topology', 'vcpu_model', 'trusted_certs'])
         self.assertRaises(SQLAlchemyError,
                           extra.__getitem__, 'pci_requests')
         self.assertIn('numa_topology', extra)
         self.assertIn('vcpu_model', extra)
+        self.assertIn('trusted_certs', extra)
 
 
 class ServiceTestCase(test.TestCase, ModelsObjectComparatorMixin):
@@ -3395,33 +3480,6 @@ class ServiceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self.assertEqual(0, done)
 
 
-class BaseInstanceTypeTestCase(test.TestCase, ModelsObjectComparatorMixin):
-    def setUp(self):
-        super(BaseInstanceTypeTestCase, self).setUp()
-        self.ctxt = context.get_admin_context()
-        self.user_ctxt = context.RequestContext('user', 'user')
-
-    def _get_base_values(self):
-        return {
-            'name': 'fake_name',
-            'memory_mb': 512,
-            'vcpus': 1,
-            'root_gb': 10,
-            'ephemeral_gb': 10,
-            'flavorid': 'fake_flavor',
-            'swap': 0,
-            'rxtx_factor': 0.5,
-            'vcpu_weight': 1,
-            'disabled': False,
-            'is_public': True
-        }
-
-    def _create_flavor(self, values, projects=None):
-        v = self._get_base_values()
-        v.update(values)
-        return db.flavor_create(self.ctxt, v, projects)
-
-
 class InstanceActionTestCase(test.TestCase, ModelsObjectComparatorMixin):
     IGNORED_FIELDS = [
         'id',
@@ -3617,6 +3675,35 @@ class InstanceActionTestCase(test.TestCase, ModelsObjectComparatorMixin):
             self.ctxt, uuid1, filters={'changes-since': timestamp})
         self.assertEqual(1, len(actions))
         self._assertEqualListsOfObjects([action2], actions)
+
+    def test_instance_actions_get_with_changes_before(self):
+        """Test list instance actions can support timestamp filter."""
+        uuid1 = uuidsentinel.uuid1
+
+        expected = []
+        extra = {
+            'created_at': timeutils.utcnow()
+        }
+
+        action_values = self._create_action_values(uuid1, extra=extra)
+        action = db.action_start(self.ctxt, action_values)
+        expected.append(action)
+
+        timestamp = timeutils.utcnow()
+        action_values['start_time'] = timestamp
+        action_values['updated_at'] = timestamp
+        action_values['action'] = 'delete'
+        action = db.action_start(self.ctxt, action_values)
+        expected.append(action)
+
+        actions = db.actions_get(self.ctxt, uuid1)
+        self.assertEqual(2, len(actions))
+        self.assertNotEqual(actions[0]['updated_at'],
+                            actions[1]['updated_at'])
+        actions = db.actions_get(
+            self.ctxt, uuid1, filters={'changes-before': timestamp})
+        self.assertEqual(2, len(actions))
+        self._assertEqualListsOfObjects(expected, actions)
 
     def test_instance_actions_get_with_not_found_marker(self):
         self.assertRaises(exception.MarkerNotFound,
@@ -4047,499 +4134,12 @@ class InstanceFaultTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self.assertFalse(mock_filter.called)
 
 
-class InstanceTypeTestCase(BaseInstanceTypeTestCase):
-
-    def test_flavor_create(self):
-        flavor = self._create_flavor({})
-        ignored_keys = ['id', 'deleted', 'deleted_at', 'updated_at',
-                        'created_at', 'extra_specs']
-
-        self.assertIsNotNone(flavor['id'])
-        self._assertEqualObjects(flavor, self._get_base_values(),
-                                 ignored_keys)
-
-    def test_flavor_create_with_projects(self):
-        projects = ['fake-project1', 'fake-project2']
-        flavor = self._create_flavor({}, projects + ['fake-project2'])
-        access = db.flavor_access_get_by_flavor_id(self.ctxt,
-                                                   flavor['flavorid'])
-        self.assertEqual(projects, [x.project_id for x in access])
-
-    def test_flavor_destroy(self):
-        specs1 = {'a': '1', 'b': '2'}
-        flavor1 = self._create_flavor({'name': 'name1', 'flavorid': 'a1',
-                                       'extra_specs': specs1})
-        specs2 = {'c': '4', 'd': '3'}
-        flavor2 = self._create_flavor({'name': 'name2', 'flavorid': 'a2',
-                                       'extra_specs': specs2})
-
-        db.flavor_destroy(self.ctxt, 'a1')
-
-        self.assertRaises(exception.FlavorNotFound,
-                          db.flavor_get, self.ctxt, flavor1['id'])
-        real_specs1 = db.flavor_extra_specs_get(self.ctxt, flavor1['flavorid'])
-        self._assertEqualObjects(real_specs1, {})
-
-        r_flavor2 = db.flavor_get(self.ctxt, flavor2['id'])
-        self._assertEqualObjects(flavor2, r_flavor2, 'extra_specs')
-
-    def test_flavor_destroy_not_found(self):
-        self.assertRaises(exception.FlavorNotFound,
-                          db.flavor_destroy, self.ctxt, 'nonexists')
-
-    def test_flavor_create_duplicate_name(self):
-        self._create_flavor({})
-        self.assertRaises(exception.FlavorExists,
-                          self._create_flavor,
-                          {'flavorid': 'some_random_flavor'})
-
-    def test_flavor_create_duplicate_flavorid(self):
-        self._create_flavor({})
-        self.assertRaises(exception.FlavorIdExists,
-                          self._create_flavor,
-                          {'name': 'some_random_name'})
-
-    def test_flavor_create_with_extra_specs(self):
-        extra_specs = dict(a='abc', b='def', c='ghi')
-        flavor = self._create_flavor({'extra_specs': extra_specs})
-        ignored_keys = ['id', 'deleted', 'deleted_at', 'updated_at',
-                        'created_at', 'extra_specs']
-
-        self._assertEqualObjects(flavor, self._get_base_values(),
-                                 ignored_keys)
-        self._assertEqualObjects(extra_specs, flavor['extra_specs'])
-
-    @mock.patch('sqlalchemy.orm.query.Query.all', return_value=[])
-    def test_flavor_create_with_extra_specs_duplicate(self, mock_all):
-        extra_specs = dict(key='value')
-        flavorid = 'flavorid'
-        self._create_flavor({'flavorid': flavorid, 'extra_specs': extra_specs})
-
-        self.assertRaises(exception.FlavorExtraSpecUpdateCreateFailed,
-                          db.flavor_extra_specs_update_or_create,
-                          self.ctxt, flavorid, extra_specs)
-
-    def test_flavor_get_all(self):
-        # NOTE(boris-42): Remove base instance types
-        for it in db.flavor_get_all(self.ctxt):
-            db.flavor_destroy(self.ctxt, it['flavorid'])
-
-        flavors = [
-            {'root_gb': 600, 'memory_mb': 100, 'disabled': True,
-             'is_public': True, 'name': 'a1', 'flavorid': 'f1'},
-            {'root_gb': 500, 'memory_mb': 200, 'disabled': True,
-             'is_public': True, 'name': 'a2', 'flavorid': 'f2'},
-            {'root_gb': 400, 'memory_mb': 300, 'disabled': False,
-             'is_public': True, 'name': 'a3', 'flavorid': 'f3'},
-            {'root_gb': 300, 'memory_mb': 400, 'disabled': False,
-             'is_public': False, 'name': 'a4', 'flavorid': 'f4'},
-            {'root_gb': 200, 'memory_mb': 500, 'disabled': True,
-             'is_public': False, 'name': 'a5', 'flavorid': 'f5'},
-            {'root_gb': 100, 'memory_mb': 600, 'disabled': True,
-             'is_public': False, 'name': 'a6', 'flavorid': 'f6'}
-        ]
-        flavors = [self._create_flavor(it) for it in flavors]
-
-        lambda_filters = {
-            'min_memory_mb': lambda it, v: it['memory_mb'] >= v,
-            'min_root_gb': lambda it, v: it['root_gb'] >= v,
-            'disabled': lambda it, v: it['disabled'] == v,
-            'is_public': lambda it, v: (v is None or it['is_public'] == v)
-        }
-
-        mem_filts = [{'min_memory_mb': x} for x in [100, 350, 550, 650]]
-        root_filts = [{'min_root_gb': x} for x in [100, 350, 550, 650]]
-        disabled_filts = [{'disabled': x} for x in [True, False]]
-        is_public_filts = [{'is_public': x} for x in [True, False, None]]
-
-        def assert_multi_filter_flavor_get(filters=None):
-            if filters is None:
-                filters = {}
-
-            expected_it = flavors
-            for name, value in filters.items():
-                filt = lambda it: lambda_filters[name](it, value)
-                expected_it = list(filter(filt, expected_it))
-
-            real_it = db.flavor_get_all(self.ctxt, filters=filters)
-            self._assertEqualListsOfObjects(expected_it, real_it)
-
-        # no filter
-        assert_multi_filter_flavor_get()
-
-        # test only with one filter
-        for filt in mem_filts:
-            assert_multi_filter_flavor_get(filt)
-        for filt in root_filts:
-            assert_multi_filter_flavor_get(filt)
-        for filt in disabled_filts:
-            assert_multi_filter_flavor_get(filt)
-        for filt in is_public_filts:
-            assert_multi_filter_flavor_get(filt)
-
-        # test all filters together
-        for mem in mem_filts:
-            for root in root_filts:
-                for disabled in disabled_filts:
-                    for is_public in is_public_filts:
-                        filts = {}
-                        for f in (mem, root, disabled, is_public):
-                            filts.update(f)
-                        assert_multi_filter_flavor_get(filts)
-
-    def test_flavor_get_all_limit_sort(self):
-        def assert_sorted_by_key_dir(sort_key, asc=True):
-            sort_dir = 'asc' if asc else 'desc'
-            results = db.flavor_get_all(self.ctxt, sort_key='name',
-                                        sort_dir=sort_dir)
-            # Manually sort the results as we would expect them
-            expected_results = sorted(results,
-                                      key=lambda item: item['name'],
-                                      reverse=(not asc))
-            self.assertEqual(expected_results, results)
-
-        def assert_sorted_by_key_both_dir(sort_key):
-            assert_sorted_by_key_dir(sort_key, True)
-            assert_sorted_by_key_dir(sort_key, False)
-
-        for attr in ['memory_mb', 'root_gb', 'deleted_at', 'name', 'deleted',
-                     'created_at', 'ephemeral_gb', 'updated_at', 'disabled',
-                     'vcpus', 'swap', 'rxtx_factor', 'is_public', 'flavorid',
-                     'vcpu_weight', 'id']:
-            assert_sorted_by_key_both_dir(attr)
-
-    def test_flavor_get_all_limit(self):
-        flavors = [
-            {'root_gb': 1, 'memory_mb': 100, 'disabled': True,
-             'is_public': False, 'name': 'flavor1', 'flavorid': 'flavor1'},
-            {'root_gb': 100, 'memory_mb': 200, 'disabled': True,
-             'is_public': False, 'name': 'flavor2', 'flavorid': 'flavor2'},
-            {'root_gb': 100, 'memory_mb': 300, 'disabled': True,
-             'is_public': False, 'name': 'flavor3', 'flavorid': 'flavor3'},
-        ]
-        flavors = [self._create_flavor(it) for it in flavors]
-
-        limited_flavors = db.flavor_get_all(self.ctxt, limit=2)
-        self.assertEqual(2, len(limited_flavors))
-
-    def test_flavor_get_all_list_marker(self):
-        flavors = [
-            {'root_gb': 1, 'memory_mb': 100, 'disabled': True,
-             'is_public': False, 'name': 'flavor1', 'flavorid': 'flavor1'},
-            {'root_gb': 100, 'memory_mb': 200, 'disabled': True,
-             'is_public': False, 'name': 'flavor2', 'flavorid': 'flavor2'},
-            {'root_gb': 100, 'memory_mb': 300, 'disabled': True,
-             'is_public': False, 'name': 'flavor3', 'flavorid': 'flavor3'},
-        ]
-        flavors = [self._create_flavor(it) for it in flavors]
-
-        all_flavors = db.flavor_get_all(self.ctxt)
-
-        # Set the 3rd result as the marker
-        marker_flavorid = all_flavors[2]['flavorid']
-        marked_flavors = db.flavor_get_all(self.ctxt, marker=marker_flavorid)
-        # We expect everything /after/ the 3rd result
-        expected_results = all_flavors[3:]
-        self.assertEqual(expected_results, marked_flavors)
-
-    def test_flavor_get_all_marker_not_found(self):
-        self.assertRaises(exception.MarkerNotFound,
-                db.flavor_get_all, self.ctxt, marker='invalid')
-
-    def test_flavor_get(self):
-        flavors = [{'name': 'abc', 'flavorid': '123'},
-                   {'name': 'def', 'flavorid': '456'},
-                   {'name': 'ghi', 'flavorid': '789'}]
-        flavors = [self._create_flavor(t) for t in flavors]
-
-        for flavor in flavors:
-            flavor_by_id = db.flavor_get(self.ctxt, flavor['id'])
-            self._assertEqualObjects(flavor, flavor_by_id)
-
-    def test_flavor_get_non_public(self):
-        flavor = self._create_flavor({'name': 'abc', 'flavorid': '123',
-                                      'is_public': False})
-
-        # Admin can see it
-        flavor_by_id = db.flavor_get(self.ctxt, flavor['id'])
-        self._assertEqualObjects(flavor, flavor_by_id)
-
-        # Regular user can not
-        self.assertRaises(exception.FlavorNotFound, db.flavor_get,
-                self.user_ctxt, flavor['id'])
-
-        # Regular user can see it after being granted access
-        db.flavor_access_add(self.ctxt, flavor['flavorid'],
-                self.user_ctxt.project_id)
-        flavor_by_id = db.flavor_get(self.user_ctxt, flavor['id'])
-        self._assertEqualObjects(flavor, flavor_by_id)
-
-    def test_flavor_get_by_name(self):
-        flavors = [{'name': 'abc', 'flavorid': '123'},
-                   {'name': 'def', 'flavorid': '456'},
-                   {'name': 'ghi', 'flavorid': '789'}]
-        flavors = [self._create_flavor(t) for t in flavors]
-
-        for flavor in flavors:
-            flavor_by_name = db.flavor_get_by_name(self.ctxt, flavor['name'])
-            self._assertEqualObjects(flavor, flavor_by_name)
-
-    def test_flavor_get_by_name_not_found(self):
-        self._create_flavor({})
-        self.assertRaises(exception.FlavorNotFoundByName,
-                          db.flavor_get_by_name, self.ctxt, 'nonexists')
-
-    def test_flavor_get_by_name_non_public(self):
-        flavor = self._create_flavor({'name': 'abc', 'flavorid': '123',
-                                      'is_public': False})
-
-        # Admin can see it
-        flavor_by_name = db.flavor_get_by_name(self.ctxt, flavor['name'])
-        self._assertEqualObjects(flavor, flavor_by_name)
-
-        # Regular user can not
-        self.assertRaises(exception.FlavorNotFoundByName,
-                db.flavor_get_by_name, self.user_ctxt,
-                flavor['name'])
-
-        # Regular user can see it after being granted access
-        db.flavor_access_add(self.ctxt, flavor['flavorid'],
-                self.user_ctxt.project_id)
-        flavor_by_name = db.flavor_get_by_name(self.user_ctxt, flavor['name'])
-        self._assertEqualObjects(flavor, flavor_by_name)
-
-    def test_flavor_get_by_flavor_id(self):
-        flavors = [{'name': 'abc', 'flavorid': '123'},
-                   {'name': 'def', 'flavorid': '456'},
-                   {'name': 'ghi', 'flavorid': '789'}]
-        flavors = [self._create_flavor(t) for t in flavors]
-
-        for flavor in flavors:
-            params = (self.ctxt, flavor['flavorid'])
-            flavor_by_flavorid = db.flavor_get_by_flavor_id(*params)
-            self._assertEqualObjects(flavor, flavor_by_flavorid)
-
-    def test_flavor_get_by_flavor_not_found(self):
-        self._create_flavor({})
-        self.assertRaises(exception.FlavorNotFound,
-                          db.flavor_get_by_flavor_id,
-                          self.ctxt, 'nonexists')
-
-    def test_flavor_get_by_flavor_id_non_public(self):
-        flavor = self._create_flavor({'name': 'abc', 'flavorid': '123',
-                                      'is_public': False})
-
-        # Admin can see it
-        flavor_by_fid = db.flavor_get_by_flavor_id(self.ctxt,
-                                                   flavor['flavorid'])
-        self._assertEqualObjects(flavor, flavor_by_fid)
-
-        # Regular user can not
-        self.assertRaises(exception.FlavorNotFound,
-                db.flavor_get_by_flavor_id, self.user_ctxt,
-                flavor['flavorid'])
-
-        # Regular user can see it after being granted access
-        db.flavor_access_add(self.ctxt, flavor['flavorid'],
-                self.user_ctxt.project_id)
-        flavor_by_fid = db.flavor_get_by_flavor_id(self.user_ctxt,
-                                                   flavor['flavorid'])
-        self._assertEqualObjects(flavor, flavor_by_fid)
-
-    def test_flavor_get_by_flavor_id_deleted(self):
-        flavor = self._create_flavor({'name': 'abc', 'flavorid': '123'})
-
-        db.flavor_destroy(self.ctxt, '123')
-
-        flavor_by_fid = db.flavor_get_by_flavor_id(self.ctxt,
-                flavor['flavorid'], read_deleted='yes')
-        self.assertEqual(flavor['id'], flavor_by_fid['id'])
-
-    def test_flavor_get_by_flavor_id_deleted_and_recreate(self):
-        # NOTE(wingwj): Aims to test difference between mysql and postgresql
-        # for bug 1288636
-        param_dict = {'name': 'abc', 'flavorid': '123'}
-
-        self._create_flavor(param_dict)
-        db.flavor_destroy(self.ctxt, '123')
-
-        # Recreate the flavor with the same params
-        flavor = self._create_flavor(param_dict)
-
-        flavor_by_fid = db.flavor_get_by_flavor_id(self.ctxt,
-                flavor['flavorid'], read_deleted='yes')
-        self.assertEqual(flavor['id'], flavor_by_fid['id'])
-
-
-class InstanceTypeExtraSpecsTestCase(BaseInstanceTypeTestCase):
-
-    def setUp(self):
-        super(InstanceTypeExtraSpecsTestCase, self).setUp()
-        values = ({'name': 'n1', 'flavorid': 'f1',
-                   'extra_specs': dict(a='a', b='b', c='c')},
-                  {'name': 'n2', 'flavorid': 'f2',
-                   'extra_specs': dict(d='d', e='e', f='f')})
-
-        # NOTE(boris-42): We have already tested flavor_create method
-        #                 with extra_specs in InstanceTypeTestCase.
-        self.flavors = [self._create_flavor(v) for v in values]
-
-    def test_flavor_extra_specs_get(self):
-        for it in self.flavors:
-            real_specs = db.flavor_extra_specs_get(self.ctxt, it['flavorid'])
-            self._assertEqualObjects(it['extra_specs'], real_specs)
-
-    def test_flavor_extra_specs_delete(self):
-        for it in self.flavors:
-            specs = it['extra_specs']
-            key = list(specs.keys())[0]
-            del specs[key]
-            db.flavor_extra_specs_delete(self.ctxt, it['flavorid'], key)
-            real_specs = db.flavor_extra_specs_get(self.ctxt, it['flavorid'])
-            self._assertEqualObjects(it['extra_specs'], real_specs)
-
-    def test_flavor_extra_specs_delete_failed(self):
-        for it in self.flavors:
-            self.assertRaises(exception.FlavorExtraSpecsNotFound,
-                          db.flavor_extra_specs_delete,
-                          self.ctxt, it['flavorid'], 'dummy')
-
-    def test_flavor_extra_specs_update_or_create(self):
-        for it in self.flavors:
-            current_specs = it['extra_specs']
-            current_specs.update(dict(b='b1', c='c1', d='d1', e='e1'))
-            params = (self.ctxt, it['flavorid'], current_specs)
-            db.flavor_extra_specs_update_or_create(*params)
-            real_specs = db.flavor_extra_specs_get(self.ctxt, it['flavorid'])
-            self._assertEqualObjects(current_specs, real_specs)
-
-    def test_flavor_extra_specs_update_or_create_flavor_not_found(self):
-        self.assertRaises(exception.FlavorNotFound,
-                          db.flavor_extra_specs_update_or_create,
-                          self.ctxt, 'nonexists', {})
-
-    def test_flavor_extra_specs_update_or_create_retry(self):
-
-        def counted():
-            def get_id(context, flavorid):
-                get_id.counter += 1
-                raise db_exc.DBDuplicateEntry
-            get_id.counter = 0
-            return get_id
-
-        get_id = counted()
-        self.stub_out('nova.db.sqlalchemy.api._flavor_get_id_from_flavor',
-                      get_id)
-        self.assertRaises(exception.FlavorExtraSpecUpdateCreateFailed,
-                          sqlalchemy_api.flavor_extra_specs_update_or_create,
-                          self.ctxt, 1, {}, 5)
-        self.assertEqual(get_id.counter, 5)
-
-
-class InstanceTypeAccessTestCase(BaseInstanceTypeTestCase):
-
-    def _create_flavor_access(self, flavor_id, project_id):
-        return db.flavor_access_add(self.ctxt, flavor_id, project_id)
-
-    def test_flavor_access_get_by_flavor_id(self):
-        flavors = ({'name': 'n1', 'flavorid': 'f1'},
-                   {'name': 'n2', 'flavorid': 'f2'})
-        it1, it2 = tuple((self._create_flavor(v) for v in flavors))
-
-        access_it1 = [self._create_flavor_access(it1['flavorid'], 'pr1'),
-                      self._create_flavor_access(it1['flavorid'], 'pr2')]
-
-        access_it2 = [self._create_flavor_access(it2['flavorid'], 'pr1')]
-
-        for it, access_it in zip((it1, it2), (access_it1, access_it2)):
-            params = (self.ctxt, it['flavorid'])
-            real_access_it = db.flavor_access_get_by_flavor_id(*params)
-            self._assertEqualListsOfObjects(access_it, real_access_it)
-
-    def test_flavor_access_get_by_flavor_id_flavor_not_found(self):
-        self.assertRaises(exception.FlavorNotFound,
-                          db.flavor_get_by_flavor_id,
-                          self.ctxt, 'nonexists')
-
-    def test_flavor_access_add(self):
-        flavor = self._create_flavor({'flavorid': 'f1'})
-        project_id = 'p1'
-
-        access = self._create_flavor_access(flavor['flavorid'], project_id)
-        # NOTE(boris-42): Check that flavor_access_add doesn't fail and
-        #                 returns correct value. This is enough because other
-        #                 logic is checked by other methods.
-        self.assertIsNotNone(access['id'])
-        self.assertEqual(access['instance_type_id'], flavor['id'])
-        self.assertEqual(access['project_id'], project_id)
-
-    def test_flavor_access_add_to_non_existing_flavor(self):
-        self.assertRaises(exception.FlavorNotFound,
-                          self._create_flavor_access,
-                          'nonexists', 'does_not_matter')
-
-    def test_flavor_access_add_duplicate_project_id_flavor(self):
-        flavor = self._create_flavor({'flavorid': 'f1'})
-        params = (flavor['flavorid'], 'p1')
-
-        self._create_flavor_access(*params)
-        self.assertRaises(exception.FlavorAccessExists,
-                          self._create_flavor_access, *params)
-
-    def test_flavor_access_remove(self):
-        flavors = ({'name': 'n1', 'flavorid': 'f1'},
-                   {'name': 'n2', 'flavorid': 'f2'})
-        it1, it2 = tuple((self._create_flavor(v) for v in flavors))
-
-        access_it1 = [self._create_flavor_access(it1['flavorid'], 'pr1'),
-                      self._create_flavor_access(it1['flavorid'], 'pr2')]
-
-        access_it2 = [self._create_flavor_access(it2['flavorid'], 'pr1')]
-
-        db.flavor_access_remove(self.ctxt, it1['flavorid'],
-                                access_it1[1]['project_id'])
-
-        for it, access_it in zip((it1, it2), (access_it1[:1], access_it2)):
-            params = (self.ctxt, it['flavorid'])
-            real_access_it = db.flavor_access_get_by_flavor_id(*params)
-            self._assertEqualListsOfObjects(access_it, real_access_it)
-
-    def test_flavor_access_remove_flavor_not_found(self):
-        self.assertRaises(exception.FlavorNotFound,
-                          db.flavor_access_remove,
-                          self.ctxt, 'nonexists', 'does_not_matter')
-
-    def test_flavor_access_remove_access_not_found(self):
-        flavor = self._create_flavor({'flavorid': 'f1'})
-        params = (flavor['flavorid'], 'p1')
-        self._create_flavor_access(*params)
-        self.assertRaises(exception.FlavorAccessNotFound,
-                          db.flavor_access_remove,
-                          self.ctxt, flavor['flavorid'], 'p2')
-
-    def test_flavor_access_removed_after_flavor_destroy(self):
-        flavor1 = self._create_flavor({'flavorid': 'f1', 'name': 'n1'})
-        flavor2 = self._create_flavor({'flavorid': 'f2', 'name': 'n2'})
-        values = [
-            (flavor1['flavorid'], 'p1'),
-            (flavor1['flavorid'], 'p2'),
-            (flavor2['flavorid'], 'p3')
-        ]
-        for v in values:
-            self._create_flavor_access(*v)
-
-        db.flavor_destroy(self.ctxt, flavor1['flavorid'])
-
-        p = (self.ctxt, flavor1['flavorid'])
-        self.assertEqual(0, len(db.flavor_access_get_by_flavor_id(*p)))
-        p = (self.ctxt, flavor2['flavorid'])
-        self.assertEqual(1, len(db.flavor_access_get_by_flavor_id(*p)))
-        db.flavor_destroy(self.ctxt, flavor2['flavorid'])
-        self.assertEqual(0, len(db.flavor_access_get_by_flavor_id(*p)))
-
-
 @mock.patch('time.sleep', new=lambda x: None)
-class FixedIPTestCase(BaseInstanceTypeTestCase):
+class FixedIPTestCase(test.TestCase, ModelsObjectComparatorMixin):
+    def setUp(self):
+        super(FixedIPTestCase, self).setUp()
+        self.ctxt = context.get_admin_context()
+
     def _timeout_test(self, ctxt, timeout, multi_host):
         instance = db.instance_create(ctxt, dict(host='foo'))
         net = db.network_create_safe(ctxt, dict(multi_host=multi_host,
@@ -7897,7 +7497,7 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
     @mock.patch("nova.db.sqlalchemy.api.compute_node_get_model")
     def test_dbapi_compute_node_get_model(self, mock_get_model):
         cid = self.item["id"]
-        db.api.compute_node_get_model(self.ctxt, cid)
+        db.compute_node_get_model(self.ctxt, cid)
         mock_get_model.assert_called_once_with(self.ctxt, cid)
 
     @mock.patch("nova.db.sqlalchemy.api.model_query")
@@ -8127,7 +7727,7 @@ class CellTestCase(test.TestCase, ModelsObjectComparatorMixin):
         }
 
     def _cell_value_modify(self, value, step):
-        if isinstance(value, str):
+        if isinstance(value, six.string_types):
             return value + str(step)
         elif isinstance(value, float):
             return value + step + 0.6
@@ -9023,288 +8623,6 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
             'shadow_instances',
             'shadow_instance_id_mappings'
         )
-
-
-class InstanceGroupDBApiTestCase(test.TestCase, ModelsObjectComparatorMixin):
-    def setUp(self):
-        super(InstanceGroupDBApiTestCase, self).setUp()
-        self.user_id = 'fake_user'
-        self.project_id = 'fake_project'
-        self.new_user_id = 'new_user_id'
-        self.new_project_id = 'new_project_id'
-        self.context = context.RequestContext(self.user_id, self.project_id)
-        self.new_context = context.RequestContext(self.new_user_id,
-                                                  self.new_project_id)
-
-    def _get_default_values(self):
-        return {'name': 'fake_name',
-                'user_id': self.user_id,
-                'project_id': self.project_id}
-
-    def _get_new_default_values(self):
-        return {'name': 'fake_new_name',
-                'user_id': self.new_user_id,
-                'project_id': self.new_project_id}
-
-    def _create_instance_group(self, context, values, policies=None,
-                               members=None):
-        return db.instance_group_create(context, values, policies=policies,
-                                        members=members)
-
-    def test_instance_group_create_no_key(self):
-        values = self._get_default_values()
-        result = self._create_instance_group(self.context, values)
-        ignored_keys = ['id', 'uuid', 'deleted', 'deleted_at', 'updated_at',
-                        'created_at']
-        self._assertEqualObjects(result, values, ignored_keys)
-        self.assertTrue(uuidutils.is_uuid_like(result['uuid']))
-
-    def test_instance_group_create_with_key(self):
-        values = self._get_default_values()
-        values['uuid'] = 'fake_id'
-        result = self._create_instance_group(self.context, values)
-        ignored_keys = ['id', 'deleted', 'deleted_at', 'updated_at',
-                        'created_at']
-        self._assertEqualObjects(result, values, ignored_keys)
-
-    def test_instance_group_create_with_same_key(self):
-        values = self._get_default_values()
-        values['uuid'] = 'fake_id'
-        self._create_instance_group(self.context, values)
-        self.assertRaises(exception.InstanceGroupIdExists,
-                          self._create_instance_group, self.context, values)
-
-    def test_instance_group_get(self):
-        values = self._get_default_values()
-        result1 = self._create_instance_group(self.context, values)
-        result2 = db.instance_group_get(self.context, result1['uuid'])
-        self._assertEqualObjects(result1, result2)
-
-    def test_instance_group_update_simple(self):
-        values = self._get_default_values()
-        result1 = self._create_instance_group(self.context, values)
-        values = {'name': 'new_name'}
-        db.instance_group_update(self.context, result1['uuid'],
-                                 values)
-        result2 = db.instance_group_get(self.context, result1['uuid'])
-        self.assertEqual(result1['uuid'], result2['uuid'])
-        ignored_keys = ['id', 'uuid', 'deleted', 'deleted_at', 'updated_at',
-                        'created_at', 'project_id', 'user_id']
-        self._assertEqualObjects(result2, values, ignored_keys)
-
-    def test_instance_group_delete(self):
-        values = self._get_default_values()
-        result = self._create_instance_group(self.context, values)
-        db.instance_group_delete(self.context, result['uuid'])
-        self.assertRaises(exception.InstanceGroupNotFound,
-                          db.instance_group_delete, self.context,
-                          result['uuid'])
-
-    def test_instance_group_get_nonexistent(self):
-        self.assertRaises(exception.InstanceGroupNotFound,
-                          db.instance_group_get,
-                          self.context,
-                          'nonexistent')
-
-    def test_instance_group_delete_nonexistent(self):
-        self.assertRaises(exception.InstanceGroupNotFound,
-                          db.instance_group_delete,
-                          self.context,
-                          'nonexistent')
-
-    def test_instance_group_get_all(self):
-        groups = db.instance_group_get_all(self.context)
-        self.assertEqual(0, len(groups))
-        value = self._get_default_values()
-        result1 = self._create_instance_group(self.context, value)
-        groups = db.instance_group_get_all(self.context)
-        self.assertEqual(1, len(groups))
-        value = self._get_default_values()
-        result2 = self._create_instance_group(self.context, value)
-        groups = db.instance_group_get_all(self.context)
-        results = [result1, result2]
-        self._assertEqualListsOfObjects(results, groups)
-
-    def test_instance_group_get_all_by_project_id(self):
-        groups = db.instance_group_get_all_by_project_id(self.context,
-                                                         'invalid_project_id')
-        self.assertEqual(0, len(groups))
-        values = self._get_default_values()
-        result1 = self._create_instance_group(self.context, values)
-        groups = db.instance_group_get_all_by_project_id(self.context,
-                                                         self.project_id)
-        self.assertEqual(1, len(groups))
-        values = self._get_new_default_values()
-        result2 = self._create_instance_group(self.new_context, values)
-        groups = db.instance_group_get_all(self.context)
-        groups.extend(db.instance_group_get_all(self.new_context))
-        results = [result1, result2]
-        self._assertEqualListsOfObjects(results, groups)
-        projects = [{'context': self.context, 'name': self.project_id,
-                     'value': [result1]},
-                    {'context': self.new_context, 'name': self.new_project_id,
-                     'value': [result2]}]
-        for project in projects:
-            groups = db.instance_group_get_all_by_project_id(
-                project['context'], project['name'])
-            self._assertEqualListsOfObjects(project['value'], groups)
-
-    def test_instance_group_update(self):
-        values = self._get_default_values()
-        result = self._create_instance_group(self.context, values)
-        ignored_keys = ['id', 'uuid', 'deleted', 'deleted_at', 'updated_at',
-                        'created_at']
-        self._assertEqualObjects(result, values, ignored_keys)
-        self.assertTrue(uuidutils.is_uuid_like(result['uuid']))
-        id = result['uuid']
-        values = self._get_default_values()
-        values['name'] = 'new_fake_name'
-        db.instance_group_update(self.context, id, values)
-        result = db.instance_group_get(self.context, id)
-        self.assertEqual(result['name'], 'new_fake_name')
-        # update update members
-        values = self._get_default_values()
-        members = ['instance_id1', 'instance_id2']
-        values['members'] = members
-        db.instance_group_update(self.context, id, values)
-        result = db.instance_group_get(self.context, id)
-        self._assertEqualListsOfPrimitivesAsSets(result['members'], members)
-        # update update policies
-        values = self._get_default_values()
-        policies = ['policy1', 'policy2']
-        values['policies'] = policies
-        db.instance_group_update(self.context, id, values)
-        result = db.instance_group_get(self.context, id)
-        self._assertEqualListsOfPrimitivesAsSets(result['policies'], policies)
-        # test invalid ID
-        self.assertRaises(exception.InstanceGroupNotFound,
-                          db.instance_group_update, self.context,
-                          'invalid_id', values)
-
-    def test_instance_group_get_by_instance(self):
-        values = self._get_default_values()
-        group1 = self._create_instance_group(self.context, values)
-
-        members = ['instance_id1', 'instance_id2']
-        db.instance_group_members_add(self.context, group1.uuid, members)
-
-        group2 = db.instance_group_get_by_instance(self.context,
-                                                   'instance_id1')
-
-        self.assertEqual(group2.uuid, group1.uuid)
-
-    def test_instance_group_get_by_other_project_user(self):
-        values = self._get_default_values()
-        result = self._create_instance_group(self.context, values)
-        self.assertRaises(exception.InstanceGroupNotFound,
-                          db.instance_group_get,
-                          self.new_context, result['uuid'])
-
-    def test_instance_group_delete_by_other_project_user(self):
-        values = self._get_default_values()
-        result = self._create_instance_group(self.context, values)
-        self.assertRaises(exception.InstanceGroupNotFound,
-                          db.instance_group_delete,
-                          self.new_context, result['uuid'])
-
-    def test_instance_group_get_by_admin(self):
-        values = self._get_default_values()
-        result = self._create_instance_group(self.context, values)
-        group = db.instance_group_get(context.get_admin_context(),
-                                      result['uuid'])
-        self.assertEqual(result['uuid'], group.uuid)
-        self.assertEqual(values['user_id'], group.user_id)
-        self.assertEqual(values['project_id'], group.project_id)
-
-    def test_instance_group_delete_by_admin(self):
-        values = self._get_default_values()
-        result = self._create_instance_group(self.context, values)
-        db.instance_group_delete(context.get_admin_context(),
-                                 result['uuid'])
-
-
-class InstanceGroupMembersDBApiTestCase(InstanceGroupDBApiTestCase):
-    def test_instance_group_members_on_create(self):
-        values = self._get_default_values()
-        values['uuid'] = 'fake_id'
-        members = ['instance_id1', 'instance_id2']
-        result = self._create_instance_group(self.context, values,
-                                             members=members)
-        ignored_keys = ['id', 'deleted', 'deleted_at', 'updated_at',
-                        'created_at']
-        self._assertEqualObjects(result, values, ignored_keys)
-        self._assertEqualListsOfPrimitivesAsSets(result['members'], members)
-
-    def test_instance_group_members_add(self):
-        values = self._get_default_values()
-        values['uuid'] = 'fake_id'
-        result = self._create_instance_group(self.context, values)
-        id = result['uuid']
-        members = db.instance_group_members_get(self.context, id)
-        self.assertEqual(members, [])
-        members2 = ['instance_id1', 'instance_id2']
-        db.instance_group_members_add(self.context, id, members2)
-        members = db.instance_group_members_get(self.context, id)
-        self._assertEqualListsOfPrimitivesAsSets(members, members2)
-
-    def test_instance_group_members_update(self):
-        values = self._get_default_values()
-        values['uuid'] = 'fake_id'
-        result = self._create_instance_group(self.context, values)
-        id = result['uuid']
-        members2 = ['instance_id1', 'instance_id2']
-        db.instance_group_members_add(self.context, id, members2)
-        members = db.instance_group_members_get(self.context, id)
-        self._assertEqualListsOfPrimitivesAsSets(members, members2)
-        # check add with existing keys
-        members3 = ['instance_id1', 'instance_id2', 'instance_id3']
-        db.instance_group_members_add(self.context, id, members3)
-        members = db.instance_group_members_get(self.context, id)
-        self._assertEqualListsOfPrimitivesAsSets(members, members3)
-
-    def test_instance_group_members_delete(self):
-        values = self._get_default_values()
-        values['uuid'] = 'fake_id'
-        result = self._create_instance_group(self.context, values)
-        id = result['uuid']
-        members3 = ['instance_id1', 'instance_id2', 'instance_id3']
-        db.instance_group_members_add(self.context, id, members3)
-        members = db.instance_group_members_get(self.context, id)
-        self._assertEqualListsOfPrimitivesAsSets(members, members3)
-        for instance_id in members3[:]:
-            db.instance_group_member_delete(self.context, id, instance_id)
-            members3.remove(instance_id)
-            members = db.instance_group_members_get(self.context, id)
-            self._assertEqualListsOfPrimitivesAsSets(members, members3)
-
-    def test_instance_group_members_invalid_ids(self):
-        values = self._get_default_values()
-        result = self._create_instance_group(self.context, values)
-        id = result['uuid']
-        self.assertRaises(exception.InstanceGroupNotFound,
-                          db.instance_group_members_get,
-                          self.context, 'invalid')
-        self.assertRaises(exception.InstanceGroupNotFound,
-                          db.instance_group_member_delete, self.context,
-                          'invalidid', 'instance_id1')
-        members = ['instance_id1', 'instance_id2']
-        db.instance_group_members_add(self.context, id, members)
-        self.assertRaises(exception.InstanceGroupMemberNotFound,
-                          db.instance_group_member_delete,
-                          self.context, id, 'invalid_id')
-
-
-class InstanceGroupPoliciesDBApiTestCase(InstanceGroupDBApiTestCase):
-    def test_instance_group_policies_on_create(self):
-        values = self._get_default_values()
-        values['uuid'] = 'fake_id'
-        policies = ['policy1', 'policy2']
-        result = self._create_instance_group(self.context, values,
-                                             policies=policies)
-        ignored_keys = ['id', 'deleted', 'deleted_at', 'updated_at',
-                        'created_at']
-        self._assertEqualObjects(result, values, ignored_keys)
-        self._assertEqualListsOfPrimitivesAsSets(result['policies'], policies)
 
 
 class PciDeviceDBApiTestCase(test.TestCase, ModelsObjectComparatorMixin):

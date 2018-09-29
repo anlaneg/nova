@@ -769,6 +769,11 @@ def instance_get_all(context, columns_to_join=None):
     return IMPL.instance_get_all(context, columns_to_join=columns_to_join)
 
 
+def instance_get_all_uuids_by_host(context, host):
+    """Get a list of instance uuids on host."""
+    return IMPL.instance_get_all_uuids_by_host(context, host)
+
+
 def instance_get_all_by_filters(context, filters, sort_key='created_at',
                                 sort_dir='desc', limit=None, marker=None,
                                 columns_to_join=None):
@@ -898,65 +903,6 @@ def instance_remove_security_group(context, instance_id, security_group_id):
 
 
 ####################
-
-
-def instance_group_create(context, values, policies=None, members=None):
-    """Create a new group.
-
-    Each group will receive a unique uuid. This will be used for access to the
-    group.
-    """
-    return IMPL.instance_group_create(context, values, policies, members)
-
-
-def instance_group_get(context, group_uuid):
-    """Get a specific group by id."""
-    return IMPL.instance_group_get(context, group_uuid)
-
-
-def instance_group_get_by_instance(context, instance_uuid):
-    """Get the group an instance is a member of."""
-    return IMPL.instance_group_get_by_instance(context, instance_uuid)
-
-
-def instance_group_update(context, group_uuid, values):
-    """Update the attributes of an group."""
-    return IMPL.instance_group_update(context, group_uuid, values)
-
-
-def instance_group_delete(context, group_uuid):
-    """Delete an group."""
-    return IMPL.instance_group_delete(context, group_uuid)
-
-
-def instance_group_get_all(context):
-    """Get all groups."""
-    return IMPL.instance_group_get_all(context)
-
-
-def instance_group_get_all_by_project_id(context, project_id):
-    """Get all groups for a specific project_id."""
-    return IMPL.instance_group_get_all_by_project_id(context, project_id)
-
-
-def instance_group_members_add(context, group_uuid, members,
-                               set_delete=False):
-    """Add members to the group."""
-    return IMPL.instance_group_members_add(context, group_uuid, members,
-                                           set_delete=set_delete)
-
-
-def instance_group_member_delete(context, group_uuid, instance_id):
-    """Delete a specific member from the group."""
-    return IMPL.instance_group_member_delete(context, group_uuid, instance_id)
-
-
-def instance_group_members_get(context, group_uuid):
-    """Get the members from the group."""
-    return IMPL.instance_group_members_get(context, group_uuid)
-
-
-###################
 
 
 def instance_info_cache_get(context, instance_uuid):
@@ -1513,77 +1459,6 @@ def console_get(context, console_id, instance_uuid=None):
     return IMPL.console_get(context, console_id, instance_uuid)
 
 ##################
-
-
-def flavor_create(context, values, projects=None):
-    """Create a new instance type."""
-    return IMPL.flavor_create(context, values, projects=projects)
-
-
-def flavor_get_all(context, inactive=False, filters=None, sort_key='flavorid',
-                   sort_dir='asc', limit=None, marker=None):
-    """Get all instance flavors."""
-    return IMPL.flavor_get_all(
-        context, inactive=inactive, filters=filters, sort_key=sort_key,
-        sort_dir=sort_dir, limit=limit, marker=marker)
-
-
-def flavor_get(context, id):
-    """Get instance type by id."""
-    return IMPL.flavor_get(context, id)
-
-
-def flavor_get_by_name(context, name):
-    """Get instance type by name."""
-    return IMPL.flavor_get_by_name(context, name)
-
-
-def flavor_get_by_flavor_id(context, id, read_deleted=None):
-    """Get instance type by flavor id."""
-    return IMPL.flavor_get_by_flavor_id(context, id, read_deleted)
-
-
-def flavor_destroy(context, flavor_id):
-    """Delete an instance type."""
-    return IMPL.flavor_destroy(context, flavor_id)
-
-
-def flavor_access_get_by_flavor_id(context, flavor_id):
-    """Get flavor access by flavor id."""
-    return IMPL.flavor_access_get_by_flavor_id(context, flavor_id)
-
-
-def flavor_access_add(context, flavor_id, project_id):
-    """Add flavor access for project."""
-    return IMPL.flavor_access_add(context, flavor_id, project_id)
-
-
-def flavor_access_remove(context, flavor_id, project_id):
-    """Remove flavor access for project."""
-    return IMPL.flavor_access_remove(context, flavor_id, project_id)
-
-
-def flavor_extra_specs_get(context, flavor_id):
-    """Get all extra specs for an instance type."""
-    return IMPL.flavor_extra_specs_get(context, flavor_id)
-
-
-def flavor_extra_specs_delete(context, flavor_id, key):
-    """Delete the given extra specs item."""
-    IMPL.flavor_extra_specs_delete(context, flavor_id, key)
-
-
-def flavor_extra_specs_update_or_create(context, flavor_id,
-                                               extra_specs):
-    """Create or update instance type extra specs.
-
-    This adds or modifies the key/value pairs specified in the
-    extra specs dict argument
-    """
-    IMPL.flavor_extra_specs_update_or_create(context, flavor_id,
-                                                    extra_specs)
-
-####################
 
 
 def pci_device_get_by_addr(context, node_id, dev_addr):

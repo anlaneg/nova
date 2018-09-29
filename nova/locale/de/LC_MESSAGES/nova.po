@@ -15,7 +15,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2018-02-17 16:08+0000\n"
+"POT-Creation-Date: 2018-09-21 04:59+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -25,7 +25,7 @@ msgstr ""
 "Language-Team: German\n"
 "Plural-Forms: nplurals=2; plural=(n != 1)\n"
 "Generated-By: Babel 2.2.0\n"
-"X-Generator: Zanata 3.9.6\n"
+"X-Generator: Zanata 4.3.3\n"
 
 #, python-format
 msgid "%(address)s is not a valid IP address."
@@ -65,14 +65,6 @@ msgstr ""
 "Stderr: %(stderr)r"
 
 #, python-format
-msgid ""
-"%(event_type)s is not a versioned notification and not whitelisted. See ./"
-"doc/source/notification.rst"
-msgstr ""
-"%(event_type)s ist keine versionierte Benachrichtigung und nicht in der "
-"Zulassungsliste enthalten. Siehe ./doc/source/notification.rst"
-
-#, python-format
 msgid "%(field)s should not be part of the updates."
 msgstr "%(field)s sollte nicht Teil der Aktualisierung sein."
 
@@ -84,14 +76,6 @@ msgstr "%(key)s muss eine Ganzzahl sein."
 msgid "%(memsize)d MB of memory assigned, but expected %(memtotal)d MB"
 msgstr ""
 "%(memsize)d MB Speicher zugewiesen, erwartet werden jedoch %(memtotal)d MB"
-
-#, python-format
-msgid "%(name)s has a minimum character requirement of %(min_length)s."
-msgstr "Für %(name)s sind mindestens %(min_length)s Zeichen erforderlich."
-
-#, python-format
-msgid "%(name)s has more than %(max_length)s characters."
-msgstr "%(name)s hast mehr als %(max_length)s Zeichen."
 
 #, python-format
 msgid "%(path)s is not on local storage: %(reason)s"
@@ -135,10 +119,6 @@ msgstr "%s unterstützt kein Anschließen von Platten im laufenden Betrieb."
 #, python-format
 msgid "%s format is not supported"
 msgstr "%s-Format wird nicht unterstützt"
-
-#, python-format
-msgid "%s is not a string or unicode"
-msgstr "%s ist keine Zeichenkette oder Unicode"
 
 #, python-format
 msgid "%s is not supported."
@@ -536,15 +516,6 @@ msgstr ""
 "werden"
 
 #, python-format
-msgid ""
-"Cannot block migrate instance %(uuid)s with mapped volumes. Selective block "
-"device migration feature requires libvirt version %(libvirt_ver)s"
-msgstr ""
-"Es kann keine Blockmigration für die Instanz %(uuid)s mit zugeordneten "
-"Datenträgern durchgeführt werden. Das ausgewählte Feature für "
-"Blockgerätemigration setzt libvirt-Version %(libvirt_ver)s voraus."
-
-#, python-format
 msgid "Cannot call %(method)s on orphaned %(objtype)s object"
 msgstr ""
 "%(method)s kann nicht für ein verwaistes %(objtype)s-Objekt aufgerufen werden"
@@ -787,9 +758,6 @@ msgstr "Abbild %(image_id)s konnte nicht abgerufen werden"
 msgid "Could not find a handler for %(driver_type)s volume."
 msgstr "Konnte keinen Handler finden für %(driver_type)s Datenträger."
 
-msgid "Could not find another compute"
-msgstr "Es konnte kein anderer Rechenknoten gefunden werden"
-
 #, python-format
 msgid "Could not find binary %(binary)s on host %(host)s."
 msgstr ""
@@ -837,9 +805,6 @@ msgstr ""
 "Erstellung der virtuellen Schnittstelle mit eindeutiger MAC-Adresse "
 "fehlgeschlagen."
 
-msgid "DNS entries not found."
-msgstr "DNS-Einträge nicht gefunden."
-
 msgid "DNS1"
 msgstr "DNS1"
 
@@ -859,13 +824,6 @@ msgstr "Standard-PBM-Richtlinie ist erforderlich, wenn PBM aktiviert ist."
 #, python-format
 msgid "Deleted %(records)d records from table '%(table_name)s'."
 msgstr "%(records)d Datensätze aus Tabelle '%(table_name)s' gelöscht."
-
-msgid "Deleting by fixed_range is not supported with the NeutronManager"
-msgstr "Löschen über fixed_range wird von NeutronManager nicht unterstützt"
-
-#, python-format
-msgid "Destination host:%s must be in the same aggregate as the source server"
-msgstr "Zielhost: %s muss im selben Aggregat sein wie Quellenserver"
 
 #, python-format
 msgid "Detected existing vlan with id %(vlan)d"
@@ -1249,20 +1207,8 @@ msgstr ""
 "Feste IP %(ip)s ist keine gültige IP Adresse  für Netzwerk %(network_id)s."
 
 #, python-format
-msgid "Fixed IP %s has been deleted"
-msgstr "Feste IP %s wurde gelöscht"
-
-#, python-format
 msgid "Fixed IP %s is already in use."
 msgstr "Feste IP %s wird bereits verwendet."
-
-#, python-format
-msgid "Fixed IP %s not found"
-msgstr "Feste IP %s nicht gefunden"
-
-#, python-format
-msgid "Fixed IP %s not valid"
-msgstr "Feste IP %s nicht gültig"
 
 #, python-format
 msgid ""
@@ -1431,10 +1377,6 @@ msgstr ""
 "Es nicht zulässig, den Versionswert der Anzahl der seriellen Ports, die in "
 "den Imagemetadaten übergeben werden, zu überschreiten. "
 
-#, python-format
-msgid "Found no PIF for device %s"
-msgstr "Kein PIF für Gerät %s gefunden"
-
 msgid "Found no disk to snapshot."
 msgstr "Es wurde keine Platte für eine Momentaufnahme gefunden."
 
@@ -1574,22 +1516,6 @@ msgstr ""
 msgid "Image that the instance was started with could not be found."
 msgstr ""
 "Image, mit dem die Instanz gestartet wurde, konnte nicht gefunden werden."
-
-#, python-format
-msgid ""
-"Image vCPU limits %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"Image-vCPU-Grenzwerte %(sockets)d:%(cores)d:%(threads)d überschreiten die "
-"zugelassenen Werte %(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-
-#, python-format
-msgid ""
-"Image vCPU topology %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"Image-vCPU-Topologie %(sockets)d:%(cores)d:%(threads)d überschreitet den "
-"zulässigen Grenzwert %(maxsockets)d:%(maxcores)d:%(maxthreads)d"
 
 #, python-format
 msgid "Image's config drive option '%(config_drive)s' is invalid"
@@ -1770,15 +1696,9 @@ msgstr "Instanz ist bereits im Rettungsmodus: %s"
 msgid "Instance is not a member of specified network"
 msgstr "Instanz ist nicht Mitglied des angegebenen Netzes"
 
-msgid "Instance recreate is not supported."
-msgstr "Erneute Erstellung von Instanz wird nicht unterstützt."
-
 #, python-format
 msgid "Instance rollback performed due to: %s"
 msgstr "Instanz-Rollback ausgeführt. Ursache: %s"
-
-msgid "Instance snapshots are not permitted at this time."
-msgstr "Instanz-Momentaufnahmen sind derzeit nicht zulässig."
 
 #, python-format
 msgid ""
@@ -1930,10 +1850,6 @@ msgid "Invalid key_name provided."
 msgstr "Ungültige Angabe für 'key_name'."
 
 #, python-format
-msgid "Invalid libvirt version %(version)s"
-msgstr "Ungültige libvirt Version %(version)s"
-
-#, python-format
 msgid "Invalid memory page size '%(pagesize)s'"
 msgstr "Ungültige Speicherseitengröße '%(pagesize)s'"
 
@@ -2048,9 +1964,6 @@ msgstr "Ungültige volume_size."
 msgid "Ironic node uuid not supplied to driver for instance %s."
 msgstr "UUID des Ironic-Knotens nicht angegeben für Treiber für Instanz %s."
 
-msgid "Is the appropriate service running?"
-msgstr "Ist der entsprechende Dienst aktiv?"
-
 #, python-format
 msgid ""
 "It is not allowed to create an interface on external network %(network_uuid)s"
@@ -2103,22 +2016,10 @@ msgstr "Grenzwerte werden nur von vCenter ab Version 6.0 unterstützt."
 msgid "Link Local address is not found.:%s"
 msgstr "Link-Local-Adresse nicht gefunden: %s"
 
-msgid "Listing virtual interfaces is not supported by this cloud."
-msgstr ""
-"Das Auflisten virtueller Schnittstellen wird von dieser Cloud nicht "
-"unterstützt."
-
 #, python-format
 msgid "Live migration %(id)s for server %(uuid)s is not in progress."
 msgstr ""
 "Die Livemigration %(id)s für den Server %(uuid)s ist nicht in Bearbeitung."
-
-msgid ""
-"Live migration with API v2.25 requires all the Mitaka upgrade to be complete "
-"before it is available."
-msgstr ""
-"Die Livemigration mit API v2.25 ist erst verfügbar, wenn das Mitaka-Upgrade "
-"vollständig abgeschlossen ist."
 
 #, python-format
 msgid "Malformed JSON: %(error)s"
@@ -2629,14 +2530,6 @@ msgid "Number of Rows Archived"
 msgstr "Anzahl der archivierten Zeilen"
 
 #, python-format
-msgid ""
-"Number of serial ports '%(num_ports)s' specified in '%(property)s' isn't "
-"valid."
-msgstr ""
-"Die Anzahl '%(num_ports)s' der seriellen Ports, die in '%(property)s' "
-"angegeben ist, ist nicht gültig. "
-
-#, python-format
 msgid "OVS configuration failed with: %(inner_exception)s."
 msgstr "OVS-Konfiguration fehlgeschlagen mit: %(inner_exception)s."
 
@@ -2710,14 +2603,6 @@ msgstr "PCI-Gerät %(id)s nicht gefunden"
 #, python-format
 msgid "PCI device request %(requests)s failed"
 msgstr "PCI-Geräteanforderung %(requests)s fehlgeschlagen"
-
-#, python-format
-msgid ""
-"PIF %(pif_uuid)s for network %(bridge)s has VLAN id %(pif_vlan)d. Expected "
-"%(vlan_num)d"
-msgstr ""
-"Physische Schnittstelle %(pif_uuid)s für Netz %(bridge)s hat VLAN-ID "
-"%(pif_vlan)d. Erwartet wurde %(vlan_num)d"
 
 #, python-format
 msgid "PIF %s does not contain IP address"
@@ -2919,9 +2804,6 @@ msgstr ""
 "konfigurierte vCPU(s)-Maske. Weitere Informationen finden Sie unter 'hw:"
 "cpu_realtime_mask' bzw. 'hw_cpu_realtime_mask'."
 
-msgid "Realtime policy not supported by hypervisor"
-msgstr "Echtzeitrichtlinie wird vom Hypervisor nicht unterstützt"
-
 msgid "Request body and URI mismatch"
 msgstr "Abweichung zwischen Anforderungshauptteil und URI"
 
@@ -3016,20 +2898,6 @@ msgstr "Stammelementname muss '%(name)s' lauten, nicht '%(tag)s'"
 #, python-format
 msgid "Rule (%s) not found"
 msgstr "Regel (%s) nicht gefunden"
-
-#, python-format
-msgid "Running Nova with parallels virt_type requires libvirt version %s"
-msgstr ""
-"Für die Ausführung von Nova mit Parallel-virt_type ist libvirt-Version %s "
-"erforderlich"
-
-#, python-format
-msgid ""
-"Running Nova with qemu/kvm virt_type on %(arch)s requires libvirt version "
-"%(libvirt_ver)s and qemu version %(qemu_ver)s, or greater"
-msgstr ""
-"Die Ausführung von Nova mit qemu/kvm virt_type unter %(arch)s erfordert "
-"libvirt-Version %(libvirt_ver)s und qemu-Version %(qemu_ver)s oder höher."
 
 #, python-format
 msgid "Running batches of %i until complete"
@@ -3327,9 +3195,6 @@ msgstr ""
 "Das Format der Option 'reserved_huge_pages' ist ungültig ('%(conf)s' "
 "gefunden). Ziehen Sie die Nova-Konfigurationsreferenz zu Rate."
 
-msgid "The input is not a string or unicode"
-msgstr "Die Eingabe ist keine Zeichenkette oder Unicode"
-
 msgid ""
 "The instance requires a newer hypervisor version than has been provided."
 msgstr ""
@@ -3549,9 +3414,6 @@ msgstr "Typ und Code müssen für den ICMP-Protokolltyp Ganzzahlen sein"
 msgid "UEFI is not supported"
 msgstr "UEFI wird nicht unterstützt."
 
-msgid "UUID is required to delete Neutron Networks"
-msgstr "UUID ist zum Löschen von Neutron-Netzen erforderlich"
-
 #, python-format
 msgid ""
 "Unable to associate floating IP %(address)s to any fixed IPs for instance "
@@ -3596,9 +3458,6 @@ msgstr "VBD %s kann nicht gelöscht werden"
 #, python-format
 msgid "Unable to destroy VDI %s"
 msgstr "VDI %s kann nicht gelöscht werden"
-
-msgid "Unable to detach from guest transient domain."
-msgstr "Aufheben der Zuordnung zur Gast-Übergangsdomäne nicht möglich."
 
 #, python-format
 msgid "Unable to determine disk bus for '%s'"
@@ -4136,9 +3995,6 @@ msgstr "Floating IP nicht gefunden"
 msgid "fmt=%(fmt)s backed by: %(backing_file)s"
 msgstr "fmt=%(fmt)s gesichert durch: %(backing_file)s"
 
-msgid "fping utility is not found."
-msgstr "fping-Dienstprogramm wurde nicht gefunden."
-
 #, python-format
 msgid "href %s does not contain version"
 msgstr "Hyperlink %s enthält Version nicht"
@@ -4380,12 +4236,6 @@ msgid "volume %s already attached"
 msgstr "Datenträger %s ist bereits angehängt"
 
 #, python-format
-msgid "volume '%(vol)s' status must be 'available'. Currently in '%(status)s'"
-msgstr ""
-"Status von Datenträger '%(vol)s' muss 'available' lauten. Weist derzeit den "
-"Status '%(status)s' auf"
-
-#, python-format
 msgid ""
 "volume '%(vol)s' status must be 'in-use'. Currently in '%(status)s' status"
 msgstr ""
@@ -4403,9 +4253,3 @@ msgid ""
 msgstr ""
 "xenapi.fake weist keine Implementierung für %s auf oder wurde mit einer "
 "falschen Anzahl von Argumenten aufgerufen"
-
-msgid "you can not pass av_zone if the scope is public"
-msgstr "Sie können av_zone nicht übergeben, wenn der Bereich öffentlich ist"
-
-msgid "you can not pass project if the scope is private"
-msgstr "Sie können das Projekt nicht übergeben, wenn der Bereich privat ist"

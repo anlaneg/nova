@@ -48,11 +48,7 @@ class NUMATopologyFilter(filters.BaseHostFilter):
         if fields.CPUThreadAllocationPolicy.REQUIRE not in cpu_thread_policy:
             return True
 
-        # the presence of siblings in at least one cell indicates
-        # hyperthreading (HT)
-        has_hyperthreading = any(cell.siblings for cell in host_topology.cells)
-
-        if not has_hyperthreading:
+        if not host_topology.has_threads:
             LOG.debug("%(host_state)s fails CPU policy requirements. "
                       "Host does not have hyperthreading or "
                       "hyperthreading is disabled, but 'require' threads "
@@ -80,6 +76,10 @@ class NUMATopologyFilter(filters.BaseHostFilter):
                 host_state)
         pci_requests = spec_obj.pci_requests
 
+        network_metadata = None
+        if 'network_metadata' in spec_obj:
+            network_metadata = spec_obj.network_metadata
+
         if pci_requests:
             pci_requests = pci_requests.requests
 
@@ -91,6 +91,10 @@ class NUMATopologyFilter(filters.BaseHostFilter):
             limits = objects.NUMATopologyLimits(
                 cpu_allocation_ratio=cpu_ratio,
                 ram_allocation_ratio=ram_ratio)
+
+            if network_metadata:
+                limits.network_metadata = network_metadata
+
             instance_topology = (hardware.numa_fit_instance_to_host(
                         host_topology, requested_topology,
                         limits=limits,

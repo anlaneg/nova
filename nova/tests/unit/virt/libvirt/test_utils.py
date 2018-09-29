@@ -22,16 +22,17 @@ import mock
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_utils import fileutils
+from oslo_utils.fixture import uuidsentinel as uuids
 import six
 
 from nova import context
 from nova import exception
 from nova import objects
 from nova.objects import fields as obj_fields
+import nova.privsep.fs
 from nova import test
 from nova.tests.unit import fake_instance
 from nova.tests.unit.virt.libvirt import fakelibvirt
-from nova.tests import uuidsentinel as uuids
 from nova import utils
 from nova.virt.disk import api as disk
 from nova.virt import images
@@ -368,7 +369,7 @@ ID        TAG                 VM SIZE                DATE       VM CLOCK
                'expected_fs_type': 'some_fs_type'},
               {'fs_type': None,
                'default_eph_format': None,
-               'expected_fs_type': disk.FS_FORMAT_EXT4},
+               'expected_fs_type': nova.privsep.fs.FS_FORMAT_EXT4},
               {'fs_type': None,
                'default_eph_format': 'eph_format',
                'expected_fs_type': 'eph_format'})
@@ -612,9 +613,12 @@ disk size: 4.4M
         context = 'opaque context'
         target = '/tmp/targetfile'
         image_id = '4'
-        libvirt_utils.fetch_image(context, target, image_id)
+        trusted_certs = objects.TrustedCerts(
+            ids=['0b5d2c72-12cc-4ba6-a8d7-3ff5cc1d8cb8',
+                 '674736e3-f25c-405c-8362-bbf991e0ce0a'])
+        libvirt_utils.fetch_image(context, target, image_id, trusted_certs)
         mock_images.assert_called_once_with(
-            context, image_id, target)
+            context, image_id, target, trusted_certs)
 
     @mock.patch('nova.virt.images.fetch')
     def test_fetch_initrd_image(self, mock_images):
@@ -624,16 +628,17 @@ disk size: 4.4M
                                           user_name="pie")
         target = '/tmp/targetfile'
         image_id = '4'
-        libvirt_utils.fetch_raw_image(_context, target, image_id)
+        trusted_certs = objects.TrustedCerts(
+            ids=['0b5d2c72-12cc-4ba6-a8d7-3ff5cc1d8cb8',
+                 '674736e3-f25c-405c-8362-bbf991e0ce0a'])
+        libvirt_utils.fetch_raw_image(_context, target, image_id,
+                                      trusted_certs)
         mock_images.assert_called_once_with(
-            _context, image_id, target)
+            _context, image_id, target, trusted_certs)
 
-    @mock.patch('nova.utils.supports_direct_io', return_value=True)
-    def test_fetch_raw_image(self, mock_direct_io):
-
-        def fake_execute(*cmd, **kwargs):
-            self.executes.append(cmd)
-            return None, None
+    @mock.patch('nova.privsep.utils.supports_direct_io', return_value=True)
+    @mock.patch('nova.privsep.qemu.unprivileged_convert_image')
+    def test_fetch_raw_image(self, mock_convert_image, mock_direct_io):
 
         def fake_rename(old, new):
             self.executes.append(('mv', old, new))
@@ -665,7 +670,6 @@ disk size: 4.4M
 
             return FakeImgInfo()
 
-        self.stub_out('nova.utils.execute', fake_execute)
         self.stub_out('os.rename', fake_rename)
         self.stub_out('os.unlink', fake_unlink)
         self.stub_out('nova.virt.images.fetch', lambda *_, **__: None)
@@ -685,19 +689,21 @@ disk size: 4.4M
 
         target = 't.qcow2'
         self.executes = []
-        expected_commands = [('qemu-img', 'convert', '-t', 'none',
-                              '-O', 'raw', '-f', 'qcow2',
-                              't.qcow2.part', 't.qcow2.converted'),
-                             ('rm', 't.qcow2.part'),
+        expected_commands = [('rm', 't.qcow2.part'),
                              ('mv', 't.qcow2.converted', 't.qcow2')]
         images.fetch_to_raw(context, image_id, target)
         self.assertEqual(self.executes, expected_commands)
+        mock_convert_image.assert_called_with(
+            't.qcow2.part', 't.qcow2.converted', 'qcow2', 'raw',
+            CONF.instances_path)
+        mock_convert_image.reset_mock()
 
         target = 't.raw'
         self.executes = []
         expected_commands = [('mv', 't.raw.part', 't.raw')]
         images.fetch_to_raw(context, image_id, target)
         self.assertEqual(self.executes, expected_commands)
+        mock_convert_image.assert_not_called()
 
         target = 'backing.qcow2'
         self.executes = []
@@ -705,6 +711,7 @@ disk size: 4.4M
         self.assertRaises(exception.ImageUnacceptable,
                           images.fetch_to_raw, context, image_id, target)
         self.assertEqual(self.executes, expected_commands)
+        mock_convert_image.assert_not_called()
 
         del self.executes
 

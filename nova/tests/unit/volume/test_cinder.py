@@ -17,8 +17,10 @@ from cinderclient import api_versions as cinder_api_versions
 from cinderclient import exceptions as cinder_exception
 from cinderclient.v2 import limits as cinder_limits
 from keystoneauth1 import loading as ks_loading
+from keystoneauth1 import session
 from keystoneclient import exceptions as keystone_exception
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 import six
 
@@ -27,8 +29,8 @@ from nova import context
 from nova import exception
 from nova import test
 from nova.tests.unit.fake_instance import fake_instance_obj
-from nova.tests import uuidsentinel as uuids
 from nova.volume import cinder
+
 
 CONF = nova.conf.CONF
 
@@ -191,9 +193,7 @@ class CinderApiTestCase(test.NoDBTestCase):
                                                     description='',
                                                     imageRef=None,
                                                     metadata=None, name='',
-                                                    project_id=None,
                                                     snapshot_id=None,
-                                                    user_id=None,
                                                     volume_type=None)
 
     @mock.patch('nova.volume.cinder.cinderclient')
@@ -211,9 +211,9 @@ class CinderApiTestCase(test.NoDBTestCase):
         self.assertRaises(exception.OverQuota, self.api.create, self.ctx,
                           1, '', '')
         mock_cinderclient.return_value.volumes.create.assert_called_once_with(
-            1, user_id=None, imageRef=None, availability_zone=None,
+            1, imageRef=None, availability_zone=None,
             volume_type=None, description='', snapshot_id=None, name='',
-            project_id=None, metadata=None)
+            metadata=None)
 
     @mock.patch('nova.volume.cinder.cinderclient')
     def test_get_all(self, mock_cinderclient):
@@ -988,12 +988,12 @@ class CinderClientTestCase(test.NoDBTestCase):
         cinder.reset_globals()
         self.ctxt = context.RequestContext('fake-user', 'fake-project')
         # Mock out the keystoneauth stuff.
-        self.mock_session = mock.Mock(
-            autospec='keystoneauth1.loading.session.Session')
-        load_session = mock.patch('keystoneauth1.loading.'
+        self.mock_session = mock.Mock(autospec=session.Session)
+        patcher = mock.patch('keystoneauth1.loading.'
                                   'load_session_from_conf_options',
-                                  return_value=self.mock_session).start()
-        self.addCleanup(load_session.stop)
+                                  return_value=self.mock_session)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     @mock.patch('cinderclient.client.get_volume_api_from_url',
                 return_value='3')
@@ -1007,13 +1007,14 @@ class CinderClientTestCase(test.NoDBTestCase):
         get_volume_api.assert_called_once_with(
             self.mock_session.get_endpoint.return_value)
 
+    @mock.patch('nova.volume.cinder._get_highest_client_server_version',
+                # Fake the case that cinder is really old.
+                return_value=cinder_api_versions.APIVersion('2.0'))
     @mock.patch('cinderclient.client.get_volume_api_from_url',
                 return_value='3')
-    @mock.patch('cinderclient.client.get_highest_client_server_version',
-                return_value=2.0)   # Fake the case that cinder is really old.
     def test_create_v3_client_with_microversion_too_new(self,
-                                                        get_highest_version,
-                                                        get_volume_api):
+                                                        get_volume_api,
+                                                        get_highest_version):
         """Tests that creating a v3 client and requesting a microversion that
         is either too new for the server (or client) to support raises an
         exception.
@@ -1023,10 +1024,11 @@ class CinderClientTestCase(test.NoDBTestCase):
         get_volume_api.assert_called_once_with(
             self.mock_session.get_endpoint.return_value)
         get_highest_version.assert_called_once_with(
-            self.mock_session.get_endpoint.return_value)
+            self.ctxt, self.mock_session.get_endpoint.return_value)
 
-    @mock.patch('cinderclient.client.get_highest_client_server_version',
-                return_value=cinder_api_versions.MAX_VERSION)
+    @mock.patch('nova.volume.cinder._get_highest_client_server_version',
+                return_value=cinder_api_versions.APIVersion(
+                    cinder_api_versions.MAX_VERSION))
     @mock.patch('cinderclient.client.get_volume_api_from_url',
                 return_value='3')
     def test_create_v3_client_with_microversion_available(self,
@@ -1042,9 +1044,9 @@ class CinderClientTestCase(test.NoDBTestCase):
         get_volume_api.assert_called_once_with(
             self.mock_session.get_endpoint.return_value)
         get_highest_version.assert_called_once_with(
-            self.mock_session.get_endpoint.return_value)
+            self.ctxt, self.mock_session.get_endpoint.return_value)
 
-    @mock.patch('cinderclient.client.get_highest_client_server_version',
+    @mock.patch('nova.volume.cinder._get_highest_client_server_version',
                 new_callable=mock.NonCallableMock)  # asserts not called
     @mock.patch('cinderclient.client.get_volume_api_from_url',
                 return_value='3')
@@ -1060,11 +1062,15 @@ class CinderClientTestCase(test.NoDBTestCase):
         get_volume_api.assert_called_once_with(
             self.mock_session.get_endpoint.return_value)
 
+    @mock.patch('nova.volume.cinder.LOG.error')
     @mock.patch.object(ks_loading, 'load_auth_from_conf_options')
-    def test_load_auth_plugin_failed(self, mock_load_from_conf):
+    def test_load_auth_plugin_failed(self, mock_load_from_conf, mock_log_err):
         mock_load_from_conf.return_value = None
         self.assertRaises(cinder_exception.Unauthorized,
                           cinder._load_auth_plugin, CONF)
+        mock_log_err.assert_called()
+        self.assertIn('The [cinder] section of your nova configuration file',
+                      mock_log_err.call_args[0][0])
 
     @mock.patch('nova.volume.cinder._ADMIN_AUTH')
     def test_admin_context_without_token(self,

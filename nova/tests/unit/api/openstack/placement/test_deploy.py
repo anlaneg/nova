@@ -14,30 +14,34 @@
 """Unit tests for the deply function used to build the Placement service."""
 
 from oslo_config import cfg
+from oslo_policy import opts as policy_opts
+import testtools
 import webob
 
 from nova.api.openstack.placement import deploy
-from nova import test
 
 
 CONF = cfg.CONF
 
 
-class DeployTest(test.NoDBTestCase):
+class DeployTest(testtools.TestCase):
 
     def test_auth_middleware_factory(self):
         """Make sure that configuration settings make their way to
         the keystone middleware correctly.
         """
-        auth_uri = 'http://example.com/identity'
-        authenticate_header_value = "Keystone uri='%s'" % auth_uri
-        self.flags(auth_uri=auth_uri, group='keystone_authtoken')
+        www_authenticate_uri = 'http://example.com/identity'
+        CONF.set_override('www_authenticate_uri', www_authenticate_uri,
+                          group='keystone_authtoken')
         # ensure that the auth_token middleware is chosen
-        self.flags(auth_strategy='keystone', group='api')
+        CONF.set_override('auth_strategy', 'keystone', group='api')
+        # register and default policy opts (referenced by deploy)
+        policy_opts.set_defaults(CONF)
         app = deploy.deploy(CONF)
         req = webob.Request.blank('/resource_providers', method="GET")
 
         response = req.get_response(app)
 
-        self.assertEqual(authenticate_header_value,
-                         response.headers['www-authenticate'])
+        auth_header = response.headers['www-authenticate']
+        self.assertIn(www_authenticate_uri, auth_header)
+        self.assertIn('keystone uri=', auth_header.lower())

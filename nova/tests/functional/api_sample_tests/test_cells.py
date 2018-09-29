@@ -17,12 +17,9 @@ import mock
 from six.moves import range
 
 from nova.cells import state
-import nova.conf
 from nova.db.sqlalchemy import models
 from nova import exception
 from nova.tests.functional.api_sample_tests import api_sample_base
-
-CONF = nova.conf.CONF
 
 
 class CellsSampleJsonTest(api_sample_base.ApiSampleTestBaseV21):
@@ -59,7 +56,7 @@ class CellsSampleJsonTest(api_sample_base.ApiSampleTestBaseV21):
                          'is_parent': our_id % 2 == 0})
             self.cell_list.append(cell)
 
-        self.stub_out('nova.db.cell_get_all', _fake_cell_get_all)
+        self.stub_out('nova.db.api.cell_get_all', _fake_cell_get_all)
         self.stub_out('nova.cells.rpcapi.CellsAPI.cell_get', _fake_cell_get)
 
     def test_cells_empty_list(self):

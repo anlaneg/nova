@@ -17,13 +17,15 @@ from oslo_utils import encodeutils
 from oslo_utils import timeutils
 import webob
 
+from nova.api.openstack.placement import errors
+from nova.api.openstack.placement import exception
 from nova.api.openstack.placement import microversion
+from nova.api.openstack.placement.objects import resource_provider as rp_obj
+from nova.api.openstack.placement.policies import trait as policies
 from nova.api.openstack.placement.schemas import trait as schema
 from nova.api.openstack.placement import util
 from nova.api.openstack.placement import wsgi_wrapper
-from nova import exception
 from nova.i18n import _
-from nova.objects import resource_provider as rp_obj
 
 
 def _normalize_traits_qs_param(qs):
@@ -64,6 +66,7 @@ def _serialize_traits(traits, want_version):
 @microversion.version_handler('1.6')
 def put_trait(req):
     context = req.environ['placement.context']
+    context.can(policies.TRAITS_UPDATE)
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     name = util.wsgi_path_item(req.environ, 'name')
 
@@ -99,14 +102,14 @@ def put_trait(req):
 @microversion.version_handler('1.6')
 def get_trait(req):
     context = req.environ['placement.context']
+    context.can(policies.TRAITS_SHOW)
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     name = util.wsgi_path_item(req.environ, 'name')
 
     try:
         trait = rp_obj.Trait.get_by_name(context, name)
     except exception.TraitNotFound as ex:
-        raise webob.exc.HTTPNotFound(
-            explanation=ex.format_message())
+        raise webob.exc.HTTPNotFound(ex.format_message())
 
     req.response.status = 204
     req.response.content_type = None
@@ -120,20 +123,18 @@ def get_trait(req):
 @microversion.version_handler('1.6')
 def delete_trait(req):
     context = req.environ['placement.context']
+    context.can(policies.TRAITS_DELETE)
     name = util.wsgi_path_item(req.environ, 'name')
 
     try:
         trait = rp_obj.Trait.get_by_name(context, name)
         trait.destroy()
     except exception.TraitNotFound as ex:
-        raise webob.exc.HTTPNotFound(
-            explanation=ex.format_message())
+        raise webob.exc.HTTPNotFound(ex.format_message())
     except exception.TraitCannotDeleteStandard as ex:
-        raise webob.exc.HTTPBadRequest(
-            explanation=ex.format_message())
+        raise webob.exc.HTTPBadRequest(ex.format_message())
     except exception.TraitInUse as ex:
-        raise webob.exc.HTTPConflict(
-            explanation=ex.format_message())
+        raise webob.exc.HTTPConflict(ex.format_message())
 
     req.response.status = 204
     req.response.content_type = None
@@ -145,6 +146,7 @@ def delete_trait(req):
 @util.check_accept('application/json')
 def list_traits(req):
     context = req.environ['placement.context']
+    context.can(policies.TRAITS_LIST)
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     filters = {}
 
@@ -155,8 +157,8 @@ def list_traits(req):
     if 'associated' in req.GET:
         if req.GET['associated'].lower() not in ['true', 'false']:
             raise webob.exc.HTTPBadRequest(
-                explanation=_('The query parameter "associated" only accepts '
-                              '"true" or "false"'))
+                _('The query parameter "associated" only accepts '
+                  '"true" or "false"'))
         filters['associated'] = (
             True if req.GET['associated'].lower() == 'true' else False)
 
@@ -176,6 +178,7 @@ def list_traits(req):
 @util.check_accept('application/json')
 def list_traits_for_resource_provider(req):
     context = req.environ['placement.context']
+    context.can(policies.RP_TRAIT_LIST)
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     uuid = util.wsgi_path_item(req.environ, 'uuid')
 
@@ -210,6 +213,7 @@ def list_traits_for_resource_provider(req):
 @util.require_content('application/json')
 def update_traits_for_resource_provider(req):
     context = req.environ['placement.context']
+    context.can(policies.RP_TRAIT_UPDATE)
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     data = util.extract_json(req.body, schema.SET_TRAITS_FOR_RP_SCHEMA)
@@ -222,7 +226,8 @@ def update_traits_for_resource_provider(req):
         raise webob.exc.HTTPConflict(
             _("Resource provider's generation already changed. Please update "
               "the generation and try again."),
-            json_formatter=util.json_error_formatter)
+            json_formatter=util.json_error_formatter,
+            comment=errors.CONCURRENT_UPDATE)
 
     trait_objs = rp_obj.TraitList.get_all(
         context, filters={'name_in': traits})
@@ -250,13 +255,15 @@ def update_traits_for_resource_provider(req):
 @microversion.version_handler('1.6')
 def delete_traits_for_resource_provider(req):
     context = req.environ['placement.context']
+    context.can(policies.RP_TRAIT_DELETE)
     uuid = util.wsgi_path_item(req.environ, 'uuid')
 
     resource_provider = rp_obj.ResourceProvider.get_by_uuid(context, uuid)
     try:
         resource_provider.set_traits(rp_obj.TraitList(objects=[]))
     except exception.ConcurrentUpdateDetected as e:
-        raise webob.exc.HTTPConflict(explanation=e.format_message())
+        raise webob.exc.HTTPConflict(e.format_message(),
+                                     comment=errors.CONCURRENT_UPDATE)
 
     req.response.status = 204
     req.response.content_type = None

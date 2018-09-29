@@ -34,6 +34,7 @@ Request
   - limit: instance_action_limit
   - marker: instance_action_marker
   - changes-since: changes_since_instance_action
+  - changes-before: changes_before_instance_action
 
 Response
 --------
@@ -111,14 +112,16 @@ Response
   - events.finish_time: event_finish_time
   - events.result: event_result
   - events.traceback: event_traceback
+  - events.hostId: event_hostId
+  - events.host: event_host
   - updated_at: updated_instance_action
 
-**Example Show Server Action Details For Admin (v2.1)**
+**Example Show Server Action Details For Admin (v2.62)**
 
-.. literalinclude:: ../../doc/api_samples/os-instance-actions/instance-action-get-resp.json
+.. literalinclude:: ../../doc/api_samples/os-instance-actions/v2.62/instance-action-get-resp.json
    :language: javascript
 
-**Example Show Server Action Details For Non-Admin (v2.51)**
+**Example Show Server Action Details For Non-Admin (v2.62)**
 
-.. literalinclude:: ../../doc/api_samples/os-instance-actions/v2.51/instance-action-get-non-admin-resp.json
+.. literalinclude:: ../../doc/api_samples/os-instance-actions/v2.62/instance-action-get-non-admin-resp.json
    :language: javascript

@@ -18,25 +18,24 @@ import mock
 
 from nova.cmd import compute
 from nova.cmd import network
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import test
 
 
 @contextlib.contextmanager
 def restore_db():
-    orig = db.api.IMPL
+    orig = db.IMPL
     try:
         yield
     finally:
-        db.api.IMPL = orig
+        db.IMPL = orig
 
 
 class ComputeMainTest(test.NoDBTestCase):
-    @mock.patch('nova.utils.monkey_patch')
     @mock.patch('nova.conductor.api.API.wait_until_ready')
     @mock.patch('oslo_reports.guru_meditation_report')
-    def _call_main(self, mod, gmr, cond, patch):
+    def _call_main(self, mod, gmr, cond):
         @mock.patch.object(mod, 'config')
         @mock.patch.object(mod, 'service')
         def run_main(serv, conf):
@@ -48,11 +47,11 @@ class ComputeMainTest(test.NoDBTestCase):
         with restore_db():
             self._call_main(compute)
             self.assertRaises(exception.DBNotAllowed,
-                              db.api.instance_get, 1, 2)
+                              db.instance_get, 1, 2)
 
     def test_network_main_blocks_db(self):
         self.flags(enable=True, group='cells')
         with restore_db():
             self._call_main(network)
             self.assertRaises(exception.DBNotAllowed,
-                              db.api.instance_get, 1, 2)
+                              db.instance_get, 1, 2)

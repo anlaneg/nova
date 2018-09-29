@@ -17,16 +17,13 @@ Unit Tests for nova.scheduler.rpcapi
 """
 
 import mock
-from oslo_config import cfg
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova import context
 from nova import exception as exc
 from nova import objects
 from nova.scheduler import rpcapi as scheduler_rpcapi
 from nova import test
-from nova.tests import uuidsentinel as uuids
-
-CONF = cfg.CONF
 
 
 class SchedulerRpcAPITestCase(test.NoDBTestCase):

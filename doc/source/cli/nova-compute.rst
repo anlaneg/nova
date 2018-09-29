@@ -7,9 +7,7 @@ Nova Compute Server
 -------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-09-27
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,10 +21,10 @@ Synopsis
 Description
 ===========
 
-`nova-compute` is a server daemon that serves the Nova Compute service, which
-is responsible for building a disk image, launching an instance via the
-underlying virtualization driver, responding to calls to check the instance's
-state, attaching persistent storage, and terminating the instance.
+:program:`nova-compute` is a server daemon that serves the Nova Compute
+service, which is responsible for building a disk image, launching an instance
+via the underlying virtualization driver, responding to calls to check the
+instance's state, attaching persistent storage, and terminating the instance.
 
 Options
 =======
@@ -44,7 +42,7 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

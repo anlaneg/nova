@@ -16,7 +16,6 @@ import mock
 
 from nova.compute import manager
 from nova.compute import power_state
-import nova.conf
 from nova import context
 from nova import objects
 from nova.objects import instance as instance_obj
@@ -24,8 +23,6 @@ from nova.tests.unit.compute import eventlet_utils
 from nova.tests.unit import fake_instance
 from nova.tests.unit.virt.xenapi import stubs
 from nova.virt.xenapi import vm_utils
-
-CONF = nova.conf.CONF
 
 
 class ComputeXenTestCase(stubs.XenAPITestBaseNoDB):
@@ -36,7 +33,7 @@ class ComputeXenTestCase(stubs.XenAPITestBaseNoDB):
                    connection_password='test_pass',
                    group='xenserver')
 
-        stubs.stubout_session(self.stubs, stubs.FakeSessionForVMTests)
+        stubs.stubout_session(self, stubs.FakeSessionForVMTests)
         self.compute = manager.ComputeManager()
         # execute power syncing synchronously for testing:
         self.compute._sync_power_pool = eventlet_utils.SyncPool()

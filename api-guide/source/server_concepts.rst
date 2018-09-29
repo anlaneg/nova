@@ -90,7 +90,7 @@ are exposed to administrators:
   there is no ongoing compute API calls (running tasks), vm_state should reflect
   what the customer expect the VM to be. When combined with task states,
   a better picture can be formed regarding the server's health and progress.
-  Please see: `VM States <https://docs.openstack.org/nova/latest/reference/vm-states.html>`_.
+  Refer to :nova-doc:`VM States <reference/vm-states.html>`.
 
 - task_state represents what is happening to the instance at the
   current moment. These tasks can be generic, such as 'spawning', or specific,
@@ -132,9 +132,9 @@ For different user roles, the user has different query options set:
 
 - For general user, there is limited set of attributes of the servers can be
   used as query option. ``reservation_id``, ``name``, ``status``, ``image``,
-  ``flavor``, ``ip``, ``changes-since``, ``ip6``, ``tags``, ``tags-any``,
-  ``not-tags``, ``not-tags-any`` are supported options to be used. Other
-  options will be ignored by nova silently.
+  ``flavor``, ``ip``, ``changes-since``, ``changes-before``, ``ip6``,
+  ``tags``, ``tags-any``, ``not-tags``, ``not-tags-any`` are supported options
+  to be used. Other options will be ignored by nova silently.
 
 - For administrator, most of the server attributes can be used as query
   options. Before the Ocata release, the fields in the database schema of
@@ -197,10 +197,13 @@ For different user roles, the user has different query options set:
        ]
    }
 
-There are also some speical query options:
+There are also some special query options:
 
 - ``changes-since`` returns the servers updated after the given time.
-  Please see: :doc:`polling_changes-since_parameter`
+  Please see: :doc:`polling_changes`
+
+- ``changes-before`` returns the servers updated before the given time.
+  Please see: :doc:`polling_changes`
 
 - ``deleted`` returns (or excludes) deleted servers
 
@@ -212,7 +215,7 @@ There are also some speical query options:
 
 .. code::
 
-   **Example: User query server with special keys changes-since**
+   **Example: User query server with special keys changes-since or changes-before**
 
    Precondition:
    GET /servers/detail
@@ -221,13 +224,13 @@ There are also some speical query options:
    {
        "servers": [
            {
-               "name": "t1"
-               "updated": "2015-12-15T15:55:52Z"
+               "name": "t1",
+               "updated": "2015-12-15T15:55:52Z",
                ...
            },
            {
                "name": "t2",
-               "updated": "2015-12-17T15:55:52Z"
+               "updated": "2015-12-17T15:55:52Z",
                ...
            }
        ]
@@ -239,9 +242,38 @@ There are also some speical query options:
    {
        {
            "name": "t2",
-           "updated": "2015-12-17T15:55:52Z"
+           "updated": "2015-12-17T15:55:52Z",
            ...
        }
+   }
+
+   GET /servers/detail?changes-before='2015-12-16T15:55:52Z'
+
+   Response:
+   {
+       {
+           "name": "t1",
+           "updated": "2015-12-15T15:55:52Z",
+           ...
+       }
+   }
+
+   GET /servers/detail?changes-since='2015-12-10T15:55:52Z'&changes-before='2015-12-28T15:55:52Z'
+
+   Response:
+   {
+       "servers": [
+           {
+               "name": "t1",
+               "updated": "2015-12-15T15:55:52Z",
+               ...
+           },
+           {
+               "name": "t2",
+               "updated": "2015-12-17T15:55:52Z",
+               ...
+           }
+       ]
    }
 
 There are two kinds of matching in query options: Exact matching and
@@ -608,22 +640,22 @@ TODO: Add some description about BDM.
 Scheduler Hints
 ~~~~~~~~~~~~~~~
 
-TODO: Add description about how to custom scheduling policy for server booting.
+Refer to `this document`_ for information on scheduler hints.
+
+.. _this document: https://docs.openstack.org/nova/latest/reference/scheduler-hints-vs-flavor-extra-specs.html#scheduler-hints
 
 Server Consoles
 ~~~~~~~~~~~~~~~
 
-Server Consoles can also be supplied after server launched.
-There are several server console services available.
-First, users can get the console output from the specified server
-and can limit the lines of console text by setting the length.
-Second, users can access multiple types of remote consoles.
-The user can use novnc, xvpvnc, rdp-html5, spice-html5, serial,
-and webmks(start from microversion 2.8) through either the OpenStack
-dashboard or the command line. Please see `Configure remote console access
-<https://docs.openstack.org/nova/latest/admin/remote-console-access.html>`_.
-Specifically for Xenserver, it provides the ability to create,
-delete, detail, list specified server vnc consoles.
+Server Consoles can also be supplied after server launched. There are several
+server console services available. First, users can get the console output
+from the specified server and can limit the lines of console text by setting
+the length. Second, users can access multiple types of remote consoles. The
+user can use novnc, xvpvnc, rdp-html5, spice-html5, serial, and webmks(start
+from microversion 2.8) through either the OpenStack dashboard or the command
+line. Refer to :nova-doc:`Configure remote console access
+<admin/remote-console-access.html>`.  Specifically for Xenserver, it provides
+the ability to create, delete, detail, list specified server vnc consoles.
 
 Server networks
 ~~~~~~~~~~~~~~~
@@ -884,13 +916,17 @@ Metadata API
 ------------
 Nova provides a metadata api for servers to retrieve server specific metadata.
 Neutron ensures this metadata api can be accessed through a predefined ip
-address (169.254.169.254). For more details, see
-`Metadata Service <https://docs.openstack.org/nova/latest/admin/networking-nova.html#metadata-service>`_.
+address (169.254.169.254). For more details, see :nova-doc:`Metadata Service
+<user/metadata-service.html>`.
 
 Config Drive
 ------------
 
-TODO
+Nova is able to write metadata to a special configuration drive that attaches
+to the server when it boots. The server can mount this drive and read files
+from it to get information that is normally available through the metadata
+service. For more details, see :nova-doc:`Config Drive
+<user/config-drive.html>`.
 
 User data
 ---------

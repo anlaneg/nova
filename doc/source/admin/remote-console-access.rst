@@ -20,6 +20,11 @@ Do not confuse the ``nova-consoleauth`` shared service with ``nova-console``,
 which is a XenAPI-specific service that most recent VNC proxy architectures do
 not use.
 
+.. deprecated:: 18.0.0
+
+   ``nova-consoleauth`` is deprecated since 18.0.0 (Rocky) and will be removed
+   in an upcoming release.
+
 SPICE console
 -------------
 
@@ -336,8 +341,13 @@ service. As root, run the following command:
 
 .. note::
 
+  It has `been reported`_ that versions of noVNC older than 0.6 do not work
+  with the ``nova-novncproxy`` service.
+
   If using non-US key mappings, then you need at least noVNC 1.0.0 for `a fix
   <https://github.com/novnc/noVNC/commit/99feba6ba8fee5b3a2b2dc99dc25e9179c560d31>`_.
+
+.. _been reported: https://bugs.launchpad.net/nova/+bug/1752896
 
 The service starts automatically on installation.
 

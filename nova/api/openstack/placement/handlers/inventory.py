@@ -12,20 +12,23 @@
 """Inventory handlers for Placement API."""
 
 import copy
+import operator
 
 from oslo_db import exception as db_exc
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
 import webob
 
+from nova.api.openstack.placement import errors
+from nova.api.openstack.placement import exception
 from nova.api.openstack.placement import microversion
+from nova.api.openstack.placement.objects import resource_provider as rp_obj
+from nova.api.openstack.placement.policies import inventory as policies
 from nova.api.openstack.placement.schemas import inventory as schema
 from nova.api.openstack.placement import util
 from nova.api.openstack.placement import wsgi_wrapper
 from nova.db import constants as db_const
-from nova import exception
 from nova.i18n import _
-from nova.objects import resource_provider as rp_obj
 
 
 # NOTE(cdent): We keep our own representation of inventory defaults
@@ -72,7 +75,7 @@ def _extract_inventories(body, schema):
     return data
 
 
-def _make_inventory_object(resource_provider, resource_class, **data):
+def make_inventory_object(resource_provider, resource_class, **data):
     """Single place to catch malformed Inventories."""
     # TODO(cdent): Some of the validation checks that are done here
     # could be done via JSONschema (using, for example, "minimum":
@@ -146,6 +149,31 @@ def _serialize_inventories(inventories, generation):
              'inventories': inventories_dict}, last_modified)
 
 
+def _validate_inventory_capacity(version, inventories):
+    """Validate inventory capacity.
+
+    :param version: request microversion.
+    :param inventories: Inventory or InventoryList to validate capacities of.
+    :raises: exception.InvalidInventoryCapacityReservedCanBeTotal if request
+        microversion is 1.26 or higher and any inventory has capacity < 0.
+    :raises: exception.InvalidInventoryCapacity if request
+        microversion is lower than 1.26 and any inventory has capacity <= 0.
+    """
+    if not version.matches((1, 26)):
+        op = operator.le
+        exc_class = exception.InvalidInventoryCapacity
+    else:
+        op = operator.lt
+        exc_class = exception.InvalidInventoryCapacityReservedCanBeTotal
+    if isinstance(inventories, rp_obj.Inventory):
+        inventories = rp_obj.InventoryList(objects=[inventories])
+    for inventory in inventories:
+        if op(inventory.capacity, 0):
+            raise exc_class(
+                resource_class=inventory.resource_class,
+                resource_provider=inventory.resource_provider.uuid)
+
+
 @wsgi_wrapper.PlacementWsgify
 @util.require_content('application/json')
 def create_inventory(req):
@@ -156,22 +184,26 @@ def create_inventory(req):
     of the inventory.
     """
     context = req.environ['placement.context']
+    context.can(policies.CREATE)
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
     data = _extract_inventory(req.body, schema.POST_INVENTORY_SCHEMA)
     resource_class = data.pop('resource_class')
 
-    inventory = _make_inventory_object(resource_provider,
-                                       resource_class,
-                                       **data)
+    inventory = make_inventory_object(resource_provider,
+                                      resource_class,
+                                      **data)
 
     try:
+        _validate_inventory_capacity(
+            req.environ[microversion.MICROVERSION_ENVIRON], inventory)
         resource_provider.add_inventory(inventory)
     except (exception.ConcurrentUpdateDetected,
             db_exc.DBDuplicateEntry) as exc:
         raise webob.exc.HTTPConflict(
-            _('Update conflict: %(error)s') % {'error': exc})
+            _('Update conflict: %(error)s') % {'error': exc},
+            comment=errors.CONCURRENT_UPDATE)
     except (exception.InvalidInventoryCapacity,
             exception.NotFound) as exc:
         raise webob.exc.HTTPBadRequest(
@@ -196,6 +228,7 @@ def delete_inventory(req):
     On success return a 204 and an empty body.
     """
     context = req.environ['placement.context']
+    context.can(policies.DELETE)
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     resource_class = util.wsgi_path_item(req.environ, 'resource_class')
 
@@ -207,7 +240,8 @@ def delete_inventory(req):
             exception.InventoryInUse) as exc:
         raise webob.exc.HTTPConflict(
             _('Unable to delete inventory of class %(class)s: %(error)s') %
-            {'class': resource_class, 'error': exc})
+            {'class': resource_class, 'error': exc},
+            comment=errors.CONCURRENT_UPDATE)
     except exception.NotFound as exc:
         raise webob.exc.HTTPNotFound(
             _('No inventory of class %(class)s found for delete: %(error)s') %
@@ -228,6 +262,7 @@ def get_inventories(req):
     a collection of inventories.
     """
     context = req.environ['placement.context']
+    context.can(policies.LIST)
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     try:
         rp = rp_obj.ResourceProvider.get_by_uuid(context, uuid)
@@ -250,6 +285,7 @@ def get_inventory(req):
     inventory.
     """
     context = req.environ['placement.context']
+    context.can(policies.SHOW)
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     resource_class = util.wsgi_path_item(req.environ, 'resource_class')
     try:
@@ -287,6 +323,7 @@ def set_inventories(req):
     the inventories.
     """
     context = req.environ['placement.context']
+    context.can(policies.UPDATE)
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
@@ -294,16 +331,19 @@ def set_inventories(req):
     data = _extract_inventories(req.body, schema.PUT_INVENTORY_SCHEMA)
     if data['resource_provider_generation'] != resource_provider.generation:
         raise webob.exc.HTTPConflict(
-            _('resource provider generation conflict'))
+            _('resource provider generation conflict'),
+            comment=errors.CONCURRENT_UPDATE)
 
     inv_list = []
     for res_class, inventory_data in data['inventories'].items():
-        inventory = _make_inventory_object(
+        inventory = make_inventory_object(
             resource_provider, res_class, **inventory_data)
         inv_list.append(inventory)
     inventories = rp_obj.InventoryList(objects=inv_list)
 
     try:
+        _validate_inventory_capacity(
+            req.environ[microversion.MICROVERSION_ENVIRON], inventories)
         resource_provider.set_inventory(inventories)
     except exception.ResourceClassNotFound as exc:
         raise webob.exc.HTTPBadRequest(
@@ -317,10 +357,14 @@ def set_inventories(req):
               '%(rp_uuid)s: %(error)s') % {'rp_uuid': resource_provider.uuid,
                                            'error': exc})
     except (exception.ConcurrentUpdateDetected,
-            exception.InventoryInUse,
             db_exc.DBDuplicateEntry) as exc:
         raise webob.exc.HTTPConflict(
-            _('update conflict: %(error)s') % {'error': exc})
+            _('update conflict: %(error)s') % {'error': exc},
+            comment=errors.CONCURRENT_UPDATE)
+    except exception.InventoryInUse as exc:
+        raise webob.exc.HTTPConflict(
+            _('update conflict: %(error)s') % {'error': exc},
+            comment=errors.INVENTORY_INUSE)
     except exception.InvalidInventoryCapacity as exc:
         raise webob.exc.HTTPBadRequest(
             _('Unable to update inventory for resource provider '
@@ -341,6 +385,7 @@ def delete_inventories(req):
     Return 405 Method Not Allowed if the wanted microversion does not match.
     """
     context = req.environ['placement.context']
+    context.can(policies.DELETE)
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
@@ -354,11 +399,13 @@ def delete_inventories(req):
             _('Unable to delete inventory for resource provider '
               '%(rp_uuid)s because the inventory was updated by '
               'another process. Please retry your request.')
-              % {'rp_uuid': resource_provider.uuid})
+              % {'rp_uuid': resource_provider.uuid},
+              comment=errors.CONCURRENT_UPDATE)
     except exception.InventoryInUse as ex:
         # NOTE(mriedem): This message cannot change without impacting the
         # nova.scheduler.client.report._RE_INV_IN_USE regex.
-        raise webob.exc.HTTPConflict(explanation=ex.format_message())
+        raise webob.exc.HTTPConflict(ex.format_message(),
+                                     comment=errors.INVENTORY_INUSE)
 
     response = req.response
     response.status = 204
@@ -380,6 +427,7 @@ def update_inventory(req):
     the inventory.
     """
     context = req.environ['placement.context']
+    context.can(policies.UPDATE)
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     resource_class = util.wsgi_path_item(req.environ, 'resource_class')
 
@@ -389,18 +437,22 @@ def update_inventory(req):
     data = _extract_inventory(req.body, schema.BASE_INVENTORY_SCHEMA)
     if data['resource_provider_generation'] != resource_provider.generation:
         raise webob.exc.HTTPConflict(
-            _('resource provider generation conflict'))
+            _('resource provider generation conflict'),
+            comment=errors.CONCURRENT_UPDATE)
 
-    inventory = _make_inventory_object(resource_provider,
-                                       resource_class,
-                                       **data)
+    inventory = make_inventory_object(resource_provider,
+                                      resource_class,
+                                      **data)
 
     try:
+        _validate_inventory_capacity(
+            req.environ[microversion.MICROVERSION_ENVIRON], inventory)
         resource_provider.update_inventory(inventory)
     except (exception.ConcurrentUpdateDetected,
             db_exc.DBDuplicateEntry) as exc:
         raise webob.exc.HTTPConflict(
-            _('update conflict: %(error)s') % {'error': exc})
+            _('update conflict: %(error)s') % {'error': exc},
+            comment=errors.CONCURRENT_UPDATE)
     except exception.InventoryWithResourceClassNotFound as exc:
         raise webob.exc.HTTPBadRequest(
             _('No inventory record with resource class for resource provider '

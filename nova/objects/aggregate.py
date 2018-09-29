@@ -332,12 +332,22 @@ class Aggregate(base.NovaPersistentObject, base.NovaObject):
         compute_utils.notify_about_aggregate_update(self._context,
                                                     "updateprop.start",
                                                     payload)
+        compute_utils.notify_about_aggregate_action(
+            context=self._context,
+            aggregate=self,
+            action=fields.NotificationAction.UPDATE_PROP,
+            phase=fields.NotificationPhase.START)
         updates.pop('id', None)
         db_aggregate = _aggregate_update_to_db(self._context,
                                                self.id, updates)
         compute_utils.notify_about_aggregate_update(self._context,
                                                     "updateprop.end",
                                                     payload)
+        compute_utils.notify_about_aggregate_action(
+            context=self._context,
+            aggregate=self,
+            action=fields.NotificationAction.UPDATE_PROP,
+            phase=fields.NotificationPhase.END)
         self._from_db_object(self._context, self, db_aggregate)
 
     @base.remotable
@@ -347,6 +357,11 @@ class Aggregate(base.NovaPersistentObject, base.NovaObject):
         compute_utils.notify_about_aggregate_update(self._context,
                                                     "updatemetadata.start",
                                                     payload)
+        compute_utils.notify_about_aggregate_action(
+            context=self._context,
+            aggregate=self,
+            action=fields.NotificationAction.UPDATE_METADATA,
+            phase=fields.NotificationPhase.START)
         to_add = {}
         for key, value in updates.items():
             if value is None:
@@ -365,6 +380,11 @@ class Aggregate(base.NovaPersistentObject, base.NovaObject):
         compute_utils.notify_about_aggregate_update(self._context,
                                                     "updatemetadata.end",
                                                     payload)
+        compute_utils.notify_about_aggregate_action(
+            context=self._context,
+            aggregate=self,
+            action=fields.NotificationAction.UPDATE_METADATA,
+            phase=fields.NotificationPhase.END)
         self.obj_reset_changes(fields=['metadata'])
 
     @base.remotable
@@ -417,10 +437,14 @@ def _get_by_host_from_db(context, host, key=None):
 
 
 @db_api.api_context_manager.reader
-def _get_by_metadata_key_from_db(context, key):
+def _get_by_metadata_from_db(context, key=None, value=None):
+    assert(key is not None or value is not None)
     query = context.session.query(api_models.Aggregate)
     query = query.join("_metadata")
-    query = query.filter(api_models.AggregateMetadata.key == key)
+    if key is not None:
+        query = query.filter(api_models.AggregateMetadata.key == key)
+    if value is not None:
+        query = query.filter(api_models.AggregateMetadata.value == value)
     query = query.options(contains_eager("_metadata"))
     query = query.options(joinedload("_hosts"))
 
@@ -433,7 +457,8 @@ class AggregateList(base.ObjectListBase, base.NovaObject):
     # Version 1.1: Added key argument to get_by_host()
     #              Aggregate <= version 1.1
     # Version 1.2: Added get_by_metadata_key
-    VERSION = '1.2'
+    # Version 1.3: Added get_by_metadata
+    VERSION = '1.3'
 
     fields = {
         'objects': fields.ListOfObjectsField('Aggregate'),
@@ -465,8 +490,20 @@ class AggregateList(base.ObjectListBase, base.NovaObject):
 
     @base.remotable_classmethod
     def get_by_metadata_key(cls, context, key, hosts=None):
-        db_aggregates = _get_by_metadata_key_from_db(context, key=key)
+        db_aggregates = _get_by_metadata_from_db(context, key=key)
         if hosts is not None:
             db_aggregates = cls._filter_db_aggregates(db_aggregates, hosts)
+        return base.obj_make_list(context, cls(context), objects.Aggregate,
+                                  db_aggregates)
+
+    @base.remotable_classmethod
+    def get_by_metadata(cls, context, key=None, value=None):
+        """Return aggregates with a metadata key set to value.
+
+        This returns a list of all aggregates that have a metadata key
+        set to some value. If key is specified, then only values for
+        that key will qualify.
+        """
+        db_aggregates = _get_by_metadata_from_db(context, key=key, value=value)
         return base.obj_make_list(context, cls(context), objects.Aggregate,
                                   db_aggregates)

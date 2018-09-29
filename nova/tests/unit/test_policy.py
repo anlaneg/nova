@@ -22,7 +22,6 @@ from oslo_policy import policy as oslo_policy
 from oslo_serialization import jsonutils
 import requests_mock
 
-import nova.conf
 from nova import context
 from nova import exception
 from nova import policy
@@ -30,8 +29,6 @@ from nova import test
 from nova.tests.unit import fake_policy
 from nova.tests.unit import policy_fixture
 from nova import utils
-
-CONF = nova.conf.CONF
 
 
 class PolicyFileTestCase(test.NoDBTestCase):
@@ -282,6 +279,7 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:servers:create:forced_host",
 "os_compute_api:servers:detail:get_all_tenants",
 "os_compute_api:servers:index:get_all_tenants",
+"os_compute_api:servers:allow_all_filters",
 "os_compute_api:servers:show:host_status",
 "os_compute_api:servers:migrations:force_complete",
 "os_compute_api:servers:migrations:delete",
@@ -305,7 +303,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-cells:sync_instances",
 "os_compute_api:os-evacuate",
 "os_compute_api:os-extended-server-attributes",
-"os_compute_api:os-fixed-ips",
 "os_compute_api:os-flavor-access:remove_tenant_access",
 "os_compute_api:os-flavor-access:add_tenant_access",
 "os_compute_api:os-flavor-extra-specs:create",
@@ -315,10 +312,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-flavor-manage:create",
 "os_compute_api:os-flavor-manage:update",
 "os_compute_api:os-flavor-manage:delete",
-"os_compute_api:os-floating-ips-bulk",
-"os_compute_api:os-floating-ip-dns:domain:delete",
-"os_compute_api:os-floating-ip-dns:domain:update",
-"os_compute_api:os-fping:all_tenants",
 "os_compute_api:os-hosts",
 "os_compute_api:os-hypervisors",
 "os_compute_api:os-instance-actions:events",
@@ -376,17 +369,19 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-suspend-server:resume",
 "os_compute_api:os-tenant-networks",
 "os_compute_api:extensions",
-"os_compute_api:os-config-drive",
 "os_compute_api:servers:confirm_resize",
 "os_compute_api:servers:create",
 "os_compute_api:servers:create:attach_network",
 "os_compute_api:servers:create:attach_volume",
+"os_compute_api:servers:create:trusted_certs",
+"os_compute_api:servers:create:zero_disk_flavor",
 "os_compute_api:servers:create_image",
 "os_compute_api:servers:delete",
 "os_compute_api:servers:detail",
 "os_compute_api:servers:index",
 "os_compute_api:servers:reboot",
 "os_compute_api:servers:rebuild",
+"os_compute_api:servers:rebuild:trusted_certs",
 "os_compute_api:servers:resize",
 "os_compute_api:servers:revert_resize",
 "os_compute_api:servers:show",
@@ -403,28 +398,19 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-console-output",
 "os_compute_api:os-remote-consoles",
 "os_compute_api:os-deferred-delete",
-"os_compute_api:os-extended-status",
-"os_compute_api:os-extended-availability-zone",
-"os_compute_api:os-extended-volumes",
 "os_compute_api:os-flavor-access",
-"os_compute_api:os-flavor-rxtx",
 "os_compute_api:flavors",
 "os_compute_api:os-flavor-extra-specs:index",
 "os_compute_api:os-flavor-extra-specs:show",
-"os_compute_api:os-floating-ip-dns",
 "os_compute_api:os-floating-ip-pools",
 "os_compute_api:os-floating-ips",
-"os_compute_api:os-fping",
-"os_compute_api:image-size",
 "os_compute_api:os-instance-actions",
-"os_compute_api:os-keypairs",
 "os_compute_api:limits",
 "os_compute_api:os-multinic",
 "os_compute_api:os-networks:view",
 "os_compute_api:os-rescue",
 "os_compute_api:os-security-groups",
 "os_compute_api:os-server-password",
-"os_compute_api:os-server-usage",
 "os_compute_api:os-server-groups",
 "os_compute_api:os-server-tags:delete",
 "os_compute_api:os-server-tags:delete_all",
@@ -438,7 +424,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-server-groups:delete",
 "os_compute_api:os-shelve:shelve",
 "os_compute_api:os-shelve:unshelve",
-"os_compute_api:os-virtual-interfaces",
 "os_compute_api:os-volumes",
 "os_compute_api:os-volumes-attachments:index",
 "os_compute_api:os-volumes-attachments:show",
@@ -446,9 +431,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-volumes-attachments:delete",
 "os_compute_api:os-availability-zone:list",
 )
-
-        self.non_admin_only_rules = (
-"os_compute_api:os-hide-server-addresses",)
 
         self.allow_all_rules = (
 "os_compute_api:os-quota-sets:defaults",
@@ -467,12 +449,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
                               self.non_admin_context, rule,
                               {'project_id': 'fake', 'user_id': 'fake'})
             policy.authorize(self.admin_context, rule, self.target)
-
-    def test_non_admin_only_rules(self):
-        for rule in self.non_admin_only_rules:
-            self.assertRaises(exception.PolicyNotAuthorized, policy.authorize,
-                              self.admin_context, rule, self.target)
-            policy.authorize(self.non_admin_context, rule, self.target)
 
     def test_admin_or_owner_rules(self):
         for rule in self.admin_or_owner_rules:
@@ -493,6 +469,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
         special_rules = ('admin_api', 'admin_or_owner', 'context_is_admin',
                          'os_compute_api:os-quota-class-sets:show')
         result = set(rules.keys()) - set(self.admin_only_rules +
-            self.admin_or_owner_rules + self.non_admin_only_rules +
+            self.admin_or_owner_rules +
             self.allow_all_rules + special_rules)
         self.assertEqual(set([]), result)

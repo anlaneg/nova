@@ -20,11 +20,10 @@ import copy
 
 from oslo_log import log as logging
 from oslo_utils import importutils
-import six
 
 import nova.conf
 from nova import context as nova_context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import objects
 from nova import utils
@@ -995,21 +994,18 @@ class CountableResource(AbsoluteResource):
 class QuotaEngine(object):
     """Represent the set of recognized quotas."""
 
-    def __init__(self, quota_driver_class=None):
+    def __init__(self, quota_driver=None):
         """Initialize a Quota object."""
         self._resources = {}
-        self._driver_cls = quota_driver_class
-        self.__driver = None
+        # NOTE(mriedem): quota_driver is ever only supplied in tests with a
+        # fake driver.
+        self.__driver = quota_driver
 
     @property
     def _driver(self):
         if self.__driver:
             return self.__driver
-        if not self._driver_cls:
-            self._driver_cls = CONF.quota.driver
-        if isinstance(self._driver_cls, six.string_types):
-            self._driver_cls = importutils.import_object(self._driver_cls)
-        self.__driver = self._driver_cls
+        self.__driver = importutils.import_object(CONF.quota.driver)
         return self.__driver
 
     def register_resource(self, resource):
@@ -1282,12 +1278,26 @@ def _server_group_count_members_by_user(context, group, user_id):
     for cell_mapping in cell_mappings:
         with nova_context.target_cell(context, cell_mapping) as cctxt:
             greenthreads.append(utils.spawn(
-                objects.InstanceList.get_by_filters, cctxt, filters))
+                objects.InstanceList.get_by_filters, cctxt, filters,
+                expected_attrs=[]))
     instances = objects.InstanceList(objects=[])
     for greenthread in greenthreads:
         found = greenthread.wait()
         instances = instances + found
-    return {'user': {'server_group_members': len(instances)}}
+    # Count build requests using the same filters to catch group members
+    # that are not yet creatd in a cell.
+    # NOTE(mriedem): BuildRequestList.get_by_filters is not very efficient for
+    # what we need and we can optimize this with a new query method.
+    build_requests = objects.BuildRequestList.get_by_filters(context, filters)
+    # Ignore any duplicates since build requests and instances can co-exist
+    # for a short window of time after the instance is created in a cell but
+    # before the build request is deleted.
+    instance_uuids = [inst.uuid for inst in instances]
+    count = len(instances)
+    for build_request in build_requests:
+        if build_request.instance_uuid not in instance_uuids:
+            count += 1
+    return {'user': {'server_group_members': count}}
 
 
 def _fixed_ip_count(context, project_id):

@@ -707,6 +707,13 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
         self.disk_write_iops_sec = None
         self.disk_total_bytes_sec = None
         self.disk_total_iops_sec = None
+        self.disk_read_bytes_sec_max = None
+        self.disk_write_bytes_sec_max = None
+        self.disk_total_bytes_sec_max = None
+        self.disk_read_iops_sec_max = None
+        self.disk_write_iops_sec_max = None
+        self.disk_total_iops_sec_max = None
+        self.disk_size_iops_sec = None
         self.logical_block_size = None
         self.physical_block_size = None
         self.readonly = False
@@ -717,6 +724,64 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
         self.boot_order = None
         self.mirror = None
         self.encryption = None
+
+    def _format_iotune(self, dev):
+        iotune = etree.Element("iotune")
+
+        if self.disk_read_bytes_sec is not None:
+            iotune.append(self._text_node("read_bytes_sec",
+                          self.disk_read_bytes_sec))
+
+        if self.disk_read_iops_sec is not None:
+            iotune.append(self._text_node("read_iops_sec",
+                          self.disk_read_iops_sec))
+
+        if self.disk_write_bytes_sec is not None:
+            iotune.append(self._text_node("write_bytes_sec",
+                          self.disk_write_bytes_sec))
+
+        if self.disk_write_iops_sec is not None:
+            iotune.append(self._text_node("write_iops_sec",
+                          self.disk_write_iops_sec))
+
+        if self.disk_total_bytes_sec is not None:
+            iotune.append(self._text_node("total_bytes_sec",
+                          self.disk_total_bytes_sec))
+
+        if self.disk_total_iops_sec is not None:
+            iotune.append(self._text_node("total_iops_sec",
+                          self.disk_total_iops_sec))
+
+        if self.disk_read_bytes_sec_max is not None:
+            iotune.append(self._text_node("read_bytes_sec_max",
+                          self.disk_read_bytes_sec_max))
+
+        if self.disk_write_bytes_sec_max is not None:
+            iotune.append(self._text_node("write_bytes_sec_max",
+                          self.disk_write_bytes_sec_max))
+
+        if self.disk_total_bytes_sec_max is not None:
+            iotune.append(self._text_node("total_bytes_sec_max",
+                          self.disk_total_bytes_sec_max))
+
+        if self.disk_read_iops_sec_max is not None:
+            iotune.append(self._text_node("read_iops_sec_max",
+                          self.disk_read_iops_sec_max))
+
+        if self.disk_write_iops_sec_max is not None:
+            iotune.append(self._text_node("write_iops_sec_max",
+                          self.disk_write_iops_sec_max))
+
+        if self.disk_total_iops_sec_max is not None:
+            iotune.append(self._text_node("total_iops_sec_max",
+                          self.disk_total_iops_sec_max))
+
+        if self.disk_size_iops_sec is not None:
+            iotune.append(self._text_node("size_iops_sec",
+                          self.disk_size_iops_sec))
+
+        if len(iotune) > 0:
+            dev.append(iotune)
 
     def format_dom(self):
         dev = super(LibvirtConfigGuestDisk, self).format_dom()
@@ -774,34 +839,7 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
         if self.serial is not None:
             dev.append(self._text_node("serial", self.serial))
 
-        iotune = etree.Element("iotune")
-
-        if self.disk_read_bytes_sec is not None:
-            iotune.append(self._text_node("read_bytes_sec",
-                self.disk_read_bytes_sec))
-
-        if self.disk_read_iops_sec is not None:
-            iotune.append(self._text_node("read_iops_sec",
-                self.disk_read_iops_sec))
-
-        if self.disk_write_bytes_sec is not None:
-            iotune.append(self._text_node("write_bytes_sec",
-                self.disk_write_bytes_sec))
-
-        if self.disk_write_iops_sec is not None:
-            iotune.append(self._text_node("write_iops_sec",
-                self.disk_write_iops_sec))
-
-        if self.disk_total_bytes_sec is not None:
-            iotune.append(self._text_node("total_bytes_sec",
-                self.disk_total_bytes_sec))
-
-        if self.disk_total_iops_sec is not None:
-            iotune.append(self._text_node("total_iops_sec",
-                self.disk_total_iops_sec))
-
-        if len(iotune) > 0:
-            dev.append(iotune)
+        self._format_iotune(dev)
 
         # Block size tuning
         if (self.logical_block_size is not None or
@@ -1320,6 +1358,8 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
         self.vhostuser_path = None
         self.vhostuser_type = None
         self.vhost_queues = None
+        self.vhost_rx_queue_size = None
+        self.vhost_tx_queue_size = None
         self.vif_inbound_peak = None
         self.vif_inbound_burst = None
         self.vif_inbound_average = None
@@ -1328,6 +1368,7 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
         self.vif_outbound_average = None
         self.vlan = None
         self.device_addr = None
+        self.mtu = None
 
     def format_dom(self):
         dev = super(LibvirtConfigGuestInterface, self).format_dom()
@@ -1339,15 +1380,33 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
         if self.model:
             dev.append(etree.Element("model", type=self.model))
 
+        drv_elem = None
         if self.driver_name:
             drv_elem = etree.Element("driver", name=self.driver_name)
+        if self.net_type == "vhostuser":
+            # For vhostuser interface we should not set the driver
+            # name.
+            drv_elem = etree.Element("driver")
+        if drv_elem is not None:
             if self.vhost_queues is not None:
                 drv_elem.set('queues', str(self.vhost_queues))
-            dev.append(drv_elem)
+            if self.vhost_rx_queue_size is not None:
+                drv_elem.set('rx_queue_size', str(self.vhost_rx_queue_size))
+            if self.vhost_tx_queue_size is not None:
+                drv_elem.set('tx_queue_size', str(self.vhost_tx_queue_size))
+
+            if (drv_elem.get('name') or drv_elem.get('queues') or
+                drv_elem.get('rx_queue_size') or
+                drv_elem.get('tx_queue_size')):
+                # Append the driver element into the dom only if name
+                # or queues or tx/rx attributes are set.
+                dev.append(drv_elem)
 
         if self.net_type == "ethernet":
             if self.script is not None:
                 dev.append(etree.Element("script", path=self.script))
+            if self.mtu is not None:
+                dev.append(etree.Element("mtu", size=str(self.mtu)))
         elif self.net_type == "direct":
             dev.append(etree.Element("source", dev=self.source_dev,
                                      mode=self.source_mode))
@@ -1370,6 +1429,8 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
             dev.append(etree.Element("source", bridge=self.source_dev))
             if self.script is not None:
                 dev.append(etree.Element("script", path=self.script))
+            if self.mtu is not None:
+                dev.append(etree.Element("mtu", size=str(self.mtu)))
         else:
             dev.append(etree.Element("source", bridge=self.source_dev))
 
@@ -1434,6 +1495,8 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
             elif c.tag == 'driver':
                 self.driver_name = c.get('name')
                 self.vhost_queues = c.get('queues')
+                self.vhost_rx_queue_size = c.get('rx_queue_size')
+                self.vhost_tx_queue_size = c.get('tx_queue_size')
             elif c.tag == 'source':
                 if self.net_type == 'direct':
                     self.source_dev = c.get('dev')
@@ -1501,6 +1564,8 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
             elif c.tag == 'address':
                 obj = LibvirtConfigGuestDeviceAddress.parse_dom(c)
                 self.device_addr = obj
+            elif c.tag == 'mtu':
+                self.mtu = int(c.get('size'))
 
     def add_filter_param(self, key, value):
         self.filterparams.append({'key': key, 'value': value})
@@ -1986,6 +2051,10 @@ class LibvirtConfigGuestMemoryBacking(LibvirtConfigObject):
         self.hugepages = []
         self.sharedpages = True
         self.locked = False
+        self.filesource = False
+        self.sharedaccess = False
+        self.allocateimmediate = False
+        self.discard = False
 
     def format_dom(self):
         root = super(LibvirtConfigGuestMemoryBacking, self).format_dom()
@@ -1999,6 +2068,14 @@ class LibvirtConfigGuestMemoryBacking(LibvirtConfigObject):
             root.append(etree.Element("nosharepages"))
         if self.locked:
             root.append(etree.Element("locked"))
+        if self.filesource:
+            root.append(etree.Element("source", type="file"))
+        if self.sharedaccess:
+            root.append(etree.Element("access", mode="shared"))
+        if self.allocateimmediate:
+            root.append(etree.Element("allocation", mode="immediate"))
+        if self.discard:
+            root.append(etree.Element("discard"))
 
         return root
 

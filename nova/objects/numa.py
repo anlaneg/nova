@@ -22,9 +22,12 @@ from nova.virt import hardware
 
 
 def all_things_equal(obj_a, obj_b):
+    if obj_b is None:
+        return False
+
     for name in obj_a.fields:
-        set_a = obj_a.obj_attr_is_set(name)
-        set_b = obj_b.obj_attr_is_set(name)
+        set_a = name in obj_a
+        set_b = name in obj_b
         if set_a != set_b:
             return False
         elif not set_a:
@@ -40,7 +43,8 @@ class NUMACell(base.NovaObject):
     # Version 1.0: Initial version
     # Version 1.1: Added pinned_cpus and siblings fields
     # Version 1.2: Added mempages field
-    VERSION = '1.2'
+    # Version 1.3: Add network_metadata field
+    VERSION = '1.3'
 
     fields = {
         'id': fields.IntegerField(read_only=True),
@@ -51,7 +55,14 @@ class NUMACell(base.NovaObject):
         'pinned_cpus': fields.SetOfIntegersField(),
         'siblings': fields.ListOfSetsOfIntegersField(),
         'mempages': fields.ListOfObjectsField('NUMAPagesTopology'),
+        'network_metadata': fields.ObjectField('NetworkMetadata'),
         }
+
+    def obj_make_compatible(self, primitive, target_version):
+        super(NUMACell, self).obj_make_compatible(primitive, target_version)
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 3):
+            primitive.pop('network_metadata', None)
 
     def __eq__(self, other):
         return all_things_equal(self, other)
@@ -76,6 +87,11 @@ class NUMACell(base.NovaObject):
     def avail_memory(self):
         return self.memory - self.memory_usage
 
+    @property
+    def has_threads(self):
+        """Check if SMT threads, a.k.a. HyperThreads, are present."""
+        return any(len(sibling_set) > 1 for sibling_set in self.siblings)
+
     def pin_cpus(self, cpus):
         if cpus - self.cpuset:
             raise exception.CPUPinningUnknown(requested=list(cpus),
@@ -96,12 +112,6 @@ class NUMACell(base.NovaObject):
         self.pinned_cpus -= cpus
 
     def pin_cpus_with_siblings(self, cpus):
-        # NOTE(snikitin): Empty siblings list means that HyperThreading is
-        # disabled on the NUMA cell and we must pin CPUs like normal CPUs.
-        if not self.siblings:
-            self.pin_cpus(cpus)
-            return
-
         pin_siblings = set()
         for sib in self.siblings:
             if cpus & sib:
@@ -109,27 +119,11 @@ class NUMACell(base.NovaObject):
         self.pin_cpus(pin_siblings)
 
     def unpin_cpus_with_siblings(self, cpus):
-        # NOTE(snikitin): Empty siblings list means that HyperThreading is
-        # disabled on the NUMA cell and we must unpin CPUs like normal CPUs.
-        if not self.siblings:
-            self.unpin_cpus(cpus)
-            return
-
         pin_siblings = set()
         for sib in self.siblings:
             if cpus & sib:
                 pin_siblings.update(sib)
         self.unpin_cpus(pin_siblings)
-
-    def _to_dict(self):
-        return {
-            'id': self.id,
-            'cpus': hardware.format_cpu_spec(
-                self.cpuset, allow_ranges=False),
-            'mem': {
-                'total': self.memory,
-                'used': self.memory_usage},
-            'cpu_usage': self.cpu_usage}
 
     @classmethod
     def _from_dict(cls, data_dict):
@@ -209,7 +203,18 @@ class NUMATopology(base.NovaObject):
 
     fields = {
         'cells': fields.ListOfObjectsField('NUMACell'),
-        }
+    }
+
+    def __eq__(self, other):
+        return all_things_equal(self, other)
+
+    def __ne__(self, other):
+        return not (self == other)
+
+    @property
+    def has_threads(self):
+        """Check if any cell use SMT threads (a.k.a. Hyperthreads)"""
+        return any(cell.has_threads for cell in self.cells)
 
     @classmethod
     def obj_from_primitive(cls, primitive, context=None):
@@ -228,16 +233,16 @@ class NUMATopology(base.NovaObject):
 
     @classmethod
     def obj_from_db_obj(cls, db_obj):
-        return cls.obj_from_primitive(
-            jsonutils.loads(db_obj))
+        """Convert serialized representation to object.
+
+        Deserialize instances of this object that have been stored as JSON
+        blobs in the database.
+        """
+        return cls.obj_from_primitive(jsonutils.loads(db_obj))
 
     def __len__(self):
         """Defined so that boolean testing works the same as for lists."""
         return len(self.cells)
-
-    def _to_dict(self):
-        # TODO(sahid): needs to be removed.
-        return {'cells': [cell._to_dict() for cell in self.cells]}
 
     @classmethod
     def _from_dict(cls, data_dict):
@@ -249,37 +254,18 @@ class NUMATopology(base.NovaObject):
 @base.NovaObjectRegistry.register
 class NUMATopologyLimits(base.NovaObject):
     # Version 1.0: Initial version
-    VERSION = '1.0'
+    # Version 1.1: Add network_metadata field
+    VERSION = '1.1'
 
     fields = {
         'cpu_allocation_ratio': fields.FloatField(),
         'ram_allocation_ratio': fields.FloatField(),
-        }
+        'network_metadata': fields.ObjectField('NetworkMetadata'),
+    }
 
-    def to_dict_legacy(self, host_topology):
-        cells = []
-        for cell in host_topology.cells:
-            cells.append(
-                {'cpus': hardware.format_cpu_spec(
-                    cell.cpuset, allow_ranges=False),
-                 'mem': {'total': cell.memory,
-                         'limit': cell.memory * self.ram_allocation_ratio},
-                 'cpu_limit': len(cell.cpuset) * self.cpu_allocation_ratio,
-                 'id': cell.id})
-        return {'cells': cells}
-
-    @classmethod
-    def obj_from_db_obj(cls, db_obj):
-        if 'nova_object.name' in db_obj:
-            obj_topology = cls.obj_from_primitive(db_obj)
-        else:
-            # NOTE(sahid): This compatibility code needs to stay until we can
-            # guarantee that all compute nodes are using RPC API => 3.40.
-            cell = db_obj['cells'][0]
-            ram_ratio = cell['mem']['limit'] / float(cell['mem']['total'])
-            cpu_ratio = cell['cpu_limit'] / float(len(hardware.parse_cpu_spec(
-                cell['cpus'])))
-            obj_topology = NUMATopologyLimits(
-                cpu_allocation_ratio=cpu_ratio,
-                ram_allocation_ratio=ram_ratio)
-        return obj_topology
+    def obj_make_compatible(self, primitive, target_version):
+        super(NUMATopologyLimits, self).obj_make_compatible(primitive,
+                                                            target_version)
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 1):
+            primitive.pop('network_metadata', None)

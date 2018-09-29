@@ -25,7 +25,7 @@ OpenStack Compute consists of the following areas and their components:
 ``nova-api-metadata`` service
   Accepts metadata requests from instances. The ``nova-api-metadata`` service
   is generally used when you run in multi-host mode with ``nova-network``
-  installations. For details, see :ref:`metadata-service`
+  installations. For details, see :ref:`metadata-service-deploy`
   in the Compute Administrator Guide.
 
 ``nova-compute`` service
@@ -64,6 +64,11 @@ OpenStack Compute consists of the following areas and their components:
   for console proxies to work. You can run proxies of either type against a
   single nova-consoleauth service in a cluster configuration. For information,
   see :ref:`about-nova-consoleauth`.
+
+  .. deprecated:: 18.0.0
+
+    ``nova-consoleauth`` is deprecated since 18.0.0 (Rocky) and will be removed
+    in an upcoming release.
 
 ``nova-novncproxy`` daemon
   Provides a proxy for accessing running instances through a VNC connection.

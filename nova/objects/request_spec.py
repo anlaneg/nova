@@ -27,7 +27,8 @@ from nova.scheduler import utils as scheduler_utils
 from nova.virt import hardware
 
 REQUEST_SPEC_OPTIONAL_ATTRS = ['requested_destination',
-                               'security_groups']
+                               'security_groups',
+                               'network_metadata']
 
 
 @base.NovaObjectRegistry.register
@@ -41,7 +42,10 @@ class RequestSpec(base.NovaObject):
     # Version 1.6: Added requested_destination
     # Version 1.7: Added destroy()
     # Version 1.8: Added security_groups
-    VERSION = '1.8'
+    # Version 1.9: Added user_id
+    # Version 1.10: Added network_metadata
+    # Version 1.11: Added is_bfv
+    VERSION = '1.11'
 
     fields = {
         'id': fields.IntegerField(),
@@ -53,6 +57,7 @@ class RequestSpec(base.NovaObject):
         # TODO(mriedem): The project_id shouldn't be nullable since the
         # scheduler relies on it being set.
         'project_id': fields.StringField(nullable=True),
+        'user_id': fields.StringField(nullable=True),
         'availability_zone': fields.StringField(nullable=True),
         'flavor': fields.ObjectField('Flavor', nullable=False),
         'num_instances': fields.IntegerField(default=1),
@@ -77,11 +82,21 @@ class RequestSpec(base.NovaObject):
         'scheduler_hints': fields.DictOfListOfStringsField(nullable=True),
         'instance_uuid': fields.UUIDField(),
         'security_groups': fields.ObjectField('SecurityGroupList'),
+        'network_metadata': fields.ObjectField('NetworkMetadata'),
+        'is_bfv': fields.BooleanField(),
     }
 
     def obj_make_compatible(self, primitive, target_version):
         super(RequestSpec, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 11) and 'is_bfv' in primitive:
+            del primitive['is_bfv']
+        if target_version < (1, 10):
+            if 'network_metadata' in primitive:
+                del primitive['network_metadata']
+        if target_version < (1, 9):
+            if 'user_id' in primitive:
+                del primitive['user_id']
         if target_version < (1, 8):
             if 'security_groups' in primitive:
                 del primitive['security_groups']
@@ -97,6 +112,11 @@ class RequestSpec(base.NovaObject):
 
         if attrname == 'security_groups':
             self.security_groups = objects.SecurityGroupList(objects=[])
+            return
+
+        if attrname == 'network_metadata':
+            self.network_metadata = objects.NetworkMetadata(
+                physnets=set(), tunneled=False)
             return
 
         # NOTE(sbauza): In case the primitive was not providing that field
@@ -153,7 +173,7 @@ class RequestSpec(base.NovaObject):
             return
 
         instance_fields = ['numa_topology', 'pci_requests', 'uuid',
-                           'project_id', 'availability_zone']
+                           'project_id', 'user_id', 'availability_zone']
         for field in instance_fields:
             if field == 'uuid':
                 setattr(self, 'instance_uuid', getter(instance, field))
@@ -205,7 +225,7 @@ class RequestSpec(base.NovaObject):
             policies = list(filter_properties.get('group_policies'))
             hosts = list(filter_properties.get('group_hosts'))
             members = list(filter_properties.get('group_members'))
-            self.instance_group = objects.InstanceGroup(policies=policies,
+            self.instance_group = objects.InstanceGroup(policy=policies[0],
                                                         hosts=hosts,
                                                         members=members)
             # hosts has to be not part of the updates for saving the object
@@ -307,7 +327,8 @@ class RequestSpec(base.NovaObject):
         # fields, we can only return a dict.
         instance = {}
         instance_fields = ['numa_topology', 'pci_requests',
-                           'project_id', 'availability_zone', 'instance_uuid']
+                           'project_id', 'user_id', 'availability_zone',
+                           'instance_uuid']
         for field in instance_fields:
             if not self.obj_attr_is_set(field):
                 continue
@@ -328,7 +349,7 @@ class RequestSpec(base.NovaObject):
         # the existing dictionary as a primitive.
         return {'group_updated': True,
                 'group_hosts': set(self.instance_group.hosts),
-                'group_policies': set(self.instance_group.policies),
+                'group_policies': set([self.instance_group.policy]),
                 'group_members': set(self.instance_group.members)}
 
     def to_legacy_request_spec_dict(self):
@@ -388,7 +409,8 @@ class RequestSpec(base.NovaObject):
     @classmethod
     def from_components(cls, context, instance_uuid, image, flavor,
             numa_topology, pci_requests, filter_properties, instance_group,
-            availability_zone, security_groups=None, project_id=None):
+            availability_zone, security_groups=None, project_id=None,
+            user_id=None):
         """Returns a new RequestSpec object hydrated by various components.
 
         This helper is useful in creating the RequestSpec from the various
@@ -409,6 +431,8 @@ class RequestSpec(base.NovaObject):
                                 set security_groups on the resulting object.
         :param project_id: The project_id for the requestspec (should match
                            the instance project_id).
+        :param user_id: The user_id for the requestspec (should match
+                           the instance user_id).
         """
         spec_obj = cls(context)
         spec_obj.num_instances = 1
@@ -417,6 +441,7 @@ class RequestSpec(base.NovaObject):
         if spec_obj.instance_group is None and filter_properties:
             spec_obj._populate_group_info(filter_properties)
         spec_obj.project_id = project_id or context.project_id
+        spec_obj.user_id = user_id or context.user_id
         spec_obj._image_meta_from_image(image)
         spec_obj._from_flavor(flavor)
         spec_obj._from_instance_pci_requests(pci_requests)
@@ -438,9 +463,31 @@ class RequestSpec(base.NovaObject):
         spec_obj.obj_set_defaults()
         return spec_obj
 
-    def ensure_project_id(self, instance):
+    def ensure_project_and_user_id(self, instance):
         if 'project_id' not in self or self.project_id is None:
             self.project_id = instance.project_id
+        if 'user_id' not in self or self.user_id is None:
+            self.user_id = instance.user_id
+
+    def ensure_network_metadata(self, instance):
+        if not (instance.info_cache and instance.info_cache.network_info):
+            return
+
+        physnets = set([])
+        tunneled = True
+
+        # physical_network and tunneled might not be in the cache for old
+        # instances that haven't had their info_cache healed yet
+        for vif in instance.info_cache.network_info:
+            physnet = vif.get('network', {}).get('meta', {}).get(
+                'physical_network', None)
+            if physnet:
+                physnets.add(physnet)
+            tunneled |= vif.get('network', {}).get('meta', {}).get(
+                'tunneled', False)
+
+        self.network_metadata = objects.NetworkMetadata(
+            physnets=physnets, tunneled=tunneled)
 
     @staticmethod
     def _from_db_object(context, spec, db_spec):
@@ -450,7 +497,7 @@ class RequestSpec(base.NovaObject):
             # though they should match.
             if key in ['id', 'instance_uuid']:
                 setattr(spec, key, db_spec[key])
-            else:
+            elif key in spec_obj:
                 setattr(spec, key, getattr(spec_obj, key))
         spec._context = context
 
@@ -501,6 +548,7 @@ class RequestSpec(base.NovaObject):
         it was originally scheduled with.
         """
         updates = self.obj_get_changes()
+        db_updates = None
         # NOTE(alaski): The db schema is the full serialized object in a
         # 'spec' column.  If anything has changed we rewrite the full thing.
         if updates:
@@ -510,6 +558,13 @@ class RequestSpec(base.NovaObject):
             if 'instance_group' in spec and spec.instance_group:
                 spec.instance_group.members = None
                 spec.instance_group.hosts = None
+            # NOTE(mriedem): Don't persist retries since those are per-request
+            if 'retry' in spec and spec.retry:
+                spec.retry = None
+            # NOTE(stephenfin): Don't persist network metadata since we have
+            # no need for it after scheduling
+            if 'network_metadata' in spec and spec.network_metadata:
+                del spec.network_metadata
 
             db_updates = {'spec': jsonutils.dumps(spec.obj_to_primitive())}
             if 'instance_uuid' in updates:
@@ -523,7 +578,9 @@ class RequestSpec(base.NovaObject):
                                               reason='already created')
 
         updates = self._get_update_primitives()
-
+        if not updates:
+            raise exception.ObjectActionError(action='create',
+                                              reason='no fields are set')
         db_spec = self._create_in_db(self._context, updates)
         self._from_db_object(self._context, self, db_spec)
 
@@ -541,9 +598,11 @@ class RequestSpec(base.NovaObject):
     @base.remotable
     def save(self):
         updates = self._get_update_primitives()
-        db_spec = self._save_in_db(self._context, self.instance_uuid, updates)
-        self._from_db_object(self._context, self, db_spec)
-        self.obj_reset_changes()
+        if updates:
+            db_spec = self._save_in_db(self._context, self.instance_uuid,
+                                       updates)
+            self._from_db_object(self._context, self, db_spec)
+            self.obj_reset_changes()
 
     @staticmethod
     @db.api_context_manager.writer
@@ -625,7 +684,8 @@ def _create_minimal_request_spec(context, instance):
         instance.flavor, instance.numa_topology,
         instance.pci_requests,
         {}, None, instance.availability_zone,
-        project_id=instance.project_id
+        project_id=instance.project_id,
+        user_id=instance.user_id
     )
     scheduler_utils.setup_instance_group(context, request_spec)
     request_spec.create()
@@ -665,7 +725,8 @@ def migrate_instances_add_request_spec(context, max_count):
 class Destination(base.NovaObject):
     # Version 1.0: Initial version
     # Version 1.1: Add cell field
-    VERSION = '1.1'
+    # Version 1.2: Add aggregates field
+    VERSION = '1.2'
 
     fields = {
         'host': fields.StringField(),
@@ -674,14 +735,47 @@ class Destination(base.NovaObject):
         # let's provide a possible nullable node here.
         'node': fields.StringField(nullable=True),
         'cell': fields.ObjectField('CellMapping', nullable=True),
+
+        # NOTE(dansmith): These are required aggregates (or sets) and
+        # are passed to placement.  See require_aggregates() below.
+        'aggregates': fields.ListOfStringsField(nullable=True,
+                                                default=None),
     }
 
     def obj_make_compatible(self, primitive, target_version):
         super(Destination, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 2):
+            if 'aggregates' in primitive:
+                del primitive['aggregates']
         if target_version < (1, 1):
             if 'cell' in primitive:
                 del primitive['cell']
+
+    def obj_load_attr(self, attrname):
+        self.obj_set_defaults(attrname)
+
+    def require_aggregates(self, aggregates):
+        """Add a set of aggregates to the list of required aggregates.
+
+        This will take a list of aggregates, which are to be logically OR'd
+        together and add them to the list of required aggregates that will
+        be used to query placement. Aggregate sets provided in sequential calls
+        to this method will be AND'd together.
+
+        For example, the following set of calls:
+            dest.require_aggregates(['foo', 'bar'])
+            dest.require_aggregates(['baz'])
+        will generate the following logical query to placement:
+            "Candidates should be in 'foo' OR 'bar', but definitely in 'baz'"
+
+        :param aggregates: A list of aggregates, at least one of which
+                           must contain the destination host.
+
+        """
+        if self.aggregates is None:
+            self.aggregates = []
+        self.aggregates.append(','.join(aggregates))
 
 
 @base.NovaObjectRegistry.register

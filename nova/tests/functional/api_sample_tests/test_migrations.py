@@ -15,10 +15,11 @@
 
 import datetime
 
+from oslo_utils.fixture import uuidsentinel as uuids
+
 from nova import context
 from nova import objects
 from nova.tests.functional.api_sample_tests import api_sample_base
-from nova.tests import uuidsentinel as uuids
 
 
 # NOTE(ShaoHe Feng) here I can not use uuidsentinel, it generate a random
@@ -36,7 +37,7 @@ def _stub_migrations(stub_self, context, filters):
             'source_compute': 'compute1',
             'dest_compute': 'compute2',
             'dest_host': '1.2.3.4',
-            'status': 'Done',
+            'status': 'done',
             'instance_uuid': 'instance_id_123',
             'old_instance_type_id': 1,
             'new_instance_type_id': 2,
@@ -55,7 +56,7 @@ def _stub_migrations(stub_self, context, filters):
             'source_compute': 'compute10',
             'dest_compute': 'compute20',
             'dest_host': '5.6.7.8',
-            'status': 'Done',
+            'status': 'done',
             'instance_uuid': 'instance_id_456',
             'old_instance_type_id': 5,
             'new_instance_type_id': 6,
@@ -284,10 +285,23 @@ class MigrationsSamplesJsonTestV2_59(MigrationsSamplesJsonTestV2_23):
             {"instance_1": INSTANCE_UUID_1, "instance_2": INSTANCE_UUID_2},
             response, 200)
 
-    def test_get_migrations_with_timestamp_filter(self):
+    def test_get_migrations_with_changes_since(self):
         response = self._do_get(
             'os-migrations?changes-since=2016-06-23T13:42:01.000000')
         self.assertEqual(200, response.status_code)
         self._verify_response(
-            'migrations-get-with-timestamp-filter',
+            'migrations-get-with-changes-since',
             {"instance_2": INSTANCE_UUID_2}, response, 200)
+
+
+class MigrationsSamplesJsonTestV2_66(MigrationsSamplesJsonTestV2_59):
+    microversion = '2.66'
+    scenarios = [('v2_66', {'api_major_version': 'v2.1'})]
+
+    def test_get_migrations_with_changes_before(self):
+        response = self._do_get(
+            'os-migrations?changes-before=2016-01-29T11:42:02.000000')
+        self.assertEqual(200, response.status_code)
+        self._verify_response(
+            'migrations-get-with-changes-before',
+            {"instance_1": INSTANCE_UUID_1}, response, 200)

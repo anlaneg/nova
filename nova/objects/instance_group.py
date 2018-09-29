@@ -15,16 +15,16 @@
 import copy
 
 from oslo_db import exception as db_exc
+from oslo_log import log as logging
+from oslo_serialization import jsonutils
 from oslo_utils import uuidutils
 from oslo_utils import versionutils
 from sqlalchemy.orm import contains_eager
 from sqlalchemy.orm import joinedload
 
 from nova.compute import utils as compute_utils
-from nova import db
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import api_models
-from nova.db.sqlalchemy import models as main_models
 from nova import exception
 from nova import objects
 from nova.objects import base
@@ -32,6 +32,7 @@ from nova.objects import fields
 
 
 LAZY_LOAD_FIELDS = ['hosts']
+LOG = logging.getLogger(__name__)
 
 
 def _instance_group_get_query(context, id_field=None, id=None):
@@ -70,17 +71,6 @@ def _instance_group_model_add(context, model_class, items, item_models, field,
     return models
 
 
-def _instance_group_policies_add(context, group, policies):
-    query = _instance_group_model_get_query(context,
-                                            api_models.InstanceGroupPolicy,
-                                            group.id)
-    query = query.filter(
-                api_models.InstanceGroupPolicy.policy.in_(set(policies)))
-    return _instance_group_model_add(context, api_models.InstanceGroupPolicy,
-                                     policies, query.all(), 'policy', group.id,
-                                     append_to_models=group._policies)
-
-
 def _instance_group_members_add(context, group, members):
     query = _instance_group_model_get_query(context,
                                             api_models.InstanceGroupMember,
@@ -108,6 +98,7 @@ def _instance_group_members_add_by_uuid(context, group_uuid, members):
 
 
 # TODO(berrange): Remove NovaObjectDictCompat
+# TODO(mriedem): Replace NovaPersistentObject with TimestampedObject in v2.0.
 @base.NovaObjectRegistry.register
 class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
                     base.NovaObjectDictCompat):
@@ -122,7 +113,8 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
     # Version 1.8: Add count_members_by_user()
     # Version 1.9: Add get_by_instance_uuid()
     # Version 1.10: Add hosts field
-    VERSION = '1.10'
+    # Version 1.11: Add policy and deprecate policies, add _rules
+    VERSION = '1.11'
 
     fields = {
         'id': fields.IntegerField(),
@@ -133,13 +125,42 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
         'uuid': fields.UUIDField(),
         'name': fields.StringField(nullable=True),
 
-        'policies': fields.ListOfStringsField(nullable=True),
+        'policies': fields.ListOfStringsField(nullable=True, read_only=True),
         'members': fields.ListOfStringsField(nullable=True),
         'hosts': fields.ListOfStringsField(nullable=True),
+        'policy': fields.StringField(nullable=True),
+        # NOTE(danms): Use rules not _rules for general access
+        '_rules': fields.DictOfStringsField(),
         }
+
+    def __init__(self, *args, **kwargs):
+        if 'rules' in kwargs:
+            kwargs['_rules'] = kwargs.pop('rules')
+        super(InstanceGroup, self).__init__(*args, **kwargs)
+
+    @property
+    def rules(self):
+        if '_rules' not in self:
+            return {}
+        # NOTE(danms): Coerce our rules into a typed dict for convenience
+        rules = {}
+        if 'max_server_per_host' in self._rules:
+            rules['max_server_per_host'] = \
+                    int(self._rules['max_server_per_host'])
+        return rules
 
     def obj_make_compatible(self, primitive, target_version):
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 11):
+            # NOTE(yikun): Before 1.11, we had a policies property which is
+            # the list of policy name, even though it was a list, there was
+            # ever only one entry in the list.
+            policy = primitive.pop('policy', None)
+            if policy:
+                primitive['policies'] = [policy]
+            else:
+                primitive['policies'] = []
+            primitive.pop('rules', None)
         if target_version < (1, 7):
             # NOTE(danms): Before 1.7, we had an always-empty
             # metadetails property
@@ -160,10 +181,31 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
             # the api database, we have removed soft-delete, so
             # the object fields for delete must be filled in with
             # default values for db models from the api database.
+            # TODO(mriedem): Remove this when NovaPersistentObject is removed.
             ignore = {'deleted': False,
                       'deleted_at': None}
-            if field in ignore and not hasattr(db_inst, field):
+            if '_rules' == field:
+                db_policy = db_inst['policy']
+                instance_group._rules = (
+                    jsonutils.loads(db_policy['rules'])
+                    if db_policy and db_policy['rules']
+                    else {})
+            elif field in ignore and not hasattr(db_inst, field):
                 instance_group[field] = ignore[field]
+            elif 'policies' == field:
+                continue
+            # NOTE(yikun): The obj.policies is deprecated and marked as
+            # read_only in version 1.11, and there is no "policies" property
+            # in InstanceGroup model anymore, so we just skip to set
+            # "policies" and then load the "policies" when "policy" is set.
+            elif 'policy' == field:
+                db_policy = db_inst['policy']
+                if db_policy:
+                    instance_group.policy = db_policy['policy']
+                    instance_group.policies = [instance_group.policy]
+                else:
+                    instance_group.policy = None
+                    instance_group.policies = []
             else:
                 instance_group[field] = db_inst[field]
 
@@ -212,20 +254,12 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
     @staticmethod
     @db_api.api_context_manager.writer
     def _save_in_db(context, group_uuid, values):
-        grp = _instance_group_get_query(context,
-                                        id_field=api_models.InstanceGroup.uuid,
-                                        id=group_uuid).first()
-        if not grp:
-            raise exception.InstanceGroupNotFound(group_uuid=group_uuid)
-
+        grp = InstanceGroup._get_from_db_by_uuid(context, group_uuid)
         values_copy = copy.copy(values)
-        policies = values_copy.pop('policies', None)
         members = values_copy.pop('members', None)
 
         grp.update(values_copy)
 
-        if policies is not None:
-            _instance_group_policies_add(context, grp, policies)
         if members is not None:
             _instance_group_members_add(context, grp, members)
 
@@ -233,7 +267,8 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
 
     @staticmethod
     @db_api.api_context_manager.writer
-    def _create_in_db(context, values, policies=None, members=None):
+    def _create_in_db(context, values, policies=None, members=None,
+                      policy=None, rules=None):
         try:
             group = api_models.InstanceGroup()
             group.update(values)
@@ -242,10 +277,21 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
             raise exception.InstanceGroupIdExists(group_uuid=values['uuid'])
 
         if policies:
-            group._policies = _instance_group_policies_add(context, group,
-                                                           policies)
+            db_policy = api_models.InstanceGroupPolicy(
+                group_id=group['id'], policy=policies[0], rules=None)
+            group._policies = [db_policy]
+            group.rules = None
+        elif policy:
+            db_rules = jsonutils.dumps(rules or {})
+            db_policy = api_models.InstanceGroupPolicy(
+                group_id=group['id'], policy=policy,
+                rules=db_rules)
+            group._policies = [db_policy]
         else:
             group._policies = []
+
+        if group._policies:
+            group.save(context.session)
 
         if members:
             group._members = _instance_group_members_add(context, group,
@@ -291,49 +337,45 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
                    in_(set(instance_uuids))).\
             delete(synchronize_session=False)
 
+    @staticmethod
+    @db_api.api_context_manager.writer
+    def _destroy_members_bulk_in_db(context, instance_uuids):
+        return context.session.query(api_models.InstanceGroupMember).filter(
+            api_models.InstanceGroupMember.instance_uuid.in_(instance_uuids)).\
+            delete(synchronize_session=False)
+
+    @classmethod
+    def destroy_members_bulk(cls, context, instance_uuids):
+        return cls._destroy_members_bulk_in_db(context, instance_uuids)
+
     def obj_load_attr(self, attrname):
         # NOTE(sbauza): Only hosts could be lazy-loaded right now
         if attrname != 'hosts':
             raise exception.ObjectActionError(
                 action='obj_load_attr', reason='unable to load %s' % attrname)
 
+        LOG.debug("Lazy-loading '%(attr)s' on %(name)s uuid %(uuid)s",
+                  {'attr': attrname,
+                   'name': self.obj_name(),
+                   'uuid': self.uuid,
+                   })
+
         self.hosts = self.get_hosts()
         self.obj_reset_changes(['hosts'])
 
     @base.remotable_classmethod
     def get_by_uuid(cls, context, uuid):
-        db_group = None
-        try:
-            db_group = cls._get_from_db_by_uuid(context, uuid)
-        except exception.InstanceGroupNotFound:
-            pass
-        if db_group is None:
-            db_group = db.instance_group_get(context, uuid)
+        db_group = cls._get_from_db_by_uuid(context, uuid)
         return cls._from_db_object(context, cls(), db_group)
 
     @base.remotable_classmethod
     def get_by_name(cls, context, name):
-        try:
-            db_group = cls._get_from_db_by_name(context, name)
-        except exception.InstanceGroupNotFound:
-            igs = InstanceGroupList._get_main_by_project_id(context,
-                                                            context.project_id)
-            for ig in igs:
-                if ig.name == name:
-                    return ig
-            raise exception.InstanceGroupNotFound(group_uuid=name)
+        db_group = cls._get_from_db_by_name(context, name)
         return cls._from_db_object(context, cls(), db_group)
 
     @base.remotable_classmethod
     def get_by_instance_uuid(cls, context, instance_uuid):
-        db_group = None
-        try:
-            db_group = cls._get_from_db_by_instance(context, instance_uuid)
-        except exception.InstanceGroupNotFound:
-            pass
-        if db_group is None:
-            db_group = db.instance_group_get_by_instance(context,
-                                                         instance_uuid)
+        db_group = cls._get_from_db_by_instance(context, instance_uuid)
         return cls._from_db_object(context, cls(), db_group)
 
     @classmethod
@@ -361,17 +403,19 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
         if 'hosts' in updates:
             raise exception.InstanceGroupSaveException(field='hosts')
 
+        # NOTE(yikun): You have to provide exactly one policy on group create,
+        # and also there are no group update APIs, so we do NOT support
+        # policies update.
+        if 'policies' in updates:
+            raise exception.InstanceGroupSaveException(field='policies')
+
         if not updates:
             return
 
         payload = dict(updates)
         payload['server_group_id'] = self.uuid
 
-        try:
-            db_group = self._save_in_db(self._context, self.uuid, updates)
-        except exception.InstanceGroupNotFound:
-            db.instance_group_update(self._context, self.uuid, updates)
-            db_group = db.instance_group_get(self._context, self.uuid)
+        db_group = self._save_in_db(self._context, self.uuid, updates)
         self._from_db_object(self._context, self, db_group)
         compute_utils.notify_about_server_group_update(self._context,
                                                        "update", payload)
@@ -385,10 +429,8 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
                 self[field] = current[field]
         self.obj_reset_changes()
 
-    def _create(self, skipcheck=False):
-        # NOTE(danms): This is just for the migration routine, and
-        # can be removed once we're no longer supporting the migration
-        # of instance groups from the main to api database.
+    @base.remotable
+    def create(self):
         if self.obj_attr_is_set('id'):
             raise exception.ObjectActionError(action='create',
                                               reason='already created')
@@ -396,23 +438,19 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
         payload = dict(updates)
         updates.pop('id', None)
         policies = updates.pop('policies', None)
+        policy = updates.pop('policy', None)
+        rules = updates.pop('_rules', None)
         members = updates.pop('members', None)
 
         if 'uuid' not in updates:
             self.uuid = uuidutils.generate_uuid()
             updates['uuid'] = self.uuid
 
-        if not skipcheck:
-            try:
-                db.instance_group_get(self._context, self.uuid)
-                raise exception.ObjectActionError(
-                    action='create',
-                    reason='already created in main')
-            except exception.InstanceGroupNotFound:
-                pass
         db_group = self._create_in_db(self._context, updates,
                                       policies=policies,
-                                      members=members)
+                                      members=members,
+                                      policy=policy,
+                                      rules=rules)
         self._from_db_object(self._context, self, db_group)
         payload['server_group_id'] = self.uuid
         compute_utils.notify_about_server_group_update(self._context,
@@ -423,16 +461,9 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
             action=fields.NotificationAction.CREATE)
 
     @base.remotable
-    def create(self):
-        self._create()
-
-    @base.remotable
     def destroy(self):
         payload = {'server_group_id': self.uuid}
-        try:
-            self._destroy_in_db(self._context, self.uuid)
-        except exception.InstanceGroupNotFound:
-            db.instance_group_delete(self._context, self.uuid)
+        self._destroy_in_db(self._context, self.uuid)
         self.obj_reset_changes()
         compute_utils.notify_about_server_group_update(self._context,
                                                        "delete", payload)
@@ -445,15 +476,12 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
     def add_members(cls, context, group_uuid, instance_uuids):
         payload = {'server_group_id': group_uuid,
                    'instance_uuids': instance_uuids}
-        try:
-            members = cls._add_members_in_db(context, group_uuid,
-                                             instance_uuids)
-            members = [member['instance_uuid'] for member in members]
-        except exception.InstanceGroupNotFound:
-            members = db.instance_group_members_add(context, group_uuid,
-                                                    instance_uuids)
+        members = cls._add_members_in_db(context, group_uuid,
+                                         instance_uuids)
+        members = [member['instance_uuid'] for member in members]
         compute_utils.notify_about_server_group_update(context,
                                                        "addmember", payload)
+        compute_utils.notify_about_server_group_add_member(context, group_uuid)
         return list(members)
 
     @base.remotable
@@ -510,13 +538,6 @@ class InstanceGroupList(base.ObjectListBase, base.NovaObject):
             query = query.filter_by(project_id=project_id)
         return query.all()
 
-    @classmethod
-    def _get_main_by_project_id(cls, context, project_id):
-        main_db_groups = db.instance_group_get_all_by_project_id(context,
-                                                                 project_id)
-        return base.obj_make_list(context, cls(context), objects.InstanceGroup,
-                                  main_db_groups)
-
     @staticmethod
     @db_api.api_context_manager.reader
     def _get_counts_from_db(context, project_id, user_id=None):
@@ -532,17 +553,14 @@ class InstanceGroupList(base.ObjectListBase, base.NovaObject):
     @base.remotable_classmethod
     def get_by_project_id(cls, context, project_id):
         api_db_groups = cls._get_from_db(context, project_id=project_id)
-        main_db_groups = db.instance_group_get_all_by_project_id(context,
-                                                                 project_id)
         return base.obj_make_list(context, cls(context), objects.InstanceGroup,
-                                  api_db_groups + main_db_groups)
+                                  api_db_groups)
 
     @base.remotable_classmethod
     def get_all(cls, context):
         api_db_groups = cls._get_from_db(context)
-        main_db_groups = db.instance_group_get_all(context)
         return base.obj_make_list(context, cls(context), objects.InstanceGroup,
-                                  api_db_groups + main_db_groups)
+                                  api_db_groups)
 
     @base.remotable_classmethod
     def get_counts(cls, context, project_id, user_id=None):
@@ -558,35 +576,3 @@ class InstanceGroupList(base.ObjectListBase, base.NovaObject):
                      'user': {'server_groups': <count across user>}}
         """
         return cls._get_counts_from_db(context, project_id, user_id=user_id)
-
-
-@db_api.pick_context_manager_reader
-def _get_main_instance_groups(context, limit):
-    return context.session.query(main_models.InstanceGroup).\
-        options(joinedload('_policies')).\
-        options(joinedload('_members')).\
-        filter_by(deleted=0).\
-        limit(limit).\
-        all()
-
-
-def migrate_instance_groups_to_api_db(context, count):
-    main_groups = _get_main_instance_groups(context, count)
-    done = 0
-    for db_group in main_groups:
-        group = objects.InstanceGroup(context=context,
-                                      user_id=db_group.user_id,
-                                      project_id=db_group.project_id,
-                                      uuid=db_group.uuid,
-                                      name=db_group.name,
-                                      policies=db_group.policies,
-                                      members=db_group.members)
-        try:
-            group._create(skipcheck=True)
-        except exception.InstanceGroupIdExists:
-            # NOTE(melwitt): This might happen if there's a failure right after
-            # the InstanceGroup was created and the migration is re-run.
-            pass
-        db_api.instance_group_delete(context, db_group.uuid)
-        done += 1
-    return len(main_groups), done

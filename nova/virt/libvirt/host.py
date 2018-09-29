@@ -32,6 +32,7 @@ import os
 import socket
 import sys
 import threading
+import traceback
 
 from eventlet import greenio
 from eventlet import greenthread
@@ -45,6 +46,7 @@ from oslo_utils import units
 from oslo_utils import versionutils
 import six
 
+from nova.compute import utils as compute_utils
 import nova.conf
 from nova import context as nova_context
 from nova import exception
@@ -180,8 +182,25 @@ class Host(object):
             #启动
             transition = virtevent.EVENT_LIFECYCLE_STARTED
         elif event == libvirt.VIR_DOMAIN_EVENT_SUSPENDED:
-            #挂起
-            transition = virtevent.EVENT_LIFECYCLE_PAUSED
+            # NOTE(siva_krishnan): We have to check if
+            # VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY and
+            # VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED exist since the current
+            # minimum version of libvirt (1.3.1) don't have those attributes.
+            # This check can be removed once MIN_LIBVIRT_VERSION is bumped to
+            # at least 1.3.3.
+            if (hasattr(libvirt, 'VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY') and
+                    detail == libvirt.VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY):
+                transition = virtevent.EVENT_LIFECYCLE_POSTCOPY_STARTED
+            # FIXME(mriedem): VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED is also sent
+            # when live migration of the guest fails, so we cannot simply rely
+            # on the event itself but need to check if the job itself was
+            # successful.
+            # elif (hasattr(libvirt, 'VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED') and
+            #         detail == libvirt.VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED):
+            #     transition = virtevent.EVENT_LIFECYCLE_MIGRATION_COMPLETED
+            else:
+            	#挂起
+                transition = virtevent.EVENT_LIFECYCLE_PAUSED
         elif event == libvirt.VIR_DOMAIN_EVENT_RESUMED:
             #恢复
             transition = virtevent.EVENT_LIFECYCLE_RESUMED
@@ -477,9 +496,12 @@ class Host(object):
             payload = dict(ip=CONF.my_ip,
                            method='_connect',
                            reason=ex)
-            rpc.get_notifier('compute').error(nova_context.get_admin_context(),
+            ctxt = nova_context.get_admin_context()
+            rpc.get_notifier('compute').error(ctxt,
                                               'compute.libvirt.error',
                                               payload)
+            compute_utils.notify_about_libvirt_connect_error(
+                ctxt, ip=CONF.my_ip, exception=ex, tb=traceback.format_exc())
             raise exception.HypervisorUnavailable(host=CONF.host)
 
         return conn
@@ -811,7 +833,47 @@ class Host(object):
 
         :returns: the total amount of memory(MB).
         """
-        return self._get_hardware_info()[1]
+        if CONF.libvirt.file_backed_memory > 0:
+            return CONF.libvirt.file_backed_memory
+        else:
+            return self._get_hardware_info()[1]
+
+    def _sum_domain_memory_mb(self, include_host=True):
+        """Get the total memory consumed by guest domains
+
+        If include_host is True, subtract available host memory from guest 0
+        to get real used memory within dom0 within xen
+        """
+        used = 0
+        for guest in self.list_guests(only_guests=False):
+            try:
+                # TODO(sahid): Use get_info...
+                dom_mem = int(guest._get_domain_info(self)[2])
+            except libvirt.libvirtError as e:
+                LOG.warning("couldn't obtain the memory from domain:"
+                            " %(uuid)s, exception: %(ex)s",
+                            {"uuid": guest.uuid, "ex": e})
+                continue
+            if include_host and guest.id == 0:
+                # Memory usage for the host domain (dom0 in xen) is the
+                # reported memory minus available memory
+                used += (dom_mem - self._get_avail_memory_kb())
+            else:
+                used += dom_mem
+        # Convert it to MB
+        return used // units.Ki
+
+    @staticmethod
+    def _get_avail_memory_kb():
+        with open('/proc/meminfo') as fp:
+            m = fp.read().split()
+        idx1 = m.index('MemFree:')
+        idx2 = m.index('Buffers:')
+        idx3 = m.index('Cached:')
+
+        avail = int(m[idx1 + 1]) + int(m[idx2 + 1]) + int(m[idx3 + 1])
+
+        return avail
 
     def get_memory_mb_used(self):
         """Get the used memory size(MB) of physical computer.
@@ -821,38 +883,16 @@ class Host(object):
         if sys.platform.upper() not in ['LINUX2', 'LINUX3']:
             return 0
 
-        with open('/proc/meminfo') as fp:
-            m = fp.read().split()
-        idx1 = m.index('MemFree:')
-        idx2 = m.index('Buffers:')
-        idx3 = m.index('Cached:')
         if CONF.libvirt.virt_type == 'xen':
-            used = 0
-            for guest in self.list_guests(only_guests=False):
-                try:
-                    # TODO(sahid): Use get_info...
-                    dom_mem = int(guest._get_domain_info(self)[2])
-                except libvirt.libvirtError as e:
-                    LOG.warning("couldn't obtain the memory from domain:"
-                                " %(uuid)s, exception: %(ex)s",
-                                {"uuid": guest.uuid, "ex": e})
-                    continue
-                # skip dom0
-                if guest.id != 0:
-                    used += dom_mem
-                else:
-                    # the mem reported by dom0 is be greater of what
-                    # it is being used
-                    used += (dom_mem -
-                             (int(m[idx1 + 1]) +
-                              int(m[idx2 + 1]) +
-                              int(m[idx3 + 1])))
-            # Convert it to MB
-            return used // units.Ki
+            # For xen, report the sum of all domains, with
+            return self._sum_domain_memory_mb(include_host=True)
+        elif CONF.libvirt.file_backed_memory > 0:
+            # For file_backed_memory, report the total usage of guests,
+            # ignoring host memory
+            return self._sum_domain_memory_mb(include_host=False)
         else:
-            avail = (int(m[idx1 + 1]) + int(m[idx2 + 1]) + int(m[idx3 + 1]))
-            # Convert it to MB
-            return self.get_memory_mb_total() - avail // units.Ki
+            return (self.get_memory_mb_total() -
+                   (self._get_avail_memory_kb() // units.Ki))
 
     def get_cpu_stats(self):
         """Returns the current CPU state of the host with frequency."""

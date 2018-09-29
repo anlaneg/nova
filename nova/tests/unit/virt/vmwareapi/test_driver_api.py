@@ -25,6 +25,7 @@ import datetime
 from eventlet import greenthread
 import mock
 from oslo_utils import fixture as utils_fixture
+from oslo_utils.fixture import uuidsentinel
 from oslo_utils import units
 from oslo_utils import uuidutils
 from oslo_vmware import exceptions as vexc
@@ -42,7 +43,7 @@ from nova import exception
 from nova.image import glance
 from nova.network import model as network_model
 from nova import objects
-from nova.objects import fields
+from nova import rc_fields as fields
 from nova import test
 from nova.tests.unit import fake_diagnostics
 from nova.tests.unit import fake_instance
@@ -52,7 +53,6 @@ from nova.tests.unit.objects import test_diagnostics
 from nova.tests.unit import utils
 from nova.tests.unit.virt.vmwareapi import fake as vmwareapi_fake
 from nova.tests.unit.virt.vmwareapi import stubs
-from nova.tests import uuidsentinel
 from nova.virt import driver as v_driver
 from nova.virt.vmwareapi import constants
 from nova.virt.vmwareapi import driver
@@ -65,6 +65,7 @@ from nova.virt.vmwareapi import vim_util
 from nova.virt.vmwareapi import vm_util
 from nova.virt.vmwareapi import vmops
 from nova.virt.vmwareapi import volumeops
+
 
 CONF = nova.conf.CONF
 
@@ -284,7 +285,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
 
     def test_driver_capabilities(self):
         self.assertTrue(self.conn.capabilities['has_imagecache'])
-        self.assertFalse(self.conn.capabilities['supports_recreate'])
+        self.assertFalse(self.conn.capabilities['supports_evacuate'])
         self.assertTrue(
             self.conn.capabilities['supports_migrate_to_same_host'])
 
@@ -674,7 +675,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
                           block_device_info=bdi)
         mock_power_off.assert_called_once_with(self.instance)
         mock_detach_volume.assert_called_once_with(
-            connection_info, self.instance, 'fake-name')
+            None, connection_info, self.instance, 'fake-name')
         mock_destroy.assert_called_once_with(self.instance, True)
 
     @mock.patch.object(vmops.VMwareVMOps, 'power_off',
@@ -712,7 +713,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
                           self.conn.destroy, self.context, self.instance,
                           self.network_info, block_device_info=bdi)
         mock_detach_volume.assert_called_once_with(
-            connection_info, self.instance, 'fake-name')
+            None, connection_info, self.instance, 'fake-name')
         self.assertFalse(mock_destroy.called)
 
     @mock.patch.object(driver.VMwareVCDriver, 'detach_volume',
@@ -730,7 +731,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         self.conn.destroy(self.context, self.instance, self.network_info,
                           block_device_info=bdi)
         mock_detach_volume.assert_called_once_with(
-            connection_info, self.instance, 'fake-name')
+            None, connection_info, self.instance, 'fake-name')
         self.assertTrue(mock_destroy.called)
         mock_destroy.assert_called_once_with(self.instance, True)
 
@@ -1496,10 +1497,11 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
             block_device_info_get_mapping.assert_called_once_with(
                 block_device_info)
             vmops.power_off.assert_called_once_with(self.instance)
-            exp_detach_calls = [mock.call(mock.sentinel.connection_info_1,
-                                          self.instance, 'dev1'),
-                                mock.call(mock.sentinel.connection_info_2,
-                                          self.instance, 'dev2')]
+            exp_detach_calls = [
+                mock.call(None, mock.sentinel.connection_info_1,
+                          self.instance, 'dev1'),
+                mock.call(None, mock.sentinel.connection_info_2,
+                          self.instance, 'dev2')]
             self.assertEqual(exp_detach_calls, detach_volume.call_args_list)
 
     def test_destroy(self):
@@ -1704,16 +1706,14 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         self._create_instance()
         with test.nested(
             mock.patch('os.path.exists', return_value=True),
-            mock.patch('{}.open'.format(driver.__name__), create=True),
             mock.patch('nova.privsep.path.last_bytes')
-        ) as (fake_exists, fake_open, fake_last_bytes):
-            fake_open.return_value = mock.MagicMock()
-            fake_fd = fake_open.return_value.__enter__.return_value
+        ) as (fake_exists, fake_last_bytes):
             fake_last_bytes.return_value = b'fira', 0
             output = self.conn.get_console_output(self.context, self.instance)
             fname = self.instance.uuid.replace('-', '')
-            fake_exists.assert_called_once_with('/opt/vspc/{}'.format(fname))
-            fake_last_bytes.assert_called_once_with(fake_fd,
+            fpath = '/opt/vspc/{}'.format(fname)
+            fake_exists.assert_called_once_with(fpath)
+            fake_last_bytes.assert_called_once_with(fpath,
                                                     driver.MAX_CONSOLE_BYTES)
         self.assertEqual(b'fira', output)
 

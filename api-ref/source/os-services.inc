@@ -10,7 +10,7 @@ Lists all running Compute services in a region, enables or disables
 scheduling for a Compute service and deletes a Compute service.
 
 For an overview of Compute services, see `OpenStack
-Compute <https://docs.openstack.org/ocata/install-guide-obs/common/get-started-compute.html>`__.
+Compute <https://docs.openstack.org/nova/latest/install/get-started-compute.html>`__.
 
 List Compute Services
 =====================
@@ -195,7 +195,16 @@ Update Forced Down
 
 .. rest_method:: PUT /os-services/force-down
 
-Set or unset ``forced_down`` flag for the service.
+Set or unset ``forced_down`` flag for the service. ``forced_down`` is a manual
+override to tell nova that the service in question has been fenced manually by
+the operations team (either hard powered off, or network unplugged). That
+signals that it is safe to proceed with ``evacuate`` or other operations that
+nova has safety checks to prevent for hosts that are up.
+
+.. warning::
+
+   Setting a service forced down without completely fencing it will likely
+   result in the corruption of VMs on that host.
 
 Action ``force-down`` available as of microversion 2.11.
 
@@ -315,12 +324,22 @@ Delete Compute Service
 
 .. rest_method:: DELETE /os-services/{service_id}
 
-Deletes a Compute service. If it's a nova-compute service, then the
+Deletes a service. If it's a ``nova-compute`` service, then the
 corresponding host will be removed from all the host aggregates as well.
+
+Attempts to delete a ``nova-compute`` service which is still hosting instances
+will result in a 409 HTTPConflict response. The instances will need to be
+migrated or deleted before a compute service can be deleted.
+
+.. important:: Be sure to stop the actual ``nova-compute`` process on the
+               physical host *before* deleting the service with this API.
+               Failing to do so can lead to the running service re-creating
+               orphaned **compute_nodes** table records in the database.
 
 Normal response codes: 204
 
-Error response codes: badRequest(400), unauthorized(401), forbidden(403), itemNotFound(404)
+Error response codes: badRequest(400), unauthorized(401), forbidden(403),
+itemNotFound(404), conflict(409)
 
 Request
 -------

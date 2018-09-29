@@ -123,13 +123,14 @@ class Resources(object):
 class FakeDriver(driver.ComputeDriver):
     capabilities = {
         "has_imagecache": True,
-        "supports_recreate": True,
+        "supports_evacuate": True,
         "supports_migrate_to_same_host": True,
         "supports_attach_interface": True,
         "supports_tagged_attach_interface": True,
         "supports_tagged_attach_volume": True,
         "supports_extend_volume": True,
-        "supports_multiattach": True
+        "supports_multiattach": True,
+        "supports_trusted_certs": True,
         }
 
     # Since we don't have a real hypervisor, pretend we have lots of
@@ -541,7 +542,13 @@ class FakeDriver(driver.ComputeDriver):
     def finish_migration(self, context, migration, instance, disk_info,
                          network_info, image_meta, resize_instance,
                          block_device_info=None, power_on=True):
-        return
+        injected_files = admin_password = allocations = None
+        # Finish migration is just like spawning the guest on a destination
+        # host during resize/cold migrate, so re-use the spawn() fake to
+        # claim resources and track the instance on this "hypervisor".
+        self.spawn(context, instance, image_meta, injected_files,
+                   admin_password, allocations,
+                   block_device_info=block_device_info)
 
     def confirm_migration(self, context, migration, instance, network_info):
         return
@@ -549,6 +556,13 @@ class FakeDriver(driver.ComputeDriver):
     def pre_live_migration(self, context, instance, block_device_info,
                            network_info, disk_info, migrate_data):
         return migrate_data
+
+    def rollback_live_migration_at_destination(self, context, instance,
+                                               network_info,
+                                               block_device_info,
+                                               destroy_disks=True,
+                                               migrate_data=None):
+        return
 
     def unfilter_instance(self, instance, network_info):
         return
@@ -691,8 +705,10 @@ class FakeLiveMigrateDriver(FakeDriver):
                        migrate_data=None):
         self._abort_migration = False
         self._migrating = True
-        while self._migrating:
+        count = 0
+        while self._migrating and count < 50:
             time.sleep(0.1)
+            count = count + 1
 
         if self._abort_migration:
             recover_method(context, instance, dest, migrate_data,
@@ -703,8 +719,14 @@ class FakeLiveMigrateDriver(FakeDriver):
 
     def live_migration_force_complete(self, instance):
         self._migrating = False
-        del self.instances[instance.uuid]
+        if instance.uuid in self.instances:
+            del self.instances[instance.uuid]
 
     def live_migration_abort(self, instance):
         self._abort_migration = True
         self._migrating = False
+
+    def post_live_migration(self, context, instance, block_device_info,
+                            migrate_data=None):
+        if instance.uuid in self.instances:
+            del self.instances[instance.uuid]

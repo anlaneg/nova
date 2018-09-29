@@ -13,11 +13,12 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 
-from nova import db
+from nova.db import api as db
 from nova.objects import virtual_interface as vif_obj
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
+
 
 fake_vif = {
     'created_at': None,
@@ -145,9 +146,10 @@ class _TestVirtualInterface(object):
         vif.instance_uuid = uuids.instance
         vif.uuid = uuids.uuid
         vif.tag = 'fake-tag'
-
-        primitive = vif.obj_to_primitive(target_version='1.0')
+        data = lambda x: x['nova_object.data']
+        primitive = data(vif.obj_to_primitive(target_version='1.0'))
         self.assertNotIn('tag', primitive)
+        self.assertIn('uuid', primitive)
 
 
 class TestVirtualInterfaceObject(test_objects._LocalTest,

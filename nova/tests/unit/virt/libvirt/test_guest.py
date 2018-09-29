@@ -34,6 +34,8 @@ if sys.version_info > (3,):
     long = int
 
 
+# Make RetryDecorator not actually sleep on retries
+@mock.patch('oslo_service.loopingcall._ThreadingEvent.wait', new=mock.Mock())
 class GuestTestCase(test.NoDBTestCase):
 
     def setUp(self):
@@ -228,7 +230,7 @@ class GuestTestCase(test.NoDBTestCase):
         conf = mock.Mock(spec=vconfig.LibvirtConfigGuestDevice)
         conf.to_xml.return_value = "</xml>"
         get_config = mock.Mock()
-        get_config.side_effect = [conf, conf, None]
+        get_config.side_effect = [conf, conf, conf, None, None]
         dev_path = "/dev/vdb"
         self.domain.isPersistent.return_value = False
         retry_detach = self.guest.detach_device_with_retry(
@@ -244,7 +246,7 @@ class GuestTestCase(test.NoDBTestCase):
         conf.to_xml.return_value = "</xml>"
         get_config = mock.Mock()
         # Force multiple retries of detach
-        get_config.side_effect = [conf, conf, conf, None]
+        get_config.side_effect = [conf, conf, conf, conf, conf, None, None]
         dev_path = "/dev/vdb"
         self.domain.isPersistent.return_value = True
 
@@ -334,7 +336,7 @@ class GuestTestCase(test.NoDBTestCase):
         get_config = mock.Mock()
         # Simulate the persistent domain attach attempt followed by the live
         # domain attach attempt and success
-        get_config.side_effect = [conf, conf, None]
+        get_config.side_effect = [conf, conf, conf, None, None]
         fake_device = "vdb"
         fake_exc = fakelibvirt.make_libvirtError(
             fakelibvirt.libvirtError, "",
@@ -631,29 +633,32 @@ class GuestTestCase(test.NoDBTestCase):
         self.guest.pause()
         self.domain.suspend.assert_called_once_with()
 
-    def test_migrate_v1(self):
-        self.guest.migrate('an-uri', flags=1, bandwidth=2)
-        self.domain.migrateToURI.assert_called_once_with(
-            'an-uri', flags=1, bandwidth=2)
-
-    def test_migrate_v2(self):
-        self.guest.migrate('an-uri', domain_xml='</xml>', flags=1, bandwidth=2)
-        self.domain.migrateToURI2.assert_called_once_with(
-            'an-uri', miguri=None, dxml='</xml>', flags=1, bandwidth=2)
-
     def test_migrate_v3(self):
-        self.guest.migrate('an-uri', domain_xml='</xml>',
-                           params={'p1': 'v1'}, flags=1, bandwidth=2)
+        self.guest.migrate('an-uri', flags=1, migrate_uri='dest-uri',
+                           migrate_disks='disk1',
+                           destination_xml='</xml>',
+                           bandwidth=2)
         self.domain.migrateToURI3.assert_called_once_with(
-            'an-uri', flags=1, params={'p1': 'v1', 'bandwidth': 2})
+                'an-uri', flags=1, params={'migrate_uri': 'dest-uri',
+                                           'migrate_disks': 'disk1',
+                                           'destination_xml': '</xml>',
+                                           'bandwidth': 2})
 
     @testtools.skipIf(not six.PY2, 'libvirt python3 bindings accept unicode')
     def test_migrate_v3_unicode(self):
-        self.guest.migrate('an-uri', domain_xml=u'</xml>',
-                           params={'p1': u'v1', 'p2': 'v2', 'p3': 3},
-                           flags=1, bandwidth=2)
+        dest_xml_template = "<domain type='qemu'><name>%s</name></domain>"
+        name = u'\u00CD\u00F1st\u00E1\u00F1c\u00E9'
+        dest_xml = dest_xml_template % name
+        expect_dest_xml = dest_xml_template % encodeutils.to_utf8(name)
+        self.guest.migrate('an-uri', flags=1, migrate_uri='dest-uri',
+                           migrate_disks=[u"disk1", u"disk2"],
+                           destination_xml=dest_xml,
+                           bandwidth=2)
         self.domain.migrateToURI3.assert_called_once_with(
-                'an-uri', flags=1, params={'p1': 'v1', 'p2': 'v2', 'p3': 3,
+                'an-uri', flags=1, params={'migrate_uri': 'dest-uri',
+                                           'migrate_disks': ['disk1',
+                                                             'disk2'],
+                                           'destination_xml': expect_dest_xml,
                                            'bandwidth': 2})
 
     def test_abort_job(self):
@@ -663,10 +668,6 @@ class GuestTestCase(test.NoDBTestCase):
     def test_migrate_configure_max_downtime(self):
         self.guest.migrate_configure_max_downtime(1000)
         self.domain.migrateSetMaxDowntime.assert_called_once_with(1000)
-
-    def test_migrate_configure_max_speed(self):
-        self.guest.migrate_configure_max_speed(1000)
-        self.domain.migrateSetMaxSpeed.assert_called_once_with(1000)
 
 
 class GuestBlockTestCase(test.NoDBTestCase):
@@ -687,7 +688,7 @@ class GuestBlockTestCase(test.NoDBTestCase):
         self.domain.blockJobAbort.assert_called_once_with('vda', flags=0)
 
     def test_abort_job_async(self):
-        self.gblock.abort_job(async=True)
+        self.gblock.abort_job(async_=True)
         self.domain.blockJobAbort.assert_called_once_with(
             'vda', flags=fakelibvirt.VIR_DOMAIN_BLOCK_JOB_ABORT_ASYNC)
 
@@ -813,6 +814,10 @@ class GuestBlockTestCase(test.NoDBTestCase):
         self.domain.blockJobInfo.side_effect = fakelibvirt.libvirtError('fake')
         self.assertRaises(fakelibvirt.libvirtError,
                           self.gblock.is_job_complete)
+
+    def test_blockStats(self):
+        self.gblock.blockStats()
+        self.domain.blockStats.assert_called_once_with('vda')
 
 
 class JobInfoTestCase(test.NoDBTestCase):

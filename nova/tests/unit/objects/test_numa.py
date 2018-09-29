@@ -10,6 +10,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_versionedobjects import base as ovo_base
 import testtools
 
 from nova import exception
@@ -22,62 +23,27 @@ fake_obj_numa = objects.NUMATopology(
             id=0, cpuset=set([1, 2]), memory=512,
             cpu_usage=2, memory_usage=256,
             mempages=[], pinned_cpus=set([]),
-            siblings=[]),
+            siblings=[set([1]), set([2])]),
         objects.NUMACell(
             id=1, cpuset=set([3, 4]), memory=512,
             cpu_usage=1, memory_usage=128,
             mempages=[], pinned_cpus=set([]),
-            siblings=[])])
+            siblings=[set([3]), set([4])])])
 
 
 class _TestNUMA(object):
-
-    def test_convert_wipe(self):
-        d1 = fake_obj_numa._to_dict()
-        d2 = objects.NUMATopology.obj_from_primitive(d1)._to_dict()
-
-        self.assertEqual(d1, d2)
-
-    def test_from_legacy_limits(self):
-        old_style = {"cells": [
-                        {"mem": {
-                            "total": 1024,
-                            "limit": 2048},
-                         "cpu_limit": 96.0,
-                         "cpus": "0,1,2,3,4,5",
-                         "id": 0}]}
-
-        limits = objects.NUMATopologyLimits.obj_from_db_obj(old_style)
-        self.assertEqual(16.0, limits.cpu_allocation_ratio)
-        self.assertEqual(2.0, limits.ram_allocation_ratio)
-
-    def test_to_legacy_limits(self):
-        limits = objects.NUMATopologyLimits(
-            cpu_allocation_ratio=16,
-            ram_allocation_ratio=2)
-        host_topo = objects.NUMATopology(cells=[
-            objects.NUMACell(id=0, cpuset=set([1, 2]), memory=1024)
-        ])
-
-        old_style = {'cells': [
-            {'mem': {'total': 1024,
-                     'limit': 2048.0},
-             'id': 0,
-             'cpus': '1,2',
-             'cpu_limit': 32.0}]}
-        self.assertEqual(old_style, limits.to_dict_legacy(host_topo))
 
     def test_free_cpus(self):
         obj = objects.NUMATopology(cells=[
             objects.NUMACell(
                 id=0, cpuset=set([1, 2]), memory=512,
                 cpu_usage=2, memory_usage=256,
-                pinned_cpus=set([1]), siblings=[],
+                pinned_cpus=set([1]), siblings=[set([1]), set([2])],
                 mempages=[]),
             objects.NUMACell(
                 id=1, cpuset=set([3, 4]), memory=512,
                 cpu_usage=1, memory_usage=128,
-                pinned_cpus=set([]), siblings=[],
+                pinned_cpus=set([]), siblings=[set([3]), set([4])],
                 mempages=[])
             ]
         )
@@ -85,10 +51,12 @@ class _TestNUMA(object):
         self.assertEqual(set([3, 4]), obj.cells[1].free_cpus)
 
     def test_pinning_logic(self):
-        numacell = objects.NUMACell(id=0, cpuset=set([1, 2, 3, 4]), memory=512,
-                                    cpu_usage=2, memory_usage=256,
-                                    pinned_cpus=set([1]), siblings=[],
-                                    mempages=[])
+        numacell = objects.NUMACell(
+            id=0, cpuset=set([1, 2, 3, 4]), memory=512,
+            cpu_usage=2, memory_usage=256,
+            pinned_cpus=set([1]),
+            siblings=[set([1]), set([2]), set([3]), set([4])],
+            mempages=[])
         numacell.pin_cpus(set([2, 3]))
         self.assertEqual(set([4]), numacell.free_cpus)
 
@@ -114,11 +82,11 @@ class _TestNUMA(object):
         self.assertEqual(set([1, 2, 3, 4]), numacell.free_cpus)
 
     def test_pinning_with_siblings(self):
-        numacell = objects.NUMACell(id=0, cpuset=set([1, 2, 3, 4]), memory=512,
-                                    cpu_usage=2, memory_usage=256,
-                                    pinned_cpus=set([]),
-                                    siblings=[set([1, 3]), set([2, 4])],
-                                    mempages=[])
+        numacell = objects.NUMACell(
+            id=0, cpuset=set([1, 2, 3, 4]), memory=512,
+            cpu_usage=2, memory_usage=256,
+            pinned_cpus=set([]), siblings=[set([1, 3]), set([2, 4])],
+            mempages=[])
 
         numacell.pin_cpus_with_siblings(set([1, 2]))
         self.assertEqual(set(), numacell.free_cpus)
@@ -137,12 +105,13 @@ class _TestNUMA(object):
         numacell.unpin_cpus_with_siblings(set([4]))
         self.assertEqual(set([1, 2, 3, 4]), numacell.free_cpus)
 
-    def test_pinning_with_siblings_with_empty_siblings_list(self):
-        numacell = objects.NUMACell(id=0, cpuset=set([1, 2, 3, 4]), memory=512,
-                                    cpu_usage=0, memory_usage=256,
-                                    pinned_cpus=set([]),
-                                    siblings=[],
-                                    mempages=[])
+    def test_pinning_with_siblings_no_host_siblings(self):
+        numacell = objects.NUMACell(
+            id=0, cpuset=set([1, 2, 3, 4]), memory=512,
+            cpu_usage=0, memory_usage=256,
+            pinned_cpus=set([]),
+            siblings=[set([1]), set([2]), set([3]), set([4])],
+            mempages=[])
 
         numacell.pin_cpus_with_siblings(set([1, 2]))
         self.assertEqual(set([1, 2]), numacell.pinned_cpus)
@@ -169,7 +138,7 @@ class _TestNUMA(object):
     def test_can_fit_hugepages(self):
         cell = objects.NUMACell(
             id=0, cpuset=set([1, 2]), memory=1024,
-            siblings=[], pinned_cpus=set([]),
+            siblings=[set([1]), set([2])], pinned_cpus=set([]),
             mempages=[
                 objects.NUMAPagesTopology(
                     size_kb=4, total=1548736, used=0),
@@ -234,6 +203,23 @@ class _TestNUMA(object):
                                  siblings=[set([5, 6])])
         self.assertNotEqual(cell1, cell2)
 
+    def test_obj_make_compatible(self):
+        network_metadata = objects.NetworkMetadata(
+            physnets=set(['foo', 'bar']), tunneled=True)
+        cell = objects.NUMACell(id=1, cpuset=set([1, 2]), memory=32,
+                                cpu_usage=10, pinned_cpus=set([3, 4]),
+                                siblings=[set([5, 6])],
+                                network_metadata=network_metadata)
+
+        versions = ovo_base.obj_tree_get_versions('NUMACell')
+        primitive = cell.obj_to_primitive(target_version='1.3',
+                                          version_manifest=versions)
+        self.assertIn('network_metadata', primitive['nova_object.data'])
+
+        primitive = cell.obj_to_primitive(target_version='1.2',
+                                          version_manifest=versions)
+        self.assertNotIn('network_metadata', primitive['nova_object.data'])
+
     def test_numa_cell_not_equivalent_missing_a(self):
         cell1 = objects.NUMACell(id=1, cpuset=set([1, 2]), memory=32,
                                  pinned_cpus=set([3, 4]),
@@ -284,6 +270,23 @@ class _TestNUMA(object):
             # a NUMAPageTopology version 1.0
             size_kb=1024, total=64, used=32)
         self.assertEqual(32, p.free)
+
+    def test_numa_topology_limits_obj_make_compatible(self):
+        network_meta = objects.NetworkMetadata(
+            physnets=set(['foo', 'bar']), tunneled=True)
+        limits = objects.NUMATopologyLimits(
+            cpu_allocation_ratio=1.0,
+            ram_allocation_ratio=1.0,
+            network_metadata=network_meta)
+
+        versions = ovo_base.obj_tree_get_versions('NUMATopologyLimits')
+        primitive = limits.obj_to_primitive(target_version='1.1',
+                                            version_manifest=versions)
+        self.assertIn('network_metadata', primitive['nova_object.data'])
+
+        primitive = limits.obj_to_primitive(target_version='1.0',
+                                            version_manifest=versions)
+        self.assertNotIn('network_metadata', primitive['nova_object.data'])
 
 
 class TestNUMA(test_objects._LocalTest,

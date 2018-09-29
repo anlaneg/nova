@@ -17,6 +17,7 @@ import mock
 from neutronclient.common import exceptions as n_exc
 from neutronclient.neutron import v2_0 as neutronv20
 from neutronclient.v2_0 import client
+from oslo_utils.fixture import uuidsentinel as uuids
 from six.moves import range
 
 from nova import context
@@ -24,7 +25,6 @@ from nova import exception
 from nova.network.security_group import neutron_driver
 from nova import objects
 from nova import test
-from nova.tests import uuidsentinel as uuids
 
 
 class TestNeutronDriver(test.NoDBTestCase):
@@ -304,6 +304,19 @@ class TestNeutronDriver(test.NoDBTestCase):
             id=mock.ANY)
         self.assertEqual(sorted([sg1_id, sg2_id]),
             sorted(self.mocked_client.list_security_groups.call_args[1]['id']))
+
+    def test_instances_security_group_bindings_port_not_found(self):
+        server_id = 'c5a20e8d-c4b0-47cf-9dca-ebe4f758acb1'
+        servers = [{'id': server_id}]
+
+        self.mocked_client.list_ports.side_effect = n_exc.PortNotFoundClient()
+
+        sg_api = neutron_driver.SecurityGroupAPI()
+        result = sg_api.get_instances_security_groups_bindings(
+                                  self.context, servers)
+        self.mocked_client.list_ports.assert_called_once_with(
+            device_id=[server_id])
+        self.assertEqual({}, result)
 
     def _test_instances_security_group_bindings_scale(self, num_servers):
         max_query = 150

@@ -43,7 +43,9 @@ Root Disk GB
   case which uses the native base image size as the size of the ephemeral root
   volume. However, in this case the filter scheduler cannot select the compute
   host based on the virtual image size. As a result, ``0`` should only be used
-  for volume booted instances or for testing purposes.
+  for volume booted instances or for testing purposes. Volume-backed instances
+  can be enforced for flavors with zero root disk via the
+  ``os_compute_api:servers:create:zero_disk_flavor`` policy rule.
 
 Ephemeral Disk GB
   Amount of disk space (in gigabytes) to use for the ephemeral partition. This
@@ -63,12 +65,10 @@ RXTX Factor
 
   .. note::
 
-     This property only applies if using the `xen` compute driver with the
-     `nova-network` network driver. It will likely be deprecated in a future
-     release. `neutron` users should refer to the `neutron QoS
-     documentation`__.
-
-     __ https://docs.openstack.org/neutron/latest/admin/config-qos.html
+     This property only applies if using the ``xen`` compute driver with the
+     ``nova-network`` network driver. It will likely be deprecated in a future
+     release. ``neutron`` users should refer to the :neutron-doc:`neutron QoS
+     documentation <admin/config-qos.html>`
 
 Is Public
   Boolean value that defines whether the flavor is available to all users or
@@ -294,6 +294,16 @@ Bandwidth I/O
      kilobytes/second. And burst values are in kilobytes. Values were converted
      using `Data rate units on Wikipedia
      <https://en.wikipedia.org/wiki/Data_rate_units>`_.
+
+Hardware video RAM
+  Specify ``hw_video:ram_max_mb`` to control the maximum RAM for the video
+  image. Used in conjunction with the ``hw_video_ram`` image property.
+  ``hw_video_ram`` must be less than or equal to ``hw_video:ram_max_mb``.
+
+  This is currently only supported by the libvirt driver.
+
+  See https://libvirt.org/formatdomain.html#elementsVideo for more information
+  on how this is used to set the ``vram`` attribute with the libvirt driver.
 
 Watchdog behavior
   For the libvirt driver, you can enable and set the behavior of a virtual
@@ -549,8 +559,11 @@ Emulator threads policy
 
   Valid THREAD-POLICY values are:
 
-  - ``share``: (default) The emulator threads float across the pCPUs associated
-    to the guest.
+  - ``share``: (default) The emulator threads float across the pCPUs
+    associated to the guest. To place a workload's emulator threads on
+    a set of isolated physical CPUs, set ``share``` and
+    ``[compute]/cpu_shared_set`` configuration option to the set of
+    host CPUs that should be used for best-effort CPU resources.
 
   - ``isolate``: The emulator threads are isolated on a single pCPU.
 
@@ -600,6 +613,28 @@ PCI passthrough
   - COUNT: (integer) The amount of PCI devices of type ALIAS to be assigned to
     a guest.
 
+Hiding hypervisor signature
+  Some hypervisors add a signature to their guests. While the presence
+  of the signature can enable some paravirtualization features on the
+  guest, it can also have the effect of preventing some drivers from
+  loading. Hiding the signature by setting this property to true may
+  allow such drivers to load and work.
+
+  .. note::
+
+     As of the 18.0.0 Rocky release, this is only supported by the libvirt
+     driver.
+
+  .. code:: console
+
+     $ openstack flavor set FLAVOR-NAME \
+         --property hide_hypervisor_id=VALUE
+
+  Where:
+
+  - VALUE: (string) 'true' or 'false'. 'false' is equivalent to the
+    property not existing.
+
 Secure Boot
   When your Compute services use the Hyper-V hypervisor, you can enable secure
   boot for Windows and Linux instances.
@@ -614,6 +649,8 @@ Secure Boot
   - ``required``: Enable Secure Boot for instances running with this flavor.
   - ``disabled`` or ``optional``: (default) Disable Secure Boot for instances
     running with this flavor.
+
+.. _extra-specs-required-traits:
 
 Required traits
     Added in the 17.0.0 Queens release.
@@ -632,9 +669,34 @@ Required traits
 
     The scheduler will pass required traits to the
     ``GET /allocation_candidates`` endpoint in the Placement API to include
-    only resource providers that can satisfy the required traits. Currently
-    the only valid value is ``required``. Any other value will be considered
+    only resource providers that can satisfy the required traits. In 17.0.0
+    the only valid value is ``required``. In 18.0.0 ``forbidden`` is added (see
+    below). Any other value will be considered
     invalid.
 
     The FilterScheduler is currently the only scheduler driver that supports
     this feature.
+
+    Traits can be managed using the `osc-placement plugin`_.
+
+.. _extra-specs-forbidden-traits:
+
+Forbidden traits
+    Added in the 18.0.0 Rocky release.
+
+    Forbidden traits are similar to required traits, described above, but
+    instead of specifying the set of traits that must be satisfied by a compute
+    node, forbidden traits must **not** be present.
+
+    The syntax of the extra spec is ``trait:<trait_name>=forbidden``, for
+    example:
+
+    - trait:HW_CPU_X86_AVX2=forbidden
+    - trait:STORAGE_DISK_SSD=forbidden
+
+    The FilterScheduler is currently the only scheduler driver that supports
+    this feature.
+
+    Traits can be managed using the `osc-placement plugin`_.
+
+.. _osc-placement plugin: https://docs.openstack.org/osc-placement/latest/index.html

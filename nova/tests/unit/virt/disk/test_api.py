@@ -77,7 +77,9 @@ class APITestCase(test.NoDBTestCase):
 
     @mock.patch('oslo_concurrency.processutils.execute')
     @mock.patch('nova.privsep.fs.resize2fs')
-    def test_resize2fs_success_as_root(self, mock_resize, mock_exec):
+    @mock.patch('nova.privsep.fs.e2fsck')
+    def test_resize2fs_success_as_root(self, mock_fsck, mock_resize,
+                                       mock_exec):
         imgfile = tempfile.NamedTemporaryFile()
         self.addCleanup(imgfile.close)
 
@@ -85,6 +87,7 @@ class APITestCase(test.NoDBTestCase):
 
         mock_exec.assert_not_called()
         mock_resize.assert_called()
+        mock_fsck.assert_called()
 
     @mock.patch('oslo_concurrency.processutils.execute', autospec=True,
                 side_effect=processutils.ProcessExecutionError("fs error"))
@@ -192,41 +195,3 @@ class APITestCase(test.NoDBTestCase):
         mock_resize.assert_called_once_with(imgfile, run_as_root=False,
                                             check_exit_code=[0])
         mock_can_resize.assert_called_once_with(imgfile, imgsize)
-
-    HASH_VFAT = utils.get_hash_str(api.FS_FORMAT_VFAT)[:7]
-    HASH_EXT4 = utils.get_hash_str(api.FS_FORMAT_EXT4)[:7]
-    HASH_NTFS = utils.get_hash_str(api.FS_FORMAT_NTFS)[:7]
-
-    def test_get_file_extension_for_os_type(self):
-        self.assertEqual(self.HASH_VFAT,
-                         api.get_file_extension_for_os_type(None, None))
-        self.assertEqual(self.HASH_EXT4,
-                         api.get_file_extension_for_os_type('linux', None))
-        self.assertEqual(self.HASH_NTFS,
-                         api.get_file_extension_for_os_type(
-                             'windows', None))
-
-    def test_get_file_extension_for_os_type_with_overrides(self):
-        with mock.patch('nova.virt.disk.api._DEFAULT_MKFS_COMMAND',
-                        'custom mkfs command'):
-            self.assertEqual("a74d253",
-                             api.get_file_extension_for_os_type(
-                                 'linux', None))
-            self.assertEqual("a74d253",
-                             api.get_file_extension_for_os_type(
-                                 'windows', None))
-            self.assertEqual("a74d253",
-                             api.get_file_extension_for_os_type('osx', None))
-
-        with mock.patch.dict(api._MKFS_COMMAND,
-                             {'osx': 'custom mkfs command'}, clear=True):
-            self.assertEqual(self.HASH_VFAT,
-                             api.get_file_extension_for_os_type(None, None))
-            self.assertEqual(self.HASH_EXT4,
-                             api.get_file_extension_for_os_type('linux', None))
-            self.assertEqual(self.HASH_NTFS,
-                             api.get_file_extension_for_os_type(
-                                 'windows', None))
-            self.assertEqual("a74d253",
-                             api.get_file_extension_for_os_type(
-                                 'osx', None))

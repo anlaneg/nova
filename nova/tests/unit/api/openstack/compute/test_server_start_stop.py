@@ -14,19 +14,19 @@
 
 import mock
 from oslo_policy import policy as oslo_policy
+from oslo_utils.fixture import uuidsentinel as uuids
 import six
 import webob
 
 from nova.api.openstack.compute import servers \
         as server_v21
 from nova.compute import api as compute_api
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import policy
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit.api.openstack import fakes
-from nova.tests import uuidsentinel as uuids
 
 
 class ServerStartStopTestV21(test.TestCase):
@@ -36,7 +36,7 @@ class ServerStartStopTestV21(test.TestCase):
         self._setup_controller()
         self.req = fakes.HTTPRequest.blank('')
         self.useFixture(nova_fixtures.SingleCellSimple())
-        self.stub_out('nova.db.instance_get_by_uuid',
+        self.stub_out('nova.db.api.instance_get_by_uuid',
                       fakes.fake_instance_get())
 
     def _setup_controller(self):
@@ -131,7 +131,7 @@ class ServerStartStopPolicyEnforcementV21(test.TestCase):
         self.req = fakes.HTTPRequest.blank('')
         self.useFixture(nova_fixtures.SingleCellSimple())
         self.stub_out(
-            'nova.db.instance_get_by_uuid',
+            'nova.db.api.instance_get_by_uuid',
             fakes.fake_instance_get(
                 project_id=self.req.environ['nova.context'].project_id))
 

@@ -144,6 +144,19 @@ tests:
                 DISK_GB: 10
   status: 204
 
+- name: fail to delete that provider
+  DELETE: /resource_providers/$ENVIRON['RP_UUID']
+  request_headers:
+      content-type: application/json
+      # we need this microversion to get error codes in the response
+      openstack-api-version: placement 1.23
+  status: 409
+  response_strings:
+      - "Unable to delete resource provider $ENVIRON['RP_UUID']"
+  response_json_paths:
+      errors[0].code: placement.resource_provider.inuse
+
+
 - name: put an allocation different consumer
   PUT: /allocations/39715579-2167-4c63-8247-301311cc6703
   request_headers:
@@ -398,6 +411,37 @@ tests:
       $.allocations.['1835b1c9-1c61-45af-9eb3-3e0e9f29487b'].resources.DISK_GB: 10
       $.allocations.['1835b1c9-1c61-45af-9eb3-3e0e9f29487b'].resources.VCPU: 8
 
+- name: put allocations on existing consumer with dashless UUID
+  PUT: /allocations/75d0f5f775d9458cb204f90ac91604ec
+  request_headers:
+      content-type: application/json
+      # Consumer generation
+      openstack-api-version: placement 1.28
+  data:
+      allocations:
+          fcfa516a-abbe-45d1-8152-d5225d82e596:
+            resources:
+                DISK_GB: 1
+                VCPU: 1
+          9229b2fc-d556-4e38-9c18-443e4bc6ceae:
+            resources:
+                DISK_GB: 1
+                VCPU: 1
+      consumer_generation: 1
+      project_id: 00000000-0000-0000-0000-000000000000
+      user_id: 00000000-0000-0000-0000-000000000000
+  status: 204
+
+- name: get allocations on existing consumer with dashed UUID
+  GET: /allocations/75d0f5f7-75d9-458c-b204-f90ac91604ec
+  response_json_paths:
+      $.allocations.['fcfa516a-abbe-45d1-8152-d5225d82e596'].generation: 4
+      $.allocations.['fcfa516a-abbe-45d1-8152-d5225d82e596'].resources.DISK_GB: 1
+      $.allocations.['fcfa516a-abbe-45d1-8152-d5225d82e596'].resources.VCPU: 1
+      $.allocations.['9229b2fc-d556-4e38-9c18-443e4bc6ceae'].generation: 4
+      $.allocations.['9229b2fc-d556-4e38-9c18-443e4bc6ceae'].resources.DISK_GB: 1
+      $.allocations.['9229b2fc-d556-4e38-9c18-443e4bc6ceae'].resources.VCPU: 1
+
 - name: put an allocation for a not existing resource provider
   PUT: /allocations/75d0f5f7-75d9-458c-b204-f90ac91604ec
   request_headers:
@@ -448,3 +492,18 @@ tests:
   response_forbidden_headers:
       - cache-control
       - last-modified
+
+- name: creating allocation with a non UUID consumer fails
+  PUT: /allocations/not-a-uuid
+  request_headers:
+      content-type: application/json
+  data:
+      allocations:
+          - resource_provider:
+                uuid: fcfa516a-abbe-45d1-8152-d5225d82e596
+            resources:
+                DISK_GB: 1
+                VCPU: 1
+  status: 400
+  response_strings:
+      - Malformed consumer_uuid

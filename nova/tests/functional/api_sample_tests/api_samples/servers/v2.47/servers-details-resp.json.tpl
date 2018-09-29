@@ -22,7 +22,6 @@
                 "disk": 1,
                 "ephemeral": 0,
                 "extra_specs": {
-                    "hw:cpu_model": "SandyBridge",
                     "hw:mem_page_size": "2048",
                     "hw:cpu_policy": "dedicated"
                 },
@@ -89,6 +88,12 @@
             "tenant_id": "6f70656e737461636b20342065766572",
             "updated": "%(isotime)s",
             "user_id": "fake"
+        }
+    ],
+    "servers_links": [
+        {
+            "href": "%(versioned_compute_endpoint)s/servers/detail?limit=1&marker=%(id)s",
+            "rel": "next"
         }
     ]
 }

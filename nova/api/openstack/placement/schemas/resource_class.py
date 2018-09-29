@@ -13,13 +13,15 @@
 
 import copy
 
+from nova.api.openstack.placement.schemas import common
+
 
 POST_RC_SCHEMA_V1_2 = {
     "type": "object",
     "properties": {
         "name": {
             "type": "string",
-            "pattern": "^CUSTOM\_[A-Z0-9_]+$",
+            "pattern": common.CUSTOM_RC_PATTERN,
             "maxLength": 255,
         },
     },

@@ -10,16 +10,16 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2018-02-17 16:08+0000\n"
+"POT-Creation-Date: 2018-09-21 04:59+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "PO-Revision-Date: 2016-04-12 06:09+0000\n"
 "Last-Translator: Copied by Zanata <copied-by-zanata@zanata.org>\n"
-"Language: tr-TR\n"
+"Language: tr_TR\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.0\n"
-"X-Generator: Zanata 3.9.6\n"
+"X-Generator: Zanata 4.3.3\n"
 "Language-Team: Turkish (Turkey)\n"
 
 #, python-format
@@ -44,14 +44,6 @@ msgstr "%(key)s tam sayı olmalı."
 #, python-format
 msgid "%(memsize)d MB of memory assigned, but expected %(memtotal)d MB"
 msgstr "%(memsize)d MB hafıza atanmış, %(memtotal)d MB bekleniyordu"
-
-#, python-format
-msgid "%(name)s has a minimum character requirement of %(min_length)s."
-msgstr "%(name)s'in %(min_length)s asgari karakter gereksinimi vardır."
-
-#, python-format
-msgid "%(name)s has more than %(max_length)s characters."
-msgstr "%(name)s %(max_length)s'den fazla karaktere sahip."
 
 #, python-format
 msgid "%(path)s is not on local storage: %(reason)s"
@@ -84,10 +76,6 @@ msgstr "%s disk canlı takmayı desteklemiyor."
 #, python-format
 msgid "%s format is not supported"
 msgstr "%s biçimi desteklenmiyor"
-
-#, python-format
-msgid "%s is not a string or unicode"
-msgstr "%s bir karakter dizisi veya evrensel kodda değil"
 
 #, python-format
 msgid "%s is not supported."
@@ -557,9 +545,6 @@ msgstr "%(image_id)s imajı getirilemedi"
 msgid "Could not find a handler for %(driver_type)s volume."
 msgstr "%(driver_type)s bölümü için bir işleyici bulunamadı."
 
-msgid "Could not find another compute"
-msgstr "Başka bir işlem bulunamadı"
-
 #, python-format
 msgid "Could not find binary %(binary)s on host %(host)s."
 msgstr "%(host)s sunucusunda %(binary)s ikilisi bulunamadı."
@@ -600,9 +585,6 @@ msgstr "Ağ oluşturma başarısız"
 msgid "Creation of virtual interface with unique mac address failed"
 msgstr "Benzersiz mac adresine sahip sanal arayüzün oluşturulması başarısız"
 
-msgid "DNS entries not found."
-msgstr "DNS girdileri bulunamadı."
-
 msgid "DNS1"
 msgstr "DNS1"
 
@@ -622,13 +604,6 @@ msgstr "PBM etkin ise varsayılan PBM ilkesi gerekir."
 #, python-format
 msgid "Deleted %(records)d records from table '%(table_name)s'."
 msgstr "'%(table_name)s' tablosundan %(records)d kayıt silindi."
-
-msgid "Deleting by fixed_range is not supported with the NeutronManager"
-msgstr "fixed_range ile silme NeutronManager ile desteklenmiyor"
-
-#, python-format
-msgid "Destination host:%s must be in the same aggregate as the source server"
-msgstr "Hedef istemci: %s kaynak sunucuyla aynı takımda olmalı"
 
 #, python-format
 msgid "Detected existing vlan with id %(vlan)d"
@@ -943,20 +918,8 @@ msgid "Fixed IP %(ip)s is not a valid ip address for network %(network_id)s."
 msgstr "Sabit IP %(ip)s %(network_id)s için gereçli bir ip adresi değil."
 
 #, python-format
-msgid "Fixed IP %s has been deleted"
-msgstr "Sabit IP %s silindi"
-
-#, python-format
 msgid "Fixed IP %s is already in use."
 msgstr "Sabit IP %s zaten kullanılıyor."
-
-#, python-format
-msgid "Fixed IP %s not found"
-msgstr "Sabit IP %s bulunamadı"
-
-#, python-format
-msgid "Fixed IP %s not valid"
-msgstr "%s sabit IP'si geçerli değil"
 
 #, python-format
 msgid ""
@@ -1049,10 +1012,6 @@ msgid ""
 msgstr ""
 "İmaj metasına geçirilen nitelik seri bağlantı noktası sayısı değerini "
 "geçmeye izin verilmez."
-
-#, python-format
-msgid "Found no PIF for device %s"
-msgstr "%s aygıtı için PIF bulunamadı"
 
 msgid "Found no disk to snapshot."
 msgstr "Anlık görüntüsü alınacak disk bulunamadı."
@@ -1170,22 +1129,6 @@ msgstr ""
 
 msgid "Image that the instance was started with could not be found."
 msgstr "Sunucunun başlatıldığı imaj bulunamadı."
-
-#, python-format
-msgid ""
-"Image vCPU limits %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"İmaj vCPU sınırları %(sockets)d:%(cores)d:%(threads)d izin verilen "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d yi aşıyor"
-
-#, python-format
-msgid ""
-"Image vCPU topology %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"İmaj vCPU topolojisi %(sockets)d:%(cores)d:%(threads)d izin verilen "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d yi aşıyor"
 
 #, python-format
 msgid "Image's config drive option '%(config_drive)s' is invalid"
@@ -1332,15 +1275,9 @@ msgstr "Sunucu zaten Kurtarma Kipinde: %s"
 msgid "Instance is not a member of specified network"
 msgstr "Örnek belirlenmiş ağın bir üyesi değil"
 
-msgid "Instance recreate is not supported."
-msgstr "Sunucu yeniden oluşturma desteklenmiyor."
-
 #, python-format
 msgid "Instance rollback performed due to: %s"
 msgstr "Sunucu geri döndürme şu sebepten yapıldı: %s"
-
-msgid "Instance snapshots are not permitted at this time."
-msgstr "Örnek sistem görüntüleri şu an onaylanmadı."
 
 #, python-format
 msgid "Insufficient compute resources: %(reason)s."
@@ -1476,10 +1413,6 @@ msgid "Invalid key_name provided."
 msgstr "Geçersiz anahtar adı verildi."
 
 #, python-format
-msgid "Invalid libvirt version %(version)s"
-msgstr "Geçersiz libvirt sürümü %(version)s"
-
-#, python-format
 msgid "Invalid memory page size '%(pagesize)s'"
 msgstr "Geçersiz hafıza sayfa boyutu '%(pagesize)s'"
 
@@ -1590,9 +1523,6 @@ msgstr "Geçersiz volume_size."
 #, python-format
 msgid "Ironic node uuid not supplied to driver for instance %s."
 msgstr "Ironic düğümü uuid'si %s sunucusu için sürücüye sağlanmamış."
-
-msgid "Is the appropriate service running?"
-msgstr "Uygun servis çalışıyor mu?"
 
 #, python-format
 msgid ""
@@ -2038,14 +1968,6 @@ msgid "Nova requires libvirt version %s or greater."
 msgstr "Nova libvirt sürüm %s ya da daha yenisine ihtiyaç duyar."
 
 #, python-format
-msgid ""
-"Number of serial ports '%(num_ports)s' specified in '%(property)s' isn't "
-"valid."
-msgstr ""
-"'%(property)s' de belirtilen seri bağlantı noktası sayısı '%(num_ports)s' "
-"geçerli değil."
-
-#, python-format
 msgid "Object action %(action)s failed because: %(reason)s"
 msgstr "Nesne eylemi %(action)s başarısız çünkü: %(reason)s"
 
@@ -2107,14 +2029,6 @@ msgstr ""
 #, python-format
 msgid "PCI device %(id)s not found"
 msgstr "PCI aygıtı %(id)s bulunamadı"
-
-#, python-format
-msgid ""
-"PIF %(pif_uuid)s for network %(bridge)s has VLAN id %(pif_vlan)d. Expected "
-"%(vlan_num)d"
-msgstr ""
-"%(bridge)s ağı için PIF %(pif_uuid)s %(pif_vlan)d VLAN kimliğine sahip. "
-"Beklenen %(vlan_num)d"
 
 #, python-format
 msgid "PIF %s does not contain IP address"
@@ -2336,11 +2250,6 @@ msgstr "Kök öğe ismi '%(name)s' olmalı '%(tag)s' değil"
 #, python-format
 msgid "Rule (%s) not found"
 msgstr "Kural (%s) bulunamadı"
-
-#, python-format
-msgid "Running Nova with parallels virt_type requires libvirt version %s"
-msgstr ""
-"Nova'yı parallels virt_type ile çalıştırma libvirt sürümü %s'e ihtiyaç duyar"
 
 #, python-format
 msgid "Running cmd (subprocess): %s"
@@ -2581,9 +2490,6 @@ msgstr "Varsayılan PBM ilkesi arka uçta mevcut değil."
 msgid "The firewall filter for %s does not exist"
 msgstr "%s için güvenlik duvarı filtresi mevcut değil"
 
-msgid "The input is not a string or unicode"
-msgstr "Girdi bir karakter dizisi ya da evrensel kodda değil"
-
 msgid ""
 "The instance requires a newer hypervisor version than has been provided."
 msgstr "Örnek şu ankinden daha yeni hypervisor versiyonu gerektirir."
@@ -2749,9 +2655,6 @@ msgstr ""
 
 msgid "Type and Code must be integers for ICMP protocol type"
 msgstr "ICMP iletişim kuralı türü için Tür ve Kod tam sayı olmalı"
-
-msgid "UUID is required to delete Neutron Networks"
-msgstr "Neutron Ağlarını silmek için UUID gerekiyor"
 
 msgid "Unable to authenticate Ironic client."
 msgstr "Ironic istemcisi doğrulanamıyor."
@@ -3220,9 +3123,6 @@ msgstr "dosya ismi None olamaz"
 msgid "fmt=%(fmt)s backed by: %(backing_file)s"
 msgstr "%(backing_file)s tarafından desteklenen fmt=%(fmt)s"
 
-msgid "fping utility is not found."
-msgstr "fping aracı bulunamadı."
-
 #, python-format
 msgid "href %s does not contain version"
 msgstr "%s referansı versiyon içermiyor"
@@ -3412,11 +3312,6 @@ msgid "volume %s already attached"
 msgstr "mantıksal sürücü %s zaten ekli"
 
 #, python-format
-msgid "volume '%(vol)s' status must be 'available'. Currently in '%(status)s'"
-msgstr ""
-"mantıksal sürücü '%(vol)s' durumu 'kullanılabilir' olmalı. Şu an '%(status)s'"
-
-#, python-format
 msgid ""
 "volume '%(vol)s' status must be 'in-use'. Currently in '%(status)s' status"
 msgstr ""
@@ -3434,9 +3329,3 @@ msgid ""
 msgstr ""
 "xenapi.fake'in %s için bir uygulaması yok veya yanlış sayıda bağımsız "
 "değişken ile çağrılmış"
-
-msgid "you can not pass av_zone if the scope is public"
-msgstr "kapsam genelse av_zone geçiremezsiniz"
-
-msgid "you can not pass project if the scope is private"
-msgstr "kapsam özel ise proje geçiremezsiniz"

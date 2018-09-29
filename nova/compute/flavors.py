@@ -27,7 +27,7 @@ import six
 from nova.api.validation import parameter_types
 import nova.conf
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova.i18n import _
 from nova import objects
@@ -256,30 +256,6 @@ def save_flavor_info(metadata, instance_type, prefix=''):
             if key.startswith(extra_prefix):
                 to_key = '%sinstance_type_extra_%s' % (prefix, key)
                 metadata[to_key] = extra_specs[key]
-
-    return metadata
-
-
-# NOTE(danms): This method is deprecated, do not use it!
-# Instances no longer store flavor information in system_metadata
-def delete_flavor_info(metadata, *prefixes):
-    """Delete flavor instance_type information from instance's system_metadata
-    by prefix.
-    """
-
-    for key in system_metadata_flavor_props.keys():
-        for prefix in prefixes:
-            to_key = '%sinstance_type_%s' % (prefix, key)
-            del metadata[to_key]
-
-    # NOTE(danms): We do NOT save all of extra_specs, but only the
-    # NUMA-related ones that we need to avoid an uglier alternative. This
-    # should be replaced by a general split-out of flavor information from
-    # system_metadata very soon.
-    for key in list(metadata.keys()):
-        for prefix in prefixes:
-            if key.startswith('%sinstance_type_extra_' % prefix):
-                del metadata[key]
 
     return metadata
 

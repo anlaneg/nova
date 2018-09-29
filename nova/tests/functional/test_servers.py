@@ -17,9 +17,12 @@ import datetime
 import time
 import zlib
 
+from keystoneauth1 import adapter
 import mock
 from oslo_log import log as logging
 from oslo_serialization import base64
+from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 import six
 
@@ -28,7 +31,6 @@ from nova.compute import instance_actions
 from nova.compute import manager as compute_manager
 from nova.compute import rpcapi
 from nova import context
-from nova import db
 from nova import exception
 from nova import objects
 from nova.objects import block_device as block_device_obj
@@ -39,11 +41,9 @@ from nova.tests.functional.api import client
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_block_device
-from nova.tests.unit import fake_network
 from nova.tests.unit import fake_notifier
+from nova.tests.unit import fake_requests
 import nova.tests.unit.image.fake
-from nova.tests.unit import policy_fixture
-from nova.tests import uuidsentinel as uuids
 from nova.virt import fake
 from nova import volume
 
@@ -72,12 +72,11 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
     _return_resv_id_parameter = 'return_reservation_id'
     _min_count_parameter = 'min_count'
 
+    USE_NEUTRON = True
+
     def setUp(self):
+        self.computes = {}
         super(ServersTestBase, self).setUp()
-        # The network service is called as part of server creates but no
-        # networks have been populated in the db, so stub the methods.
-        # The networks aren't relevant to what is being tested.
-        fake_network.set_stub_network_methods(self)
         self.conductor = self.start_service(
             'conductor', manager='nova.conductor.manager.ConductorManager')
 
@@ -133,6 +132,30 @@ class ServersTest(ServersTestBase):
         for server in servers:
             LOG.debug("server: %s", server)
 
+    def _get_node_build_failures(self):
+        ctxt = context.get_admin_context()
+        computes = objects.ComputeNodeList.get_all(ctxt)
+        return {
+            node.hypervisor_hostname: int(node.stats.get('failed_builds', 0))
+            for node in computes}
+
+    def _run_periodics(self):
+        """Run the update_available_resource task on every compute manager
+
+        This runs periodics on the computes in an undefined order; some child
+        class redefined this function to force a specific order.
+        """
+
+        if self.compute.host not in self.computes:
+            self.computes[self.compute.host] = self.compute
+
+        ctx = context.get_admin_context()
+        for compute in self.computes.values():
+            LOG.info('Running periodic for compute (%s)',
+                compute.manager.host)
+            compute.manager.update_available_resource(ctx)
+        LOG.info('Finished with periodics')
+
     def test_create_server_with_error(self):
         # Create a server which will enter error state.
 
@@ -153,6 +176,59 @@ class ServersTest(ServersTestBase):
 
         self.assertEqual('ERROR', found_server['status'])
         self._delete_server(created_server_id)
+
+        # We should have no (persisted) build failures until we update
+        # resources, after which we should have one
+        self.assertEqual([0], list(self._get_node_build_failures().values()))
+        self._run_periodics()
+        self.assertEqual([1], list(self._get_node_build_failures().values()))
+
+    def _test_create_server_with_error_with_retries(self):
+        # Create a server which will enter error state.
+
+        fake.set_nodes(['host2'])
+        self.addCleanup(fake.restore_nodes)
+        self.flags(host='host2')
+        self.compute2 = self.start_service('compute', host='host2')
+        self.computes['compute2'] = self.compute2
+
+        fails = []
+
+        def throw_error(*args, **kwargs):
+            fails.append('one')
+            raise test.TestingException('Please retry me')
+
+        self.stub_out('nova.virt.fake.FakeDriver.spawn', throw_error)
+
+        server = self._build_minimal_create_server_request()
+        created_server = self.api.post_server({"server": server})
+        created_server_id = created_server['id']
+
+        found_server = self.api.get_server(created_server_id)
+        self.assertEqual(created_server_id, found_server['id'])
+
+        found_server = self._wait_for_state_change(found_server, 'BUILD')
+
+        self.assertEqual('ERROR', found_server['status'])
+        self._delete_server(created_server_id)
+
+        return len(fails)
+
+    def test_create_server_with_error_with_retries(self):
+        self.flags(max_attempts=2, group='scheduler')
+        fails = self._test_create_server_with_error_with_retries()
+        self.assertEqual(2, fails)
+        self._run_periodics()
+        self.assertEqual(
+            [1, 1], list(self._get_node_build_failures().values()))
+
+    def test_create_server_with_error_with_no_retries(self):
+        self.flags(max_attempts=1, group='scheduler')
+        fails = self._test_create_server_with_error_with_retries()
+        self.assertEqual(1, fails)
+        self._run_periodics()
+        self.assertEqual(
+            [0, 1], list(sorted(self._get_node_build_failures().values())))
 
     def test_create_and_delete_server(self):
         # Creates and deletes a server.
@@ -970,7 +1046,6 @@ class ServerTestV220(ServersTestBase):
     def setUp(self):
         super(ServerTestV220, self).setUp()
         self.api.microversion = '2.20'
-        fake_network.set_stub_network_methods(self)
         self.ctxt = context.get_admin_context()
 
     def _create_server(self):
@@ -1257,6 +1332,15 @@ class ServerRebuildTestCase(integrated_helpers._IntegratedTestBase,
             return self.placement_api.get(
                 '/allocations/%s' % server_uuid).body['allocations']
 
+        def _set_provider_inventory(rp_uuid, resource_class, inventory):
+            # Get the resource provider generation for the inventory update.
+            rp = self.placement_api.get(
+                '/resource_providers/%s' % rp_uuid).body
+            inventory['resource_provider_generation'] = rp['generation']
+            return self.placement_api.put(
+                '/resource_providers/%s/inventories/%s' %
+                (rp_uuid, resource_class), inventory).body
+
         def assertFlavorMatchesAllocation(flavor, allocation):
             self.assertEqual(flavor['vcpus'], allocation['VCPU'])
             self.assertEqual(flavor['ram'], allocation['MEMORY_MB'])
@@ -1284,6 +1368,9 @@ class ServerRebuildTestCase(integrated_helpers._IntegratedTestBase,
         self._wait_for_state_change(self.api, server, 'ACTIVE')
 
         flavor = self.api.api_get('/flavors/1').body['flavor']
+
+        # make the compute node full and ensure rebuild still succeed
+        _set_provider_inventory(rp_uuid, "VCPU", {"total": 1})
 
         # There should be usage for the server on the compute node now.
         rp_usages = _get_provider_usages(rp_uuid)
@@ -1362,272 +1449,523 @@ class ServerRebuildTestCase(integrated_helpers._IntegratedTestBase,
                       'volume-backed server', six.text_type(resp))
 
 
-class ProviderUsageBaseTestCase(test.TestCase,
-                                integrated_helpers.InstanceHelperMixin):
-    """Base test class for functional tests that check provider usage
-    and consumer allocations in Placement during various operations.
-
-    Subclasses must define a **compute_driver** attribute for the virt driver
-    to use.
-
-    This class sets up standard fixtures and controller services but does not
-    start any compute services, that is left to the subclass.
-    """
-
-    microversion = 'latest'
+class ProviderTreeTests(integrated_helpers.ProviderUsageBaseTestCase):
+    compute_driver = 'fake.MediumFakeDriver'
 
     def setUp(self):
-        self.flags(compute_driver=self.compute_driver)
-        super(ProviderUsageBaseTestCase, self).setUp()
+        super(ProviderTreeTests, self).setUp()
+        # Before starting compute, placement has no providers registered
+        self.assertEqual([], self._get_all_providers())
 
-        self.useFixture(policy_fixture.RealPolicyFixture())
-        self.useFixture(nova_fixtures.NeutronFixture(self))
-        self.useFixture(nova_fixtures.AllServicesCurrent())
+        # Start compute without mocking update_provider_tree. The fake driver
+        # doesn't implement the method, so this will cause us to start with the
+        # legacy get_available_resource()-based inventory discovery and
+        # boostrapping of placement data.
+        self.compute = self._start_compute(host='host1')
 
-        placement = self.useFixture(nova_fixtures.PlacementFixture())
-        self.placement_api = placement.api
-        api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
-            api_version='v2.1'))
+        # Mock out update_provider_tree *after* starting compute with the
+        # (unmocked, default, unimplemented) version from the fake driver.
+        _p = mock.patch.object(fake.MediumFakeDriver, 'update_provider_tree')
+        self.addCleanup(_p.stop)
+        self.mock_upt = _p.start()
 
-        self.admin_api = api_fixture.admin_api
-        self.admin_api.microversion = self.microversion
-        self.api = self.admin_api
+        # The compute host should have been created in placement with
+        # appropriate inventory and no traits
+        rps = self._get_all_providers()
+        self.assertEqual(1, len(rps))
+        self.assertEqual(self.compute.host, rps[0]['name'])
+        self.host_uuid = self._get_provider_uuid_by_host(self.compute.host)
+        self.assertEqual({
+            'DISK_GB': {
+                'total': 1028,
+                'allocation_ratio': 1.0,
+                'max_unit': 1028,
+                'min_unit': 1,
+                'reserved': 0,
+                'step_size': 1,
+            },
+            'MEMORY_MB': {
+                'total': 8192,
+                'allocation_ratio': 1.5,
+                'max_unit': 8192,
+                'min_unit': 1,
+                'reserved': 512,
+                'step_size': 1,
+            },
+            'VCPU': {
+                'total': 10,
+                'allocation_ratio': 16.0,
+                'max_unit': 10,
+                'min_unit': 1,
+                'reserved': 0,
+                'step_size': 1,
+            },
+        }, self._get_provider_inventory(self.host_uuid))
+        self.assertEqual([], self._get_provider_traits(self.host_uuid))
 
-        # the image fake backend needed for image discovery
-        nova.tests.unit.image.fake.stub_out_image_service(self)
+    def _run_update_available_resource(self, startup):
+        ctx = context.get_admin_context()
+        rt = self.compute._get_resource_tracker()
+        rt.update_available_resource(ctx, self.compute.host, startup=startup)
 
-        self.start_service('conductor')
-        self.scheduler_service = self.start_service('scheduler')
+    def _run_update_available_resource_and_assert_raises(
+            self, exc=exception.ResourceProviderSyncFailed, startup=False):
+        """Invoke ResourceTracker.update_available_resource and assert that it
+        results in ResourceProviderSyncFailed.
 
-        self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
-        fake_network.set_stub_network_methods(self)
-
-        self.computes = {}
-
-    def _start_compute(self, host):
-        """Start a nova compute service on the given host
-
-        :param host: the name of the host that will be associated to the
-                     compute service.
-        :return: the nova compute service object
+        _run_periodicals is a little too high up in the call stack to be useful
+        for this, because ResourceTracker.update_available_resource_for_node
+        swallows all exceptions.
         """
-        fake.set_nodes([host])
-        self.addCleanup(fake.restore_nodes)
-        compute = self.start_service('compute', host=host)
-        self.computes[host] = compute
-        return compute
+        self.assertRaises(exc, self._run_update_available_resource, startup)
 
-    def _get_provider_uuid_by_host(self, host):
-        # NOTE(gibi): the compute node id is the same as the compute node
-        # provider uuid on that compute
-        resp = self.admin_api.api_get(
-            'os-hypervisors?hypervisor_hostname_pattern=%s' % host).body
-        return resp['hypervisors'][0]['id']
-
-    def _get_provider_usages(self, provider_uuid):
-        return self.placement_api.get(
-            '/resource_providers/%s/usages' % provider_uuid).body['usages']
-
-    def _get_allocations_by_server_uuid(self, server_uuid):
-        return self.placement_api.get(
-            '/allocations/%s' % server_uuid).body['allocations']
-
-    def _get_traits(self):
-        return self.placement_api.get('/traits', version='1.6').body['traits']
-
-    def _get_all_providers(self):
-        return self.placement_api.get(
-            '/resource_providers').body['resource_providers']
-
-    def _get_provider_traits(self, provider_uuid):
-        return self.placement_api.get(
-            '/resource_providers/%s/traits' % provider_uuid,
-            version='1.6').body['traits']
-
-    def _set_provider_traits(self, rp_uuid, traits):
-        """This will overwrite any existing traits.
-
-        :param rp_uuid: UUID of the resource provider to update
-        :param traits: list of trait strings to set on the provider
-        :returns: APIResponse object with the results
+    def test_update_provider_tree_associated_info(self):
+        """Inventory in some standard and custom resource classes.  Standard
+        and custom traits.  Aggregates.  Custom resource class and trait get
+        created; inventory, traits, and aggregates get set properly.
         """
-        provider = self.placement_api.get(
-            '/resource_providers/%s' % rp_uuid).body
-        put_traits_req = {
-            'resource_provider_generation': provider['generation'],
-            'traits': traits
+        inv = {
+            'VCPU': {
+                'total': 10,
+                'reserved': 0,
+                'min_unit': 1,
+                'max_unit': 2,
+                'step_size': 1,
+                'allocation_ratio': 10.0,
+            },
+            'MEMORY_MB': {
+                'total': 1048576,
+                'reserved': 2048,
+                'min_unit': 1024,
+                'max_unit': 131072,
+                'step_size': 1024,
+                'allocation_ratio': 1.0,
+            },
+            'CUSTOM_BANDWIDTH': {
+                'total': 1250000,
+                'reserved': 10000,
+                'min_unit': 5000,
+                'max_unit': 250000,
+                'step_size': 5000,
+                'allocation_ratio': 8.0,
+            },
         }
-        return self.placement_api.put(
-            '/resource_providers/%s/traits' % rp_uuid,
-            put_traits_req, version='1.6')
+        traits = set(['HW_CPU_X86_AVX', 'HW_CPU_X86_AVX2', 'CUSTOM_GOLD'])
+        aggs = set([uuids.agg1, uuids.agg2])
 
-    def assertFlavorMatchesAllocation(self, flavor, allocation):
-        self.assertEqual(flavor['vcpus'], allocation['VCPU'])
-        self.assertEqual(flavor['ram'], allocation['MEMORY_MB'])
-        self.assertEqual(flavor['disk'], allocation['DISK_GB'])
+        def update_provider_tree(prov_tree, nodename):
+            prov_tree.update_inventory(self.compute.host, inv)
+            prov_tree.update_traits(self.compute.host, traits)
+            prov_tree.update_aggregates(self.compute.host, aggs)
+        self.mock_upt.side_effect = update_provider_tree
 
-    def assertFlavorsMatchAllocation(self, old_flavor, new_flavor, allocation):
-        self.assertEqual(old_flavor['vcpus'] + new_flavor['vcpus'],
-                         allocation['VCPU'])
-        self.assertEqual(old_flavor['ram'] + new_flavor['ram'],
-                         allocation['MEMORY_MB'])
-        self.assertEqual(old_flavor['disk'] + new_flavor['disk'],
-                         allocation['DISK_GB'])
-
-    def get_migration_uuid_for_instance(self, instance_uuid):
-        # NOTE(danms): This is too much introspection for a test like this, but
-        # we can't see the migration uuid from the API, so we just encapsulate
-        # the peek behind the curtains here to keep it out of the tests.
-        # TODO(danms): Get the migration uuid from the API once it is exposed
-        ctxt = context.get_admin_context()
-        migrations = db.migration_get_all_by_filters(
-            ctxt, {'instance_uuid': instance_uuid})
-        self.assertEqual(1, len(migrations),
-                         'Test expected a single migration, '
-                         'but found %i' % len(migrations))
-        return migrations[0].uuid
-
-    def _boot_and_check_allocations(self, flavor, source_hostname):
-        """Boot an instance and check that the resource allocation is correct
-
-        After booting an instance on the given host with a given flavor it
-        asserts that both the providers usages and resource allocations match
-        with the resources requested in the flavor. It also asserts that
-        running the periodic update_available_resource call does not change the
-        resource state.
-
-        :param flavor: the flavor the instance will be booted with
-        :param source_hostname: the name of the host the instance will be
-                                booted on
-        :return: the API representation of the booted instance
-        """
-        server_req = self._build_minimal_create_server_request(
-            self.api, 'some-server', flavor_id=flavor['id'],
-            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
-            networks=[])
-        server_req['availability_zone'] = 'nova:%s' % source_hostname
-        LOG.info('booting on %s', source_hostname)
-        created_server = self.api.post_server({'server': server_req})
-        server = self._wait_for_state_change(
-            self.admin_api, created_server, 'ACTIVE')
-
-        # Verify that our source host is what the server ended up on
-        self.assertEqual(source_hostname, server['OS-EXT-SRV-ATTR:host'])
-
-        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
-
-        # Before we run periodics, make sure that we have allocations/usages
-        # only on the source host
-        source_usages = self._get_provider_usages(source_rp_uuid)
-        self.assertFlavorMatchesAllocation(flavor, source_usages)
-
-        # Check that the other providers has no usage
-        for rp_uuid in [self._get_provider_uuid_by_host(hostname)
-                        for hostname in self.computes.keys()
-                        if hostname != source_hostname]:
-            usages = self._get_provider_usages(rp_uuid)
-            self.assertEqual({'VCPU': 0,
-                              'MEMORY_MB': 0,
-                              'DISK_GB': 0}, usages)
-
-        # Check that the server only allocates resource from the host it is
-        # booted on
-        allocations = self._get_allocations_by_server_uuid(server['id'])
-        self.assertEqual(1, len(allocations),
-                         'No allocation for the server on the host it '
-                         'is booted on')
-        allocation = allocations[source_rp_uuid]['resources']
-        self.assertFlavorMatchesAllocation(flavor, allocation)
+        self.assertNotIn('CUSTOM_BANDWIDTH', self._get_all_resource_classes())
+        self.assertNotIn('CUSTOM_GOLD', self._get_all_traits())
 
         self._run_periodics()
 
-        # After running the periodics but before we start any other operation,
-        # we should have exactly the same allocation/usage information as
-        # before running the periodics
+        self.assertIn('CUSTOM_BANDWIDTH', self._get_all_resource_classes())
+        self.assertIn('CUSTOM_GOLD', self._get_all_traits())
+        self.assertEqual(inv, self._get_provider_inventory(self.host_uuid))
+        self.assertEqual(traits,
+                         set(self._get_provider_traits(self.host_uuid)))
+        self.assertEqual(aggs,
+                         set(self._get_provider_aggregates(self.host_uuid)))
 
-        # Check usages on the selected host after boot
-        source_usages = self._get_provider_usages(source_rp_uuid)
-        self.assertFlavorMatchesAllocation(flavor, source_usages)
+    def _update_provider_tree_multiple_providers(self, startup=False,
+                                                 do_reshape=False):
+        """Make update_provider_tree create multiple providers, including an
+        additional root as a sharing provider; and some descendants in the
+        compute node's tree.
 
-        # Check that the server only allocates resource from the host it is
-        # booted on
-        allocations = self._get_allocations_by_server_uuid(server['id'])
-        self.assertEqual(1, len(allocations),
-                         'No allocation for the server on the host it '
-                         'is booted on')
-        allocation = allocations[source_rp_uuid]['resources']
-        self.assertFlavorMatchesAllocation(flavor, allocation)
-
-        # Check that the other providers has no usage
-        for rp_uuid in [self._get_provider_uuid_by_host(hostname)
-                        for hostname in self.computes.keys()
-                        if hostname != source_hostname]:
-            usages = self._get_provider_usages(rp_uuid)
-            self.assertEqual({'VCPU': 0,
-                              'MEMORY_MB': 0,
-                              'DISK_GB': 0}, usages)
-        return server
-
-    def _delete_and_check_allocations(self, server):
-        """Delete the instance and asserts that the allocations are cleaned
-
-        :param server: The API representation of the instance to be deleted
+                   +---------------------------+   +--------------------------+
+                   |uuid: self.host_uuid       |   |uuid: uuids.ssp           |
+                   |name: self.compute.host    |   |name: 'ssp'               |
+                   |inv: (per MediumFakeDriver)|   |inv: DISK_GB=500          |
+                   |     VCPU=10               |...|traits: [MISC_SHARES_..., |
+                   |     MEMORY_MB=8192        |   |         STORAGE_DISK_SSD]|
+                   |     DISK_GB=1028          |   |aggs: [uuids.agg]         |
+                   |aggs: [uuids.agg]          |   +--------------------------+
+                   +---------------------------+
+                         /                   \
+             +-----------------+          +-----------------+
+             |uuid: uuids.numa1|          |uuid: uuids.numa2|
+             |name: 'numa1'    |          |name: 'numa2'    |
+             |inv: VCPU=10     |          |inv: VCPU=20     |
+             |     MEMORY_MB=1G|          |     MEMORY_MB=2G|
+             +-----------------+          +-----------------+
+                 /          \                    /         \
+        +------------+  +------------+   +------------+  +------------+
+        |uuid:       |  |uuid:       |   |uuid:       |  |uuid:       |
+        | uuids.pf1_1|  | uuids.pf1_2|   | uuids.pf2_1|  | uuids.pf2_2|
+        |name:       |  |name:       |   |name:       |  |name:       |
+        | 'pf1_1'    |  | 'pf1_2'    |   | 'pf2_1'    |  | 'pf2_2'    |
+        |inv:        |  |inv:        |   |inv:        |  |inv:        |
+        | ..NET_VF: 2|  | ..NET_VF: 3|   | ..NET_VF: 3|  | ..NET_VF: 4|
+        |traits:     |  |traits:     |   |traits:     |  |traits:     |
+        | ..PHYSNET_0|  | ..PHYSNET_1|   | ..PHYSNET_0|  | ..PHYSNET_1|
+        +------------+  +------------+   +------------+  +------------+
         """
+        def update_provider_tree(prov_tree, nodename, allocations=None):
+            if do_reshape and allocations is None:
+                raise exception.ReshapeNeeded()
 
-        self.api.delete_server(server['id'])
-        self._wait_until_deleted(server)
-        # NOTE(gibi): The resource allocation is deleted after the instance is
-        # destroyed in the db so wait_until_deleted might return before the
-        # the resource are deleted in placement. So we need to wait for the
-        # instance.delete.end notification as that is emitted after the
-        # resources are freed.
-        fake_notifier.wait_for_versioned_notifications('instance.delete.end')
+            # Create a shared storage provider as a root
+            prov_tree.new_root('ssp', uuids.ssp)
+            prov_tree.update_traits(
+                'ssp', ['MISC_SHARES_VIA_AGGREGATE', 'STORAGE_DISK_SSD'])
+            prov_tree.update_aggregates('ssp', [uuids.agg])
+            prov_tree.update_inventory('ssp', {'DISK_GB': {'total': 500}})
+            # Compute node is in the same aggregate
+            prov_tree.update_aggregates(self.compute.host, [uuids.agg])
+            # Create two NUMA nodes as children
+            prov_tree.new_child('numa1', self.host_uuid, uuid=uuids.numa1)
+            prov_tree.new_child('numa2', self.host_uuid, uuid=uuids.numa2)
+            # Give the NUMA nodes the proc/mem inventory.  NUMA 2 has twice as
+            # much as NUMA 1 (so we can validate later that everything is where
+            # it should be).
+            for n in (1, 2):
+                inv = {
+                    'VCPU': {
+                        'total': 10 * n,
+                        'reserved': 0,
+                        'min_unit': 1,
+                        'max_unit': 2,
+                        'step_size': 1,
+                        'allocation_ratio': 10.0,
+                    },
+                    'MEMORY_MB': {
+                         'total': 1048576 * n,
+                         'reserved': 2048,
+                         'min_unit': 512,
+                         'max_unit': 131072,
+                         'step_size': 512,
+                         'allocation_ratio': 1.0,
+                     },
+                }
+                prov_tree.update_inventory('numa%d' % n, inv)
+            # Each NUMA node has two PFs providing VF inventory on one of two
+            # networks
+            for n in (1, 2):
+                for p in (1, 2):
+                    name = 'pf%d_%d' % (n, p)
+                    prov_tree.new_child(
+                        name, getattr(uuids, 'numa%d' % n),
+                        uuid=getattr(uuids, name))
+                    trait = 'CUSTOM_PHYSNET_%d' % ((n + p) % 2)
+                    prov_tree.update_traits(name, [trait])
+                    inv = {
+                        'SRIOV_NET_VF': {
+                            'total': n + p,
+                            'reserved': 0,
+                            'min_unit': 1,
+                            'max_unit': 1,
+                            'step_size': 1,
+                            'allocation_ratio': 1.0,
+                        },
+                    }
+                    prov_tree.update_inventory(name, inv)
+            if do_reshape:
+                # Clear out the compute node's inventory. Its VCPU and
+                # MEMORY_MB "moved" to the NUMA RPs and its DISK_GB "moved" to
+                # the shared storage provider.
+                prov_tree.update_inventory(self.host_uuid, {})
+                # Move all the allocations
+                for consumer_uuid, alloc_info in allocations.items():
+                    allocs = alloc_info['allocations']
+                    # All allocations should belong to the compute node.
+                    self.assertEqual([self.host_uuid], list(allocs))
+                    new_allocs = {}
+                    for rc, amt in allocs[self.host_uuid]['resources'].items():
+                        # Move VCPU to NUMA1 and MEMORY_MB to NUMA2. Bogus, but
+                        # lets us prove stuff ends up where we tell it to go.
+                        if rc == 'VCPU':
+                            rp_uuid = uuids.numa1
+                        elif rc == 'MEMORY_MB':
+                            rp_uuid = uuids.numa2
+                        elif rc == 'DISK_GB':
+                            rp_uuid = uuids.ssp
+                        else:
+                            self.fail("Unexpected resource on compute node: "
+                                      "%s=%d" % (rc, amt))
+                        new_allocs[rp_uuid] = {
+                            'resources': {rc: amt},
+                        }
+                    # Add a VF for the heck of it. Again bogus, but see above.
+                    new_allocs[uuids.pf1_1] = {
+                        'resources': {'SRIOV_NET_VF': 1}
+                    }
+                    # Now replace just the allocations, leaving the other stuff
+                    # (proj/user ID and consumer generation) alone
+                    alloc_info['allocations'] = new_allocs
 
-        for rp_uuid in [self._get_provider_uuid_by_host(hostname)
-                        for hostname in self.computes.keys()]:
-            usages = self._get_provider_usages(rp_uuid)
-            self.assertEqual({'VCPU': 0,
-                              'MEMORY_MB': 0,
-                              'DISK_GB': 0}, usages)
+        self.mock_upt.side_effect = update_provider_tree
 
-        # and no allocations for the deleted server
-        allocations = self._get_allocations_by_server_uuid(server['id'])
-        self.assertEqual(0, len(allocations))
+        if startup:
+            self.restart_compute_service(self.compute)
+        else:
+            self._run_update_available_resource(False)
 
-    def _run_periodics(self):
-        """Run the update_available_resource task on every compute manager
+        # Create a dict, keyed by provider UUID, of all the providers
+        rps_by_uuid = {}
+        for rp_dict in self._get_all_providers():
+            rps_by_uuid[rp_dict['uuid']] = rp_dict
 
-        This runs periodics on the computes in an undefined order; some child
-        class redefined this function to force a specific order.
+        # All and only the expected providers got created.
+        all_uuids = set([self.host_uuid, uuids.ssp, uuids.numa1, uuids.numa2,
+                         uuids.pf1_1, uuids.pf1_2, uuids.pf2_1, uuids.pf2_2])
+        self.assertEqual(all_uuids, set(rps_by_uuid))
+
+        # Validate tree roots
+        tree_uuids = [self.host_uuid, uuids.numa1, uuids.numa2,
+                      uuids.pf1_1, uuids.pf1_2, uuids.pf2_1, uuids.pf2_2]
+        for tree_uuid in tree_uuids:
+            self.assertEqual(self.host_uuid,
+                             rps_by_uuid[tree_uuid]['root_provider_uuid'])
+        self.assertEqual(uuids.ssp,
+                         rps_by_uuid[uuids.ssp]['root_provider_uuid'])
+
+        # SSP has the right traits
+        self.assertEqual(
+            set(['MISC_SHARES_VIA_AGGREGATE', 'STORAGE_DISK_SSD']),
+            set(self._get_provider_traits(uuids.ssp)))
+
+        # SSP has the right inventory
+        self.assertEqual(
+            500, self._get_provider_inventory(uuids.ssp)['DISK_GB']['total'])
+
+        # SSP and compute are in the same aggregate
+        agg_uuids = set([self.host_uuid, uuids.ssp])
+        for uuid in agg_uuids:
+            self.assertEqual(set([uuids.agg]),
+                             set(self._get_provider_aggregates(uuid)))
+
+        # The rest aren't in aggregates
+        for uuid in (all_uuids - agg_uuids):
+            self.assertEqual(set(), set(self._get_provider_aggregates(uuid)))
+
+        # NUMAs have the right inventory and parentage
+        for n in (1, 2):
+            numa_uuid = getattr(uuids, 'numa%d' % n)
+            self.assertEqual(self.host_uuid,
+                             rps_by_uuid[numa_uuid]['parent_provider_uuid'])
+            inv = self._get_provider_inventory(numa_uuid)
+            self.assertEqual(10 * n, inv['VCPU']['total'])
+            self.assertEqual(1048576 * n, inv['MEMORY_MB']['total'])
+
+        # PFs have the right inventory, physnet, and parentage
+        self.assertEqual(uuids.numa1,
+                         rps_by_uuid[uuids.pf1_1]['parent_provider_uuid'])
+        self.assertEqual(['CUSTOM_PHYSNET_0'],
+                         self._get_provider_traits(uuids.pf1_1))
+        self.assertEqual(
+            2,
+            self._get_provider_inventory(uuids.pf1_1)['SRIOV_NET_VF']['total'])
+
+        self.assertEqual(uuids.numa1,
+                         rps_by_uuid[uuids.pf1_2]['parent_provider_uuid'])
+        self.assertEqual(['CUSTOM_PHYSNET_1'],
+                         self._get_provider_traits(uuids.pf1_2))
+        self.assertEqual(
+            3,
+            self._get_provider_inventory(uuids.pf1_2)['SRIOV_NET_VF']['total'])
+
+        self.assertEqual(uuids.numa2,
+                         rps_by_uuid[uuids.pf2_1]['parent_provider_uuid'])
+        self.assertEqual(['CUSTOM_PHYSNET_1'],
+                         self._get_provider_traits(uuids.pf2_1))
+        self.assertEqual(
+            3,
+            self._get_provider_inventory(uuids.pf2_1)['SRIOV_NET_VF']['total'])
+
+        self.assertEqual(uuids.numa2,
+                         rps_by_uuid[uuids.pf2_2]['parent_provider_uuid'])
+        self.assertEqual(['CUSTOM_PHYSNET_0'],
+                         self._get_provider_traits(uuids.pf2_2))
+        self.assertEqual(
+            4,
+            self._get_provider_inventory(uuids.pf2_2)['SRIOV_NET_VF']['total'])
+
+        # Compute and NUMAs don't have any traits
+        for uuid in (self.host_uuid, uuids.numa1, uuids.numa2):
+            self.assertEqual([], self._get_provider_traits(uuid))
+
+    def test_update_provider_tree_multiple_providers(self):
+        self._update_provider_tree_multiple_providers()
+
+    def test_update_provider_tree_multiple_providers_startup(self):
+        """The above works the same for startup when no reshape requested."""
+        self._update_provider_tree_multiple_providers(startup=True)
+
+    def test_update_provider_tree_bogus_resource_class(self):
+        def update_provider_tree(prov_tree, nodename):
+            prov_tree.update_inventory(self.compute.host, {'FOO': {}})
+        self.mock_upt.side_effect = update_provider_tree
+
+        rcs = self._get_all_resource_classes()
+        self.assertIn('VCPU', rcs)
+        self.assertNotIn('FOO', rcs)
+
+        self._run_update_available_resource_and_assert_raises()
+
+        rcs = self._get_all_resource_classes()
+        self.assertIn('VCPU', rcs)
+        self.assertNotIn('FOO', rcs)
+
+    def test_update_provider_tree_bogus_trait(self):
+        def update_provider_tree(prov_tree, nodename):
+            prov_tree.update_traits(self.compute.host, ['FOO'])
+        self.mock_upt.side_effect = update_provider_tree
+
+        traits = self._get_all_traits()
+        self.assertIn('HW_CPU_X86_AVX', traits)
+        self.assertNotIn('FOO', traits)
+
+        self._run_update_available_resource_and_assert_raises()
+
+        traits = self._get_all_traits()
+        self.assertIn('HW_CPU_X86_AVX', traits)
+        self.assertNotIn('FOO', traits)
+
+    def _create_instance(self, flavor):
+        server_req = self._build_minimal_create_server_request(
+            self.api, 'some-server', flavor_id=flavor['id'],
+            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
+            networks='none', az='nova:host1')
+        inst = self.api.post_server({'server': server_req})
+        return self._wait_for_state_change(self.admin_api, inst, 'ACTIVE')
+
+    def test_reshape(self):
+        """On startup, virt driver signals it needs to reshape, then does so.
+
+        This test creates a couple of instances so there are allocations to be
+        moved by the reshape operation. Then we do the reshape and make sure
+        the inventories and allocations end up where they should.
         """
+        # First let's create some instances so we have allocations to move.
+        flavors = self.api.get_flavors()
+        inst1 = self._create_instance(flavors[0])
+        inst2 = self._create_instance(flavors[1])
 
-        ctx = context.get_admin_context()
-        for compute in self.computes.values():
-            LOG.info('Running periodic for compute (%s)',
-                compute.manager.host)
-            compute.manager.update_available_resource(ctx)
-        LOG.info('Finished with periodics')
+        # Instance create calls RT._update, which calls
+        # driver.update_provider_tree, which is currently mocked to a no-op.
+        self.assertEqual(2, self.mock_upt.call_count)
+        self.mock_upt.reset_mock()
+
+        # Hit the reshape.
+        self._update_provider_tree_multiple_providers(startup=True,
+                                                      do_reshape=True)
+
+        # Check the final allocations
+        # The compute node provider should have *no* allocations.
+        self.assertEqual(
+            {}, self._get_allocations_by_provider_uuid(self.host_uuid))
+        # And no inventory
+        self.assertEqual({}, self._get_provider_inventory(self.host_uuid))
+        # NUMA1 got all the VCPU
+        self.assertEqual(
+            {inst1['id']: {'resources': {'VCPU': 1}},
+             inst2['id']: {'resources': {'VCPU': 1}}},
+            self._get_allocations_by_provider_uuid(uuids.numa1))
+        # NUMA2 got all the memory
+        self.assertEqual(
+            {inst1['id']: {'resources': {'MEMORY_MB': 512}},
+             inst2['id']: {'resources': {'MEMORY_MB': 2048}}},
+            self._get_allocations_by_provider_uuid(uuids.numa2))
+        # Disk resource ended up on the shared storage provider
+        self.assertEqual(
+            {inst1['id']: {'resources': {'DISK_GB': 1}},
+             inst2['id']: {'resources': {'DISK_GB': 20}}},
+            self._get_allocations_by_provider_uuid(uuids.ssp))
+        # We put VFs on the first PF in NUMA1
+        self.assertEqual(
+            {inst1['id']: {'resources': {'SRIOV_NET_VF': 1}},
+             inst2['id']: {'resources': {'SRIOV_NET_VF': 1}}},
+            self._get_allocations_by_provider_uuid(uuids.pf1_1))
+        self.assertEqual(
+            {}, self._get_allocations_by_provider_uuid(uuids.pf1_2))
+        self.assertEqual(
+            {}, self._get_allocations_by_provider_uuid(uuids.pf2_1))
+        self.assertEqual(
+            {}, self._get_allocations_by_provider_uuid(uuids.pf2_2))
+        # This is *almost* redundant - but it makes sure the instances don't
+        # have extra allocations from some other provider.
+        self.assertEqual(
+            {
+                uuids.numa1: {
+                    'resources': {'VCPU': 1},
+                    # Don't care about the generations - rely on placement db
+                    # tests to validate that those behave properly.
+                    'generation': mock.ANY,
+                },
+                uuids.numa2: {
+                    'resources': {'MEMORY_MB': 512},
+                    'generation': mock.ANY,
+                },
+                uuids.ssp: {
+                    'resources': {'DISK_GB': 1},
+                    'generation': mock.ANY,
+                },
+                uuids.pf1_1: {
+                    'resources': {'SRIOV_NET_VF': 1},
+                    'generation': mock.ANY,
+                },
+            }, self._get_allocations_by_server_uuid(inst1['id']))
+        self.assertEqual(
+            {
+                uuids.numa1: {
+                    'resources': {'VCPU': 1},
+                    'generation': mock.ANY,
+                },
+                uuids.numa2: {
+                    'resources': {'MEMORY_MB': 2048},
+                    'generation': mock.ANY,
+                },
+                uuids.ssp: {
+                    'resources': {'DISK_GB': 20},
+                    'generation': mock.ANY,
+                },
+                uuids.pf1_1: {
+                    'resources': {'SRIOV_NET_VF': 1},
+                    'generation': mock.ANY,
+                },
+            }, self._get_allocations_by_server_uuid(inst2['id']))
+
+        # The first call raises ReshapeNeeded, resulting in the second.
+        self.assertEqual(2, self.mock_upt.call_count)
+        # The expected value of the allocations kwarg to update_provider_tree
+        # for that second call:
+        exp_allocs = {
+            inst1['id']: {
+                'allocations': {
+                    uuids.numa1: {'resources': {'VCPU': 1}},
+                    uuids.numa2: {'resources': {'MEMORY_MB': 512}},
+                    uuids.ssp: {'resources': {'DISK_GB': 1}},
+                    uuids.pf1_1: {'resources': {'SRIOV_NET_VF': 1}},
+                },
+                'consumer_generation': mock.ANY,
+                'project_id': mock.ANY,
+                'user_id': mock.ANY,
+            },
+            inst2['id']: {
+                'allocations': {
+                    uuids.numa1: {'resources': {'VCPU': 1}},
+                    uuids.numa2: {'resources': {'MEMORY_MB': 2048}},
+                    uuids.ssp: {'resources': {'DISK_GB': 20}},
+                    uuids.pf1_1: {'resources': {'SRIOV_NET_VF': 1}},
+                },
+                'consumer_generation': mock.ANY,
+                'project_id': mock.ANY,
+                'user_id': mock.ANY,
+            },
+        }
+        self.mock_upt.assert_has_calls([
+            mock.call(mock.ANY, 'host1'),
+            mock.call(mock.ANY, 'host1', allocations=exp_allocs),
+        ])
 
 
-class TraitsTrackingTests(ProviderUsageBaseTestCase):
-    compute_driver = 'fake.SmallFakeDriver'
-
-    @mock.patch.object(fake.SmallFakeDriver, 'get_traits')
-    def test_resource_provider_traits(self, mock_traits):
-        traits = ['CUSTOM_FOO', 'HW_CPU_X86_VMX']
-        mock_traits.return_value = traits
-
-        self.assertNotIn('CUSTOM_FOO', self._get_traits())
-        self.assertEqual([], self._get_all_providers())
-
-        self.compute = self._start_compute(host='host1')
-
-        rp_uuid = self._get_provider_uuid_by_host('host1')
-        self.assertEqual(traits, sorted(self._get_provider_traits(rp_uuid)))
-        self.assertIn('CUSTOM_FOO', self._get_traits())
-
-
-class ServerMovingTests(ProviderUsageBaseTestCase):
+class ServerMovingTests(integrated_helpers.ProviderUsageBaseTestCase):
     """Tests moving servers while checking the resource allocations and usages
 
     These tests use two compute hosts. Boot a server on one of them then try to
@@ -1700,63 +2038,16 @@ class ServerMovingTests(ProviderUsageBaseTestCase):
 
     def _resize_and_check_allocations(self, server, old_flavor, new_flavor,
             source_rp_uuid, dest_rp_uuid):
-        # Resize the server and check usages in VERIFY_RESIZE state
         self.flags(allow_resize_to_same_host=False)
         resize_req = {
             'resize': {
                 'flavorRef': new_flavor['id']
             }
         }
-        self.api.post_server_action(server['id'], resize_req)
-        self._wait_for_state_change(self.api, server, 'VERIFY_RESIZE')
-
-        # OK, so the resize operation has run, but we have not yet confirmed or
-        # reverted the resize operation. Before we run periodics, make sure
-        # that we have allocations/usages on BOTH the source and the
-        # destination hosts.
-        source_usages = self._get_provider_usages(source_rp_uuid)
-        self.assertFlavorMatchesAllocation(old_flavor, source_usages)
-        dest_usages = self._get_provider_usages(dest_rp_uuid)
-        self.assertFlavorMatchesAllocation(new_flavor, dest_usages)
-
-        # The instance should own the new_flavor allocation against the
-        # destination host created by the scheduler
-        allocations = self._get_allocations_by_server_uuid(server['id'])
-        self.assertEqual(1, len(allocations))
-        dest_alloc = allocations[dest_rp_uuid]['resources']
-        self.assertFlavorMatchesAllocation(new_flavor, dest_alloc)
-
-        # The migration should own the old_flavor allocation against the
-        # source host created by conductor
-        migration_uuid = self.get_migration_uuid_for_instance(server['id'])
-        allocations = self._get_allocations_by_server_uuid(migration_uuid)
-        source_alloc = allocations[source_rp_uuid]['resources']
-        self.assertFlavorMatchesAllocation(old_flavor, source_alloc)
-
-        self._run_periodics()
-
-        # the original host expected to have the old resource usage
-        source_usages = self._get_provider_usages(source_rp_uuid)
-        self.assertFlavorMatchesAllocation(old_flavor, source_usages)
-
-        # the dest host expected to have resource allocation based on
-        # the new flavor the server is resized to
-        dest_usages = self._get_provider_usages(dest_rp_uuid)
-        self.assertFlavorMatchesAllocation(new_flavor, dest_usages)
-
-        # The instance should own the new_flavor allocation against the
-        # destination host
-        allocations = self._get_allocations_by_server_uuid(server['id'])
-        self.assertEqual(1, len(allocations))
-        dest_allocation = allocations[dest_rp_uuid]['resources']
-        self.assertFlavorMatchesAllocation(new_flavor, dest_allocation)
-
-        # The migration should own the old_flavor allocation against the
-        # source host
-        migration_uuid = self.get_migration_uuid_for_instance(server['id'])
-        allocations = self._get_allocations_by_server_uuid(migration_uuid)
-        source_alloc = allocations[source_rp_uuid]['resources']
-        self.assertFlavorMatchesAllocation(old_flavor, source_alloc)
+        self._move_and_check_allocations(
+            server, request=resize_req, old_flavor=old_flavor,
+            new_flavor=new_flavor, source_rp_uuid=source_rp_uuid,
+            dest_rp_uuid=dest_rp_uuid)
 
     def _test_resize_revert(self, dest_hostname):
         source_hostname = self._other_hostname(dest_hostname)
@@ -1773,6 +2064,11 @@ class ServerMovingTests(ProviderUsageBaseTestCase):
         post = {'revertResize': None}
         self.api.post_server_action(server['id'], post)
         self._wait_for_state_change(self.api, server, 'ACTIVE')
+
+        # Make sure the RequestSpec.flavor matches the original flavor.
+        ctxt = context.get_admin_context()
+        reqspec = objects.RequestSpec.get_by_instance_uuid(ctxt, server['id'])
+        self.assertEqual(self.flavor1['id'], reqspec.flavor.flavorid)
 
         self._run_periodics()
 
@@ -1861,59 +2157,6 @@ class ServerMovingTests(ProviderUsageBaseTestCase):
         self.assertFlavorMatchesAllocation(self.flavor2, dest_allocation)
 
         self._delete_and_check_allocations(server)
-
-    def _resize_to_same_host_and_check_allocations(self, server, old_flavor,
-                                                   new_flavor, rp_uuid):
-        # Resize the server to the same host and check usages in VERIFY_RESIZE
-        # state
-        self.flags(allow_resize_to_same_host=True)
-        resize_req = {
-            'resize': {
-                'flavorRef': new_flavor['id']
-            }
-        }
-        self.api.post_server_action(server['id'], resize_req)
-        self._wait_for_state_change(self.api, server, 'VERIFY_RESIZE')
-
-        usages = self._get_provider_usages(rp_uuid)
-        self.assertFlavorsMatchAllocation(old_flavor, new_flavor, usages)
-
-        # The instance should hold a new_flavor allocation
-        allocations = self._get_allocations_by_server_uuid(server['id'])
-        self.assertEqual(1, len(allocations))
-        allocation = allocations[rp_uuid]['resources']
-        self.assertFlavorMatchesAllocation(new_flavor, allocation)
-
-        # The migration should hold an old_flavor allocation
-        migration_uuid = self.get_migration_uuid_for_instance(server['id'])
-        allocations = self._get_allocations_by_server_uuid(migration_uuid)
-        self.assertEqual(1, len(allocations))
-        allocation = allocations[rp_uuid]['resources']
-        self.assertFlavorMatchesAllocation(old_flavor, allocation)
-
-        # We've resized to the same host and have doubled allocations for both
-        # the old and new flavor on the same host. Run the periodic on the
-        # compute to see if it tramples on what the scheduler did.
-        self._run_periodics()
-
-        usages = self._get_provider_usages(rp_uuid)
-
-        # In terms of usage, it's still double on the host because the instance
-        # and the migration each hold an allocation for the new and old
-        # flavors respectively.
-        self.assertFlavorsMatchAllocation(old_flavor, new_flavor, usages)
-
-        # The instance should hold a new_flavor allocation
-        allocations = self._get_allocations_by_server_uuid(server['id'])
-        self.assertEqual(1, len(allocations))
-        allocation = allocations[rp_uuid]['resources']
-        self.assertFlavorMatchesAllocation(new_flavor, allocation)
-
-        # The migration should hold an old_flavor allocation
-        allocations = self._get_allocations_by_server_uuid(migration_uuid)
-        self.assertEqual(1, len(allocations))
-        allocation = allocations[rp_uuid]['resources']
-        self.assertFlavorMatchesAllocation(old_flavor, allocation)
 
     def test_resize_revert_same_host(self):
         # make sure that the test only uses a single host
@@ -2118,6 +2361,48 @@ class ServerMovingTests(ProviderUsageBaseTestCase):
         zero_usage = {'VCPU': 0, 'DISK_GB': 0, 'MEMORY_MB': 0}
         dest_usages = self._get_provider_usages(dest_rp_uuid)
         self.assertEqual(zero_usage, dest_usages)
+
+        self._delete_and_check_allocations(server)
+
+    def test_migrate_no_valid_host(self):
+        source_hostname = self.compute1.host
+        dest_hostname = self.compute2.host
+        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
+        dest_rp_uuid = self._get_provider_uuid_by_host(dest_hostname)
+
+        server = self._boot_and_check_allocations(
+            self.flavor1, source_hostname)
+
+        dest_compute_id = self.admin_api.get_services(
+            host=dest_hostname, binary='nova-compute')[0]['id']
+        self.compute2.stop()
+        # force it down to avoid waiting for the service group to time out
+        self.admin_api.put_service(
+            dest_compute_id, {'forced_down': 'true'})
+
+        # migrate the server
+        post = {'migrate': None}
+        ex = self.assertRaises(client.OpenStackApiException,
+                               self.api.post_server_action,
+                               server['id'], post)
+        self.assertIn('No valid host', six.text_type(ex))
+        expected_params = {'OS-EXT-SRV-ATTR:host': source_hostname,
+                           'status': 'ACTIVE'}
+        self._wait_for_server_parameter(self.api, server, expected_params)
+
+        self._run_periodics()
+
+        # Expect to have allocation only on source_host
+        source_usages = self._get_provider_usages(source_rp_uuid)
+        self.assertFlavorMatchesAllocation(self.flavor1, source_usages)
+        zero_usage = {'VCPU': 0, 'DISK_GB': 0, 'MEMORY_MB': 0}
+        dest_usages = self._get_provider_usages(dest_rp_uuid)
+        self.assertEqual(zero_usage, dest_usages)
+
+        allocations = self._get_allocations_by_server_uuid(server['id'])
+        self.assertEqual(1, len(allocations))
+        allocation = allocations[source_rp_uuid]['resources']
+        self.assertFlavorMatchesAllocation(self.flavor1, allocation)
 
         self._delete_and_check_allocations(server)
 
@@ -2471,7 +2756,8 @@ class ServerMovingTests(ProviderUsageBaseTestCase):
         self.api.post_server_action(server['id'], req)
         self._wait_for_server_parameter(
             self.api, server, {'status': 'SHELVED_OFFLOADED',
-                               'OS-EXT-SRV-ATTR:host': None})
+                               'OS-EXT-SRV-ATTR:host': None,
+                               'OS-EXT-AZ:availability_zone': ''})
         source_usages = self._get_provider_usages(source_rp_uuid)
         self.assertEqual({'VCPU': 0,
                           'MEMORY_MB': 0,
@@ -2707,14 +2993,9 @@ class ServerMovingTests(ProviderUsageBaseTestCase):
 
         self._delete_and_check_allocations(server)
 
-    @mock.patch('nova.virt.fake.FakeDriver.pre_live_migration',
-                # The actual type of exception here doesn't matter. The point
-                # is that the virt driver raised an exception from the
-                # pre_live_migration method on the destination host.
-                side_effect=test.TestingException(
-                    'test_live_migrate_rollback_cleans_dest_node_allocations'))
+    @mock.patch('nova.virt.fake.FakeDriver.pre_live_migration')
     def test_live_migrate_rollback_cleans_dest_node_allocations(
-            self, mock_pre_live_migration):
+            self, mock_pre_live_migration, force=False):
         """Tests the case that when live migration fails, either during the
         call to pre_live_migration on the destination, or during the actual
         live migration in the virt driver, the allocations on the destination
@@ -2728,10 +3009,35 @@ class ServerMovingTests(ProviderUsageBaseTestCase):
         server = self._boot_and_check_allocations(
             self.flavor1, source_hostname)
 
+        def stub_pre_live_migration(context, instance, block_device_info,
+                                    network_info, disk_info, migrate_data):
+            # Make sure the source node allocations are against the migration
+            # record and the dest node allocations are against the instance.
+            _allocations = self._get_allocations_by_server_uuid(
+                migrate_data.migration.uuid)
+            self.assertEqual(1, len(_allocations))
+            self.assertIn(source_rp_uuid, _allocations)
+            self.assertFlavorMatchesAllocation(
+                self.flavor1, _allocations[source_rp_uuid]['resources'])
+
+            _allocations = self._get_allocations_by_server_uuid(server['id'])
+            self.assertEqual(1, len(_allocations))
+            self.assertIn(dest_rp_uuid, _allocations)
+            self.assertFlavorMatchesAllocation(
+                self.flavor1, _allocations[dest_rp_uuid]['resources'])
+            # The actual type of exception here doesn't matter. The point
+            # is that the virt driver raised an exception from the
+            # pre_live_migration method on the destination host.
+            raise test.TestingException(
+                'test_live_migrate_rollback_cleans_dest_node_allocations')
+
+        mock_pre_live_migration.side_effect = stub_pre_live_migration
+
         post = {
             'os-migrateLive': {
                 'host': dest_hostname,
                 'block_migration': True,
+                'force': force
             }
         }
         self.api.post_server_action(server['id'], post)
@@ -2765,6 +3071,16 @@ class ServerMovingTests(ProviderUsageBaseTestCase):
             self.flavor1, allocations[source_rp_uuid]['resources'])
 
         self._delete_and_check_allocations(server)
+
+    def test_live_migrate_rollback_cleans_dest_node_allocations_forced(self):
+        """Tests the case that when a forced host live migration fails, either
+        during the call to pre_live_migration on the destination, or during
+        the actual live migration in the virt driver, the allocations on the
+        destination node are rolled back since the instance is still on the
+        source node.
+        """
+        self.test_live_migrate_rollback_cleans_dest_node_allocations(
+            force=True)
 
     def test_rescheduling_when_migrating_instance(self):
         """Tests that allocations are removed from the destination node by
@@ -2881,7 +3197,7 @@ class ServerMovingTests(ProviderUsageBaseTestCase):
         server_req = self._build_minimal_create_server_request(
                 self.api, "some-server", flavor_id=self.flavor1["id"],
                 image_uuid="155d900f-4e14-4e4c-a73d-069cbf4541e6",
-                networks=[])
+                networks='none')
 
         created_server = self.api.post_server({"server": server_req})
         server = self._wait_for_state_change(self.api, created_server,
@@ -2982,8 +3298,103 @@ class ServerMovingTests(ProviderUsageBaseTestCase):
     def test_resize_reschedule_uses_host_lists_not_enough_alts(self):
         self._test_resize_reschedule_uses_host_lists(fails=3, num_alts=1)
 
+    def test_migrate_confirm(self):
+        source_hostname = self.compute1.host
+        dest_hostname = self.compute2.host
+        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
+        dest_rp_uuid = self._get_provider_uuid_by_host(dest_hostname)
 
-class ServerLiveMigrateForceAndAbort(ProviderUsageBaseTestCase):
+        server = self._boot_and_check_allocations(
+            self.flavor1, source_hostname)
+
+        self._migrate_and_check_allocations(
+            server, self.flavor1, source_rp_uuid, dest_rp_uuid)
+
+        # Confirm the move and check the usages
+        post = {'confirmResize': None}
+        self.api.post_server_action(
+            server['id'], post, check_response_status=[204])
+        self._wait_for_state_change(self.api, server, 'ACTIVE')
+
+        def _check_allocation():
+            allocations = self._get_allocations_by_server_uuid(server['id'])
+
+            # and the server allocates only from the target host
+            self.assertEqual(1, len(allocations))
+
+            source_usages = self._get_provider_usages(source_rp_uuid)
+            dest_usages = self._get_provider_usages(dest_rp_uuid)
+
+            # and the target host allocation should be according to the flavor
+            self.assertFlavorMatchesAllocation(self.flavor1, dest_usages)
+            self.assertEqual({'VCPU': 0,
+                              'MEMORY_MB': 0,
+                              'DISK_GB': 0}, source_usages,
+                             'The source host %s still has usages after the '
+                             'resize has been confirmed' % source_hostname)
+
+            # and the target host allocation should be according to the flavor
+            self.assertFlavorMatchesAllocation(self.flavor1, dest_usages)
+
+            dest_allocation = allocations[dest_rp_uuid]['resources']
+            self.assertFlavorMatchesAllocation(self.flavor1, dest_allocation)
+
+        # After confirming, we should have an allocation only on the
+        # destination host
+        _check_allocation()
+        self._run_periodics()
+
+        # Check we're still accurate after running the periodics
+        _check_allocation()
+
+        self._delete_and_check_allocations(server)
+
+    def test_migrate_revert(self):
+        source_hostname = self.compute1.host
+        dest_hostname = self.compute2.host
+        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
+        dest_rp_uuid = self._get_provider_uuid_by_host(dest_hostname)
+
+        server = self._boot_and_check_allocations(
+            self.flavor1, source_hostname)
+
+        self._migrate_and_check_allocations(
+            server, self.flavor1, source_rp_uuid, dest_rp_uuid)
+
+        # Revert the move and check the usages
+        post = {'revertResize': None}
+        self.api.post_server_action(server['id'], post)
+        self._wait_for_state_change(self.api, server, 'ACTIVE')
+
+        def _check_allocation():
+            source_usages = self._get_provider_usages(source_rp_uuid)
+            allocations = self._get_allocations_by_server_uuid(server['id'])
+            self.assertFlavorMatchesAllocation(self.flavor1, source_usages)
+
+            dest_usages = self._get_provider_usages(dest_rp_uuid)
+            self.assertEqual({'VCPU': 0,
+                              'MEMORY_MB': 0,
+                              'DISK_GB': 0}, dest_usages,
+                              'Target host %s still has usage after the '
+                              'resize has been reverted' % dest_hostname)
+
+            # Check that the server only allocates resource from the original
+            # host
+            self.assertEqual(1, len(allocations))
+
+            source_allocation = allocations[source_rp_uuid]['resources']
+            self.assertFlavorMatchesAllocation(self.flavor1, source_allocation)
+
+        # the original host expected to have the old resource allocation
+        _check_allocation()
+        self._run_periodics()
+        _check_allocation()
+
+        self._delete_and_check_allocations(server)
+
+
+class ServerLiveMigrateForceAndAbort(
+        integrated_helpers.ProviderUsageBaseTestCase):
     """Test Server live migrations, which delete the migration or
     force_complete it, and check the allocations after the operations.
 
@@ -3088,7 +3499,7 @@ class ServerLiveMigrateForceAndAbort(ProviderUsageBaseTestCase):
         self._delete_and_check_allocations(server)
 
 
-class ServerRescheduleTests(ProviderUsageBaseTestCase):
+class ServerRescheduleTests(integrated_helpers.ProviderUsageBaseTestCase):
     """Tests server create scenarios which trigger a reschedule during
     a server build and validates that allocations in Placement
     are properly cleaned up.
@@ -3119,7 +3530,7 @@ class ServerRescheduleTests(ProviderUsageBaseTestCase):
         server_req = self._build_minimal_create_server_request(
                 self.api, 'some-server', flavor_id=self.flavor1['id'],
                 image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
-                networks=[])
+                networks='none')
 
         created_server = self.api.post_server({'server': server_req})
         server = self._wait_for_state_change(
@@ -3143,7 +3554,7 @@ class ServerRescheduleTests(ProviderUsageBaseTestCase):
         self.assertFlavorMatchesAllocation(self.flavor1, dest_usages)
 
 
-class ServerBuildAbortTests(ProviderUsageBaseTestCase):
+class ServerBuildAbortTests(integrated_helpers.ProviderUsageBaseTestCase):
     """Tests server create scenarios which trigger a build abort during
     a server build and validates that allocations in Placement
     are properly cleaned up.
@@ -3168,7 +3579,7 @@ class ServerBuildAbortTests(ProviderUsageBaseTestCase):
         server_req = self._build_minimal_create_server_request(
                 self.api, 'some-server', flavor_id=self.flavor1['id'],
                 image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
-                networks=[])
+                networks='none')
 
         created_server = self.api.post_server({'server': server_req})
         self._wait_for_state_change(self.api, created_server, 'ERROR')
@@ -3182,7 +3593,8 @@ class ServerBuildAbortTests(ProviderUsageBaseTestCase):
            {'vcpus': 0, 'ram': 0, 'disk': 0}, failed_usages)
 
 
-class ServerUnshelveSpawnFailTests(ProviderUsageBaseTestCase):
+class ServerUnshelveSpawnFailTests(
+        integrated_helpers.ProviderUsageBaseTestCase):
     """Tests server unshelve scenarios which trigger a
     VirtualInterfaceCreateException during driver.spawn() and validates that
     allocations in Placement are properly cleaned up.
@@ -3244,7 +3656,7 @@ class ServerUnshelveSpawnFailTests(ProviderUsageBaseTestCase):
            {'vcpus': 0, 'ram': 0, 'disk': 0}, usages)
 
 
-class ServerSoftDeleteTests(ProviderUsageBaseTestCase):
+class ServerSoftDeleteTests(integrated_helpers.ProviderUsageBaseTestCase):
 
     compute_driver = 'fake.SmallFakeDriver'
 
@@ -3358,7 +3770,146 @@ class ServerSoftDeleteTests(ProviderUsageBaseTestCase):
         self._delete_and_check_allocations(server)
 
 
-class TraitsBasedSchedulingTest(ProviderUsageBaseTestCase):
+class VolumeBackedServerTest(integrated_helpers.ProviderUsageBaseTestCase):
+    """Tests for volume-backed servers."""
+
+    compute_driver = 'fake.SmallFakeDriver'
+
+    def setUp(self):
+        super(VolumeBackedServerTest, self).setUp()
+        self.compute1 = self._start_compute('host1')
+        self.flavor_id = self._create_flavor()
+
+    def _create_flavor(self):
+        body = {
+            'flavor': {
+                'id': 'vbst',
+                'name': 'special',
+                'ram': 512,
+                'vcpus': 1,
+                'disk': 10,
+                'OS-FLV-EXT-DATA:ephemeral': 20,
+                'swap': 5 * 1024,
+                'rxtx_factor': 1.0,
+                'os-flavor-access:is_public': True,
+            },
+        }
+        self.admin_api.post_flavor(body)
+        return body['flavor']['id']
+
+    def _create_server(self):
+        with nova.utils.temporary_mutation(self.api, microversion='2.35'):
+            image_id = self.api.get_images()[0]['id']
+        server_req = self._build_minimal_create_server_request(
+            self.api, 'trait-based-server',
+            image_uuid=image_id,
+            flavor_id=self.flavor_id, networks='none')
+        server = self.api.post_server({'server': server_req})
+        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        return server
+
+    def _create_volume_backed_server(self):
+        self.useFixture(nova_fixtures.CinderFixtureNewAttachFlow(self))
+        volume_id = nova_fixtures.CinderFixtureNewAttachFlow.IMAGE_BACKED_VOL
+        server_req_body = {
+            # There is no imageRef because this is boot from volume.
+            'server': {
+                'flavorRef': self.flavor_id,
+                'name': 'test_volume_backed',
+                # We don't care about networking for this test. This
+                # requires microversion >= 2.37.
+                'networks': 'none',
+                'block_device_mapping_v2': [{
+                    'boot_index': 0,
+                    'uuid': volume_id,
+                    'source_type': 'volume',
+                    'destination_type': 'volume'
+                }]
+            }
+        }
+        server = self.api.post_server(server_req_body)
+        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        return server
+
+    def test_ephemeral_has_disk_allocation(self):
+        server = self._create_server()
+        allocs = self._get_allocations_by_server_uuid(server['id'])
+        resources = list(allocs.values())[0]['resources']
+        self.assertIn('MEMORY_MB', resources)
+        # 10gb root, 20gb ephemeral, 5gb swap
+        expected_usage = 35
+        self.assertEqual(expected_usage, resources['DISK_GB'])
+        # Ensure the compute node is reporting the correct disk usage
+        self.assertEqual(
+            expected_usage,
+            self.admin_api.get_hypervisor_stats()['local_gb_used'])
+
+    def test_volume_backed_no_disk_allocation(self):
+        server = self._create_volume_backed_server()
+        allocs = self._get_allocations_by_server_uuid(server['id'])
+        resources = list(allocs.values())[0]['resources']
+        self.assertIn('MEMORY_MB', resources)
+        # 0gb root, 20gb ephemeral, 5gb swap
+        expected_usage = 25
+        self.assertEqual(expected_usage, resources['DISK_GB'])
+        # Ensure the compute node is reporting the correct disk usage
+        self.assertEqual(
+            expected_usage,
+            self.admin_api.get_hypervisor_stats()['local_gb_used'])
+
+        # Now let's hack the RequestSpec.is_bfv field to mimic migrating an
+        # old instance created before RequestSpec.is_bfv was set in the API,
+        # move the instance and verify that the RequestSpec.is_bfv is set
+        # and the instance still reports the same DISK_GB allocations as during
+        # the initial create.
+        ctxt = context.get_admin_context()
+        reqspec = objects.RequestSpec.get_by_instance_uuid(ctxt, server['id'])
+        # Make sure it's set.
+        self.assertTrue(reqspec.is_bfv)
+        del reqspec.is_bfv
+        reqspec.save()
+        reqspec = objects.RequestSpec.get_by_instance_uuid(ctxt, server['id'])
+        # Make sure it's not set.
+        self.assertNotIn('is_bfv', reqspec)
+        # Now migrate the instance to another host and check the request spec
+        # and allocations after the migration.
+        self._start_compute('host2')
+        self.admin_api.post_server_action(server['id'], {'migrate': None})
+        # Wait for the server to complete the cold migration.
+        server = self._wait_for_state_change(
+            self.admin_api, server, 'VERIFY_RESIZE')
+        self.assertEqual('host2', server['OS-EXT-SRV-ATTR:host'])
+        # Confirm the cold migration and check usage and the request spec.
+        self.api.post_server_action(server['id'], {'confirmResize': None})
+        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        reqspec = objects.RequestSpec.get_by_instance_uuid(ctxt, server['id'])
+        # Make sure it's set.
+        self.assertTrue(reqspec.is_bfv)
+        allocs = self._get_allocations_by_server_uuid(server['id'])
+        resources = list(allocs.values())[0]['resources']
+        self.assertEqual(expected_usage, resources['DISK_GB'])
+
+        # Now shelve and unshelve the server to make sure root_gb DISK_GB
+        # isn't reported for allocations after we unshelve the server.
+        fake_notifier.stub_notifier(self)
+        self.addCleanup(fake_notifier.reset)
+        self.api.post_server_action(server['id'], {'shelve': None})
+        self._wait_for_state_change(self.api, server, 'SHELVED_OFFLOADED')
+        fake_notifier.wait_for_versioned_notifications('shelve_offload.end')
+        # The server should not have any allocations since it's not currently
+        # hosted on any compute service.
+        allocs = self._get_allocations_by_server_uuid(server['id'])
+        self.assertDictEqual({}, allocs)
+        # Now unshelve the server and make sure there are still no DISK_GB
+        # allocations for the root disk.
+        self.api.post_server_action(server['id'], {'unshelve': None})
+        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        allocs = self._get_allocations_by_server_uuid(server['id'])
+        resources = list(allocs.values())[0]['resources']
+        self.assertEqual(expected_usage, resources['DISK_GB'])
+
+
+class TraitsBasedSchedulingTest(integrated_helpers.ProviderUsageBaseTestCase):
     """Tests for requesting a server with required traits in Placement"""
 
     compute_driver = 'fake.SmallFakeDriver'
@@ -3374,42 +3925,409 @@ class TraitsBasedSchedulingTest(ProviderUsageBaseTestCase):
         self.admin_api.post_extra_spec(
             self.flavor_with_trait['id'],
             {'extra_specs': {'trait:HW_CPU_X86_VMX': 'required'}})
+        self.flavor_without_trait = flavors[1]
+        self.flavor_with_forbidden_trait = flavors[2]
+        self.admin_api.post_extra_spec(
+            self.flavor_with_forbidden_trait['id'],
+            {'extra_specs': {'trait:HW_CPU_X86_SGX': 'forbidden'}})
 
-    def _create_server(self):
-        # Create the server using the flavor with the required trait.
+        # Note that we're using v2.35 explicitly as the api returns 404
+        # starting with 2.36
+        with nova.utils.temporary_mutation(self.api, microversion='2.35'):
+            images = self.api.get_images()
+            self.image_id_with_trait = images[0]['id']
+            self.api.api_put('/images/%s/metadata' % self.image_id_with_trait,
+                             {'metadata': {
+                                 'trait:HW_CPU_X86_SGX': 'required'}})
+            self.image_id_without_trait = images[1]['id']
+
+    def _create_server_with_traits(self, flavor_id, image_id):
+        """Create a server with given flavor and image id's
+        :param flavor_id: the flavor id
+        :param image_id: the image id
+        :return: create server response
+        """
+
         server_req = self._build_minimal_create_server_request(
             self.api, 'trait-based-server',
-            image_uuid='76fa36fc-c930-4bf3-8c8a-ea2a2420deb6',
-            flavor_id=self.flavor_with_trait['id'], networks='none')
+            image_uuid=image_id,
+            flavor_id=flavor_id, networks='none')
         return self.api.post_server({'server': server_req})
 
-    def test_traits_based_scheduling(self):
-        """Tests that a server create request using a required trait ends
-        up on the single compute node resource provider that also has that
+    def _create_volume_backed_server_with_traits(self, flavor_id, volume_id):
+        """Create a server with block device mapping(volume) with the given
+        flavor and volume id's. Either the flavor or the image backing the
+        volume is expected to have the traits
+        :param flavor_id: the flavor id
+        :param volume_id: the volume id
+        :return: create server response
+        """
+
+        server_req_body = {
+            # There is no imageRef because this is boot from volume.
+            'server': {
+                'flavorRef': flavor_id,
+                'name': 'test_image_trait_on_volume_backed',
+                # We don't care about networking for this test. This
+                # requires microversion >= 2.37.
+                'networks': 'none',
+                'block_device_mapping_v2': [{
+                    'boot_index': 0,
+                    'uuid': volume_id,
+                    'source_type': 'volume',
+                    'destination_type': 'volume'
+                }]
+            }
+        }
+        server = self.api.post_server(server_req_body)
+        return server
+
+    def test_flavor_traits_based_scheduling(self):
+        """Tests that a server create request using a required trait on flavor
+        ends up on the single compute node resource provider that also has that
         trait in Placement.
         """
-        # Decorate the compute_with_trait resource provider with that same
-        # trait.
+
+        # Decorate compute1 resource provider with that same trait.
         rp_uuid = self._get_provider_uuid_by_host(self.compute1.host)
         self._set_provider_traits(rp_uuid, ['HW_CPU_X86_VMX'])
-        server = self._create_server()
+
+        # Create server using only flavor trait
+        server = self._create_server_with_traits(self.flavor_with_trait['id'],
+                                                 self.image_id_without_trait)
         server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
         # Assert the server ended up on the expected compute host that has
         # the required trait.
         self.assertEqual(self.compute1.host, server['OS-EXT-SRV-ATTR:host'])
 
-    def test_traits_based_scheduling_no_valid_host(self):
-        """Tests that a server create request using a required trait
-        fails to find a valid host since no compute node resource providers
-        have the trait.
+    def test_image_traits_based_scheduling(self):
+        """Tests that a server create request using a required trait on image
+        ends up on the single compute node resource provider that also has that
+        trait in Placement.
         """
-        server = self._create_server()
+
+        # Decorate compute2 resource provider with image trait.
+        rp_uuid = self._get_provider_uuid_by_host(self.compute2.host)
+        self._set_provider_traits(rp_uuid, ['HW_CPU_X86_SGX'])
+
+        # Create server using only image trait
+        server = self._create_server_with_traits(
+            self.flavor_without_trait['id'], self.image_id_with_trait)
+        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        # Assert the server ended up on the expected compute host that has
+        # the required trait.
+        self.assertEqual(self.compute2.host, server['OS-EXT-SRV-ATTR:host'])
+
+    def test_flavor_image_traits_based_scheduling(self):
+        """Tests that a server create request using a required trait on flavor
+        AND a required trait on the image ends up on the single compute node
+        resource provider that also has that trait in Placement.
+        """
+
+        # Decorate compute2 resource provider with both flavor and image trait.
+        rp_uuid = self._get_provider_uuid_by_host(self.compute2.host)
+        self._set_provider_traits(rp_uuid, ['HW_CPU_X86_VMX',
+                                            'HW_CPU_X86_SGX'])
+
+        # Create server using flavor and image trait
+        server = self._create_server_with_traits(
+            self.flavor_with_trait['id'], self.image_id_with_trait)
+        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        # Assert the server ended up on the expected compute host that has
+        # the required trait.
+        self.assertEqual(self.compute2.host, server['OS-EXT-SRV-ATTR:host'])
+
+    def test_image_trait_on_volume_backed_instance(self):
+        """Tests that when trying to launch a volume-backed instance with a
+        required trait on the image metadata contained within the volume,
+        the instance ends up on the single compute node resource provider
+        that also has that trait in Placement.
+        """
+        # Decorate compute2 resource provider with volume image metadata trait.
+        rp_uuid = self._get_provider_uuid_by_host(self.compute2.host)
+        self._set_provider_traits(rp_uuid, ['HW_CPU_X86_SGX'])
+
+        self.useFixture(nova_fixtures.CinderFixtureNewAttachFlow(self))
+        # Create our server with a volume containing the image meta data with a
+        # required trait
+        server = self._create_volume_backed_server_with_traits(
+            self.flavor_without_trait['id'],
+            nova_fixtures.CinderFixtureNewAttachFlow.
+            IMAGE_WITH_TRAITS_BACKED_VOL)
+
+        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        # Assert the server ended up on the expected compute host that has
+        # the required trait.
+        self.assertEqual(self.compute2.host, server['OS-EXT-SRV-ATTR:host'])
+
+    def test_flavor_image_trait_on_volume_backed_instance(self):
+        """Tests that when trying to launch a volume-backed instance with a
+        required trait on flavor AND a required trait on the image metadata
+        contained within the volume, the instance ends up on the single
+        compute node resource provider that also has those traits in Placement.
+        """
+        # Decorate compute2 resource provider with volume image metadata trait.
+        rp_uuid = self._get_provider_uuid_by_host(self.compute2.host)
+        self._set_provider_traits(rp_uuid, ['HW_CPU_X86_VMX',
+                                            'HW_CPU_X86_SGX'])
+
+        self.useFixture(nova_fixtures.CinderFixtureNewAttachFlow(self))
+        # Create our server with a flavor trait and a volume containing the
+        # image meta data with a required trait
+        server = self._create_volume_backed_server_with_traits(
+            self.flavor_with_trait['id'],
+            nova_fixtures.CinderFixtureNewAttachFlow.
+            IMAGE_WITH_TRAITS_BACKED_VOL)
+
+        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        # Assert the server ended up on the expected compute host that has
+        # the required trait.
+        self.assertEqual(self.compute2.host, server['OS-EXT-SRV-ATTR:host'])
+
+    def test_flavor_traits_based_scheduling_no_valid_host(self):
+        """Tests that a server create request using a required trait expressed
+         in flavor fails to find a valid host since no compute node resource
+         providers have the trait.
+        """
+
+        # Decorate compute1 resource provider with the image trait.
+        rp_uuid = self._get_provider_uuid_by_host(self.compute1.host)
+        self._set_provider_traits(rp_uuid, ['HW_CPU_X86_SGX'])
+
+        server = self._create_server_with_traits(self.flavor_with_trait['id'],
+                                                 self.image_id_without_trait)
         # The server should go to ERROR state because there is no valid host.
         server = self._wait_for_state_change(self.admin_api, server, 'ERROR')
         self.assertIsNone(server['OS-EXT-SRV-ATTR:host'])
         # Make sure the failure was due to NoValidHost by checking the fault.
         self.assertIn('fault', server)
         self.assertIn('No valid host', server['fault']['message'])
+
+    def test_image_traits_based_scheduling_no_valid_host(self):
+        """Tests that a server create request using a required trait expressed
+         in image fails to find a valid host since no compute node resource
+         providers have the trait.
+        """
+
+        # Decorate compute1 resource provider with that flavor trait.
+        rp_uuid = self._get_provider_uuid_by_host(self.compute1.host)
+        self._set_provider_traits(rp_uuid, ['HW_CPU_X86_VMX'])
+
+        server = self._create_server_with_traits(
+            self.flavor_without_trait['id'], self.image_id_with_trait)
+        # The server should go to ERROR state because there is no valid host.
+        server = self._wait_for_state_change(self.admin_api, server, 'ERROR')
+        self.assertIsNone(server['OS-EXT-SRV-ATTR:host'])
+        # Make sure the failure was due to NoValidHost by checking the fault.
+        self.assertIn('fault', server)
+        self.assertIn('No valid host', server['fault']['message'])
+
+    def test_flavor_image_traits_based_scheduling_no_valid_host(self):
+        """Tests that a server create request using a required trait expressed
+         in flavor AND a required trait expressed in the image fails to find a
+         valid host since no compute node resource providers have the trait.
+        """
+
+        server = self._create_server_with_traits(
+            self.flavor_with_trait['id'], self.image_id_with_trait)
+        # The server should go to ERROR state because there is no valid host.
+        server = self._wait_for_state_change(self.admin_api, server, 'ERROR')
+        self.assertIsNone(server['OS-EXT-SRV-ATTR:host'])
+        # Make sure the failure was due to NoValidHost by checking the fault.
+        self.assertIn('fault', server)
+        self.assertIn('No valid host', server['fault']['message'])
+
+    def test_image_trait_on_volume_backed_instance_no_valid_host(self):
+        """Tests that when trying to launch a volume-backed instance with a
+        required trait on the image metadata contained within the volume
+        fails to find a valid host since no compute node resource providers
+        have the trait.
+        """
+        self.useFixture(nova_fixtures.CinderFixtureNewAttachFlow(self))
+        # Create our server with a volume
+        server = self._create_volume_backed_server_with_traits(
+            self.flavor_without_trait['id'],
+            nova_fixtures.CinderFixtureNewAttachFlow.
+            IMAGE_WITH_TRAITS_BACKED_VOL)
+
+        # The server should go to ERROR state because there is no valid host.
+        server = self._wait_for_state_change(self.admin_api, server, 'ERROR')
+        self.assertIsNone(server['OS-EXT-SRV-ATTR:host'])
+        # Make sure the failure was due to NoValidHost by checking the fault.
+        self.assertIn('fault', server)
+        self.assertIn('No valid host', server['fault']['message'])
+
+    def test_rebuild_instance_with_image_traits(self):
+        """Rebuilds a server with a different image which has traits
+        associated with it and which will run it through the scheduler to
+        validate the image is still OK with the compute host that the
+        instance is running on.
+         """
+        # Decorate compute2 resource provider with both flavor and image trait.
+        rp_uuid = self._get_provider_uuid_by_host(self.compute2.host)
+        self._set_provider_traits(rp_uuid, ['HW_CPU_X86_VMX',
+                                            'HW_CPU_X86_SGX'])
+        # make sure we start with no usage on the compute node
+        rp_usages = self._get_provider_usages(rp_uuid)
+        self.assertEqual({'VCPU': 0, 'MEMORY_MB': 0, 'DISK_GB': 0}, rp_usages)
+
+        # create a server without traits on image and with traits on flavour
+        server = self._create_server_with_traits(
+            self.flavor_with_trait['id'], self.image_id_without_trait)
+        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+
+        # make the compute node full and ensure rebuild still succeed
+        inv = {"resource_class": "VCPU",
+               "total": 1}
+        self._set_inventory(rp_uuid, inv)
+
+        # Now rebuild the server with a different image with traits
+        rebuild_req_body = {
+            'rebuild': {
+                'imageRef': self.image_id_with_trait
+            }
+        }
+        self.api.api_post('/servers/%s/action' % server['id'],
+                          rebuild_req_body)
+        self._wait_for_server_parameter(
+            self.api, server, {'OS-EXT-STS:task_state': None})
+
+        allocs = self._get_allocations_by_server_uuid(server['id'])
+        self.assertIn(rp_uuid, allocs)
+
+        # Assert the server ended up on the expected compute host that has
+        # the required trait.
+        self.assertEqual(self.compute2.host, server['OS-EXT-SRV-ATTR:host'])
+
+    def test_rebuild_instance_with_image_traits_no_host(self):
+        """Rebuilding a server with a different image which has required
+        traits on the image fails to valid the host that this server is
+        currently running, cause the compute host resource provider is not
+        associated with similar trait.
+        """
+        # Decorate compute2 resource provider with traits on flavor
+        rp_uuid = self._get_provider_uuid_by_host(self.compute2.host)
+        self._set_provider_traits(rp_uuid, ['HW_CPU_X86_VMX'])
+
+        # make sure we start with no usage on the compute node
+        rp_usages = self._get_provider_usages(rp_uuid)
+        self.assertEqual({'VCPU': 0, 'MEMORY_MB': 0, 'DISK_GB': 0}, rp_usages)
+
+        # create a server without traits on image and with traits on flavour
+        server = self._create_server_with_traits(
+            self.flavor_with_trait['id'], self.image_id_without_trait)
+        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+
+        # Now rebuild the server with a different image with traits
+        rebuild_req_body = {
+            'rebuild': {
+                'imageRef': self.image_id_with_trait
+            }
+        }
+
+        self.api.api_post('/servers/%s/action' % server['id'],
+                          rebuild_req_body)
+        # Look for the failed rebuild action.
+        self._wait_for_action_fail_completion(
+            server, instance_actions.REBUILD, 'rebuild_server', self.admin_api)
+        # Assert the server image_ref was rolled back on failure.
+        server = self.api.get_server(server['id'])
+        self.assertEqual(self.image_id_without_trait, server['image']['id'])
+
+        # The server should be in ERROR state
+        self.assertEqual('ERROR', server['status'])
+        self.assertEqual("No valid host was found. Image traits cannot be "
+                         "satisfied by the current resource providers. "
+                         "Either specify a different image during rebuild "
+                         "or create a new server with the specified image.",
+                         server['fault']['message'])
+
+    def test_rebuild_instance_with_image_traits_no_image_change(self):
+        """Rebuilds a server with a same image which has traits
+        associated with it and which will run it through the scheduler to
+        validate the image is still OK with the compute host that the
+        instance is running on.
+         """
+        # Decorate compute2 resource provider with both flavor and image trait.
+        rp_uuid = self._get_provider_uuid_by_host(self.compute2.host)
+        self._set_provider_traits(rp_uuid, ['HW_CPU_X86_VMX',
+                                            'HW_CPU_X86_SGX'])
+        # make sure we start with no usage on the compute node
+        rp_usages = self._get_provider_usages(rp_uuid)
+        self.assertEqual({'VCPU': 0, 'MEMORY_MB': 0, 'DISK_GB': 0},
+                         rp_usages)
+
+        # create a server with traits in both image and flavour
+        server = self._create_server_with_traits(
+            self.flavor_with_trait['id'], self.image_id_with_trait)
+        server = self._wait_for_state_change(self.admin_api, server,
+                                             'ACTIVE')
+
+        # Now rebuild the server with a different image with traits
+        rebuild_req_body = {
+            'rebuild': {
+                'imageRef': self.image_id_with_trait
+            }
+        }
+        self.api.api_post('/servers/%s/action' % server['id'],
+                          rebuild_req_body)
+        self._wait_for_server_parameter(
+            self.api, server, {'OS-EXT-STS:task_state': None})
+
+        allocs = self._get_allocations_by_server_uuid(server['id'])
+        self.assertIn(rp_uuid, allocs)
+
+        # Assert the server ended up on the expected compute host that has
+        # the required trait.
+        self.assertEqual(self.compute2.host,
+                         server['OS-EXT-SRV-ATTR:host'])
+
+    def test_rebuild_instance_with_image_traits_and_forbidden_flavor_traits(
+                                                                        self):
+        """Rebuilding a server with a different image which has required
+        traits on the image fails to validate image traits because flavor
+        associated with the current instance has the similar trait that is
+        forbidden
+        """
+        # Decorate compute2 resource provider with traits on flavor
+        rp_uuid = self._get_provider_uuid_by_host(self.compute2.host)
+        self._set_provider_traits(rp_uuid, ['HW_CPU_X86_VMX'])
+
+        # make sure we start with no usage on the compute node
+        rp_usages = self._get_provider_usages(rp_uuid)
+        self.assertEqual({'VCPU': 0, 'MEMORY_MB': 0, 'DISK_GB': 0}, rp_usages)
+
+        # create a server with forbidden traits on flavor and no triats on
+        # image
+        server = self._create_server_with_traits(
+            self.flavor_with_forbidden_trait['id'],
+            self.image_id_without_trait)
+        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+
+        # Now rebuild the server with a different image with traits
+        rebuild_req_body = {
+            'rebuild': {
+                'imageRef': self.image_id_with_trait
+            }
+        }
+
+        self.api.api_post('/servers/%s/action' % server['id'],
+                          rebuild_req_body)
+        # Look for the failed rebuild action.
+        self._wait_for_action_fail_completion(
+            server, instance_actions.REBUILD, 'rebuild_server', self.admin_api)
+        # Assert the server image_ref was rolled back on failure.
+        server = self.api.get_server(server['id'])
+        self.assertEqual(self.image_id_without_trait, server['image']['id'])
+
+        # The server should be in ERROR state
+        self.assertEqual('ERROR', server['status'])
+        self.assertEqual("No valid host was found. Image traits are part of "
+                         "forbidden traits in flavor associated with the "
+                         "server. Either specify a different image during "
+                         "rebuild or create a new server with the specified "
+                         "image and a compatible flavor.",
+                         server['fault']['message'])
 
 
 class ServerTestV256Common(ServersTestBase):
@@ -3424,10 +4342,12 @@ class ServerTestV256Common(ServersTestBase):
             self.addCleanup(fake.restore_nodes)
             self.start_service('compute', host=host)
 
-    def _create_server(self):
+    def _create_server(self, target_host=None):
         server = self._build_minimal_create_server_request(
             image_uuid='a2459075-d96c-40d5-893e-577ff92e721c')
         server.update({'networks': 'auto'})
+        if target_host is not None:
+            server['availability_zone'] = 'nova:%s' % target_host
         post = {'server': server}
         response = self.api.api_post('/servers', post).body
         return response['server']
@@ -3438,6 +4358,43 @@ class ServerTestV256Common(ServersTestBase):
                               'host2': ['host3', 'host1'],
                               'host3': ['host1', 'host2']}
         return target_other_hosts[host]
+
+
+class ServerTestV256MultiCellTestCase(ServerTestV256Common):
+    """Negative test to ensure we fail with ComputeHostNotFound if we try to
+    target a host in another cell from where the instance lives.
+    """
+    NUMBER_OF_CELLS = 2
+
+    def _setup_compute_service(self):
+        # Set up 2 compute services in different cells
+        host_to_cell_mappings = {
+            'host1': 'cell1',
+            'host2': 'cell2'}
+        for host in sorted(host_to_cell_mappings):
+            fake.set_nodes([host])
+            self.addCleanup(fake.restore_nodes)
+            self.start_service('compute', host=host,
+                               cell=host_to_cell_mappings[host])
+
+    def test_migrate_server_to_host_in_different_cell(self):
+        # We target host1 specifically so that we have a predictable target for
+        # the cold migration in cell2.
+        server = self._create_server(target_host='host1')
+        server = self._wait_for_state_change(server, 'BUILD')
+
+        self.assertEqual('host1', server['OS-EXT-SRV-ATTR:host'])
+        ex = self.assertRaises(client.OpenStackApiException,
+                               self.api.post_server_action,
+                               server['id'],
+                               {'migrate': {'host': 'host2'}})
+        # When the API pulls the instance out of cell1, the context is targeted
+        # to cell1, so when the compute API resize() method attempts to lookup
+        # the target host in cell1, it will result in a ComputeHostNotFound
+        # error.
+        self.assertEqual(400, ex.response.status_code)
+        self.assertIn('Compute host host2 could not be found',
+                      six.text_type(ex))
 
 
 class ServerTestV256SingleCellMultiHostTestCase(ServerTestV256Common):
@@ -3476,3 +4433,385 @@ class ServerTestV256RescheduleTestCase(ServerTestV256Common):
         found_server = self.api.get_server(server['id'])
         # Check that rescheduling is not occurred.
         self.assertNotEqual(other_host, found_server['OS-EXT-SRV-ATTR:host'])
+
+
+class ConsumerGenerationConflictTest(
+        integrated_helpers.ProviderUsageBaseTestCase):
+
+    # we need the medium driver to be able to allocate resource not just for
+    # a single instance
+    compute_driver = 'fake.MediumFakeDriver'
+
+    def setUp(self):
+        super(ConsumerGenerationConflictTest, self).setUp()
+        flavors = self.api.get_flavors()
+        self.flavor = flavors[0]
+        self.other_flavor = flavors[1]
+        self.compute1 = self._start_compute('compute1')
+        self.compute2 = self._start_compute('compute2')
+
+    def test_migrate_move_allocation_fails_due_to_conflict(self):
+        source_hostname = self.compute1.host
+        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
+
+        server = self._boot_and_check_allocations(self.flavor, source_hostname)
+
+        rsp = fake_requests.FakeResponse(
+            409,
+            jsonutils.dumps(
+                {'errors': [
+                    {'code': 'placement.concurrent_update',
+                     'detail': 'consumer generation conflict'}]}))
+
+        with mock.patch('keystoneauth1.adapter.Adapter.post',
+                        autospec=True) as mock_post:
+            mock_post.return_value = rsp
+
+            request = {'migrate': None}
+            exception = self.assertRaises(client.OpenStackApiException,
+                                          self.api.post_server_action,
+                                          server['id'], request)
+
+        self.assertEqual(1, mock_post.call_count)
+
+        self.assertEqual(409, exception.response.status_code)
+        self.assertIn('Failed to move allocations', exception.response.text)
+
+        migrations = self.api.get_migrations()
+        self.assertEqual(1, len(migrations))
+        self.assertEqual('migration', migrations[0]['migration_type'])
+        self.assertEqual(server['id'], migrations[0]['instance_uuid'])
+        self.assertEqual(source_hostname, migrations[0]['source_compute'])
+        self.assertEqual('error', migrations[0]['status'])
+
+        # The migration is aborted so the instance is ACTIVE on the source
+        # host instead of being in VERIFY_RESIZE state.
+        server = self.api.get_server(server['id'])
+        self.assertEqual('ACTIVE', server['status'])
+        self.assertEqual(source_hostname, server['OS-EXT-SRV-ATTR:host'])
+
+        source_usages = self._get_provider_usages(source_rp_uuid)
+        self.assertFlavorMatchesAllocation(self.flavor, source_usages)
+
+        allocations = self._get_allocations_by_server_uuid(server['id'])
+        self.assertEqual(1, len(allocations))
+        alloc = allocations[source_rp_uuid]['resources']
+        self.assertFlavorMatchesAllocation(self.flavor, alloc)
+
+        self._delete_and_check_allocations(server)
+
+    def test_confirm_migrate_delete_alloc_on_source_fails(self):
+        source_hostname = self.compute1.host
+        dest_hostname = self.compute2.host
+        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
+        dest_rp_uuid = self._get_provider_uuid_by_host(dest_hostname)
+
+        server = self._boot_and_check_allocations(self.flavor, source_hostname)
+        self._migrate_and_check_allocations(
+            server, self.flavor, source_rp_uuid, dest_rp_uuid)
+
+        rsp = fake_requests.FakeResponse(
+            409,
+            jsonutils.dumps(
+                {'errors': [
+                    {'code': 'placement.concurrent_update',
+                     'detail': 'consumer generation conflict'}]}))
+
+        with mock.patch('keystoneauth1.adapter.Adapter.put',
+                        autospec=True) as mock_put:
+            mock_put.return_value = rsp
+
+            post = {'confirmResize': None}
+            self.api.post_server_action(
+                server['id'], post, check_response_status=[204])
+            server = self._wait_for_state_change(self.api, server, 'ERROR')
+            self.assertIn('Failed to delete allocations',
+                          server['fault']['message'])
+
+        self.assertEqual(1, mock_put.call_count)
+
+        migrations = self.api.get_migrations()
+        self.assertEqual(1, len(migrations))
+        self.assertEqual('migration', migrations[0]['migration_type'])
+        self.assertEqual(server['id'], migrations[0]['instance_uuid'])
+        self.assertEqual(source_hostname, migrations[0]['source_compute'])
+        # NOTE(gibi): it might be better to mark the migration as error
+        self.assertEqual('confirmed', migrations[0]['status'])
+
+        # NOTE(gibi): Nova leaks the allocation held by the migration_uuid even
+        # after the instance is deleted. At least nova logs a fat ERROR.
+        self.assertIn('Deleting allocation in placement for migration %s '
+                      'failed. The instance %s will be put to ERROR state but '
+                      'the allocation held by the migration is leaked.' %
+                      (migrations[0]['uuid'], server['id']),
+                      self.stdlog.logger.output)
+        self.api.delete_server(server['id'])
+        self._wait_until_deleted(server)
+        fake_notifier.wait_for_versioned_notifications('instance.delete.end')
+
+        allocations = self._get_allocations_by_server_uuid(
+            migrations[0]['uuid'])
+        self.assertEqual(1, len(allocations))
+
+    def test_revert_migrate_delete_dest_allocation_fails_due_to_conflict(self):
+        source_hostname = self.compute1.host
+        dest_hostname = self.compute2.host
+        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
+        dest_rp_uuid = self._get_provider_uuid_by_host(dest_hostname)
+
+        server = self._boot_and_check_allocations(self.flavor, source_hostname)
+        self._migrate_and_check_allocations(
+            server, self.flavor, source_rp_uuid, dest_rp_uuid)
+
+        rsp = fake_requests.FakeResponse(
+            409,
+            jsonutils.dumps(
+                {'errors': [
+                    {'code': 'placement.concurrent_update',
+                     'detail': 'consumer generation conflict'}]}))
+
+        with mock.patch('keystoneauth1.adapter.Adapter.post',
+                        autospec=True) as mock_post:
+            mock_post.return_value = rsp
+
+            post = {'revertResize': None}
+            self.api.post_server_action(server['id'], post)
+            server = self._wait_for_state_change(self.api, server, 'ERROR')
+
+        self.assertEqual(1, mock_post.call_count)
+
+        migrations = self.api.get_migrations()
+        self.assertEqual(1, len(migrations))
+        self.assertEqual('migration', migrations[0]['migration_type'])
+        self.assertEqual(server['id'], migrations[0]['instance_uuid'])
+        self.assertEqual(source_hostname, migrations[0]['source_compute'])
+        self.assertEqual('error', migrations[0]['status'])
+
+        # NOTE(gibi): Nova leaks the allocation held by the migration_uuid even
+        # after the instance is deleted. At least nova logs a fat ERROR.
+        self.assertIn('Reverting allocation in placement for migration %s '
+                      'failed. The instance %s will be put into ERROR state '
+                      'but the allocation held by the migration is leaked.' %
+                      (migrations[0]['uuid'], server['id']),
+                      self.stdlog.logger.output)
+        self.api.delete_server(server['id'])
+        self._wait_until_deleted(server)
+        fake_notifier.wait_for_versioned_notifications('instance.delete.end')
+
+        allocations = self._get_allocations_by_server_uuid(
+            migrations[0]['uuid'])
+        self.assertEqual(1, len(allocations))
+
+    def test_revert_resize_same_host_delete_dest_fails_due_to_conflict(self):
+        # make sure that the test only uses a single host
+        compute2_service_id = self.admin_api.get_services(
+            host=self.compute2.host, binary='nova-compute')[0]['id']
+        self.admin_api.put_service(compute2_service_id, {'status': 'disabled'})
+
+        hostname = self.compute1.manager.host
+        rp_uuid = self._get_provider_uuid_by_host(hostname)
+
+        server = self._boot_and_check_allocations(self.flavor, hostname)
+
+        self._resize_to_same_host_and_check_allocations(
+            server, self.flavor, self.other_flavor, rp_uuid)
+
+        rsp = fake_requests.FakeResponse(
+            409,
+            jsonutils.dumps(
+                {'errors': [
+                    {'code': 'placement.concurrent_update',
+                     'detail': 'consumer generation conflict'}]}))
+        with mock.patch('keystoneauth1.adapter.Adapter.post',
+                        autospec=True) as mock_post:
+            mock_post.return_value = rsp
+
+            post = {'revertResize': None}
+            self.api.post_server_action(server['id'], post)
+            server = self._wait_for_state_change(self.api, server, 'ERROR',)
+
+        self.assertEqual(1, mock_post.call_count)
+
+        migrations = self.api.get_migrations()
+        self.assertEqual(1, len(migrations))
+        self.assertEqual('resize', migrations[0]['migration_type'])
+        self.assertEqual(server['id'], migrations[0]['instance_uuid'])
+        self.assertEqual(hostname, migrations[0]['source_compute'])
+        self.assertEqual('error', migrations[0]['status'])
+
+        # NOTE(gibi): Nova leaks the allocation held by the migration_uuid even
+        # after the instance is deleted. At least nova logs a fat ERROR.
+        self.assertIn('Reverting allocation in placement for migration %s '
+                      'failed. The instance %s will be put into ERROR state '
+                      'but the allocation held by the migration is leaked.' %
+                      (migrations[0]['uuid'], server['id']),
+                      self.stdlog.logger.output)
+        self.api.delete_server(server['id'])
+        self._wait_until_deleted(server)
+        fake_notifier.wait_for_versioned_notifications('instance.delete.end')
+
+        allocations = self._get_allocations_by_server_uuid(
+            migrations[0]['uuid'])
+        self.assertEqual(1, len(allocations))
+
+    def test_live_migrate_drop_allocation_on_source_fails(self):
+        source_hostname = self.compute1.host
+        dest_hostname = self.compute2.host
+        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
+        dest_rp_uuid = self._get_provider_uuid_by_host(dest_hostname)
+
+        server = self._boot_and_check_allocations(
+            self.flavor, source_hostname)
+
+        fake_notifier.stub_notifier(self)
+        self.addCleanup(fake_notifier.reset)
+
+        orig_put = adapter.Adapter.put
+
+        rsp = fake_requests.FakeResponse(
+            409,
+            jsonutils.dumps(
+                {'errors': [
+                    {'code': 'placement.concurrent_update',
+                     'detail': 'consumer generation conflict'}]}))
+
+        def fake_put(_self, url, *args, **kwargs):
+            migration_uuid = self.get_migration_uuid_for_instance(server['id'])
+            if url == '/allocations/%s' % migration_uuid:
+                return rsp
+            else:
+                return orig_put(_self, url, *args, **kwargs)
+
+        with mock.patch('keystoneauth1.adapter.Adapter.put',
+                        autospec=True) as mock_put:
+            mock_put.side_effect = fake_put
+
+            post = {
+                'os-migrateLive': {
+                    'host': dest_hostname,
+                    'block_migration': True,
+                    'force': True,
+                }
+            }
+
+            self.api.post_server_action(server['id'], post)
+
+            # nova does the source host cleanup _after_ setting the migration
+            # to completed and sending end notifications so we have to wait
+            # here a bit.
+            time.sleep(1)
+
+            # Nova failed to clean up on the source host. This right now puts
+            # the instance to ERROR state and fails the migration.
+            server = self._wait_for_server_parameter(self.api, server,
+                {'OS-EXT-SRV-ATTR:host': dest_hostname,
+                 'status': 'ERROR'})
+            self._wait_for_migration_status(server, ['error'])
+            fake_notifier.wait_for_versioned_notifications(
+                'instance.live_migration_post.end')
+
+        # 1 claim on destination, 1 normal delete on dest that fails,
+        self.assertEqual(2, mock_put.call_count)
+
+        source_usages = self._get_provider_usages(source_rp_uuid)
+        # As the cleanup on the source host failed Nova leaks the allocation
+        # held by the migration.
+        self.assertFlavorMatchesAllocation(self.flavor, source_usages)
+        migration_uuid = self.get_migration_uuid_for_instance(server['id'])
+        allocations = self._get_allocations_by_server_uuid(migration_uuid)
+        self.assertEqual(1, len(allocations))
+        self.assertIn(source_rp_uuid, allocations)
+        source_allocation = allocations[source_rp_uuid]['resources']
+        self.assertFlavorMatchesAllocation(self.flavor, source_allocation)
+
+        dest_usages = self._get_provider_usages(dest_rp_uuid)
+        self.assertFlavorMatchesAllocation(self.flavor, dest_usages)
+
+        allocations = self._get_allocations_by_server_uuid(server['id'])
+        self.assertEqual(1, len(allocations))
+        self.assertNotIn(source_rp_uuid, allocations)
+        dest_allocation = allocations[dest_rp_uuid]['resources']
+        self.assertFlavorMatchesAllocation(self.flavor, dest_allocation)
+
+        # NOTE(gibi): Nova leaks the allocation held by the migration_uuid even
+        # after the instance is deleted. At least nova logs a fat ERROR.
+        self.assertIn('Deleting allocation in placement for migration %s '
+                      'failed. The instance %s will be put to ERROR state but '
+                      'the allocation held by the migration is leaked.' %
+                      (migration_uuid, server['id']),
+                      self.stdlog.logger.output)
+
+        self.api.delete_server(server['id'])
+        self._wait_until_deleted(server)
+        fake_notifier.wait_for_versioned_notifications('instance.delete.end')
+
+        allocations = self._get_allocations_by_server_uuid(migration_uuid)
+        self.assertEqual(1, len(allocations))
+
+    def test_server_delete_fails_due_to_conflict(self):
+        source_hostname = self.compute1.host
+
+        server = self._boot_and_check_allocations(self.flavor, source_hostname)
+
+        rsp = fake_requests.FakeResponse(
+            409, jsonutils.dumps({'text': 'consumer generation conflict'}))
+
+        with mock.patch('keystoneauth1.adapter.Adapter.put',
+                        autospec=True) as mock_put:
+            mock_put.return_value = rsp
+
+            self.api.delete_server(server['id'])
+            server = self._wait_for_state_change(self.admin_api, server,
+                                                 'ERROR')
+            self.assertEqual(1, mock_put.call_count)
+
+        # We still have the allocations as deletion failed
+        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
+        source_usages = self._get_provider_usages(source_rp_uuid)
+        self.assertFlavorMatchesAllocation(self.flavor, source_usages)
+
+        allocations = self._get_allocations_by_server_uuid(server['id'])
+        self.assertEqual(1, len(allocations))
+        source_allocation = allocations[source_rp_uuid]['resources']
+        self.assertFlavorMatchesAllocation(self.flavor, source_allocation)
+
+        # retry the delete to make sure that allocations are removed this time
+        self._delete_and_check_allocations(server)
+
+    def test_server_local_delete_fails_due_to_conflict(self):
+        source_hostname = self.compute1.host
+
+        server = self._boot_and_check_allocations(self.flavor, source_hostname)
+        source_compute_id = self.admin_api.get_services(
+            host=self.compute1.host, binary='nova-compute')[0]['id']
+        self.compute1.stop()
+        self.admin_api.put_service(
+            source_compute_id, {'forced_down': 'true'})
+
+        rsp = fake_requests.FakeResponse(
+            409, jsonutils.dumps({'text': 'consumer generation conflict'}))
+
+        with mock.patch('keystoneauth1.adapter.Adapter.put',
+                        autospec=True) as mock_put:
+            mock_put.return_value = rsp
+
+            ex = self.assertRaises(client.OpenStackApiException,
+                                   self.api.delete_server, server['id'])
+            self.assertEqual(409, ex.response.status_code)
+            self.assertIn('Failed to delete allocations for consumer',
+                          jsonutils.loads(ex.response.content)[
+                              'conflictingRequest']['message'])
+            self.assertEqual(1, mock_put.call_count)
+
+        # We still have the allocations as deletion failed
+        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
+        source_usages = self._get_provider_usages(source_rp_uuid)
+        self.assertFlavorMatchesAllocation(self.flavor, source_usages)
+
+        allocations = self._get_allocations_by_server_uuid(server['id'])
+        self.assertEqual(1, len(allocations))
+        source_allocation = allocations[source_rp_uuid]['resources']
+        self.assertFlavorMatchesAllocation(self.flavor, source_allocation)
+
+        # retry the delete to make sure that allocations are removed this time
+        self._delete_and_check_allocations(server)

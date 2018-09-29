@@ -18,24 +18,21 @@ Tests For CellsScheduler
 import copy
 
 import mock
+from oslo_utils.fixture import uuidsentinel
 from oslo_utils import uuidutils
 
 from nova import block_device
 from nova.cells import filters
 from nova.cells import weights
 from nova.compute import vm_states
-import nova.conf
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import objects
 from nova import test
 from nova.tests.unit.cells import fakes
 from nova.tests.unit import fake_block_device
-from nova.tests import uuidsentinel
 from nova import utils
-
-CONF = nova.conf.CONF
 
 
 class FakeFilterClass1(filters.BaseCellFilter):
@@ -99,7 +96,6 @@ class CellsSchedulerTestCase(test.TestCase):
                           'security_groups': 'removed',
                           'info_cache': 'removed',
                           'name': 'instance-00000001',
-                          'hostname': 'meow',
                           'display_name': 'moo',
                           'image_ref': uuidsentinel.fake_image_ref,
                           'user_id': self.ctxt.user_id,
@@ -140,7 +136,7 @@ class CellsSchedulerTestCase(test.TestCase):
             self.assertEqual('cow', meta['moo'])
             sys_meta = utils.instance_sys_meta(instance)
             self.assertEqual('cat', sys_meta['meow'])
-            self.assertEqual('meow', instance['hostname'])
+            self.assertEqual('moo-%d' % (count + 1), instance['hostname'])
             self.assertEqual('moo-%d' % (count + 1),
                              instance['display_name'])
             self.assertEqual(uuidsentinel.fake_image_ref,

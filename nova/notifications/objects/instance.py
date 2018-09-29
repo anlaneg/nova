@@ -65,7 +65,10 @@ class InstancePayload(base.NotificationPayloadBase):
     # Version 1.3: Add key_name field
     # Version 1.4: Add BDM related data
     # Version 1.5: Add updated_at field
-    VERSION = '1.5'
+    # Version 1.6: Add request_id field
+    # Version 1.7: Added action_initiator_user and action_initiator_project to
+    #              InstancePayload
+    VERSION = '1.7'
     fields = {
         'uuid': fields.UUIDField(),
         'user_id': fields.StringField(nullable=True),
@@ -105,10 +108,14 @@ class InstancePayload(base.NotificationPayloadBase):
 
         'metadata': fields.DictOfStringsField(),
         'locked': fields.BooleanField(),
-        'auto_disk_config': fields.DiskConfigField()
+        'auto_disk_config': fields.DiskConfigField(),
+
+        'request_id': fields.StringField(nullable=True),
+        'action_initiator_user': fields.StringField(nullable=True),
+        'action_initiator_project': fields.StringField(nullable=True),
     }
 
-    def __init__(self, instance, bdms=None):
+    def __init__(self, context, instance, bdms=None):
         super(InstancePayload, self).__init__()
         network_info = instance.get_network_info()
         self.ip_addresses = IpPayload.from_network_info(network_info)
@@ -117,7 +124,14 @@ class InstancePayload(base.NotificationPayloadBase):
             self.block_devices = BlockDevicePayload.from_bdms(bdms)
         else:
             self.block_devices = BlockDevicePayload.from_instance(instance)
-
+        # NOTE(Kevin_Zheng): Don't include request_id for periodic tasks,
+        # RequestContext for periodic tasks does not include project_id
+        # and user_id. Consider modify this once periodic tasks got a
+        # consistent request_id.
+        self.request_id = context.request_id if (context.project_id and
+                                                 context.user_id) else None
+        self.action_initiator_user = context.user_id
+        self.action_initiator_project = context.project_id
         self.populate_schema(instance=instance)
 
 
@@ -130,13 +144,18 @@ class InstanceActionPayload(InstancePayload):
     # Version 1.3: Added key_name field to InstancePayload
     # Version 1.4: Add BDM related data
     # Version 1.5: Added updated_at field to InstancePayload
-    VERSION = '1.5'
+    # Version 1.6: Added request_id field to InstancePayload
+    # Version 1.7: Added action_initiator_user and action_initiator_project to
+    #              InstancePayload
+    VERSION = '1.7'
     fields = {
         'fault': fields.ObjectField('ExceptionPayload', nullable=True),
+        'request_id': fields.StringField(nullable=True),
     }
 
-    def __init__(self, instance, fault, bdms=None):
-        super(InstanceActionPayload, self).__init__(instance=instance,
+    def __init__(self, context, instance, fault, bdms=None):
+        super(InstanceActionPayload, self).__init__(context=context,
+                                                    instance=instance,
                                                     bdms=bdms)
         self.fault = fault
 
@@ -147,14 +166,17 @@ class InstanceActionVolumePayload(InstanceActionPayload):
     # Version 1.1: Added key_name field to InstancePayload
     # Version 1.2: Add BDM related data
     # Version 1.3: Added updated_at field to InstancePayload
-
-    VERSION = '1.3'
+    # Version 1.4: Added request_id field to InstancePayload
+    # Version 1.5: Added action_initiator_user and action_initiator_project to
+    #              InstancePayload
+    VERSION = '1.5'
     fields = {
         'volume_id': fields.UUIDField()
     }
 
-    def __init__(self, instance, fault, volume_id):
+    def __init__(self, context, instance, fault, volume_id):
         super(InstanceActionVolumePayload, self).__init__(
+                context=context,
                 instance=instance,
                 fault=fault)
         self.volume_id = volume_id
@@ -169,14 +191,18 @@ class InstanceActionVolumeSwapPayload(InstanceActionPayload):
     # Version 1.3: Added key_name field to InstancePayload
     # Version 1.4: Add BDM related data
     # Version 1.5: Added updated_at field to InstancePayload
-    VERSION = '1.5'
+    # Version 1.6: Added request_id field to InstancePayload
+    # Version 1.7: Added action_initiator_user and action_initiator_project to
+    #              InstancePayload
+    VERSION = '1.7'
     fields = {
         'old_volume_id': fields.UUIDField(),
         'new_volume_id': fields.UUIDField(),
     }
 
-    def __init__(self, instance, fault, old_volume_id, new_volume_id):
+    def __init__(self, context, instance, fault, old_volume_id, new_volume_id):
         super(InstanceActionVolumeSwapPayload, self).__init__(
+                context=context,
                 instance=instance,
                 fault=fault)
         self.old_volume_id = old_volume_id
@@ -197,15 +223,23 @@ class InstanceCreatePayload(InstanceActionPayload):
     #         1.5: Add BDM related data to InstancePayload
     #         1.6: Add tags field to InstanceCreatePayload
     #         1.7: Added updated_at field to InstancePayload
-    VERSION = '1.7'
+    #         1.8: Added request_id field to InstancePayload
+    #         1.9: Add trusted_image_certificates field to
+    #              InstanceCreatePayload
+    #         1.10: Added action_initiator_user and action_initiator_project to
+    #              InstancePayload
+    VERSION = '1.10'
 
     fields = {
         'keypairs': fields.ListOfObjectsField('KeypairPayload'),
         'tags': fields.ListOfStringsField(),
+        'trusted_image_certificates': fields.ListOfStringsField(
+            nullable=True)
     }
 
-    def __init__(self, instance, fault, bdms):
+    def __init__(self, context, instance, fault, bdms):
         super(InstanceCreatePayload, self).__init__(
+            context=context,
             instance=instance,
             fault=fault,
             bdms=bdms)
@@ -213,6 +247,9 @@ class InstanceCreatePayload(InstanceActionPayload):
                          for keypair in instance.keypairs]
         self.tags = [instance_tag.tag
                      for instance_tag in instance.tags]
+        self.trusted_image_certificates = None
+        if instance.trusted_certs:
+            self.trusted_image_certificates = instance.trusted_certs.ids
 
 
 @nova_base.NovaObjectRegistry.register_notification
@@ -220,13 +257,17 @@ class InstanceActionResizePrepPayload(InstanceActionPayload):
     # No SCHEMA as all the additional fields are calculated
 
     # Version 1.0: Initial version
-    VERSION = '1.0'
+    # Version 1.1: Added request_id field to InstancePayload
+    # Version 1.2: Added action_initiator_user and action_initiator_project to
+    #              InstancePayload
+    VERSION = '1.2'
     fields = {
         'new_flavor': fields.ObjectField('FlavorPayload', nullable=True)
     }
 
-    def __init__(self, instance, fault, new_flavor):
+    def __init__(self, context, instance, fault, new_flavor):
         super(InstanceActionResizePrepPayload, self).__init__(
+                context=context,
                 instance=instance,
                 fault=fault)
         self.new_flavor = new_flavor
@@ -241,7 +282,10 @@ class InstanceUpdatePayload(InstancePayload):
     # Version 1.4: Added key_name field to InstancePayload
     # Version 1.5: Add BDM related data
     # Version 1.6: Added updated_at field to InstancePayload
-    VERSION = '1.6'
+    # Version 1.7: Added request_id field to InstancePayload
+    # Version 1.8: Added action_initiator_user and action_initiator_project to
+    #              InstancePayload
+    VERSION = '1.8'
     fields = {
         'state_update': fields.ObjectField('InstanceStateUpdatePayload'),
         'audit_period': fields.ObjectField('AuditPeriodPayload'),
@@ -250,9 +294,10 @@ class InstanceUpdatePayload(InstancePayload):
         'tags': fields.ListOfStringsField(),
     }
 
-    def __init__(self, instance, state_update, audit_period, bandwidth,
-                 old_display_name):
-        super(InstanceUpdatePayload, self).__init__(instance=instance)
+    def __init__(self, context, instance, state_update, audit_period,
+                 bandwidth, old_display_name):
+        super(InstanceUpdatePayload, self).__init__(
+            context=context, instance=instance)
         self.state_update = state_update
         self.audit_period = audit_period
         self.bandwidth = bandwidth
@@ -264,16 +309,48 @@ class InstanceUpdatePayload(InstancePayload):
 @nova_base.NovaObjectRegistry.register_notification
 class InstanceActionRescuePayload(InstanceActionPayload):
     # Version 1.0: Initial version
-    VERSION = '1.0'
+    # Version 1.1: Added request_id field to InstancePayload
+    # Version 1.2: Added action_initiator_user and action_initiator_project to
+    #              InstancePayload
+    VERSION = '1.2'
     fields = {
         'rescue_image_ref': fields.UUIDField(nullable=True)
     }
 
-    def __init__(self, instance, fault, rescue_image_ref):
+    def __init__(self, context, instance, fault, rescue_image_ref):
         super(InstanceActionRescuePayload, self).__init__(
+                context=context,
                 instance=instance,
                 fault=fault)
         self.rescue_image_ref = rescue_image_ref
+
+
+@nova_base.NovaObjectRegistry.register_notification
+class InstanceActionRebuildPayload(InstanceActionPayload):
+    # No SCHEMA as all the additional fields are calculated
+
+    # Version 1.7: Initial version. It starts at 1.7 to equal one more than
+    #              the version of the InstanceActionPayload at the time
+    #              when this specific payload is created so that the
+    #              instance.rebuild.* notifications using this new payload
+    #              signal the change of nova_object.name.
+    # Version 1.8: Added action_initiator_user and action_initiator_project to
+    #              InstancePayload
+    VERSION = '1.8'
+    fields = {
+        'trusted_image_certificates': fields.ListOfStringsField(
+            nullable=True)
+    }
+
+    def __init__(self, context, instance, fault, bdms=None):
+        super(InstanceActionRebuildPayload, self).__init__(
+                context=context,
+                instance=instance,
+                fault=fault,
+                bdms=bdms)
+        self.trusted_image_certificates = None
+        if instance.trusted_certs:
+            self.trusted_image_certificates = instance.trusted_certs.ids
 
 
 @nova_base.NovaObjectRegistry.register_notification
@@ -459,23 +536,22 @@ class InstanceStateUpdatePayload(base.NotificationPayloadBase):
 @base.notification_sample('instance-live_migration_pre-end.json')
 @base.notification_sample('instance-live_migration_abort-start.json')
 @base.notification_sample('instance-live_migration_abort-end.json')
-# @base.notification_sample('instance-live_migration_post-start.json')
-# @base.notification_sample('instance-live_migration_post-end.json')
-# @base.notification_sample('instance-live_migration_post_dest-start.json')
-# @base.notification_sample('instance-live_migration_post_dest-end.json')
+@base.notification_sample('instance-live_migration_post-start.json')
+@base.notification_sample('instance-live_migration_post-end.json')
+@base.notification_sample('instance-live_migration_post_dest-start.json')
+@base.notification_sample('instance-live_migration_post_dest-end.json')
 @base.notification_sample('instance-live_migration_rollback-start.json')
 @base.notification_sample('instance-live_migration_rollback-end.json')
-# @base.notification_sample('instance-live_migration_rollback_dest-start.json')
-# @base.notification_sample('instance-live_migration_rollback_dest-end.json')
-@base.notification_sample('instance-rebuild-start.json')
-@base.notification_sample('instance-rebuild-end.json')
-@base.notification_sample('instance-rebuild-error.json')
+@base.notification_sample('instance-live_migration_rollback_dest-start.json')
+@base.notification_sample('instance-live_migration_rollback_dest-end.json')
 @base.notification_sample('instance-interface_detach-start.json')
 @base.notification_sample('instance-interface_detach-end.json')
 @base.notification_sample('instance-resize_confirm-start.json')
 @base.notification_sample('instance-resize_confirm-end.json')
 @base.notification_sample('instance-resize_revert-start.json')
 @base.notification_sample('instance-resize_revert-end.json')
+@base.notification_sample('instance-live_migration_force_complete-start.json')
+@base.notification_sample('instance-live_migration_force_complete-end.json')
 @base.notification_sample('instance-shelve_offload-start.json')
 @base.notification_sample('instance-shelve_offload-end.json')
 @base.notification_sample('instance-soft_delete-start.json')
@@ -486,6 +562,8 @@ class InstanceStateUpdatePayload(base.NotificationPayloadBase):
 @base.notification_sample('instance-unrescue-end.json')
 @base.notification_sample('instance-unshelve-start.json')
 @base.notification_sample('instance-unshelve-end.json')
+@base.notification_sample('instance-lock.json')
+@base.notification_sample('instance-unlock.json')
 @nova_base.NovaObjectRegistry.register_notification
 class InstanceActionNotification(base.NotificationBase):
     # Version 1.0: Initial version
@@ -584,6 +662,20 @@ class InstanceActionRescueNotification(base.NotificationBase):
     }
 
 
+@base.notification_sample('instance-rebuild_scheduled.json')
+@base.notification_sample('instance-rebuild-start.json')
+@base.notification_sample('instance-rebuild-end.json')
+@base.notification_sample('instance-rebuild-error.json')
+@nova_base.NovaObjectRegistry.register_notification
+class InstanceActionRebuildNotification(base.NotificationBase):
+    # Version 1.0: Initial version
+    VERSION = '1.0'
+
+    fields = {
+        'payload': fields.ObjectField('InstanceActionRebuildPayload')
+    }
+
+
 @nova_base.NovaObjectRegistry.register_notification
 class InstanceActionSnapshotPayload(InstanceActionPayload):
     # Version 1.6: Initial version. It starts at version 1.6 as
@@ -591,13 +683,46 @@ class InstanceActionSnapshotPayload(InstanceActionPayload):
     #              from using InstanceActionPayload 1.5 to this new payload and
     #              also it added a new field so we wanted to keep the version
     #              number increasing to signal the change.
-    VERSION = '1.6'
+    # Version 1.7: Added request_id field to InstancePayload
+    # Version 1.8: Added action_initiator_user and action_initiator_project to
+    #              InstancePayload
+    VERSION = '1.8'
     fields = {
         'snapshot_image_id': fields.UUIDField(),
     }
 
-    def __init__(self, instance, fault, snapshot_image_id):
+    def __init__(self, context, instance, fault, snapshot_image_id):
         super(InstanceActionSnapshotPayload, self).__init__(
+                context=context,
                 instance=instance,
                 fault=fault)
         self.snapshot_image_id = snapshot_image_id
+
+
+@nova_base.NovaObjectRegistry.register_notification
+class InstanceExistsPayload(InstancePayload):
+    # Version 1.0: Initial version
+    # Version 1.1: Added action_initiator_user and action_initiator_project to
+    #              InstancePayload
+    VERSION = '1.1'
+    fields = {
+        'audit_period': fields.ObjectField('AuditPeriodPayload'),
+        'bandwidth': fields.ListOfObjectsField('BandwidthPayload'),
+    }
+
+    def __init__(self, context, instance, audit_period, bandwidth):
+        super(InstanceExistsPayload, self).__init__(context=context,
+                                                    instance=instance)
+        self.audit_period = audit_period
+        self.bandwidth = bandwidth
+
+
+@base.notification_sample('instance-exists.json')
+@nova_base.NovaObjectRegistry.register_notification
+class InstanceExistsNotification(base.NotificationBase):
+    # Version 1.0: Initial version
+    VERSION = '1.0'
+
+    fields = {
+        'payload': fields.ObjectField('InstanceExistsPayload')
+    }

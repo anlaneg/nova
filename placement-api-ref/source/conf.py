@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-#
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
 # a copy of the License at
@@ -24,12 +22,17 @@
 # All configuration values have a default; values that are commented out
 # serve to show the default.
 
+import os
+import sys
+
 from nova.version import version_info
 
+sys.path.insert(0, os.path.abspath('../'))
 
 extensions = [
     'openstackdocstheme',
     'os_api_ref',
+    'ext.validator',
 ]
 
 # -- General configuration ----------------------------------------------------
@@ -89,4 +92,10 @@ html_last_updated_fmt = '%Y-%m-%d %H:%M'
 latex_documents = [
     ('index', 'Placement.tex', u'OpenStack Placement API Documentation',
      u'OpenStack Foundation', 'manual'),
+]
+
+# -- Options for openstackdocstheme -------------------------------------------
+
+openstack_projects = [
+    'nova',
 ]

@@ -25,11 +25,39 @@ tests:
       $.usages.DISK_GB: 1020
       $.usages.VCPU: 7
 
+- name: get allocations
+  GET: /resource_providers/$ENVIRON['RP_UUID']/allocations
+  response_headers:
+      content-type: /application/json/
+  response_json_paths:
+      $.allocations.`len`: 3
+      $.allocations["$ENVIRON['CONSUMER_0']"].resources:
+          DISK_GB: 1000
+      $.allocations["$ENVIRON['CONSUMER_ID']"].resources:
+          VCPU: 6
+      $.allocations["$ENVIRON['ALT_CONSUMER_ID']"].resources:
+          VCPU: 1
+          DISK_GB: 20
+      $.resource_provider_generation: 5
+
 - name: fail to delete resource provider
   DELETE: /resource_providers/$ENVIRON['RP_UUID']
   status: 409
   response_strings:
       - "Unable to delete resource provider $ENVIRON['RP_UUID']: Resource provider has allocations."
+
+- name: fail to change inventory via put 1.23
+  PUT: /resource_providers/$ENVIRON['RP_UUID']/inventories
+  request_headers:
+      accept: application/json
+      content-type: application/json
+      openstack-api-version: placement 1.23
+  data:
+      resource_provider_generation: 5
+      inventories: {}
+  status: 409
+  response_json_paths:
+      $.errors[0].code: placement.inventory.inuse
 
 - name: fail to delete all inventory
   DELETE: /resource_providers/$ENVIRON['RP_UUID']/inventories
@@ -41,6 +69,35 @@ tests:
       content-type: /application/json/
   response_strings:
       - "Inventory for 'VCPU, DISK_GB' on resource provider '$ENVIRON['RP_UUID']' in use"
+
+- name: fail to delete all inventory 1.23
+  DELETE: /resource_providers/$ENVIRON['RP_UUID']/inventories
+  request_headers:
+      accept: application/json
+      openstack-api-version: placement 1.23
+  status: 409
+  response_headers:
+      content-type: /application/json/
+  response_strings:
+      - "Inventory for 'VCPU, DISK_GB' on resource provider '$ENVIRON['RP_UUID']' in use"
+  response_json_paths:
+      $.errors[0].code: placement.inventory.inuse
+
+# We can change inventory in a way that makes existing allocations exceed the
+# new capacity. This is allowed.
+- name: change inventory despite capacity exceeded
+  PUT: /resource_providers/$ENVIRON['RP_UUID']/inventories
+  request_headers:
+      accept: application/json
+      content-type: application/json
+  data:
+      resource_provider_generation: 5
+      inventories:
+        DISK_GB:
+          total: 1019
+        VCPU:
+          total: 97
+  status: 200
 
 - name: get total usages by project
   GET: /usages?project_id=$ENVIRON['PROJECT_ID']

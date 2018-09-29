@@ -158,7 +158,8 @@ class FilterScheduler(driver.Scheduler):
         # is based on CONF.scheduler.max_attempts; note that if there are not
         # enough filtered hosts to provide the full number of alternates, the
         # list of hosts may be shorter than this amount.
-        num_alts = CONF.scheduler.max_attempts if return_alternates else 0
+        num_alts = (CONF.scheduler.max_attempts - 1
+                    if return_alternates else 0)
 
         if (instance_uuids is None or
                 not self.USES_ALLOCATION_CANDIDATES or
@@ -173,7 +174,8 @@ class FilterScheduler(driver.Scheduler):
             # the objects without alternates. They will be converted back to
             # the older dict format representing HostState objects.
             return self._legacy_find_hosts(context, num_instances, spec_obj,
-                                           hosts, num_alts)
+                                           hosts, num_alts,
+                                           instance_uuids=instance_uuids)
 
         # A list of the instance UUIDs that were successfully claimed against
         # in the placement API. If we are not able to successfully claim for
@@ -184,7 +186,18 @@ class FilterScheduler(driver.Scheduler):
         # The list of hosts that have been selected (and claimed).
         claimed_hosts = []
 
-        for num in range(num_instances):
+        for num, instance_uuid in enumerate(instance_uuids):
+            # In a multi-create request, the first request spec from the list
+            # is passed to the scheduler and that request spec's instance_uuid
+            # might not be the same as the instance we're processing, so we
+            # update the instance_uuid in that case before passing the request
+            # spec to filters since at least one filter
+            # (ServerGroupAntiAffinityFilter) depends on that information being
+            # accurate.
+            spec_obj.instance_uuid = instance_uuid
+            # Reset the field so it's not persisted accidentally.
+            spec_obj.obj_reset_changes(['instance_uuid'])
+
             hosts = self._get_sorted_hosts(spec_obj, hosts, num)
             if not hosts:
                 # NOTE(jaypipes): If we get here, that means not all instances
@@ -193,7 +206,6 @@ class FilterScheduler(driver.Scheduler):
                 # _ensure_sufficient_hosts() call.
                 break
 
-            instance_uuid = instance_uuids[num]
             # Attempt to claim the resources against one or more resource
             # providers, looping over the sorted list of possible hosts
             # looking for an allocation_request that contains that host's
@@ -235,7 +247,8 @@ class FilterScheduler(driver.Scheduler):
 
             # Now consume the resources so the filter/weights will change for
             # the next instance.
-            self._consume_selected_host(claimed_host, spec_obj)
+            self._consume_selected_host(claimed_host, spec_obj,
+                                        instance_uuid=instance_uuid)
 
         # Check if we were able to fulfill the request. If not, this call will
         # raise a NoValidHost exception.
@@ -288,7 +301,7 @@ class FilterScheduler(driver.Scheduler):
             self.placement_client.delete_allocation_for_instance(context, uuid)
 
     def _legacy_find_hosts(self, context, num_instances, spec_obj, hosts,
-                           num_alts):
+                           num_alts, instance_uuids=None):
         """Some schedulers do not do claiming, or we can sometimes not be able
         to if the Placement service is not reachable. Additionally, we may be
         working with older conductors that don't pass in instance_uuids.
@@ -302,6 +315,13 @@ class FilterScheduler(driver.Scheduler):
         selections_to_return = []
 
         for num in range(num_instances):
+            instance_uuid = instance_uuids[num] if instance_uuids else None
+            if instance_uuid:
+                # Update the RequestSpec.instance_uuid before sending it to
+                # the filters in case we're doing a multi-create request, but
+                # don't persist the change.
+                spec_obj.instance_uuid = instance_uuid
+                spec_obj.obj_reset_changes(['instance_uuid'])
             hosts = self._get_sorted_hosts(spec_obj, hosts, num)
             if not hosts:
                 # No hosts left, so break here, and the
@@ -309,7 +329,8 @@ class FilterScheduler(driver.Scheduler):
                 break
             selected_host = hosts[0]
             selected_hosts.append(selected_host)
-            self._consume_selected_host(selected_host, spec_obj)
+            self._consume_selected_host(selected_host, spec_obj,
+                                        instance_uuid=instance_uuid)
 
         # Check if we were able to fulfill the request. If not, this call will
         # raise a NoValidHost exception.
@@ -320,21 +341,31 @@ class FilterScheduler(driver.Scheduler):
         return selections_to_return
 
     @staticmethod
-    def _consume_selected_host(selected_host, spec_obj):
-        LOG.debug("Selected host: %(host)s", {'host': selected_host})
+    def _consume_selected_host(selected_host, spec_obj, instance_uuid=None):
+        LOG.debug("Selected host: %(host)s", {'host': selected_host},
+                  instance_uuid=instance_uuid)
         selected_host.consume_from_request(spec_obj)
+        # If we have a server group, add the selected host to it for the
+        # (anti-)affinity filters to filter out hosts for subsequent instances
+        # in a multi-create request.
         if spec_obj.instance_group is not None:
             spec_obj.instance_group.hosts.append(selected_host.host)
             # hosts has to be not part of the updates when saving
             spec_obj.instance_group.obj_reset_changes(['hosts'])
+            # The ServerGroupAntiAffinityFilter also relies on
+            # HostState.instances being accurate within a multi-create request.
+            if instance_uuid and instance_uuid not in selected_host.instances:
+                # Set a stub since ServerGroupAntiAffinityFilter only cares
+                # about the keys.
+                selected_host.instances[instance_uuid] = (
+                    objects.Instance(uuid=instance_uuid))
 
     def _get_alternate_hosts(self, selected_hosts, spec_obj, hosts, index,
                              num_alts, alloc_reqs_by_rp_uuid=None,
                              allocation_request_version=None):
         # We only need to filter/weigh the hosts again if we're dealing with
-        # more than one instance since the single selected host will get
-        # filtered out of the list of alternates below.
-        if index > 0:
+        # more than one instance and are going to be picking alternates.
+        if index > 0 and num_alts > 0:
             # The selected_hosts have all had resources 'claimed' via
             # _consume_selected_host, so we need to filter/weigh and sort the
             # hosts again to get an accurate count for alternates.
@@ -364,7 +395,7 @@ class FilterScheduler(driver.Scheduler):
             # will have had its resources reduced and will have a much lower
             # chance of being able to fit another instance on it.
             for host in hosts:
-                if len(selected_plus_alts) >= num_alts:
+                if len(selected_plus_alts) >= num_alts + 1:
                     break
                 if host.cell_uuid == cell_uuid and host not in selected_hosts:
                     if alloc_reqs_by_rp_uuid is not None:

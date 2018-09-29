@@ -13,9 +13,7 @@
 #    under the License.
 
 import datetime
-import errno
 import hashlib
-import importlib
 import os
 import os.path
 import tempfile
@@ -26,7 +24,6 @@ from keystoneauth1 import exceptions as ks_exc
 from keystoneauth1.identity import base as ks_identity
 from keystoneauth1 import session as ks_session
 import mock
-from mox3 import mox
 import netaddr
 from oslo_concurrency import processutils
 from oslo_config import cfg
@@ -38,7 +35,6 @@ from oslo_utils import fixture as utils_fixture
 from oslo_utils import units
 import six
 
-import nova
 from nova import context
 from nova import exception
 from nova.objects import base as obj_base
@@ -239,6 +235,16 @@ class GenericUtilsTestCase(test.NoDBTestCase):
         with mock.patch('nova.utils.execute') as mock_method:
             utils.ssh_execute('remotehost', 'ls', '-l')
         mock_method.assert_called_once_with(*expected_args)
+
+    def test_generate_hostid(self):
+        host = 'host'
+        project_id = '9b9e3c847e904b0686e8ffb20e4c6381'
+        hostId = 'fa123c6f74efd4aad95f84096f9e187caa0625925a9e7837b2b46792'
+        self.assertEqual(hostId, utils.generate_hostid(host, project_id))
+
+    def test_generate_hostid_with_none_host(self):
+        project_id = '9b9e3c847e904b0686e8ffb20e4c6381'
+        self.assertEqual('', utils.generate_hostid(None, project_id))
 
 
 class TestCachedFile(test.NoDBTestCase):
@@ -447,74 +453,6 @@ Exit code: -2''')
             [mock.call(['a', '1'], None),
              mock.call(['a', '1'], None),
              mock.call(['a', '1'], None)])
-
-
-class MonkeyPatchTestCase(test.NoDBTestCase):
-    """Unit test for utils.monkey_patch()."""
-    def setUp(self):
-        super(MonkeyPatchTestCase, self).setUp()
-        self.example_package = 'nova.tests.unit.monkey_patch_example.'
-        self.flags(
-            monkey_patch=True,
-            monkey_patch_modules=[self.example_package + 'example_a' + ':'
-            + self.example_package + 'example_decorator'])
-
-    def test_monkey_patch(self):
-        utils.monkey_patch()
-        nova.tests.unit.monkey_patch_example.CALLED_FUNCTION = []
-        from nova.tests.unit.monkey_patch_example import example_a
-        from nova.tests.unit.monkey_patch_example import example_b
-
-        self.assertEqual('Example function', example_a.example_function_a())
-        exampleA = example_a.ExampleClassA()
-        exampleA.example_method()
-        ret_a = exampleA.example_method_add(3, 5)
-        self.assertEqual(ret_a, 8)
-
-        self.assertEqual('Example function', example_b.example_function_b())
-        exampleB = example_b.ExampleClassB()
-        exampleB.example_method()
-        ret_b = exampleB.example_method_add(3, 5)
-
-        self.assertEqual(ret_b, 8)
-        package_a = self.example_package + 'example_a.'
-        self.assertIn(package_a + 'example_function_a',
-                      nova.tests.unit.monkey_patch_example.CALLED_FUNCTION)
-
-        self.assertIn(package_a + 'ExampleClassA.example_method',
-                        nova.tests.unit.monkey_patch_example.CALLED_FUNCTION)
-        self.assertIn(package_a + 'ExampleClassA.example_method_add',
-                        nova.tests.unit.monkey_patch_example.CALLED_FUNCTION)
-        package_b = self.example_package + 'example_b.'
-        self.assertNotIn(package_b + 'example_function_b',
-                         nova.tests.unit.monkey_patch_example.CALLED_FUNCTION)
-        self.assertNotIn(package_b + 'ExampleClassB.example_method',
-                         nova.tests.unit.monkey_patch_example.CALLED_FUNCTION)
-        self.assertNotIn(package_b + 'ExampleClassB.example_method_add',
-                         nova.tests.unit.monkey_patch_example.CALLED_FUNCTION)
-
-
-class MonkeyPatchDefaultTestCase(test.NoDBTestCase):
-    """Unit test for default monkey_patch_modules value."""
-
-    def setUp(self):
-        super(MonkeyPatchDefaultTestCase, self).setUp()
-        self.flags(
-            monkey_patch=True)
-
-    def test_monkey_patch_default_mod(self):
-        # monkey_patch_modules is defined to be
-        #    <module_to_patch>:<decorator_to_patch_with>
-        #  Here we check that both parts of the default values are
-        # valid
-        for module in CONF.monkey_patch_modules:
-            m = module.split(':', 1)
-            # Check we can import the module to be patched
-            importlib.import_module(m[0])
-            # check the decorator is valid
-            decorator_name = m[1].rsplit('.', 1)
-            decorator_module = importlib.import_module(decorator_name[0])
-            getattr(decorator_module, decorator_name[1])
 
 
 class AuditPeriodTest(test.NoDBTestCase):
@@ -1303,7 +1241,7 @@ class GetKSAAdapterTestCase(test.NoDBTestCase):
         # load_adapter* called with what we passed in (and the right group)
         self.load_adap.assert_called_once_with(
             utils.CONF, 'glance', session='sess', auth='auth',
-            min_version='min', max_version='max')
+            min_version='min', max_version='max', raise_exc=False)
 
     def test_auth_from_session(self):
         self.sess.auth = 'auth'
@@ -1317,7 +1255,7 @@ class GetKSAAdapterTestCase(test.NoDBTestCase):
         # load_adapter* called with the auth from the session
         self.load_adap.assert_called_once_with(
             utils.CONF, 'ironic', session=self.sess, auth='auth',
-            min_version=None, max_version=None)
+            min_version=None, max_version=None, raise_exc=False)
 
     def test_load_auth_and_session(self):
         ret = utils.get_ksa_adapter('volumev3')
@@ -1331,7 +1269,7 @@ class GetKSAAdapterTestCase(test.NoDBTestCase):
         # load_adapter* called with the loaded auth & session
         self.load_adap.assert_called_once_with(
             utils.CONF, 'cinder', session=self.sess, auth=self.auth,
-            min_version=None, max_version=None)
+            min_version=None, max_version=None, raise_exc=False)
 
 
 class GetEndpointTestCase(test.NoDBTestCase):
@@ -1383,54 +1321,3 @@ class GetEndpointTestCase(test.NoDBTestCase):
         self.adap.get_endpoint_data.assert_not_called()
         self.assertEqual(3, self.adap.get_endpoint.call_count)
         self.assertEqual('public', self.adap.interface)
-
-    def _behave_supports_direct_io(self, raise_open=False, raise_write=False,
-                                   exc=ValueError()):
-        open_behavior = os.open(os.path.join('.', '.directio.test'),
-                                os.O_CREAT | os.O_WRONLY | os.O_DIRECT)
-        if raise_open:
-            open_behavior.AndRaise(exc)
-        else:
-            open_behavior.AndReturn(3)
-            write_bahavior = os.write(3, mox.IgnoreArg())
-            if raise_write:
-                write_bahavior.AndRaise(exc)
-
-            # ensure unlink(filepath) will actually remove the file by deleting
-            # the remaining link to it in close(fd)
-            os.close(3)
-
-        os.unlink(3)
-
-    def test_supports_direct_io(self):
-        # O_DIRECT is not supported on all Python runtimes, so on platforms
-        # where it's not supported (e.g. Mac), we can still test the code-path
-        # by stubbing out the value.
-        if not hasattr(os, 'O_DIRECT'):
-            # `mock` seems to have trouble stubbing an attr that doesn't
-            # originally exist, so falling back to stubbing out the attribute
-            # directly.
-            os.O_DIRECT = 16384
-            self.addCleanup(delattr, os, 'O_DIRECT')
-
-        einval = OSError()
-        einval.errno = errno.EINVAL
-        self.mox.StubOutWithMock(os, 'open')
-        self.mox.StubOutWithMock(os, 'write')
-        self.mox.StubOutWithMock(os, 'close')
-        self.mox.StubOutWithMock(os, 'unlink')
-        _supports_direct_io = utils.supports_direct_io
-
-        self._behave_supports_direct_io()
-        self._behave_supports_direct_io(raise_write=True)
-        self._behave_supports_direct_io(raise_open=True)
-        self._behave_supports_direct_io(raise_write=True, exc=einval)
-        self._behave_supports_direct_io(raise_open=True, exc=einval)
-
-        self.mox.ReplayAll()
-        self.assertTrue(_supports_direct_io('.'))
-        self.assertRaises(ValueError, _supports_direct_io, '.')
-        self.assertRaises(ValueError, _supports_direct_io, '.')
-        self.assertFalse(_supports_direct_io('.'))
-        self.assertFalse(_supports_direct_io('.'))
-        self.mox.VerifyAll()

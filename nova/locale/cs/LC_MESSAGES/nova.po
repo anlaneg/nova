@@ -12,7 +12,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2018-02-17 16:08+0000\n"
+"POT-Creation-Date: 2018-09-21 04:59+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -21,7 +21,7 @@ msgstr ""
 "Language: cs\n"
 "Plural-Forms: nplurals=3; plural=(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2;\n"
 "Generated-By: Babel 2.0\n"
-"X-Generator: Zanata 3.9.6\n"
+"X-Generator: Zanata 4.3.3\n"
 "Language-Team: Czech\n"
 
 #, python-format
@@ -73,14 +73,6 @@ msgid "%(memsize)d MB of memory assigned, but expected %(memtotal)d MB"
 msgstr "%(memsize)d MB paměti přiděleno, ale očekáváno %(memtotal)d MB"
 
 #, python-format
-msgid "%(name)s has a minimum character requirement of %(min_length)s."
-msgstr "%(name)s požaduje minimálně %(min_length)s znaků."
-
-#, python-format
-msgid "%(name)s has more than %(max_length)s characters."
-msgstr "%(name)s má více než %(max_length)s znaků."
-
-#, python-format
 msgid "%(path)s is not on local storage: %(reason)s"
 msgstr "%(path)s není v místním úložišti: %(reason)s"
 
@@ -116,10 +108,6 @@ msgstr "%s nepodporuje zapojování disku za běhu."
 #, python-format
 msgid "%s format is not supported"
 msgstr "formát %s není podporován"
-
-#, python-format
-msgid "%s is not a string or unicode"
-msgstr "%s není řetězec nebo unicode"
 
 #, python-format
 msgid "%s is not supported."
@@ -659,9 +647,6 @@ msgstr "Nelze získat obraz %(image_id)s"
 msgid "Could not find a handler for %(driver_type)s volume."
 msgstr "Nelze najít obslužnou rutinu pro svazek %(driver_type)s."
 
-msgid "Could not find another compute"
-msgstr "Nelze najít další výpočet"
-
 #, python-format
 msgid "Could not find binary %(binary)s on host %(host)s."
 msgstr "Nelze najít binární soubor %(binary)s v hostiteli %(host)s."
@@ -702,9 +687,6 @@ msgstr "Vytvoření sítí selhalo"
 msgid "Creation of virtual interface with unique mac address failed"
 msgstr "Vytváření virtuálního rozhraní s jedinečnou mac adresou selhalo"
 
-msgid "DNS entries not found."
-msgstr "Záznamy DNS nenalezeny."
-
 msgid "DNS1"
 msgstr "DNS1"
 
@@ -725,13 +707,6 @@ msgstr "Výchozí zásada PVM je pro povolení PBM vyžadována."
 #, python-format
 msgid "Deleted %(records)d records from table '%(table_name)s'."
 msgstr "Smazáno %(records)d záznamů z tabulky '%(table_name)s'."
-
-msgid "Deleting by fixed_range is not supported with the NeutronManager"
-msgstr "NeutronManager nepodporuje mazání pomocí rozsahu pevných ip adres"
-
-#, python-format
-msgid "Destination host:%s must be in the same aggregate as the source server"
-msgstr "Cílový hostitel:%s musí být ve stejném agregátu jako zdrojový server"
 
 #, python-format
 msgid "Detected existing vlan with id %(vlan)d"
@@ -1075,20 +1050,8 @@ msgid "Fixed IP %(ip)s is not a valid ip address for network %(network_id)s."
 msgstr "Pevná IP %(ip)s není platnou ip adresou pro síť %(network_id)s."
 
 #, python-format
-msgid "Fixed IP %s has been deleted"
-msgstr "Pevná IP adresa %s byla smazána"
-
-#, python-format
 msgid "Fixed IP %s is already in use."
 msgstr "Pevná IP adresa %s se již používá."
-
-#, python-format
-msgid "Fixed IP %s not found"
-msgstr "Pevná IP adresa %s nebyla nalezena"
-
-#, python-format
-msgid "Fixed IP %s not valid"
-msgstr "Pevná Ip adresa %s není platná"
 
 #, python-format
 msgid ""
@@ -1243,10 +1206,6 @@ msgstr ""
 "Je zakázáno překročit hodnotu z konfigurace ohledně počtu sériových portů "
 "předaných v popisných datech obrazu."
 
-#, python-format
-msgid "Found no PIF for device %s"
-msgstr "Nenalezeno žádné PIF pro zařízení %s"
-
 msgid "Found no disk to snapshot."
 msgstr "Nenalezen žádný disk k pořízení snímku."
 
@@ -1366,22 +1325,6 @@ msgstr ""
 
 msgid "Image that the instance was started with could not be found."
 msgstr "Obraz, z kterého byla instance spuštěna, nemohl být nalezen."
-
-#, python-format
-msgid ""
-"Image vCPU limits %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"Limity vCPU instance %(sockets)d:%(cores)d:%(threads)d překračují povolené "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-
-#, python-format
-msgid ""
-"Image vCPU topology %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"Topologie vCPU instance %(sockets)d:%(cores)d:%(threads)d překračují "
-"povolené %(maxsockets)d:%(maxcores)d:%(maxthreads)d"
 
 #, python-format
 msgid "Image's config drive option '%(config_drive)s' is invalid"
@@ -1544,15 +1487,9 @@ msgstr "Instance již je v záchranném režimu: %s"
 msgid "Instance is not a member of specified network"
 msgstr "Instance není členem zadané sítě"
 
-msgid "Instance recreate is not supported."
-msgstr "Znovu vytvoření instance není podporováno."
-
 #, python-format
 msgid "Instance rollback performed due to: %s"
 msgstr "Provedeno zpětné vrácení instance kvůli: %s"
-
-msgid "Instance snapshots are not permitted at this time."
-msgstr "Snímky instance nejsou v současnosti povoleny."
 
 #, python-format
 msgid ""
@@ -1697,10 +1634,6 @@ msgid "Invalid key_name provided."
 msgstr "Zadán neplatný název klíče."
 
 #, python-format
-msgid "Invalid libvirt version %(version)s"
-msgstr "Neplatná verze libvirt %(version)s"
-
-#, python-format
 msgid "Invalid memory page size '%(pagesize)s'"
 msgstr "Neplatná velikost stránky paměti '%(pagesize)s'"
 
@@ -1809,9 +1742,6 @@ msgstr "Neplatná velikost svazku"
 #, python-format
 msgid "Ironic node uuid not supplied to driver for instance %s."
 msgstr "UUID uzlu Ironic nebylo předáno ovladači instance %s."
-
-msgid "Is the appropriate service running?"
-msgstr "Běží odpovídající služba?"
 
 #, python-format
 msgid ""
@@ -2295,13 +2225,6 @@ msgid "Number of Rows Archived"
 msgstr "Počet archivovaných řádků"
 
 #, python-format
-msgid ""
-"Number of serial ports '%(num_ports)s' specified in '%(property)s' isn't "
-"valid."
-msgstr ""
-"Počet sériových portů '%(num_ports)s' zadaných v '%(property)s' není platný."
-
-#, python-format
 msgid "Object action %(action)s failed because: %(reason)s"
 msgstr "Činnost objektu %(action)s selhala protože: %(reason)s"
 
@@ -2367,14 +2290,6 @@ msgstr "PCI zařízení %(id)s nenalezeno"
 #, python-format
 msgid "PCI device request %(requests)s failed"
 msgstr "Žádost zařízení PCI %(requests)s selhala"
-
-#, python-format
-msgid ""
-"PIF %(pif_uuid)s for network %(bridge)s has VLAN id %(pif_vlan)d. Expected "
-"%(vlan_num)d"
-msgstr ""
-"Fyz. rozhraní %(pif_uuid)s sítě %(bridge)s má VLAN id %(pif_vlan)d. "
-"Očekáváno %(vlan_num)d"
 
 #, python-format
 msgid "PIF %s does not contain IP address"
@@ -2633,11 +2548,6 @@ msgstr "Název kořenového prvku by měl být '%(name)s' ne '%(tag)s'"
 #, python-format
 msgid "Rule (%s) not found"
 msgstr "Pravidlo (%s) nenalezeno"
-
-#, python-format
-msgid "Running Nova with parallels virt_type requires libvirt version %s"
-msgstr ""
-"Spuštění Nova s paralelními typy virtualizací vyžaduje libvirt verze %s"
 
 #, python-format
 msgid "Running cmd (subprocess): %s"
@@ -2902,9 +2812,6 @@ msgstr "Filtr brány firewall pro %s neexistuje"
 msgid "The floating IP request failed with a BadRequest"
 msgstr "Žádost o plovoucí IP selhala s chybou Špatný požadavek."
 
-msgid "The input is not a string or unicode"
-msgstr "Vstup není řetězec nebo unicode"
-
 msgid ""
 "The instance requires a newer hypervisor version than has been provided."
 msgstr "Instance vyžaduje novější verzi hypervizoru, než byla poskytnuta."
@@ -3108,9 +3015,6 @@ msgstr ""
 msgid "Type and Code must be integers for ICMP protocol type"
 msgstr "Typ a kód musí být v protokolu ICMP celá čísla"
 
-msgid "UUID is required to delete Neutron Networks"
-msgstr "Pro smazání sítí Neutron je vyžadováno UUID"
-
 #, python-format
 msgid ""
 "Unable to associate floating IP %(address)s to any fixed IPs for instance "
@@ -3146,9 +3050,6 @@ msgstr "Nelze zničit VBD %s"
 #, python-format
 msgid "Unable to destroy VDI %s"
 msgstr "Nelze zničit VDI %s"
-
-msgid "Unable to detach from guest transient domain."
-msgstr "Nelze odpojit z přechodné domény hosta."
 
 #, python-format
 msgid "Unable to determine disk bus for '%s'"
@@ -3656,9 +3557,6 @@ msgstr "Plovoucí IP adresa nenalezena"
 msgid "fmt=%(fmt)s backed by: %(backing_file)s"
 msgstr "fmt=%(fmt)s zálohováno: %(backing_file)s"
 
-msgid "fping utility is not found."
-msgstr "nástroj fping nenalezen."
-
 #, python-format
 msgid "href %s does not contain version"
 msgstr "href %s neobsahuje verzi"
@@ -3857,11 +3755,6 @@ msgid "volume %s already attached"
 msgstr "svazek %s již je připojen"
 
 #, python-format
-msgid "volume '%(vol)s' status must be 'available'. Currently in '%(status)s'"
-msgstr ""
-"stav svazku '%(vol)s' musí být 'available. Nyní je ve stavu '%(status)s'."
-
-#, python-format
 msgid ""
 "volume '%(vol)s' status must be 'in-use'. Currently in '%(status)s' status"
 msgstr ""
@@ -3877,9 +3770,3 @@ msgid ""
 "with the wrong number of arguments"
 msgstr ""
 "xenapi.fake nemá zavedeno %s, nebo byl zavolán se špatným počtem argumentů"
-
-msgid "you can not pass av_zone if the scope is public"
-msgstr "nemůžete předat av_zone, pokud je zaměření veřejné"
-
-msgid "you can not pass project if the scope is private"
-msgstr "nemůžete předat projekt, pokud je zaměření soukromé"

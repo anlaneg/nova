@@ -24,12 +24,13 @@ from sqlalchemy import or_
 from sqlalchemy.sql import func
 from sqlalchemy.sql import null
 
+from nova import availability_zones as avail_zone
 from nova.cells import opts as cells_opts
 from nova.cells import rpcapi as cells_rpcapi
 from nova.cells import utils as cells_utils
 from nova.compute import task_states
 from nova.compute import vm_states
-from nova import db
+from nova.db import api as db
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import models
 from nova import exception
@@ -57,7 +58,7 @@ _INSTANCE_OPTIONAL_NON_COLUMN_FIELDS = ['flavor', 'old_flavor',
 # These are fields that are optional and in instance_extra
 _INSTANCE_EXTRA_FIELDS = ['numa_topology', 'pci_requests',
                           'flavor', 'vcpu_model', 'migration_context',
-                          'keypairs', 'device_metadata']
+                          'keypairs', 'device_metadata', 'trusted_certs']
 # These are fields that applied/drooped by migration_context
 _MIGRATION_CONTEXT_ATTRS = ['numa_topology', 'pci_requests',
                             'pci_devices']
@@ -112,7 +113,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
     # Version 2.1: Added services
     # Version 2.2: Added keypairs
     # Version 2.3: Added device_metadata
-    VERSION = '2.3'
+    # Version 2.4: Added trusted_certs
+    VERSION = '2.4'
 
     fields = {
         'id': fields.IntegerField(),
@@ -212,6 +214,7 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         'migration_context': fields.ObjectField('MigrationContext',
                                                 nullable=True),
         'keypairs': fields.ObjectField('KeyPairList'),
+        'trusted_certs': fields.ObjectField('TrustedCerts', nullable=True),
         }
 
     obj_extra_fields = ['name']
@@ -219,6 +222,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
     def obj_make_compatible(self, primitive, target_version):
         super(Instance, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (2, 4) and 'trusted_certs' in primitive:
+            del primitive['trusted_certs']
         if target_version < (2, 3) and 'device_metadata' in primitive:
             del primitive['device_metadata']
         if target_version < (2, 2) and 'keypairs' in primitive:
@@ -297,11 +302,13 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                 base_name = CONF.instance_name_template % info
             except KeyError:
                 base_name = self.uuid
-        except exception.ObjectActionError:
-            # This indicates self.id was not set and could not be lazy loaded.
-            # What this means is the instance has not been persisted to a db
-            # yet, which should indicate it has not been scheduled yet. In this
-            # situation it will have a blank name.
+        except (exception.ObjectActionError,
+                exception.OrphanedObjectError):
+            # This indicates self.id was not set and/or could not be
+            # lazy loaded.  What this means is the instance has not
+            # been persisted to a db yet, which should indicate it has
+            # not been scheduled yet. In this situation it will have a
+            # blank name.
             if (self.vm_state == vm_states.BUILDING and
                     self.task_state == task_states.SCHEDULING):
                 base_name = ''
@@ -317,17 +324,32 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
     def _flavor_from_db(self, db_flavor):
         """Load instance flavor information from instance_extra."""
 
+        # Before we stored flavors in instance_extra, certain fields, defined
+        # in nova.compute.flavors.system_metadata_flavor_props, were stored
+        # in the instance.system_metadata for the embedded instance.flavor.
+        # The "disabled" field wasn't one of those keys, however, so really
+        # old instances that had their embedded flavor converted to the
+        # serialized instance_extra form won't have the disabled attribute
+        # set and we need to default those here so callers don't explode trying
+        # to load instance.flavor.disabled.
+        def _default_disabled(flavor):
+            if 'disabled' not in flavor:
+                flavor.disabled = False
+
         flavor_info = jsonutils.loads(db_flavor)
 
         self.flavor = objects.Flavor.obj_from_primitive(flavor_info['cur'])
+        _default_disabled(self.flavor)
         if flavor_info['old']:
             self.old_flavor = objects.Flavor.obj_from_primitive(
                 flavor_info['old'])
+            _default_disabled(self.old_flavor)
         else:
             self.old_flavor = None
         if flavor_info['new']:
             self.new_flavor = objects.Flavor.obj_from_primitive(
                 flavor_info['new'])
+            _default_disabled(self.new_flavor)
         else:
             self.new_flavor = None
         self.obj_reset_changes(['flavor', 'old_flavor', 'new_flavor'])
@@ -453,6 +475,12 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         if 'keypairs' in expected_attrs:
             if have_extra:
                 instance._load_keypairs(db_inst['extra'].get('keypairs'))
+        if 'trusted_certs' in expected_attrs:
+            if have_extra:
+                instance._load_trusted_certs(
+                    db_inst['extra'].get('trusted_certs'))
+            else:
+                instance.trusted_certs = None
         if any([x in expected_attrs for x in ('flavor',
                                               'old_flavor',
                                               'new_flavor')]):
@@ -561,6 +589,13 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                 jsonutils.dumps(vcpu_model.obj_to_primitive()))
         else:
             updates['extra']['vcpu_model'] = None
+        trusted_certs = updates.pop('trusted_certs', None)
+        expected_attrs.append('trusted_certs')
+        if trusted_certs:
+            updates['extra']['trusted_certs'] = jsonutils.dumps(
+                trusted_certs.obj_to_primitive())
+        else:
+            updates['extra']['trusted_certs'] = None
         db_inst = db.instance_create(self._context, updates)
         self._from_db_object(self._context, self, db_inst, expected_attrs)
 
@@ -695,18 +730,16 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         """Save updates to this instance
 
         Column-wise updates will be made based on the result of
-        self.what_changed(). If expected_task_state is provided,
+        self.obj_what_changed(). If expected_task_state is provided,
         it will be checked against the in-database copy of the
         instance before updates are made.
 
-        :param:context: Security context
-        :param:expected_task_state: Optional tuple of valid task states
-        for the instance to be in
-        :param:expected_vm_state: Optional tuple of valid vm states
-        for the instance to be in
+        :param expected_vm_state: Optional tuple of valid vm states
+                                  for the instance to be in
+        :param expected_task_state: Optional tuple of valid task states
+                                    for the instance to be in
         :param admin_state_reset: True if admin API is forcing setting
-        of task_state/vm_state
-
+                                  of task_state/vm_state
         """
         # Store this on the class because _cell_name_blocks_sync is useless
         # after the db update call below.
@@ -848,11 +881,20 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         current._context = None
 
         for field in self.fields:
-            if self.obj_attr_is_set(field):
-                if field == 'info_cache':
-                    self.info_cache.refresh()
-                elif self[field] != current[field]:
-                    self[field] = current[field]
+            if field not in self:
+                continue
+            if field not in current:
+                # If the field isn't in current we should not
+                # touch it, triggering a likely-recursive lazy load.
+                # Log it so we can see it happening though, as it
+                # probably isn't expected in most cases.
+                LOG.debug('Field %s is set but not in refreshed '
+                          'instance, skipping', field)
+                continue
+            if field == 'info_cache':
+                self.info_cache.refresh()
+            elif self[field] != current[field]:
+                self[field] = current[field]
         self.obj_reset_changes()
 
     def _load_generic(self, attrname):
@@ -861,13 +903,18 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                                                   uuid=self.uuid,
                                                   expected_attrs=[attrname])
 
-        # NOTE(danms): Never allow us to recursively-load
-        if instance.obj_attr_is_set(attrname):
-            self[attrname] = instance[attrname]
-        else:
+        if attrname not in instance:
+            # NOTE(danms): Never allow us to recursively-load
             raise exception.ObjectActionError(
                 action='obj_load_attr',
                 reason=_('loading %s requires recursion') % attrname)
+
+        # NOTE(danms): load anything we don't already have from the
+        # instance we got from the database to make the most of the
+        # performance hit.
+        for field in self.fields:
+            if field in instance and field not in self:
+                setattr(self, field, getattr(instance, field))
 
     def _load_fault(self):
         self.fault = objects.InstanceFault.get_latest_for_instance(
@@ -978,6 +1025,16 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         self.tags = objects.TagList.get_by_resource_id(
             self._context, self.uuid)
 
+    def _load_trusted_certs(self, db_trusted_certs=_NO_DATA_SENTINEL):
+        if db_trusted_certs is None:
+            self.trusted_certs = None
+        elif db_trusted_certs is _NO_DATA_SENTINEL:
+            self.trusted_certs = objects.TrustedCerts.get_by_instance_uuid(
+                self._context, self.uuid)
+        else:
+            self.trusted_certs = objects.TrustedCerts.obj_from_primitive(
+                jsonutils.loads(db_trusted_certs))
+
     def apply_migration_context(self):
         if self.migration_context:
             self._set_migration_context_to_instance(prefix='new_')
@@ -1038,14 +1095,14 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
             self.numa_topology = numa_topology.clear_host_pinning()
 
     def obj_load_attr(self, attrname):
-        if attrname not in INSTANCE_OPTIONAL_ATTRS:
-            raise exception.ObjectActionError(
-                action='obj_load_attr',
-                reason=_('attribute %s not lazy-loadable') % attrname)
-
+        # NOTE(danms): We can't lazy-load anything without a context and a uuid
         if not self._context:
             raise exception.OrphanedObjectError(method='obj_load_attr',
                                                 objtype=self.obj_name())
+        if 'uuid' not in self:
+            raise exception.ObjectActionError(
+                action='obj_load_attr',
+                reason=_('attribute %s not lazy-loadable') % attrname)
 
         LOG.debug("Lazy-loading '%(attr)s' on %(name)s uuid %(uuid)s",
                   {'attr': attrname,
@@ -1073,6 +1130,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
             # NOTE(danms): Let keypairs control its own destiny for
             # resetting changes.
             return self._load_keypairs()
+        elif attrname == 'trusted_certs':
+            return self._load_trusted_certs()
         elif attrname == 'security_groups':
             self._load_security_groups()
         elif attrname == 'pci_devices':
@@ -1092,9 +1151,19 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                 self.tags = objects.TagList(self._context)
             else:
                 self._load_tags()
-        else:
-            # FIXME(comstud): This should be optimized to only load the attr.
+        elif attrname in self.fields and attrname != 'id':
+            # NOTE(danms): We've never let 'id' be lazy-loaded, and use its
+            # absence as a sentinel that it hasn't been created in the database
+            # yet, so refuse to do so here.
             self._load_generic(attrname)
+        else:
+            # NOTE(danms): This is historically what we did for
+            # something not in a field that was force-loaded. So, just
+            # do this for consistency.
+            raise exception.ObjectActionError(
+                action='obj_load_attr',
+                reason=_('attribute %s not lazy-loadable') % attrname)
+
         self.obj_reset_changes([attrname])
 
     def get_flavor(self, namespace=None):
@@ -1208,6 +1277,23 @@ def _make_instance_list(context, inst_list, db_inst_list, expected_attrs):
     return inst_list
 
 
+@db_api.pick_context_manager_writer
+def populate_missing_availability_zones(context, count):
+    # instances without host have no reasonable AZ to set
+    not_empty_host = models.Instance.host != None  # noqa E711
+    instances = (context.session.query(models.Instance).
+        filter(not_empty_host).
+        filter_by(availability_zone=None).limit(count).all())
+    count_all = len(instances)
+    count_hit = 0
+    for instance in instances:
+        az = avail_zone.get_instance_availability_zone(context, instance)
+        instance.availability_zone = az
+        instance.save(context.session)
+        count_hit += 1
+    return count_all, count_hit
+
+
 @base.NovaObjectRegistry.register
 class InstanceList(base.ObjectListBase, base.NovaObject):
     # Version 2.0: Initial Version
@@ -1236,18 +1322,24 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
             db_inst_list = db.instance_get_all_by_filters(
                 context, filters, sort_key, sort_dir, limit=limit,
                 marker=marker, columns_to_join=_expected_cols(expected_attrs))
-        return _make_instance_list(context, cls(), db_inst_list,
-                                   expected_attrs)
+        return db_inst_list
 
     @base.remotable_classmethod
     def get_by_filters(cls, context, filters,
                        sort_key='created_at', sort_dir='desc', limit=None,
                        marker=None, expected_attrs=None, use_slave=False,
                        sort_keys=None, sort_dirs=None):
-        return cls._get_by_filters_impl(
+        db_inst_list = cls._get_by_filters_impl(
             context, filters, sort_key=sort_key, sort_dir=sort_dir,
             limit=limit, marker=marker, expected_attrs=expected_attrs,
             use_slave=use_slave, sort_keys=sort_keys, sort_dirs=sort_dirs)
+        # NOTE(melwitt): _make_instance_list could result in joined objects'
+        # (from expected_attrs) _from_db_object methods being called during
+        # Instance._from_db_object, each of which might choose to perform
+        # database writes. So, we call this outside of _get_by_filters_impl to
+        # avoid being nested inside a 'reader' database transaction context.
+        return _make_instance_list(context, cls(), db_inst_list,
+                                   expected_attrs)
 
     @staticmethod
     @db.select_db_reader_mode
@@ -1395,11 +1487,7 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
 
     @base.remotable_classmethod
     def get_uuids_by_host(cls, context, host):
-        # NOTE(danms): We could potentially do this a little more efficiently
-        # but for now just pull all the instances and scrape the uuids.
-        db_instances = db.instance_get_all_by_host(context, host,
-                                                   columns_to_join=[])
-        return [inst['uuid'] for inst in db_instances]
+        return db.instance_get_all_uuids_by_host(context, host)
 
     @staticmethod
     @db_api.pick_context_manager_reader

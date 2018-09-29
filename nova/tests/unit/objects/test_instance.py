@@ -18,13 +18,14 @@ import mock
 import netaddr
 from oslo_db import exception as db_exc
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
 from nova.cells import rpcapi as cells_rpcapi
 from nova.compute import flavors
 from nova.compute import task_states
 from nova.compute import vm_states
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova.network import model as network_model
 from nova import notifications
@@ -46,7 +47,6 @@ from nova.tests.unit.objects import test_migration_context as test_mig_ctxt
 from nova.tests.unit.objects import test_objects
 from nova.tests.unit.objects import test_security_group
 from nova.tests.unit.objects import test_vcpu_model
-from nova.tests import uuidsentinel as uuids
 from nova import utils
 
 
@@ -70,6 +70,7 @@ class _TestInstanceObject(object):
         db_inst['user_id'] = self.context.user_id
         db_inst['project_id'] = self.context.project_id
         db_inst['tags'] = []
+        db_inst['trusted_certs'] = []
 
         db_inst['info_cache'] = dict(test_instance_info_cache.fake_info_cache,
                                      instance_uuid=db_inst['uuid'])
@@ -144,11 +145,12 @@ class _TestInstanceObject(object):
         exp_cols.remove('migration_context')
         exp_cols.remove('keypairs')
         exp_cols.remove('device_metadata')
+        exp_cols.remove('trusted_certs')
         exp_cols = [exp_col for exp_col in exp_cols if 'flavor' not in exp_col]
         exp_cols.extend(['extra', 'extra.numa_topology', 'extra.pci_requests',
                          'extra.flavor', 'extra.vcpu_model',
                          'extra.migration_context', 'extra.keypairs',
-                         'extra.device_metadata'])
+                         'extra.device_metadata', 'extra.trusted_certs'])
 
         fake_topology = (test_instance_numa_topology.
                          fake_db_topology['numa_topology'])
@@ -167,6 +169,8 @@ class _TestInstanceObject(object):
             objects.KeyPair(name='foo')])
         fake_keypairs = jsonutils.dumps(
             fake_keypairlist.obj_to_primitive())
+        fake_trusted_certs = jsonutils.dumps(
+            objects.TrustedCerts(ids=['123foo']).obj_to_primitive())
         fake_service = {'created_at': None, 'updated_at': None,
                         'deleted_at': None, 'deleted': False, 'id': 123,
                         'host': 'fake-host', 'binary': 'nova-compute',
@@ -185,6 +189,7 @@ class _TestInstanceObject(object):
                                  'vcpu_model': fake_vcpu_model,
                                  'migration_context': fake_mig_context,
                                  'keypairs': fake_keypairs,
+                                 'trusted_certs': fake_trusted_certs,
                                  })
 
         mock_get.return_value = fake_instance
@@ -199,6 +204,7 @@ class _TestInstanceObject(object):
             self.assertTrue(inst.obj_attr_is_set(attr))
         self.assertEqual(123, inst.services[0].id)
         self.assertEqual('foo', inst.keypairs[0].name)
+        self.assertEqual(['123foo'], inst.trusted_certs.ids)
 
         mock_get.assert_called_once_with(self.context, 'uuid',
             columns_to_join=exp_cols)
@@ -330,6 +336,23 @@ class _TestInstanceObject(object):
         self.assertNotIn('keypairs', inst.obj_what_changed())
 
     @mock.patch.object(db, 'instance_get_by_uuid')
+    def test_lazy_load_flavor_from_extra(self, mock_get):
+        inst = objects.Instance(context=self.context, uuid=uuids.instance)
+        # These disabled values are only here for logic testing purposes to
+        # make sure we default the "new" flavor's disabled value to False on
+        # load from the database.
+        fake_flavor = jsonutils.dumps(
+            {'cur': objects.Flavor(disabled=False).obj_to_primitive(),
+             'old': objects.Flavor(disabled=True).obj_to_primitive(),
+             'new': objects.Flavor().obj_to_primitive()})
+        fake_inst = dict(self.fake_instance, extra={'flavor': fake_flavor})
+        mock_get.return_value = fake_inst
+        # Assert the disabled values on the flavors.
+        self.assertFalse(inst.flavor.disabled)
+        self.assertTrue(inst.old_flavor.disabled)
+        self.assertFalse(inst.new_flavor.disabled)
+
+    @mock.patch.object(db, 'instance_get_by_uuid')
     def test_get_remote(self, mock_get):
         # isotime doesn't have microseconds and is always UTC
         fake_instance = self.fake_instance
@@ -380,7 +403,7 @@ class _TestInstanceObject(object):
 
         mock_get.return_value = inst_copy
 
-        self.assertRaises(exception.OrphanedObjectError, inst.refresh)
+        inst.refresh()
         mock_get.assert_called_once_with(self.context, uuid=inst.uuid,
             expected_attrs=['metadata'], use_slave=False)
 
@@ -522,7 +545,7 @@ class _TestInstanceObject(object):
             'system_metadata'])
         mock_send.assert_called_once_with(self.context, mock.ANY, mock.ANY)
 
-    @mock.patch('nova.db.instance_extra_update_by_uuid')
+    @mock.patch('nova.db.api.instance_extra_update_by_uuid')
     def test_save_object_pci_requests(self, mock_instance_extra_update):
         expected_json = ('[{"count": 1, "alias_name": null, "is_new": false,'
                          '"request_id": null, "spec": [{"vendor_id": "8086",'
@@ -553,7 +576,7 @@ class _TestInstanceObject(object):
         inst.save()
         self.assertFalse(mock_instance_extra_update.called)
 
-    @mock.patch('nova.db.instance_update_and_get_original')
+    @mock.patch('nova.db.api.instance_update_and_get_original')
     @mock.patch.object(instance.Instance, '_from_db_object')
     def test_save_does_not_refresh_pci_devices(self, mock_fdo, mock_update):
         # NOTE(danms): This tests that we don't update the pci_devices
@@ -569,8 +592,8 @@ class _TestInstanceObject(object):
         self.assertNotIn('pci_devices',
                          mock_fdo.call_args_list[0][1]['expected_attrs'])
 
-    @mock.patch('nova.db.instance_extra_update_by_uuid')
-    @mock.patch('nova.db.instance_update_and_get_original')
+    @mock.patch('nova.db.api.instance_extra_update_by_uuid')
+    @mock.patch('nova.db.api.instance_update_and_get_original')
     @mock.patch.object(instance.Instance, '_from_db_object')
     def test_save_updates_numa_topology(self, mock_fdo, mock_update,
             mock_extra_update):
@@ -604,7 +627,7 @@ class _TestInstanceObject(object):
         mock_extra_update.assert_called_once_with(
                 self.context, inst.uuid, {'numa_topology': None})
 
-    @mock.patch('nova.db.instance_extra_update_by_uuid')
+    @mock.patch('nova.db.api.instance_extra_update_by_uuid')
     def test_save_vcpu_model(self, mock_update):
         inst = fake_instance.fake_instance_obj(self.context)
         inst.vcpu_model = test_vcpu_model.fake_vcpumodel
@@ -624,7 +647,7 @@ class _TestInstanceObject(object):
         mock_update.assert_called_once_with(
             self.context, inst.uuid, {'vcpu_model': None})
 
-    @mock.patch('nova.db.instance_extra_update_by_uuid')
+    @mock.patch('nova.db.api.instance_extra_update_by_uuid')
     def test_save_migration_context_model(self, mock_update):
         inst = fake_instance.fake_instance_obj(self.context)
         inst.migration_context = test_mig_ctxt.get_fake_migration_context_obj(
@@ -650,11 +673,12 @@ class _TestInstanceObject(object):
         inst = objects.Instance(context=self.context,
                                 flavor=objects.Flavor())
         inst.obj_reset_changes()
-        with mock.patch('nova.db.instance_extra_update_by_uuid') as mock_upd:
+        with mock.patch(
+                'nova.db.api.instance_extra_update_by_uuid') as mock_upd:
             inst.save()
             self.assertFalse(mock_upd.called)
 
-    @mock.patch('nova.db.instance_extra_update_by_uuid')
+    @mock.patch('nova.db.api.instance_extra_update_by_uuid')
     def test_save_multiple_extras_updates_once(self, mock_update):
         inst = fake_instance.fake_instance_obj(self.context)
         inst.numa_topology = None
@@ -972,7 +996,7 @@ class _TestInstanceObject(object):
         mock_fault_get.assert_called_once_with(self.context, [fake_uuid])
 
     @mock.patch('nova.objects.EC2Ids.get_by_instance')
-    @mock.patch('nova.db.instance_get_by_uuid')
+    @mock.patch('nova.db.api.instance_get_by_uuid')
     def test_with_ec2_ids(self, mock_get, mock_ec2):
         fake_inst = dict(self.fake_instance)
         fake_uuid = fake_inst['uuid']
@@ -986,7 +1010,7 @@ class _TestInstanceObject(object):
 
         self.assertEqual(fake_ec2_ids.instance_id, inst.ec2_ids.instance_id)
 
-    @mock.patch('nova.db.instance_get_by_uuid')
+    @mock.patch('nova.db.api.instance_get_by_uuid')
     def test_with_image_meta(self, mock_get):
         fake_inst = dict(self.fake_instance)
         mock_get.return_value = fake_inst
@@ -1028,6 +1052,7 @@ class _TestInstanceObject(object):
                     'numa_topology': None,
                     'pci_requests': None,
                     'device_metadata': None,
+                    'trusted_certs': None,
                 }}
         fake_inst = fake_instance.fake_db_instance(**vals)
         mock_create.return_value = fake_inst
@@ -1057,6 +1082,7 @@ class _TestInstanceObject(object):
                     'numa_topology': None,
                     'pci_requests': None,
                     'device_metadata': None,
+                    'trusted_certs': None,
                 }}
         fake_inst = fake_instance.fake_db_instance(**vals)
         mock_create.return_value = fake_inst
@@ -1072,7 +1098,9 @@ class _TestInstanceObject(object):
         extras = {'vcpu_model': None,
                   'numa_topology': None,
                   'pci_requests': None,
-                  'device_metadata': None}
+                  'device_metadata': None,
+                  'trusted_certs': None,
+                  }
         mock_create.return_value = self.fake_instance
         inst = objects.Instance(context=self.context)
         inst.create()
@@ -1108,6 +1136,7 @@ class _TestInstanceObject(object):
                     objects.InstancePCIRequest(count=123,
                                                spec=[])]),
             vcpu_model=test_vcpu_model.fake_vcpumodel,
+            trusted_certs=objects.TrustedCerts(ids=['123foo']),
             )
         inst.create()
         self.assertIsNotNone(inst.numa_topology)
@@ -1124,6 +1153,7 @@ class _TestInstanceObject(object):
         vcpu_model = objects.VirtCPUModel.get_by_instance_uuid(
             self.context, inst.uuid)
         self.assertEqual('fake-model', vcpu_model.model)
+        self.assertEqual(['123foo'], inst.trusted_certs.ids)
 
     def test_recreate_fails(self):
         inst = objects.Instance(context=self.context,
@@ -1161,6 +1191,7 @@ class _TestInstanceObject(object):
                                 'numa_topology': None,
                                 'pci_requests': None,
                                 'device_metadata': None,
+                                'trusted_certs': None,
                             },
                             })
 
@@ -1281,7 +1312,7 @@ class _TestInstanceObject(object):
                              expected_attrs=['security_groups'])
         self.assertEqual([], inst.security_groups.objects)
 
-    @mock.patch('nova.db.instance_extra_get_by_instance_uuid',
+    @mock.patch('nova.db.api.instance_extra_get_by_instance_uuid',
                 return_value=None)
     def test_from_db_object_no_extra_db_calls(self, mock_get):
         db_inst = fake_instance.fake_db_instance()
@@ -1419,7 +1450,7 @@ class _TestInstanceObject(object):
         inst.migration_context.instance_uuid = inst.uuid
         inst.migration_context.id = 7
         with mock.patch(
-                'nova.db.instance_extra_update_by_uuid') as update_extra:
+                'nova.db.api.instance_extra_update_by_uuid') as update_extra:
             inst.drop_migration_context()
             self.assertIsNone(inst.migration_context)
             update_extra.assert_called_once_with(self.context, inst.uuid,
@@ -1489,7 +1520,19 @@ class _TestInstanceObject(object):
         inst = instance.Instance(context=self.context, uuid=uuids.instance)
         inst.metadata
 
-    @mock.patch('nova.db.instance_fault_get_by_instance_uuids')
+    @mock.patch.object(objects.Instance, 'get_by_uuid')
+    def test_load_something_unspecial(self, mock_get):
+        inst2 = objects.Instance(vm_state=vm_states.ACTIVE,
+                                 task_state=task_states.SCHEDULING)
+        mock_get.return_value = inst2
+        inst = instance.Instance(context=self.context, uuid=uuids.instance)
+        self.assertEqual(vm_states.ACTIVE, inst.vm_state)
+        self.assertEqual(task_states.SCHEDULING, inst.task_state)
+        mock_get.assert_called_once_with(self.context,
+                                         uuid=uuids.instance,
+                                         expected_attrs=['vm_state'])
+
+    @mock.patch('nova.db.api.instance_fault_get_by_instance_uuids')
     def test_load_fault(self, mock_get):
         fake_fault = test_instance_fault.fake_faults['fake-uuid'][0]
         mock_get.return_value = {uuids.load_fault_instance: [fake_fault]}
@@ -1765,7 +1808,7 @@ class _TestInstanceListObject(object):
                                              type_id='bar')
 
     @mock.patch('nova.objects.instance._expected_cols')
-    @mock.patch('nova.db.instance_get_all')
+    @mock.patch('nova.db.api.instance_get_all')
     def test_get_all(self, mock_get_all, mock_exp):
         fakes = [self.fake_instance(1), self.fake_instance(2)]
         mock_get_all.return_value = fakes
@@ -1943,19 +1986,14 @@ class _TestInstanceListObject(object):
         self.assertEqual(2, len(instances))
         self.assertEqual([1, 2], [x.id for x in instances])
 
-    @mock.patch('nova.db.instance_get_all_by_host')
+    @mock.patch('nova.db.api.instance_get_all_uuids_by_host')
     def test_get_uuids_by_host(self, mock_get_all):
-        fake_instances = [
-            fake_instance.fake_db_instance(id=1),
-            fake_instance.fake_db_instance(id=2),
-            ]
+        fake_instances = [uuids.inst1, uuids.inst2]
         mock_get_all.return_value = fake_instances
-        expected_uuids = [inst['uuid'] for inst in fake_instances]
         actual_uuids = objects.InstanceList.get_uuids_by_host(
             self.context, 'b')
-        self.assertEqual(expected_uuids, actual_uuids)
-        mock_get_all.assert_called_once_with(self.context, 'b',
-                                             columns_to_join=[])
+        self.assertEqual(fake_instances, actual_uuids)
+        mock_get_all.assert_called_once_with(self.context, 'b')
 
 
 class TestInstanceListObject(test_objects._LocalTest,

@@ -22,12 +22,12 @@ Host Aggregates
 Host aggregates can be regarded as a mechanism to further partition an
 availability zone; while availability zones are visible to users, host
 aggregates are only visible to administrators.  Host aggregates started out as
-a way to use Xen hypervisor resource pools, but has been generalized to provide
+a way to use Xen hypervisor resource pools, but have been generalized to provide
 a mechanism to allow administrators to assign key-value pairs to groups of
 machines.  Each node can have multiple aggregates, each aggregate can have
 multiple key-value pairs, and the same key-value pair can be assigned to
-multiple aggregate.  This information can be used in the scheduler to enable
-advanced scheduling, to set up xen hypervisor resources pools or to define
+multiple aggregates.  This information can be used in the scheduler to enable
+advanced scheduling, to set up Xen hypervisor resource pools or to define
 logical groups for migration.  For more information, including an example of
 associating a group of hosts to a flavor, see :ref:`host-aggregates`.
 
@@ -56,7 +56,7 @@ between aggregates and availability zones:
   list of availability zones, they have no way to know whether the default
   availability zone name (currently *nova*) is provided because an host
   belongs to an aggregate whose AZ metadata key is set to *nova*, or because
-  there are at least one host belonging to no aggregate. Consequently, it is
+  there is at least one host not belonging to any aggregate. Consequently, it is
   highly recommended for users to never ever ask for booting an instance by
   specifying an explicit AZ named *nova* and for operators to never set the
   AZ metadata for an aggregate to *nova*. That leads to some problems
@@ -65,15 +65,12 @@ between aggregates and availability zones:
   moved to another aggregate or when the user would like to migrate the
   instance.
 
-.. note:: Availablity zone name must NOT contain ':' since it is used by admin
+.. note:: Availability zone name must NOT contain ':' since it is used by admin
   users to specify hosts where instances are launched in server creation.
   See :doc:`Select hosts where instances are launched </admin/availability-zones>` for more detail.
 
-Xen Pool Host Aggregates
-------------------------
-Originally all aggregates were Xen resource pools, now an aggregate can be set up as a resource pool by giving the aggregate the correct key-value pair.
-
-You can use aggregates for XenServer resource pools when you have multiple compute nodes installed (only XenServer/XCP via xenapi driver is currently supported), and you want to leverage the capabilities of the underlying hypervisor resource pools. For example, you want to enable VM live migration (i.e. VM migration within the pool) or enable host maintenance with zero-downtime for guest instances. Please, note that VM migration across pools (i.e. storage migration) is not yet supported in XenServer/XCP, but will be added when available. Bear in mind that the two migration techniques are not mutually exclusive and can be used in combination for a higher level of flexibility in your cloud management.
+There is a nice educational video about availability zones from the Rocky
+summit which can be found here: https://www.openstack.org/videos/vancouver-2018/curse-your-bones-availability-zones-1
 
 Design
 ------
@@ -94,13 +91,13 @@ The OSAPI Admin API is extended to support the following operations:
 
   * list all hosts by service
 
-    * It has been depricated since microversion 2.43. Use `list hypervisors` instead.
+    * It has been deprecated since microversion 2.43. Use `list hypervisors` instead.
   * start host maintenance (or evacuate-host): disallow a host to serve API requests and migrate instances to other hosts of the aggregate
 
-    * It has been depricated since microversion 2.43. Use `disable service` instead.
-  * stop host maintenance: (or rebalance-host): put the host back into operational mode, migrating instances back onto that host
+    * It has been deprecated since microversion 2.43. Use `disable service` instead.
+  * stop host maintenance (or rebalance-host): put the host back into operational mode, migrating instances back onto that host
 
-    * It has been depricated since microversion 2.43. Use `enable service` instead.
+    * It has been deprecated since microversion 2.43. Use `enable service` instead.
 
 * Hypervisors
 

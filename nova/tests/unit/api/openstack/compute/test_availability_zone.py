@@ -16,14 +16,14 @@ import datetime
 
 import iso8601
 import mock
-from oslo_config import cfg
+from oslo_utils.fixture import uuidsentinel
 
 from nova.api.openstack.compute import availability_zone as az_v21
 from nova.api.openstack.compute import servers as servers_v21
 from nova import availability_zones
 from nova.compute import api as compute_api
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import objects
 from nova import test
@@ -31,10 +31,8 @@ from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit.image import fake
 from nova.tests.unit import matchers
 from nova.tests.unit.objects import test_service
-from nova.tests import uuidsentinel
 
 
-CONF = cfg.CONF
 FAKE_UUID = fakes.FAKE_UUID
 
 
@@ -85,7 +83,7 @@ class AvailabilityZoneApiTestV21(test.NoDBTestCase):
         super(AvailabilityZoneApiTestV21, self).setUp()
         availability_zones.reset_cache()
         fakes.stub_out_nw_api(self)
-        self.stub_out('nova.db.service_get_all', fake_service_get_all)
+        self.stub_out('nova.db.api.service_get_all', fake_service_get_all)
         self.stub_out('nova.availability_zones.set_availability_zones',
                       lambda c, services: services)
         self.stub_out('nova.servicegroup.API.service_is_up',
@@ -170,6 +168,8 @@ class ServersControllerCreateTestV21(test.TestCase):
         super(ServersControllerCreateTestV21, self).setUp()
 
         self.instance_cache_num = 0
+        # Neutron security groups are tested in test_neutron_security_groups.py
+        self.flags(use_neutron=False)
         fakes.stub_out_nw_api(self)
         self._set_up_controller()
 

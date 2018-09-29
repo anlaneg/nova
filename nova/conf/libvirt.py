@@ -23,6 +23,8 @@ import itertools
 
 from oslo_config import cfg
 
+from oslo_config import types
+
 from nova.conf import paths
 
 
@@ -152,13 +154,13 @@ root user is available, the instance won't be launched and an error is thrown.
 Be aware that the injection is *not* possible when the instance gets launched
 from a volume.
 
+*Linux* distribution guest only.
+
 Possible values:
 
 * True: Allows the injection.
-* False (default): Disallows the injection. Any via the REST API provided
-admin password will be silently ignored.
-
-*Linux* distribution guest only.
+* False: Disallows the injection. Any via the REST API provided admin password
+  will be silently ignored.
 
 Related options:
 
@@ -235,6 +237,7 @@ and/or SPICE is enabled. If the node doesn't support a graphical framebuffer,
 then it is valid to set this to False.
 
 Related options:
+
 * ``[vnc]enabled``: If VNC is enabled, ``use_usb_tablet`` will have an effect.
 * ``[spice]enabled`` + ``[spice].agent_enabled``: If SPICE is enabled and the
   spice agent is disabled, the config value of ``use_usb_tablet`` will have
@@ -394,7 +397,10 @@ Related options:
     cfg.IntOpt('live_migration_progress_timeout',
                default=0,
                deprecated_for_removal=True,
-               deprecated_reason="Serious bugs found in this feature.",
+               deprecated_reason="""
+Serious bugs found in this feature, see
+https://bugs.launchpad.net/nova/+bug/1644248 for details.
+""",
                mutable=True,
                help="""
 Time to wait, in seconds, for migration to make forward progress in
@@ -498,16 +504,15 @@ Possible values:
 * ``host-passthrough``: Use the host CPU model exactly
 * ``custom``: Use a named CPU model
 * ``none``: Don't set a specific CPU model. For instances with
-``virt_type`` as KVM/QEMU, the default CPU model from QEMU will be used,
-which provides a basic set of CPU features that are compatible with most
-hosts.
+  ``virt_type`` as KVM/QEMU, the default CPU model from QEMU will be used,
+  which provides a basic set of CPU features that are compatible with most
+  hosts.
 
 Related options:
 
 * ``cpu_model``: This should be set ONLY when ``cpu_mode`` is set to
-``custom``. Otherwise, it would result in an error and the instance
-launch will fail.
-
+  ``custom``. Otherwise, it would result in an error and the instance launch
+  will fail.
 """),
     cfg.StrOpt('cpu_model',
                help="""
@@ -520,10 +525,78 @@ Possible values:
 Related options:
 
 * ``cpu_mode``: This should be set to ``custom`` ONLY when you want to
-configure (via ``cpu_model``) a specific named CPU model.  Otherwise, it
-would result in an error and the instance launch will fail.
-
+  configure (via ``cpu_model``) a specific named CPU model.  Otherwise, it
+  would result in an error and the instance launch will fail.
 * ``virt_type``: Only the virtualization types ``kvm`` and ``qemu`` use this.
+"""),
+    cfg.ListOpt(
+        'cpu_model_extra_flags',
+        item_type=types.String(
+            ignore_case=True,
+        ),
+        default=[],
+        help="""
+This allows specifying granular CPU feature flags when configuring CPU
+models.  For example, to explicitly specify the ``pcid``
+(Process-Context ID, an Intel processor feature -- which is now required
+to address the guest performance degradation as a result of applying the
+"Meltdown" CVE fixes to certain Intel CPU models) flag to the
+"IvyBridge" virtual CPU model::
+
+    [libvirt]
+    cpu_mode = custom
+    cpu_model = IvyBridge
+    cpu_model_extra_flags = pcid
+
+To specify multiple CPU flags (e.g. the Intel ``VMX`` to expose the
+virtualization extensions to the guest, or ``pdpe1gb`` to configure 1GB
+huge pages for CPU models that do not provide it)::
+
+    [libvirt]
+    cpu_mode = custom
+    cpu_model = Haswell-noTSX-IBRS
+    cpu_model_extra_flags = PCID, VMX, pdpe1gb
+
+As it can be noticed from above, the ``cpu_model_extra_flags`` config
+attribute is case insensitive.  And specifying extra flags is valid in
+combination with all the three possible values for ``cpu_mode``:
+``custom`` (this also requires an explicit ``cpu_model`` to be
+specified), ``host-model``, or ``host-passthrough``.  A valid example
+for allowing extra CPU flags even for ``host-passthrough`` mode is that
+sometimes QEMU may disable certain CPU features -- e.g. Intel's
+"invtsc", Invariable Time Stamp Counter, CPU flag.  And if you need to
+expose that CPU flag to the Nova instance, the you need to explicitly
+ask for it.
+
+The possible values for ``cpu_model_extra_flags`` depends on the CPU
+model in use.  Refer to ``/usr/share/libvirt/cpu_map.xml`` possible CPU
+feature flags for a given CPU model.
+
+Note that when using this config attribute to set the 'PCID' CPU flag
+with the ``custom`` CPU mode, not all virtual (i.e. libvirt / QEMU) CPU
+models need it:
+
+* The only virtual CPU models that include the 'PCID' capability are
+  Intel "Haswell", "Broadwell", and "Skylake" variants.
+
+* The libvirt / QEMU CPU models "Nehalem", "Westmere", "SandyBridge",
+  and "IvyBridge" will _not_ expose the 'PCID' capability by default,
+  even if the host CPUs by the same name include it.  I.e.  'PCID' needs
+  to be explicitly specified when using the said virtual CPU models.
+
+The libvirt driver's default CPU mode, ``host-model``, will do the right
+thing with respect to handling 'PCID' CPU flag for the guest --
+*assuming* you are running updated processor microcode, host and guest
+kernel, libvirt, and QEMU.  The other mode, ``host-passthrough``, checks
+if 'PCID' is available in the hardware, and if so directly passes it
+through to the Nova guests.  Thus, in context of 'PCID', with either of
+these CPU modes (``host-model`` or ``host-passthrough``), there is no
+need to use the ``cpu_model_extra_flags``.
+
+Related options:
+
+* cpu_mode
+* cpu_model
 """),
     cfg.StrOpt('snapshots_directory',
                default='$instances_path/snapshots',
@@ -578,6 +651,10 @@ Possible cache modes:
   is not protected in a power failure. As a result, this caching mode is
   recommended only for temporary data where potential data loss is not a
   concern.
+  NOTE: Certain backend disk mechanisms may provide safe writeback cache
+  semantics. Specifically those that bypass the host page cache, such as
+  QEMU's integrated RBD driver. Ceph documentation recommends setting this
+  to writeback for maximum performance while maintaining data safety.
 * directsync: Like "writethrough", but it bypasses the host page cache.
 * unsafe: Caching mode of unsafe ignores cache transfer operations
   completely. As its name implies, this caching mode should be used only for
@@ -586,9 +663,19 @@ Possible cache modes:
   mode in production environments.
 """),
     cfg.StrOpt('rng_dev_path',
-               help='A path to a device that will be used as source of '
-                    'entropy on the host. Permitted options are: '
-                    '/dev/random or /dev/hwrng'),
+               default='/dev/urandom',
+               help="""
+The path to an RNG (Random Number Generator) device that will be used as
+the source of entropy on the host.  Since libvirt 1.3.4, any path (that
+returns random numbers when read) is accepted.  The recommended source
+of entropy is ``/dev/urandom`` -- it is non-blocking, therefore
+relatively fast; and avoids the limitations of ``/dev/random``, which is
+a legacy interface.  For more details (and comparision between different
+RNG sources), refer to the "Usage" section in the Linux kernel API
+documentation for ``[u]random``:
+http://man7.org/linux/man-pages/man4/urandom.4.html and
+http://man7.org/linux/man-pages/man7/random.7.html.
+"""),
     cfg.ListOpt('hw_machine_type',
                 help='For qemu or KVM guests, set this option to specify '
                      'a default machine type per host architecture. '
@@ -625,17 +712,29 @@ Possible cache modes:
     cfg.ListOpt('enabled_perf_events',
                default=[],
                help= """
-This is a performance event list which could be used as monitor. These events
-will be passed to libvirt domain xml while creating a new instances.
-Then event statistics data can be collected from libvirt.  The minimum
-libvirt version is 2.0.0. For more information about `Performance monitoring
-events`, refer https://libvirt.org/formatdomain.html#elementsPerf .
+This will allow you to specify a list of events to monitor low-level
+performance of guests, and collect related statsitics via the libvirt
+driver, which in turn uses the Linux kernel's `perf` infrastructure.
+With this config attribute set, Nova will generate libvirt guest XML to
+monitor the specified events.  For more information, refer to the
+"Performance monitoring events" section here:
+https://libvirt.org/formatdomain.html#elementsPerf.  And here:
+https://libvirt.org/html/libvirt-libvirt-domain.html -- look for
+``VIR_PERF_PARAM_*``
 
-Possible values:
-* A string list. For example: ``enabled_perf_events = cmt, mbml, mbmt``
-  The supported events list can be found in
-  https://libvirt.org/html/libvirt-libvirt-domain.html ,
-  which you may need to search key words ``VIR_PERF_PARAM_*``
+For example, to monitor the count of CPU cycles (total/elapsed) and the
+count of cache misses, enable them as follows::
+
+    [libvirt]
+    enabled_perf_events = cpu_clock, cache_misses
+
+Possible values: A string list.  The list of supported events can be
+found here: https://libvirt.org/formatdomain.html#elementsPerf.
+
+Note that support for Intel CMT events (`cmt`, `mbmbt`, `mbml`) is
+deprecated, and will be removed in the "Stein" release.  That's because
+the upstream Linux kernel (from 4.14 onwards) has deleted support for
+Intel CMT, because it is broken by design.
 """),
     cfg.IntOpt('num_pcie_ports',
                default=0,
@@ -655,6 +754,33 @@ More info: https://github.com/qemu/qemu/blob/master/docs/pcie.txt
 Due to QEMU limitations for aarch64/virt maximum value is set to '28'.
 
 Default value '0' moves calculating amount of ports to libvirt.
+"""),
+    cfg.IntOpt('file_backed_memory',
+               default=0,
+               min=0,
+               help="""
+Available capacity in MiB for file-backed memory.
+
+Set to 0 to disable file-backed memory.
+
+When enabled, instances will create memory files in the directory specified
+in ``/etc/libvirt/qemu.conf``'s ``memory_backing_dir`` option. The default
+location is ``/var/lib/libvirt/qemu/ram``.
+
+When enabled, the value defined for this option is reported as the node memory
+capacity. Compute node system memory will be used as a cache for file-backed
+memory, via the kernel's pagecache mechanism.
+
+.. note::
+   This feature is not compatible with hugepages.
+
+.. note::
+   This feature is not compatible with memory overcommit.
+
+Related options:
+
+* ``virt_type`` must be set to ``kvm`` or ``qemu``.
+* ``ram_allocation_ratio`` must be set to 1.0.
 """),
 ]
 
@@ -1080,6 +1206,45 @@ Related options:
 ),
 ]
 
+
+# The queue size requires value to be a power of two from [256, 1024]
+# range.
+# https://libvirt.org/formatdomain.html#elementsDriverBackendOptions
+QueueSizeType = types.Integer(choices=(256, 512, 1024))
+
+libvirt_virtio_queue_sizes = [
+    cfg.Opt('rx_queue_size',
+            type=QueueSizeType,
+            help="""
+Configure virtio rx queue size.
+
+This option is only usable for virtio-net device with vhost and
+vhost-user backend. Available only with QEMU/KVM. Requires libvirt
+v2.3 QEMU v2.7."""),
+    cfg.Opt('tx_queue_size',
+            type=QueueSizeType,
+            help="""
+Configure virtio tx queue size.
+
+This option is only usable for virtio-net device with vhost-user
+backend. Available only with QEMU/KVM. Requires libvirt v3.7 QEMU
+v2.10."""),
+
+]
+
+
+libvirt_volume_nvmeof_opts = [
+    cfg.IntOpt('num_nvme_discover_tries',
+               default=3,
+               help="""
+Number of times to rediscover NVMe target to find volume
+
+Nova provides support for block storage attaching to hosts via NVMe
+(Non-Volatile Memory Express). This option allows the user to specify the
+maximum number of retry attempts that can be made to discover the NVMe device.
+"""),
+]
+
 ALL_OPTS = list(itertools.chain(
     libvirt_general_opts,
     libvirt_imagebackend_opts,
@@ -1097,6 +1262,8 @@ ALL_OPTS = list(itertools.chain(
     libvirt_volume_smbfs_opts,
     libvirt_remotefs_opts,
     libvirt_volume_vzstorage_opts,
+    libvirt_virtio_queue_sizes,
+    libvirt_volume_nvmeof_opts,
 ))
 
 

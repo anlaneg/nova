@@ -57,32 +57,6 @@ Possible values:
         deprecated_group='DEFAULT',
         deprecated_name='default_notification_level',
         help="Default notification level for outgoing notifications."),
-
-    cfg.StrOpt(
-        'default_publisher_id',
-        default='$host',
-        deprecated_group='DEFAULT',
-        deprecated_for_removal=True,
-        deprecated_since='17.0.0',
-        deprecated_reason="""
-This option is only used when ``monkey_patch=True`` and
-``monkey_patch_modules`` is configured to specify the legacy notify_decorator.
-Since the monkey_patch and monkey_patch_modules options are deprecated, this
-option is also deprecated.
-""",
-        help="""
-Default publisher_id for outgoing notifications. If you consider routing
-notifications using different publisher, change this value accordingly.
-
-Possible values:
-
-* Defaults to the current hostname of this host, but it can be any valid
-  oslo.messaging publisher_id
-
-Related options:
-
-*  host - Hostname, FQDN or IP address of this host.
-"""),
     cfg.StrOpt(
         'notification_format',
         choices=['unversioned', 'versioned', 'both'],
@@ -94,9 +68,13 @@ Specifies which notification format shall be used by nova.
 The default value is fine for most deployments and rarely needs to be changed.
 This value can be set to 'versioned' once the infrastructure moves closer to
 consuming the newer format of notifications. After this occurs, this option
-will be removed (possibly in the "P" release).
+will be removed.
+
+Note that notifications can be completely disabled by setting ``driver=noop``
+in the ``[oslo_messaging_notifications]`` group.
 
 Possible values:
+
 * unversioned: Only the legacy unversioned notifications are emitted.
 * versioned: Only the new versioned notifications are emitted.
 * both: Both the legacy unversioned and the new versioned notifications are

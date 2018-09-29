@@ -53,7 +53,7 @@ several key concepts:
    A collection of files used to create or rebuild a server. Operators
    provide a number of pre-built OS images by default. You may also
    create custom images from cloud servers you have launched. These
-   custom images are useful for backup purposes or for producing “gold”
+   custom images are useful for backup purposes or for producing "gold"
    server images if you plan to deploy a particular server configuration
    frequently.
 
@@ -78,8 +78,9 @@ several key concepts:
    is created it has some disk storage available, but that is considered
    ephemeral, as it is destroyed when the server is destroyed. A volume can be
    attached to a server, then later detached and used by another server.
-   Volumes are created and managed by the Cinder service, though the Nova API
-   can proxy some of these calls.
+   Volumes are created and managed by the Cinder service.
+   For additional info, see
+   :nova-doc:`Block device mapping <user/block-device-mapping.html>`
 
 -  **Quotas**
 
@@ -87,7 +88,8 @@ several key concepts:
    Quotas can be used to limit the number of servers a tenant creates, or the
    amount of disk space consumed, so that no one tenant can overwhelm the
    system and prevent normal operation for others. Changing quotas is an
-   administrator-level action.
+   administrator-level action. For additional info,
+   see :nova-doc:`Quotas <user/quotas.html>`
 
 -  **Rate Limiting**
 
@@ -174,15 +176,15 @@ on compute hosts rather than servers.
      This service handles networking of virtual servers. It is no longer under
      active development, and is being replaced by Neutron.
 
-   - **nova-ec2 (deprecated)**
-
-     This service provides AWS EC2 API compatibility.
-
-   - **nova-consoleauth**
+   - **nova-consoleauth (deprecated)**
 
      This service provides authorization for compute instances consoles.
 
 -  **Services Actions**
+
+   .. note::
+      The services actions described in this section apply only to
+      **nova-compute** services.
 
    - **enable, disable, disable-log-reason**
 
@@ -195,14 +197,27 @@ on compute hosts rather than servers.
 
    - **forced-down**
 
-     This action allows you set the state of service down immediately. Actually
-     Nova only provides the health monitor of service status, there isn't any
-     guarantee about health status of other parts of infrastructure, like the
-     health status of data network, storage network and other components. The
-     more complete health monitor of infrastructure is provided by external
-     system normally. An external health monitor system can mark the service
-     down for notifying the fault.
-     `(This action is enabled in Microversion 2.11)`
+     .. note::
+       This action is enabled in microversion 2.11.
+
+     This action allows you set the state of service down immediately. Nova
+     only provides a very basic health monitor of service status, there isn't
+     any guarantee about health status of other parts of infrastructure, like
+     the health status of data network, storage network and other
+     components.
+
+     If you have a more extensive health monitoring system external to Nova,
+     and know that the service in question is dead (and disconnected from the
+     network), this can be used to tell the rest of Nova it can trust that this
+     service is never coming back, and allow actions such as evacuate.
+
+     .. warning::
+
+        This must *only* be used if you have fully fenced the service in
+        question, and that it can never send updates to the rest of the
+        system. This can be done by powering off the node or completely
+        isolating its networking. If you force-down a service that is not
+        fenced you can corrupt the VMs that were running on that host.
 
 -  **Hosts**
 
@@ -219,6 +234,9 @@ on compute hosts rather than servers.
    servers on the hosts that can best fit them.
 
 -  **Host Actions**
+
+   .. note::
+     These APIs are deprecated in Microversion 2.43.
 
    A *host action* is one that affects the physical host machine, as opposed to
    actions that only affect the virtual servers running on that machine. There
@@ -247,8 +265,7 @@ on compute hosts rather than servers.
 
 -  **Aggregates**
 
-   See `Aggregates developer information
-   <https://docs.openstack.org/nova/latest/user/aggregates.html>`_.
+   See :nova-doc:`Aggregates Developer Information <user/aggregates.html>`.
 
 -  **Migrations**
 

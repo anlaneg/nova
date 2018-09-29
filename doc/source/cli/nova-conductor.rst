@@ -7,9 +7,7 @@ Server for the Nova Conductor
 -----------------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-11-16
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
@@ -23,8 +21,8 @@ Synopsis
 Description
 ===========
 
-`nova-conductor` is a server daemon that serves the Nova Conductor service,
-which provides coordination and database query support for Nova.
+:program:`nova-conductor` is a server daemon that serves the Nova Conductor
+service, which provides coordination and database query support for nova.
 
 Options
 =======
@@ -39,7 +37,7 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

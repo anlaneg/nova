@@ -24,18 +24,20 @@ import netifaces
 from oslo_concurrency import processutils
 from oslo_serialization import jsonutils
 from oslo_utils import fileutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
 import nova.conf
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova.network import driver
 from nova.network import linux_net
+from nova.network import linux_utils as linux_net_utils
 from nova import objects
 from nova import test
-from nova.tests import uuidsentinel as uuids
 from nova import utils
+
 
 CONF = nova.conf.CONF
 
@@ -366,9 +368,10 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
         def get_instance(_context, instance_id):
             return instances[instance_id]
 
-        self.stub_out('nova.db.virtual_interface_get_by_instance', get_vifs)
-        self.stub_out('nova.db.instance_get', get_instance)
-        self.stub_out('nova.db.network_get_associated_fixed_ips',
+        self.stub_out('nova.db.api.virtual_interface_get_by_instance',
+                      get_vifs)
+        self.stub_out('nova.db.api.instance_get', get_instance)
+        self.stub_out('nova.db.api.network_get_associated_fixed_ips',
                       get_associated)
 
     @mock.patch.object(linux_net.iptables_manager.ipv4['nat'], 'add_rule')
@@ -609,7 +612,7 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
                      "share_address": False}, "fakemac")
         self.assertEqual(2, mock_add_rule.call_count)
 
-    @mock.patch.object(linux_net, 'device_exists')
+    @mock.patch('nova.network.linux_utils.device_exists')
     @mock.patch.object(utils, 'execute')
     def test_linux_ovs_driver_plug_exception(self, mock_execute,
                                              mock_device_exists):
@@ -1140,7 +1143,8 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
                 ]
             }
         with test.nested(
-            mock.patch.object(linux_net, 'device_exists', return_value=True),
+            mock.patch('nova.network.linux_utils.device_exists',
+                       return_value=True),
             mock.patch.object(linux_net, '_execute', return_value=('', '')),
             mock.patch.object(netifaces, 'ifaddresses')
         ) as (device_exists, _execute, ifaddresses):
@@ -1159,7 +1163,8 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
                 return ('', '')
 
         with test.nested(
-            mock.patch.object(linux_net, 'device_exists', return_value=True),
+            mock.patch('nova.network.linux_utils.device_exists',
+                       return_value=True),
             mock.patch.object(linux_net, '_execute', fake_execute)
         ) as (device_exists, _):
             driver = linux_net.LinuxBridgeInterfaceDriver()
@@ -1176,22 +1181,17 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
                 return ('', '')
 
         with test.nested(
-            mock.patch.object(linux_net, 'device_exists', return_value=False),
+            mock.patch('nova.network.linux_utils.device_exists',
+                       return_value=False),
             mock.patch.object(linux_net, '_execute', fake_execute)
         ) as (device_exists, _):
             driver = linux_net.LinuxBridgeInterfaceDriver()
             driver.ensure_bridge('brq1234567-89', '')
             device_exists.assert_called_once_with('brq1234567-89')
 
-    def test_set_device_mtu_default(self):
-        calls = []
-        with mock.patch.object(utils, 'execute', return_value=('', '')) as ex:
-            linux_net._set_device_mtu('fake-dev')
-            ex.assert_has_calls(calls)
-
     def _create_veth_pair(self, calls):
         with mock.patch.object(utils, 'execute', return_value=('', '')) as ex:
-            linux_net._create_veth_pair('fake-dev1', 'fake-dev2')
+            linux_net_utils.create_veth_pair('fake-dev1', 'fake-dev2')
             ex.assert_has_calls(calls)
 
     def test_create_veth_pair(self):
@@ -1303,8 +1303,8 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
         self.assertEqual(expected_execute_args, mock_execute.mock_calls)
 
     @mock.patch.object(linux_net, '_execute')
-    @mock.patch.object(linux_net, 'device_exists', return_value=False)
-    @mock.patch.object(linux_net, '_set_device_mtu')
+    @mock.patch('nova.network.linux_utils.device_exists', return_value=False)
+    @mock.patch('nova.network.linux_utils.set_device_mtu')
     def test_ensure_vlan(self, mock_set_device_mtu, mock_device_exists,
                          mock_execute):
         interface = linux_net.LinuxBridgeInterfaceDriver.ensure_vlan(
@@ -1324,8 +1324,8 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
         mock_set_device_mtu.assert_called_once_with('vlan_name', 'MTU')
 
     @mock.patch.object(linux_net, '_execute')
-    @mock.patch.object(linux_net, 'device_exists', return_value=True)
-    @mock.patch.object(linux_net, '_set_device_mtu')
+    @mock.patch('nova.network.linux_utils.device_exists', return_value=True)
+    @mock.patch('nova.network.linux_utils.set_device_mtu')
     def test_ensure_vlan_device_exists(self, mock_set_device_mtu,
                                        mock_device_exists, mock_execute):
         interface = linux_net.LinuxBridgeInterfaceDriver.ensure_vlan(1, 'eth0')
@@ -1342,73 +1342,24 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
                           linux_net.LinuxBridgeInterfaceDriver.remove_bridge,
                           'fake-bridge')
 
+    @mock.patch('nova.pci.utils.get_vf_num_by_pci_address')
+    @mock.patch('nova.pci.utils.get_ifname_by_pci_address')
     @mock.patch('nova.utils.execute')
-    def test_create_tap_dev(self, mock_execute):
-        linux_net.create_tap_dev('tap42')
+    def test_set_vf_trusted_on(self, mexecute, mget_ifname, mget_vfnum):
+        mget_ifname.return_value = 'eth0'
+        mget_vfnum.return_value = 2
+        linux_net.set_vf_trusted('PCI_ADDR', True)
+        mexecute.assert_called_once_with(
+            'ip', 'link', 'set', 'eth0', 'vf', 2, 'trust', 'on',
+            check_exit_code=[0, 2, 254], run_as_root=True)
 
-        mock_execute.assert_has_calls([
-            mock.call('ip', 'tuntap', 'add', 'tap42', 'mode', 'tap',
-                      run_as_root=True, check_exit_code=[0, 2, 254]),
-            mock.call('ip', 'link', 'set', 'tap42', 'up',
-                      run_as_root=True, check_exit_code=[0, 2, 254])
-        ])
-
-    @mock.patch('os.path.exists', return_value=True)
+    @mock.patch('nova.pci.utils.get_vf_num_by_pci_address')
+    @mock.patch('nova.pci.utils.get_ifname_by_pci_address')
     @mock.patch('nova.utils.execute')
-    def test_create_tap_skipped_when_exists(self, mock_execute, mock_exists):
-        linux_net.create_tap_dev('tap42')
-
-        mock_exists.assert_called_once_with('/sys/class/net/tap42')
-        mock_execute.assert_not_called()
-
-    @mock.patch('nova.utils.execute')
-    def test_create_tap_dev_mac(self, mock_execute):
-        linux_net.create_tap_dev('tap42', '00:11:22:33:44:55')
-
-        mock_execute.assert_has_calls([
-            mock.call('ip', 'tuntap', 'add', 'tap42', 'mode', 'tap',
-                      run_as_root=True, check_exit_code=[0, 2, 254]),
-            mock.call('ip', 'link', 'set', 'tap42',
-                      'address', '00:11:22:33:44:55',
-                      run_as_root=True, check_exit_code=[0, 2, 254]),
-            mock.call('ip', 'link', 'set', 'tap42', 'up',
-                      run_as_root=True, check_exit_code=[0, 2, 254])
-        ])
-
-    @mock.patch('nova.utils.execute')
-    def test_create_tap_dev_fallback_to_tunctl(self, mock_execute):
-        # ip failed, fall back to tunctl
-        mock_execute.side_effect = [processutils.ProcessExecutionError, 0, 0]
-
-        linux_net.create_tap_dev('tap42')
-
-        mock_execute.assert_has_calls([
-            mock.call('ip', 'tuntap', 'add', 'tap42', 'mode', 'tap',
-                      run_as_root=True, check_exit_code=[0, 2, 254]),
-            mock.call('tunctl', '-b', '-t', 'tap42',
-                      run_as_root=True),
-            mock.call('ip', 'link', 'set', 'tap42', 'up',
-                      run_as_root=True, check_exit_code=[0, 2, 254])
-        ])
-
-    @mock.patch('nova.utils.execute')
-    def test_create_tap_dev_multiqueue(self, mock_execute):
-        linux_net.create_tap_dev('tap42', multiqueue=True)
-
-        mock_execute.assert_has_calls([
-            mock.call('ip', 'tuntap', 'add', 'tap42', 'mode', 'tap',
-                      'multi_queue',
-                      run_as_root=True, check_exit_code=[0, 2, 254]),
-            mock.call('ip', 'link', 'set', 'tap42', 'up',
-                      run_as_root=True, check_exit_code=[0, 2, 254])
-        ])
-
-    @mock.patch('nova.utils.execute')
-    def test_create_tap_dev_multiqueue_tunctl_raises(self, mock_execute):
-        # if creation of a tap by the means of ip command fails,
-        # create_tap_dev() will try to do that by the means of tunctl
-        mock_execute.side_effect = processutils.ProcessExecutionError
-        # but tunctl can't create multiqueue taps, so the failure is expected
-        self.assertRaises(processutils.ProcessExecutionError,
-                          linux_net.create_tap_dev,
-                          'tap42', multiqueue=True)
+    def test_set_vf_trusted_off(self, mexecute, mget_ifname, mget_vfnum):
+        mget_ifname.return_value = 'eth0'
+        mget_vfnum.return_value = 2
+        linux_net.set_vf_trusted('PCI_ADDR', False)
+        mexecute.assert_called_once_with(
+            'ip', 'link', 'set', 'eth0', 'vf', 2, 'trust', 'off',
+            check_exit_code=[0, 2, 254], run_as_root=True)

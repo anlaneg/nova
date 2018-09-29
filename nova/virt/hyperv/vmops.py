@@ -94,6 +94,7 @@ class VMOps(object):
         self._metricsutils = utilsfactory.get_metricsutils()
         self._vhdutils = utilsfactory.get_vhdutils()
         self._hostutils = utilsfactory.get_hostutils()
+        self._migrutils = utilsfactory.get_migrationutils()
         self._pathutils = pathutils.PathUtils()
         self._volumeops = volumeops.VolumeOps()
         self._imagecache = imagecache.ImageCache()
@@ -286,6 +287,8 @@ class VMOps(object):
                 # waiting will occur after the instance is created.
                 self.create_instance(instance, network_info, root_device,
                                      block_device_info, vm_gen, image_meta)
+                # This is supported starting from OVS version 2.5
+                self.plug_vifs(instance, network_info)
 
             self._save_device_metadata(context, instance, block_device_info)
 
@@ -298,7 +301,12 @@ class VMOps(object):
 
                 self.attach_config_drive(instance, configdrive_path, vm_gen)
             self.set_boot_order(instance.name, vm_gen, block_device_info)
-            self.power_on(instance, network_info=network_info)
+            # vifs are already plugged in at this point. We waited on the vif
+            # plug event previously when we created the instance. Skip the
+            # plug vifs during power on in this case
+            self.power_on(instance,
+                          network_info=network_info,
+                          should_plug_vifs=False)
         except Exception:
             with excutils.save_and_reraise_exception():
                 self.destroy(instance, network_info, block_device_info)
@@ -731,9 +739,14 @@ class VMOps(object):
                 self._vmutils.stop_vm_jobs(instance_name)
                 self.power_off(instance)
                 self._vmutils.destroy_vm(instance_name)
+            elif self._migrutils.planned_vm_exists(instance_name):
+                self._migrutils.destroy_existing_planned_vm(instance_name)
             else:
                 LOG.debug("Instance not found", instance=instance)
 
+            # NOTE(claudiub): The vifs should be unplugged and the volumes
+            # should be disconnected even if the VM doesn't exist anymore,
+            # so they are not leaked.
             self.unplug_vifs(instance, network_info)
             self._volumeops.disconnect_volumes(block_device_info)
 
@@ -843,7 +856,8 @@ class VMOps(object):
             LOG.debug("Instance not found. Skipping power off",
                       instance=instance)
 
-    def power_on(self, instance, block_device_info=None, network_info=None):
+    def power_on(self, instance, block_device_info=None, network_info=None,
+                 should_plug_vifs=True):
         """Power on the specified instance."""
         LOG.debug("Power on instance", instance=instance)
 
@@ -851,8 +865,9 @@ class VMOps(object):
             self._volumeops.fix_instance_volume_disk_paths(instance.name,
                                                            block_device_info)
 
+        if should_plug_vifs:
+            self.plug_vifs(instance, network_info)
         self._set_vm_state(instance, os_win_const.HYPERV_VM_STATE_ENABLED)
-        self.plug_vifs(instance, network_info)
 
     def _set_vm_state(self, instance, req_state):
         instance_name = instance.name
