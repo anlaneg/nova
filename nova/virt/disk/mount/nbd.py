@@ -39,10 +39,12 @@ class NbdMount(api.Mount):
     """qemu-nbd support disk images."""
     mode = 'nbd'
 
+    #提取系统所有nbd设备
     def _detect_nbd_devices(self):
         """Detect nbd device files."""
         return filter(NBD_DEVICE_RE.match, os.listdir('/sys/block/'))
 
+    #获得未被占用的nbd设备
     def _find_unused(self, devices):
         for device in devices:
             if not os.path.exists(os.path.join('/sys/block/', device, 'pid')):
@@ -55,21 +57,26 @@ class NbdMount(api.Mount):
         return None
 
     def _allocate_nbd(self):
+        #检测nbd设备是否存在，如不存在，报nbd.ko未载入
         if not os.path.exists('/sys/block/nbd0'):
             LOG.error('nbd module not loaded')
             self.error = _('nbd unavailable: module not loaded')
             return None
 
         devices = self._detect_nbd_devices()
+        #将devices打乱
         random.shuffle(devices)
+        #自其中找出第一个未用的nbd device
         device = self._find_unused(devices)
         if not device:
             # really want to log this info, not raise
             self.error = _('No free nbd devices')
             return None
+        #返回找到的nbd设备
         return os.path.join('/dev', device)
 
     @utils.synchronized('nbd-allocation-lock')
+    #选用空闲的nbd设备，并加载self.image
     def _inner_get_dev(self):
         device = self._allocate_nbd()
         if not device:
@@ -80,6 +87,7 @@ class NbdMount(api.Mount):
         LOG.debug('Get nbd device %(dev)s for %(imgfile)s',
                   {'dev': device, 'imgfile': self.image.path})
         try:
+            #使nbd设备挂载self.image镜像对应的路径
             _out, err = nova.privsep.fs.nbd_connect(device, self.image.path)
         except processutils.ProcessExecutionError as exc:
             err = six.text_type(exc)
@@ -95,6 +103,7 @@ class NbdMount(api.Mount):
         for _i in range(CONF.timeout_nbd):
             if os.path.exists(pidfile):
                 self.device = device
+                #检测挂载成功，退出
                 break
             time.sleep(1)
         else:
@@ -116,10 +125,12 @@ class NbdMount(api.Mount):
         self.linked = True
         return True
 
+    #加载并返回对应的nbd设备
     def get_dev(self):
         """Retry requests for NBD devices."""
         return self._get_dev_retry_helper()
 
+    #断开连接
     def unget_dev(self):
         if not self.linked:
             return
