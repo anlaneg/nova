@@ -34,9 +34,6 @@ used.
 
 Other options are:
 
-* 'caching_scheduler' which aggressively caches the system state for better
-  individual scheduler performance at the risk of more retries when running
-  multiple schedulers. [DEPRECATED]
 * 'fake_scheduler' which is used for testing.
 
 Possible values:
@@ -44,7 +41,6 @@ Possible values:
 * Any of the drivers included in Nova:
 
   * filter_scheduler
-  * caching_scheduler
   * fake_scheduler
 
 * You may also set this to the entry point name of a custom scheduler driver,
@@ -62,8 +58,8 @@ Periodic task interval.
 
 This value controls how often (in seconds) to run periodic tasks in the
 scheduler. The specific tasks that are run for each period are determined by
-the particular scheduler being used. Currently the only in-tree scheduler
-driver that uses this option is the ``caching_scheduler``.
+the particular scheduler being used. Currently there are no in-tree scheduler
+driver that use this option.
 
 If this is larger than the nova-service 'service_down_time' setting, the
 ComputeFilter (if enabled) may think the compute service is down. As each
@@ -182,6 +178,12 @@ be the same as not finding any suitable hosts.
 Note that if you enable this flag, you can disable the (less efficient)
 AvailabilityZoneFilter in the scheduler.
 """),
+    cfg.BoolOpt("query_placement_for_image_type_support",
+                default=False,
+                help="""
+This setting causes the scheduler to ask placement only for compute
+hosts that support the ``disk_format`` of the image used in the request.
+"""),
 ]
 
 filter_scheduler_group = cfg.OptGroup(name="filter_scheduler",
@@ -237,7 +239,7 @@ Possible values:
         min=1,
         deprecated_group="DEFAULT",
         help="""
-Maximum number of instances that be active on a host.
+Maximum number of instances that can exist on a host.
 
 If you need to limit the number of instances on any given host, set this option
 to the maximum number of instances you want to allow. The NumInstancesFilter
@@ -246,8 +248,8 @@ instances as this option's value.
 
 This option is only used by the FilterScheduler and its subclasses; if you use
 a different scheduler, this option has no effect. Also note that this setting
-only affects scheduling if the 'NumInstancesFilter' or
-'AggregateNumInstancesFilter' filter is enabled.
+only affects scheduling if the ``NumInstancesFilter`` or
+``AggregateNumInstancesFilter`` filter is enabled.
 
 Possible values:
 
@@ -305,8 +307,10 @@ Related options:
 * enabled_filters
 """),
     cfg.ListOpt("enabled_filters",
+        # NOTE(artom) If we change the defaults here, we should also update
+        # Tempest's scheduler_enabled_filters to keep the default values in
+        # sync.
         default=[
-          "RetryFilter",
           "AvailabilityZoneFilter",
           "ComputeFilter",
           "ComputeCapabilitiesFilter",
@@ -468,32 +472,28 @@ Possible values:
 * A positive integer or float value, where the value corresponds to the
   multiplier ratio for this weigher.
 """),
-    # TODO(sfinucan): Add 'min' parameter and remove warning in 'affinity.py'
     cfg.FloatOpt("soft_affinity_weight_multiplier",
         default=1.0,
-        deprecated_group="DEFAULT",
+        min=0.0,
         help="""
 Multiplier used for weighing hosts for group soft-affinity.
 
 Possible values:
 
-* An integer or float value, where the value corresponds to weight multiplier
-  for hosts with group soft affinity. Only a positive value are meaningful, as
-  negative values would make this behave as a soft anti-affinity weigher.
+* A non-negative integer or float value, where the value corresponds to
+  weight multiplier for hosts with group soft affinity.
 """),
     cfg.FloatOpt(
         "soft_anti_affinity_weight_multiplier",
         default=1.0,
-        deprecated_group="DEFAULT",
+        min=0.0,
         help="""
 Multiplier used for weighing hosts for group soft-anti-affinity.
 
 Possible values:
 
-* An integer or float value, where the value corresponds to weight multiplier
-  for hosts with group soft anti-affinity. Only a positive value are
-  meaningful, as negative values would make this behave as a soft affinity
-  weigher.
+* A non-negative integer or float value, where the value corresponds to
+  weight multiplier for hosts with group soft anti-affinity.
 """),
     cfg.FloatOpt(
         "build_failure_weight_multiplier",

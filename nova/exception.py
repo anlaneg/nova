@@ -23,6 +23,7 @@ SHOULD include dedicated exception logging.
 """
 
 from oslo_log import log as logging
+import six
 
 import webob.exc
 from webob import util as woutil
@@ -77,15 +78,16 @@ class NovaException(Exception):
             except AttributeError:
                 pass
 
-        if not message:
-            try:
+        try:
+            if not message:
                 message = self.msg_fmt % kwargs
-
-            except Exception:
-                # NOTE(melwitt): This is done in a separate method so it can be
-                # monkey-patched during testing to make it a hard failure.
-                self._log_exception()
-                message = self.msg_fmt
+            else:
+                message = six.text_type(message)
+        except Exception:
+            # NOTE(melwitt): This is done in a separate method so it can be
+            # monkey-patched during testing to make it a hard failure.
+            self._log_exception()
+            message = self.msg_fmt
 
         self.message = message
         super(NovaException, self).__init__(message)
@@ -185,6 +187,10 @@ class Invalid(NovaException):
     code = 400
 
 
+class InvalidConfiguration(Invalid):
+    msg_fmt = _("Configuration is Invalid.")
+
+
 class InvalidBDM(Invalid):
     msg_fmt = _("Block Device Mapping is Invalid.")
 
@@ -242,6 +248,12 @@ class InvalidBDMVolumeNotBootable(InvalidBDM):
     msg_fmt = _("Block Device %(id)s is not bootable.")
 
 
+class TooManyDiskDevices(InvalidBDM):
+    msg_fmt = _('The maximum allowed number of disk devices (%(maximum)d) to '
+                'attach to a single instance has been exceeded.')
+    code = 403
+
+
 class InvalidAttribute(Invalid):
     msg_fmt = _("Attribute not supported: %(attr)s")
 
@@ -270,22 +282,27 @@ class MultiattachNotSupportedByVirtDriver(NovaException):
     code = 409
 
 
-class MultiattachSupportNotYetAvailable(NovaException):
-    # This exception indicates the deployment is not yet new enough to support
-    # multiattach volumes, so a 409 HTTPConflict response is generally used
-    # for handling this in the API.
-    msg_fmt = _("Multiattach volume support is not yet available.")
-    code = 409
-
-
 class MultiattachNotSupportedOldMicroversion(Invalid):
     msg_fmt = _('Multiattach volumes are only supported starting with '
                 'compute API version 2.60.')
 
 
+class VolumeTypeSupportNotYetAvailable(NovaException):
+    # This exception indicates the deployment is not yet new enough to support
+    # volume type, so a 409 HTTPConflict response is generally used
+    # for handling this in the API.
+    msg_fmt = _("Volume type support is not yet available.")
+    code = 409
+
+
 class MultiattachToShelvedNotSupported(Invalid):
     msg_fmt = _("Attaching multiattach volumes is not supported for "
                 "shelved-offloaded instances.")
+
+
+class MultiattachSwapVolumeNotSupported(Invalid):
+    msg_fmt = _('Swapping multi-attach volumes with more than one read/write '
+                'attachment is not supported.')
 
 
 class VolumeNotCreated(NovaException):
@@ -336,6 +353,10 @@ class InvalidVolume(Invalid):
 
 class InvalidVolumeAccessMode(Invalid):
     msg_fmt = _("Invalid volume access mode: %(access_mode)s")
+
+
+class StaleVolumeMount(InvalidVolume):
+    msg_fmt = _("The volume mount at %(mount_path)s is unusable.")
 
 
 class InvalidMetadata(Invalid):
@@ -592,10 +613,6 @@ class InstanceUnacceptable(Invalid):
     msg_fmt = _("Instance %(instance_id)s is unacceptable: %(reason)s")
 
 
-class InvalidEc2Id(Invalid):
-    msg_fmt = _("Ec2 id %(ec2_id)s is unacceptable.")
-
-
 class InvalidUUID(Invalid):
     msg_fmt = _("Expected a uuid but received %(uuid)s.")
 
@@ -629,6 +646,10 @@ class VolumeAttachmentNotFound(NotFound):
 
 class VolumeNotFound(NotFound):
     msg_fmt = _("Volume %(volume_id)s could not be found.")
+
+
+class VolumeTypeNotFound(NotFound):
+    msg_fmt = _("Volume type %(id_or_name)s could not be found.")
 
 
 class UndefinedRootBDM(NovaException):
@@ -836,7 +857,7 @@ class VifDetailsMissingMacvtapParameters(Invalid):
                 " correct.")
 
 
-class OvsConfigurationFailure(NovaException):
+class OVSConfigurationFailure(NovaException):
     msg_fmt = _("OVS configuration failed with: %(inner_exception)s.")
 
 
@@ -1249,40 +1270,8 @@ class FlavorExtraSpecUpdateCreateFailed(NovaException):
                 "after %(retries)d retries.")
 
 
-class CellNotFound(NotFound):
-    msg_fmt = _("Cell %(cell_name)s doesn't exist.")
-
-
-class CellExists(NovaException):
-    msg_fmt = _("Cell with name %(name)s already exists.")
-
-
-class CellRoutingInconsistency(NovaException):
-    msg_fmt = _("Inconsistency in cell routing: %(reason)s")
-
-
-class CellServiceAPIMethodNotFound(NotFound):
-    msg_fmt = _("Service API method not found: %(detail)s")
-
-
 class CellTimeout(NotFound):
     msg_fmt = _("Timeout waiting for response from cell")
-
-
-class CellMaxHopCountReached(NovaException):
-    msg_fmt = _("Cell message has reached maximum hop count: %(hop_count)s")
-
-
-class NoCellsAvailable(NovaException):
-    msg_fmt = _("No cells available matching scheduling criteria.")
-
-
-class CellsUpdateUnsupported(NovaException):
-    msg_fmt = _("Cannot update cells configuration file.")
-
-
-class InstanceUnknownCell(NotFound):
-    msg_fmt = _("Cell is not known for instance %(instance_uuid)s")
 
 
 class SchedulerHostFilterNotFound(NotFound):
@@ -1579,12 +1568,12 @@ class ConfigDriveNotFound(NotFound):
                 "does not exist.")
 
 
-class InterfaceAttachFailed(Invalid):
+class InterfaceAttachFailed(NovaException):
     msg_fmt = _("Failed to attach network adapter device to "
                 "%(instance_uuid)s")
 
 
-class InterfaceAttachFailedNoNetwork(InterfaceAttachFailed):
+class InterfaceAttachFailedNoNetwork(Invalid):
     msg_fmt = _("No specific network was requested and none are available "
                 "for project '%(project_id)s'.")
 
@@ -1784,6 +1773,11 @@ class PciConfigInvalidWhitelist(Invalid):
     msg_fmt = _("Invalid PCI devices Whitelist config: %(reason)s")
 
 
+class PciRequestFromVIFNotFound(NotFound):
+    msg_fmt = _("Failed to locate PCI request associated with the given VIF "
+                "PCI address: %(pci_slot)s on compute node: %(node_id)s")
+
+
 # Cannot be templated, msg needs to be constructed when raised.
 class InternalError(NovaException):
     """Generic hypervisor errors.
@@ -1867,6 +1861,19 @@ class LiveMigrationURINotAvailable(NovaException):
 
 class UnshelveException(NovaException):
     msg_fmt = _("Error during unshelve instance %(instance_id)s: %(reason)s")
+
+
+class MismatchVolumeAZException(Invalid):
+    msg_fmt = _("The availability zone between the server and its attached "
+                "volumes do not match: %(reason)s.")
+    code = 409
+
+
+class UnshelveInstanceInvalidState(InstanceInvalidState):
+    msg_fmt = _('Specifying an availability zone when unshelving server '
+                '%(instance_uuid)s with status "%(state)s" is not supported. '
+                'The server status must be SHELVED_OFFLOADED.')
+    code = 409
 
 
 class ImageVCPULimitsRangeExceeded(Invalid):
@@ -1970,6 +1977,11 @@ class InvalidHypervisorVirtType(Invalid):
                 "recognised")
 
 
+class InvalidMachineType(Invalid):
+    msg_fmt = _("Machine type '%(mtype)s' is not compatible with image "
+                "%(image_name)s (%(image_id)s): %(reason)s")
+
+
 class InvalidVirtualMachineMode(Invalid):
     msg_fmt = _("Virtual machine mode '%(vmmode)s' is not recognised")
 
@@ -2023,22 +2035,22 @@ class CPUPinningNotSupported(Invalid):
 
 class CPUPinningInvalid(Invalid):
     msg_fmt = _("CPU set to pin %(requested)s must be a subset of "
-                "free CPU set %(free)s")
+                "free CPU set %(available)s")
 
 
 class CPUUnpinningInvalid(Invalid):
     msg_fmt = _("CPU set to unpin %(requested)s must be a subset of "
-                "pinned CPU set %(pinned)s")
+                "pinned CPU set %(available)s")
 
 
 class CPUPinningUnknown(Invalid):
     msg_fmt = _("CPU set to pin %(requested)s must be a subset of "
-                "known CPU set %(cpuset)s")
+                "known CPU set %(available)s")
 
 
 class CPUUnpinningUnknown(Invalid):
     msg_fmt = _("CPU set to unpin %(requested)s must be a subset of "
-                "known CPU set %(cpuset)s")
+                "known CPU set %(available)s")
 
 
 class ImageCPUPinningForbidden(Forbidden):
@@ -2049,6 +2061,11 @@ class ImageCPUPinningForbidden(Forbidden):
 class ImageCPUThreadPolicyForbidden(Forbidden):
     msg_fmt = _("Image property 'hw_cpu_thread_policy' is not permitted to "
                 "override CPU thread pinning policy set against the flavor")
+
+
+class ImagePMUConflict(Forbidden):
+    msg_fmt = _("Image property 'hw_pmu' is not permitted to "
+                "override the PMU policy set in the flavor")
 
 
 class UnsupportedPolicyException(Invalid):
@@ -2077,6 +2094,10 @@ class UnsupportedImageModel(Invalid):
 
 class HostMappingNotFound(Invalid):
     msg_fmt = _("Host '%(name)s' is not mapped to any cell")
+
+
+class HostMappingExists(Invalid):
+    msg_fmt = _("Host '%(name)s' mapping already exists")
 
 
 class RealtimeConfigurationInvalid(Invalid):
@@ -2127,6 +2148,22 @@ class BuildRequestNotFound(NotFound):
 class AttachInterfaceNotSupported(Invalid):
     msg_fmt = _("Attaching interfaces is not supported for "
                 "instance %(instance_uuid)s.")
+
+
+class AttachInterfaceWithQoSPolicyNotSupported(AttachInterfaceNotSupported):
+    msg_fmt = _("Attaching interfaces with QoS policy is not supported for "
+                "instance %(instance_uuid)s.")
+
+
+class NetworksWithQoSPolicyNotSupported(Invalid):
+    msg_fmt = _("Using networks with QoS policy is not supported for "
+                "instance %(instance_uuid)s. (Network ID is %(network_id)s)")
+
+
+class CreateWithPortResourceRequestOldVersion(Invalid):
+    msg_fmt = _("Creating servers with ports having resource requests, like a "
+                "port with a QoS minimum bandwidth policy, is not supported "
+                "until microversion 2.72.")
 
 
 class InvalidReservedMemoryPagesOption(Invalid):
@@ -2213,10 +2250,12 @@ class InvalidInventory(Invalid):
 # An exception with this name is used on both sides of the placement/
 # nova interaction.
 class InventoryInUse(InvalidInventory):
-    # NOTE(mriedem): This message cannot change without impacting the
-    # nova.scheduler.client.report._RE_INV_IN_USE regex.
-    msg_fmt = _("Inventory for '%(resource_classes)s' on "
-                "resource provider '%(resource_provider)s' in use.")
+    pass
+
+
+class UsagesRetrievalFailed(NovaException):
+    msg_fmt = _("Failed to retrieve usages for project '%(project_id)s' and "
+                "user '%(user_id)s'.")
 
 
 class UnsupportedPointerModelRequested(Invalid):
@@ -2241,6 +2280,16 @@ class NeutronAdminCredentialConfigurationInvalid(Invalid):
 
 class InvalidEmulatorThreadsPolicy(Invalid):
     msg_fmt = _("CPU emulator threads option requested is invalid, "
+                "given: '%(requested)s', available: '%(available)s'.")
+
+
+class InvalidCPUAllocationPolicy(Invalid):
+    msg_fmt = _("CPU policy requested from '%(source)s' is invalid, "
+                "given: '%(requested)s', available: '%(available)s'.")
+
+
+class InvalidCPUThreadAllocationPolicy(Invalid):
+    msg_fmt = _("CPU thread policy requested from '%(source)s' is invalid, "
                 "given: '%(requested)s', available: '%(available)s'.")
 
 
@@ -2277,6 +2326,11 @@ class CannotMigrateToSameHost(NovaException):
 
 class VirtDriverNotReady(NovaException):
     msg_fmt = _("Virt driver is not ready.")
+
+
+class InvalidPeerList(NovaException):
+    msg_fmt = _("Configured nova-compute peer list for the ironic virt "
+                "driver is invalid on host %(host)s")
 
 
 class InstanceDiskMappingFailed(NovaException):
@@ -2344,12 +2398,6 @@ class CertificateValidationFailed(NovaException):
                 "certificate: %(cert_uuid)s. %(reason)s")
 
 
-class CertificateValidationNotYetAvailable(NovaException):
-    msg_fmt = _("Image signature certificate validation support is "
-                "not yet available.")
-    code = 409
-
-
 class InstanceRescueFailure(NovaException):
     msg_fmt = _("Failed to move instance to rescue mode: %(reason)s")
 
@@ -2405,3 +2453,58 @@ class ReshapeFailed(NovaException):
 class ReshapeNeeded(NovaException):
     msg_fmt = _("Virt driver indicates that provider inventories need to be "
                 "moved.")
+
+
+class FlavorImageConflict(NovaException):
+    msg_fmt = _("Conflicting values for %(setting)s found in the flavor "
+                "(%(flavor_val)s) and the image (%(image_val)s).")
+
+
+class HealPortAllocationException(NovaException):
+    msg_fmt = _("Healing port allocation failed.")
+
+
+class MoreThanOneResourceProviderToHealFrom(HealPortAllocationException):
+    msg_fmt = _("More than one matching resource provider %(rp_uuids)s is "
+                "available for healing the port allocation for port "
+                "%(port_id)s for instance %(instance_uuid)s. This script "
+                "does not have enough information to select the proper "
+                "resource provider from which to heal.")
+
+
+class NoResourceProviderToHealFrom(HealPortAllocationException):
+    msg_fmt = _("No matching resource provider is "
+                "available for healing the port allocation for port "
+                "%(port_id)s for instance %(instance_uuid)s. There are no "
+                "resource providers with matching traits %(traits)s in the "
+                "provider tree of the resource provider %(node_uuid)s ."
+                "This probably means that the neutron QoS configuration is "
+                "wrong. Consult with "
+                "https://docs.openstack.org/neutron/latest/admin/"
+                "config-qos-min-bw.html for information on how to configure "
+                "neutron. If the configuration is fixed the script can be run "
+                "again.")
+
+
+class UnableToQueryPorts(HealPortAllocationException):
+    msg_fmt = _("Unable to query ports for instance %(instance_uuid)s: "
+                "%(error)s")
+
+
+class UnableToUpdatePorts(HealPortAllocationException):
+    msg_fmt = _("Unable to update ports with allocations that are about to be "
+                "created in placement: %(error)s. The healing of the "
+                "instance is aborted. It is safe to try to heal the instance "
+                "again.")
+
+
+class UnableToRollbackPortUpdates(HealPortAllocationException):
+    msg_fmt = _("Failed to update neutron ports with allocation keys and the "
+                "automatic rollback of the previously successful port updates "
+                "also failed: %(error)s. Make sure that the "
+                "binding:profile.allocation key of the affected ports "
+                "%(port_uuids)s are manually cleaned in neutron according to "
+                "document https://docs.openstack.org/nova/latest/cli/"
+                "nova-manage.html#placement. If you re-run the script without "
+                "the manual fix then the missing allocation for these ports "
+                "will not be healed in placement.")

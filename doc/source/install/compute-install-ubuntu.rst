@@ -56,11 +56,12 @@ Install and configure components
 
         [keystone_authtoken]
         # ...
-        auth_url = http://controller:5000/v3
+        www_authenticate_uri = http://controller:5000/
+        auth_url = http://controller:5000/
         memcached_servers = controller:11211
         auth_type = password
-        project_domain_name = default
-        user_domain_name = default
+        project_domain_name = Default
+        user_domain_name = Default
         project_name = service
         username = nova
         password = NOVA_PASS
@@ -151,13 +152,6 @@ Install and configure components
         [oslo_concurrency]
         # ...
         lock_path = /var/lib/nova/tmp
-
-.. todo::
-
-   https://bugs.launchpad.net/ubuntu/+source/nova/+bug/1506667
-
-   * Due to a packaging bug, remove the ``log_dir`` option from the
-     ``[DEFAULT]`` section.
 
    *  In the ``[placement]`` section, configure the Placement API:
 

@@ -22,6 +22,8 @@ Driver base-classes:
 
 import sys
 
+import os_resource_classes as orc
+import os_traits
 from oslo_log import log as logging
 from oslo_utils import importutils
 import six
@@ -90,6 +92,39 @@ def block_device_info_get_mapping(block_device_info):
     return block_device_mapping
 
 
+# NOTE(aspiers): When adding new capabilities, ensure they are
+# mirrored in ComputeDriver.capabilities, and that the corresponding
+# values should always be standard traits in os_traits.  If something
+# isn't a standard trait, it doesn't need to be a compute node
+# capability trait; and if it needs to be a compute node capability
+# trait, it needs to be (made) standard, and must be prefixed with
+# "COMPUTE_".
+CAPABILITY_TRAITS_MAP = {
+    # Added in os-traits 0.7.0.
+    "supports_attach_interface": os_traits.COMPUTE_NET_ATTACH_INTERFACE,
+    "supports_device_tagging": os_traits.COMPUTE_DEVICE_TAGGING,
+    "supports_tagged_attach_interface":
+        os_traits.COMPUTE_NET_ATTACH_INTERFACE_WITH_TAG,
+    "supports_tagged_attach_volume": os_traits.COMPUTE_VOLUME_ATTACH_WITH_TAG,
+    "supports_extend_volume": os_traits.COMPUTE_VOLUME_EXTEND,
+    "supports_multiattach": os_traits.COMPUTE_VOLUME_MULTI_ATTACH,
+    # Added in os-traits 0.8.0.
+    "supports_trusted_certs": os_traits.COMPUTE_TRUSTED_CERTS,
+
+    # Image type support flags, added in os-traits 0.12.0
+    "supports_image_type_aki": os_traits.COMPUTE_IMAGE_TYPE_AKI,
+    "supports_image_type_ami": os_traits.COMPUTE_IMAGE_TYPE_AMI,
+    "supports_image_type_ari": os_traits.COMPUTE_IMAGE_TYPE_ARI,
+    "supports_image_type_iso": os_traits.COMPUTE_IMAGE_TYPE_ISO,
+    "supports_image_type_qcow2": os_traits.COMPUTE_IMAGE_TYPE_QCOW2,
+    "supports_image_type_raw": os_traits.COMPUTE_IMAGE_TYPE_RAW,
+    "supports_image_type_vdi": os_traits.COMPUTE_IMAGE_TYPE_VDI,
+    "supports_image_type_vhd": os_traits.COMPUTE_IMAGE_TYPE_VHD,
+    "supports_image_type_vhdx": os_traits.COMPUTE_IMAGE_TYPE_VHDX,
+    "supports_image_type_vmdk": os_traits.COMPUTE_IMAGE_TYPE_VMDK,
+}
+
+
 #定义计算虚拟化驱动基类
 class ComputeDriver(object):
     """Base class for compute drivers.
@@ -122,6 +157,9 @@ class ComputeDriver(object):
 
     """
 
+    # NOTE(mriedem): When adding new capabilities, consider whether they
+    # should also be added to CAPABILITY_TRAITS_MAP; if so, any new traits
+    # must also be added to the os-traits library.
     capabilities = {
         "has_imagecache": False,
         "supports_evacuate": False,
@@ -133,6 +171,18 @@ class ComputeDriver(object):
         "supports_extend_volume": False,
         "supports_multiattach": False,
         "supports_trusted_certs": False,
+
+        # Image type support flags
+        "supports_image_type_aki": False,
+        "supports_image_type_ami": False,
+        "supports_image_type_ari": False,
+        "supports_image_type_iso": False,
+        "supports_image_type_qcow2": False,
+        "supports_image_type_raw": False,
+        "supports_image_type_vdi": False,
+        "supports_image_type_vhd": False,
+        "supports_image_type_vhdx": False,
+        "supports_image_type_vmdk": False,
     }
 
     # Indicates if this driver will rebalance nodes among compute service
@@ -157,10 +207,15 @@ class ComputeDriver(object):
         """
         pass
 
-    def get_info(self, instance):
+    def get_info(self, instance, use_cache=True):
         """Get the current status of an instance.
 
         :param instance: nova.objects.instance.Instance object
+        :param use_cache: boolean to indicate if the driver should be allowed
+                          to use cached data to return instance status.
+                          This only applies to drivers which cache instance
+                          state information. For drivers that do not use a
+                          cache, this parameter can be ignored.
         :returns: An InstanceInfo object
         """
         # TODO(Vek): Need to pass context in for access to auth_token
@@ -200,20 +255,6 @@ class ComputeDriver(object):
             return instance.uuid in self.list_instance_uuids()
         except NotImplementedError:
             return instance.name in self.list_instances()
-
-    def estimate_instance_overhead(self, instance_info):
-        """Estimate the virtualization overhead required to build an instance
-        of the given flavor.
-
-        Defaults to zero, drivers should override if per-instance overhead
-        calculations are desired.
-
-        :param instance_info: Instance/flavor to calculate overhead for.
-        :returns: Dict of estimated overhead values.
-        """
-        return {'memory_mb': 0,
-                'disk_gb': 0,
-                'vcpus': 0}
 
     def list_instances(self):
         """Return the names of all the instances known to the virtualization
@@ -302,11 +343,12 @@ class ComputeDriver(object):
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
         """Create a new instance/VM/domain on the virtualization platform.
 
         Once this successfully completes, the instance should be
-        running (power_state.RUNNING).
+        running (power_state.RUNNING) if ``power_on`` is True, else the
+        instance should be stopped (power_state.SHUTDOWN).
 
         If this fails, any partial instance should be completely
         cleaned up, and the virtualization platform should be in the state
@@ -326,6 +368,8 @@ class ComputeDriver(object):
         :param network_info: instance network information
         :param block_device_info: Information about block devices to be
                                   attached to the instance.
+        :param power_on: True if the instance should be powered on, False
+                         otherwise
         """
         raise NotImplementedError()
 
@@ -491,7 +535,11 @@ class ComputeDriver(object):
 
     def attach_volume(self, context, connection_info, instance, mountpoint,
                       disk_bus=None, device_type=None, encryption=None):
-        """Attach the disk to the instance at mountpoint using info."""
+        """Attach the disk to the instance at mountpoint using info.
+
+        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+                                    to a single instance is exceeded.
+        """
         raise NotImplementedError()
 
     def detach_volume(self, context, connection_info, instance, mountpoint,
@@ -523,13 +571,15 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def extend_volume(self, connection_info, instance):
+    def extend_volume(self, connection_info, instance, requested_size):
         """Extend the disk attached to the instance.
 
         :param dict connection_info:
             The connection for the extended volume.
         :param nova.objects.instance.Instance instance:
             The instance whose volume gets extended.
+        :param int requested_size
+            The requested new size of the volume in bytes
 
         :return: None
         """
@@ -677,12 +727,14 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def finish_revert_migration(self, context, instance, network_info,
-                                block_device_info=None, power_on=True):
+                                migration, block_device_info=None,
+                                power_on=True):
         """Finish reverting a resize/migration.
 
         :param context: the context for the finish_revert_migration
         :param instance: nova.objects.instance.Instance being migrated/resized
         :param network_info: instance network information
+        :param migration: nova.objects.Migration for the migration
         :param block_device_info: instance volume block device info
         :param power_on: True if the instance should be powered on, False
                          otherwise
@@ -817,6 +869,19 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    def power_update_event(self, instance, target_power_state):
+        """Update power, vm and task states of the specified instance.
+
+        Note that the driver is expected to set the task_state of the
+        instance back to None.
+
+        :param instance: nova.objects.instance.Instance
+        :param target_power_state: The desired target power state for the
+                                   instance; possible values are "POWER_ON"
+                                   and "POWER_OFF".
+        """
+        raise NotImplementedError()
+
     def trigger_crash_dump(self, instance):
         """Trigger crash dump mechanism on the given instance.
 
@@ -858,6 +923,46 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    @staticmethod
+    def _get_reserved_host_disk_gb_from_config():
+        import nova.compute.utils as compute_utils  # avoid circular import
+        return compute_utils.convert_mb_to_ceil_gb(CONF.reserved_host_disk_mb)
+
+    @staticmethod
+    def _get_allocation_ratios(inventory):
+        """Get the cpu/ram/disk allocation ratios for the given inventory.
+
+        This utility method is used to get the inventory allocation ratio
+        for VCPU, MEMORY_MB and DISK_GB resource classes based on the following
+        precedence:
+
+        * Use ``[DEFAULT]/*_allocation_ratio`` if set - this overrides
+          everything including externally set allocation ratios on the
+          inventory via the placement API
+        * Use ``[DEFAULT]/initial_*_allocation_ratio`` if a value does not
+          exist for a given resource class in the ``inventory`` dict
+        * Use what is already in the ``inventory`` dict for the allocation
+          ratio if the above conditions are false
+
+        :param inventory: dict, keyed by resource class, of inventory
+                          information.
+        :returns: Return a dict, keyed by resource class, of allocation ratio
+        """
+        keys = {'cpu': orc.VCPU,
+                'ram': orc.MEMORY_MB,
+                'disk': orc.DISK_GB}
+        result = {}
+        for res, rc in keys.items():
+            attr = '%s_allocation_ratio' % res
+            conf_ratio = getattr(CONF, attr)
+            if conf_ratio:
+                result[rc] = conf_ratio
+            elif rc not in inventory:
+                result[rc] = getattr(CONF, 'initial_%s' % attr)
+            else:
+                result[rc] = inventory[rc]['allocation_ratio']
+        return result
+
     def update_provider_tree(self, provider_tree, nodename, allocations=None):
         """Update a ProviderTree object with current resource provider and
         inventory information.
@@ -869,6 +974,12 @@ class ComputeDriver(object):
 
         This method supersedes get_inventory(): if this method is implemented,
         get_inventory() is not used.
+
+        Implementors of this interface are expected to set ``allocation_ratio``
+        and ``reserved`` values for inventory records, which may be based on
+        configuration options, e.g. ``[DEFAULT]/cpu_allocation_ratio``,
+        depending on the driver and resource class. If not provided, allocation
+        ratio defaults to 1.0 and reserved defaults to 0 in placement.
 
         :note: Renaming the root provider (by deleting it from provider_tree
         and re-adding it with a different name) is not supported at this time.
@@ -929,12 +1040,11 @@ class ComputeDriver(object):
             allocations. Drivers should *only* edit allocation records for
             providers whose inventories are being affected by the reshape
             operation.
-            TODO(efried): Doc reshaper in reference/update-provider-tree.html
-            Meanwhile, please refer to the spec for more details on reshaping:
-            http://specs.openstack.org/openstack/nova-specs/specs/stein/approved/reshape-provider-tree.html  # noqa
         :raises ReshapeNeeded: If allocations is None and any inventory needs
             to be moved from one provider to another and/or to a different
             resource class.
+        :raises: ReshapeFailed if the requested tree reshape fails for
+            whatever reason.
         """
         raise NotImplementedError()
 
@@ -943,6 +1053,23 @@ class ComputeDriver(object):
         the supplied node.
         """
         raise NotImplementedError()
+
+    def capabilities_as_traits(self):
+        """Returns this driver's capabilities dict where the keys are traits
+
+        Traits can only be standard compute capabilities traits from
+        the os-traits library.
+
+        :returns: dict, keyed by trait, of this driver's capabilities where the
+            values are booleans indicating if the driver supports the trait
+
+        """
+        traits = {}
+        for capability, supported in self.capabilities.items():
+            if capability in CAPABILITY_TRAITS_MAP:
+                traits[CAPABILITY_TRAITS_MAP[capability]] = supported
+
+        return traits
 
     def get_available_resource(self, nodename):
         """Retrieve resource information.
@@ -968,6 +1095,8 @@ class ComputeDriver(object):
         :param disk_info: instance disk information
         :param migrate_data: a LiveMigrateData object
         :returns: migrate_data modified by the driver
+        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+                                    to a single instance is exceeded.
         """
         raise NotImplementedError()
 
@@ -1008,6 +1137,16 @@ class ComputeDriver(object):
 
         """
         raise NotImplementedError()
+
+    def rollback_live_migration_at_source(self, context, instance,
+                                          migrate_data):
+        """Clean up source node after a failed live migration.
+
+        :param context: security context
+        :param instance: instance object that was being migrated
+        :param migrate_data: a LiveMigrateData object
+        """
+        pass
 
     def rollback_live_migration_at_destination(self, context, instance,
                                                network_info,
@@ -1401,43 +1540,19 @@ class ComputeDriver(object):
         unused.
 
         Note that this function takes an instance ID.
+
+        :param instance: nova.objects.Instance to get block storage statistics
+        :param disk_id: mountpoint name, e.g. "vda"
+        :returns: None if block statistics could not be retrieved, otherwise a
+            list of the form: [rd_req, rd_bytes, wr_req, wr_bytes, errs]
+        :raises: NotImplementedError if the driver does not implement this
+            method
         """
         raise NotImplementedError()
 
     def deallocate_networks_on_reschedule(self, instance):
         """Does the driver want networks deallocated on reschedule?"""
         return False
-
-    # NOTE(vsaienko) This method is deprecated, don't use it!
-    # TODO(vsaienko) Remove this function in Ocata.
-    def macs_for_instance(self, instance):
-        """What MAC addresses must this instance have?
-
-        Some hypervisors (such as bare metal) cannot do freeform virtualization
-        of MAC addresses. This method allows drivers to return a set of MAC
-        addresses that the instance is to have. allocate_for_instance will take
-        this into consideration when provisioning networking for the instance.
-
-        Mapping of MAC addresses to actual networks (or permitting them to be
-        freeform) is up to the network implementation layer. For instance,
-        with openflow switches, fixed MAC addresses can still be virtualized
-        onto any L2 domain, with arbitrary VLANs etc, but regular switches
-        require pre-configured MAC->network mappings that will match the
-        actual configuration.
-
-        Most hypervisors can use the default implementation which returns None.
-        Hypervisors with MAC limits should return a set of MAC addresses, which
-        will be supplied to the allocate_for_instance call by the compute
-        manager, and it is up to that call to ensure that all assigned network
-        details are compatible with the set of MAC addresses.
-
-        This is called during spawn_instance by the compute manager.
-
-        :return: None, or a set of MAC ids (e.g. set(['12:34:56:78:90:ab'])).
-            None means 'no constraints', a set means 'these and only these
-            MAC addresses'.
-        """
-        return None
 
     def manage_image_cache(self, context, all_instances):
         """Manage the driver's local image cache.
@@ -1653,12 +1768,18 @@ class ComputeDriver(object):
             The metadata of the image of the instance.
         :param nova.objects.BlockDeviceMapping root_bdm:
             The description of the root device.
+        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+                                    to a single instance is exceeded.
         """
         raise NotImplementedError()
 
     def default_device_names_for_instance(self, instance, root_device_name,
                                           *block_device_lists):
-        """Default the missing device names in the block device mapping."""
+        """Default the missing device names in the block device mapping.
+
+        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+                                    to a single instance is exceeded.
+        """
         raise NotImplementedError()
 
     def get_device_name_for_instance(self, instance,
@@ -1675,6 +1796,8 @@ class ComputeDriver(object):
                                  implementation if not set.
 
         :returns: The chosen device name.
+        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+                                    to a single instance is exceeded.
         """
         raise NotImplementedError()
 
@@ -1728,6 +1851,20 @@ class ComputeDriver(object):
         """
         return instance.get('host')
 
+    def manages_network_binding_host_id(self):
+        """Compute driver manages port bindings.
+
+        Used to indicate whether or not the compute driver is responsible
+        for managing port binding details, such as the host_id.
+        By default the ComputeManager will manage port bindings and the
+        host_id associated with a binding using the network API.
+        However, some backends, like Ironic, will manage the port binding
+        host_id out-of-band and the compute service should not override what
+        is set by the backing hypervisor.
+        """
+        return False
+
+
 #加载并返回计算虚拟化驱动
 def load_compute_driver(virtapi, compute_driver=None):
     """Load a compute driver module.
@@ -1765,7 +1902,7 @@ def load_compute_driver(virtapi, compute_driver=None):
         LOG.exception(_("Unable to load the virtualization driver"))
         sys.exit(1)
     except ValueError:
-        LOG.exception("Compute driver '%s' from 'nova.virt' is not of type"
+        LOG.exception("Compute driver '%s' from 'nova.virt' is not of type "
                       "'%s'", compute_driver, str(ComputeDriver))
         sys.exit(1)
 

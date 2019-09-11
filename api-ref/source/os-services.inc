@@ -21,6 +21,14 @@ Lists all running Compute services.
 
 Provides details why any services were disabled.
 
+.. note:: Starting with microversion 2.69 if service details cannot be loaded
+   due to a transient condition in the deployment like infrastructure failure,
+   the response body for those unavailable compute services in the down cells
+   will be missing keys. See `handling down cells
+   <https://docs.openstack.org/api-guide/compute/down_cells.html>`__
+   section of the Compute API guide for more information on the keys that
+   would be returned in the partial constructs.
+
 Normal response codes: 200
 
 Error response codes: unauthorized(401), forbidden(403)
@@ -50,9 +58,18 @@ Response
   - zone: OS-EXT-AZ:availability_zone
   - forced_down: forced_down_2_11
 
-**Example List Compute Services**
+**Example List Compute Services (v2.11)**
 
 .. literalinclude:: ../../doc/api_samples/os-services/v2.11/services-list-get-resp.json
+   :language: javascript
+
+**Example List Compute Services (v2.69)**
+
+This is a sample response for the services from the non-responsive part of the
+deployment. The responses for the available service records will be normal
+without any missing keys.
+
+.. literalinclude:: ../../doc/api_samples/os-services/v2.69/services-list-get-resp.json
    :language: javascript
 
 Disable Scheduling For A Compute Service
@@ -255,7 +272,8 @@ Update Compute Service
 
 Update a compute service to enable or disable scheduling, including recording a
 reason why a compute service was disabled from scheduling. Set or unset the
-``forced_down`` flag for the service.
+``forced_down`` flag for the service. This operation is only allowed on
+services whose ``binary`` is ``nova-compute``.
 
 This API is available starting with microversion 2.53.
 

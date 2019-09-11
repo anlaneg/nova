@@ -28,12 +28,12 @@ from oslo_utils import fileutils
 from oslo_utils import imageutils
 from oslo_utils import units
 
+from nova.compute import utils as compute_utils
 import nova.conf
 from nova import exception
 from nova.i18n import _
 from nova import image
 import nova.privsep.qemu
-from nova import utils
 
 LOG = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def qemu_img_info(path, format=None):
         # to add the --force-share flag.
         if QEMU_VERSION and operator.ge(QEMU_VERSION, QEMU_VERSION_REQ_SHARED):
             cmd = cmd + ('--force-share',)
-        out, err = utils.execute(*cmd, prlimit=QEMU_IMG_LIMITS)
+        out, err = processutils.execute(*cmd, prlimit=QEMU_IMG_LIMITS)
     except processutils.ProcessExecutionError as exp:
         if exp.exit_code == -9:
             # this means we hit prlimits, make the exception more specific
@@ -95,12 +95,14 @@ def qemu_img_info(path, format=None):
     return imageutils.QemuImgInfo(out)
 
 
-def convert_image(source, dest, in_format, out_format, run_as_root=False):
+def convert_image(source, dest, in_format, out_format, run_as_root=False,
+                  compress=False):
     """Convert image to other format."""
     if in_format is None:
         raise RuntimeError("convert_image without input format is a security"
                            " risk")
-    _convert_image(source, dest, in_format, out_format, run_as_root)
+    _convert_image(source, dest, in_format, out_format, run_as_root,
+                   compress=compress)
 
 
 def convert_image_unsafe(source, dest, out_format, run_as_root=False):
@@ -116,14 +118,18 @@ def convert_image_unsafe(source, dest, out_format, run_as_root=False):
     _convert_image(source, dest, None, out_format, run_as_root)
 
 
-def _convert_image(source, dest, in_format, out_format, run_as_root):
+def _convert_image(source, dest, in_format, out_format, run_as_root,
+                   compress=False):
     try:
-        if not run_as_root:
-            nova.privsep.qemu.unprivileged_convert_image(
-                source, dest, in_format, out_format, CONF.instances_path)
-        else:
-            nova.privsep.qemu.convert_image(
-                source, dest, in_format, out_format, CONF.instances_path)
+        with compute_utils.disk_ops_semaphore:
+            if not run_as_root:
+                nova.privsep.qemu.unprivileged_convert_image(
+                    source, dest, in_format, out_format, CONF.instances_path,
+                    compress)
+            else:
+                nova.privsep.qemu.convert_image(
+                    source, dest, in_format, out_format, CONF.instances_path,
+                    compress)
 
     except processutils.ProcessExecutionError as exp:
         msg = (_("Unable to convert image to %(format)s: %(exp)s") %
@@ -134,8 +140,9 @@ def _convert_image(source, dest, in_format, out_format, run_as_root):
 #下载image到path
 def fetch(context, image_href, path, trusted_certs=None):
     with fileutils.remove_path_on_error(path):
-        IMAGE_API.download(context, image_href, dest_path=path,
-                           trusted_certs=trusted_certs)
+        with compute_utils.disk_ops_semaphore:
+            IMAGE_API.download(context, image_href, dest_path=path,
+                               trusted_certs=trusted_certs)
 
 
 def get_info(context, image_href):

@@ -31,7 +31,7 @@ LOG = logging.getLogger(__name__)
 
 
 # NOTE(danms): This is the global service version counter
-SERVICE_VERSION = 35
+SERVICE_VERSION = 39
 
 
 # NOTE(danms): This is our SERVICE_VERSION history. The idea is that any
@@ -146,6 +146,16 @@ SERVICE_VERSION_HISTORY = (
     # Version 35: Indicates that nova-compute supports live migration with
     # ports bound early on the destination host using VIFMigrateData.
     {'compute_rpc': '5.0'},
+    # Version 36: Indicates that nova-compute supports specifying volume
+    # type when booting a volume-backed server.
+    {'compute_rpc': '5.0'},
+    # Version 37: prep_resize takes a RequestSpec object
+    {'compute_rpc': '5.1'},
+    # Version 38: set_host_enabled reflects COMPUTE_STATUS_DISABLED trait
+    {'compute_rpc': '5.1'},
+    # Version 39: resize_instance, finish_resize, revert_resize,
+    # finish_revert_resize, unshelve_instance takes a RequestSpec object
+    {'compute_rpc': '5.2'},
 )
 
 
@@ -272,7 +282,7 @@ class Service(base.NovaPersistentObject, base.NovaObject,
         service.obj_reset_changes()
 
         # TODO(dpeschman): Drop this once all services have uuids in database
-        if 'uuid' not in service:
+        if 'uuid' not in service and not service.deleted:
             service.uuid = uuidutils.generate_uuid()
             LOG.debug('Generated UUID %(uuid)s for service %(id)i',
                       dict(uuid=service.uuid, id=service.id))
@@ -516,7 +526,7 @@ def get_minimum_version_all_cells(context, binaries, require_all=False):
                         'service version', cell_uuid)
             if require_all:
                 raise exception.CellTimeout()
-        elif result is nova_context.raised_exception_sentinel:
+        elif isinstance(result, Exception):
             LOG.warning('Failed to get minimum service version for cell %s',
                         cell_uuid)
             if require_all:

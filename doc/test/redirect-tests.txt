@@ -27,14 +27,12 @@
 /nova/latest/man/nova-api-metadata.html 301 /nova/latest/cli/nova-api-metadata.html
 /nova/latest/man/nova-api-os-compute.html 301 /nova/latest/cli/nova-api-os-compute.html
 /nova/latest/man/nova-api.html 301 /nova/latest/cli/nova-api.html
-/nova/latest/man/nova-cells.html 301 /nova/latest/cli/nova-cells.html
 # this is gone and never coming back, indicate that to the end users
+/nova/latest/man/nova-cells.html 301 /nova/latest/cli/nova-cells.html
 /nova/latest/man/nova-compute.html 301 /nova/latest/cli/nova-compute.html
 /nova/latest/man/nova-conductor.html 301 /nova/latest/cli/nova-conductor.html
 /nova/latest/man/nova-console.html 301 /nova/latest/cli/nova-console.html
-/nova/latest/man/nova-consoleauth.html 301 /nova/latest/cli/nova-consoleauth.html
 /nova/latest/man/nova-dhcpbridge.html 301 /nova/latest/cli/nova-dhcpbridge.html
-/nova/latest/man/nova-idmapshift.html 301 /nova/latest/cli/nova-idmapshift.html
 /nova/latest/man/nova-manage.html 301 /nova/latest/cli/nova-manage.html
 /nova/latest/man/nova-network.html 301 /nova/latest/cli/nova-network.html
 /nova/latest/man/nova-novncproxy.html 301 /nova/latest/cli/nova-novncproxy.html
@@ -66,7 +64,12 @@
 /nova/latest/testing/zero-downtime-upgrade.html 301 /nova/latest/contributor/testing/zero-downtime-upgrade.html
 /nova/latest/threading.html 301 /nova/latest/reference/threading.html
 /nova/latest/upgrade.html 301 /nova/latest/user/upgrade.html
-/nova/latest/vendordata.html 301 /nova/latest/user/vendordata.html
+/nova/latest/user/cellsv2_layout.html 301 /nova/latest/user/cellsv2-layout.html
+/nova/latest/user/config-drive.html 301 /nova/latest/user/metadata.html
+/nova/latest/user/metadata-service.html 301 /nova/latest/user/metadata.html
+/nova/latest/user/placement.html 301 /placement/latest/
+/nova/latest/user/user-data.html 301 /nova/latest/user/metadata.html
+/nova/latest/user/vendordata.html 301 /nova/latest/user/metadata.html
+/nova/latest/vendordata.html 301 /nova/latest/user/metadata.html
 /nova/latest/vmstates.html 301 /nova/latest/reference/vm-states.html
 /nova/latest/wsgi.html 301 /nova/latest/user/wsgi.html
-/nova/latest/user/cellsv2_layout.html 301 /nova/latest/user/cellsv2-layout.html

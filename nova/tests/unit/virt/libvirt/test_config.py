@@ -18,13 +18,12 @@ from oslo_utils import units
 
 from nova.objects import fields as obj_fields
 from nova import test
-from nova.tests.unit import matchers
+from nova.tests.unit.virt.libvirt import fake_libvirt_data
 from nova.virt.libvirt import config
 
 
 class LibvirtConfigBaseTest(test.NoDBTestCase):
-    def assertXmlEqual(self, expectedXmlstr, actualXmlstr):
-        self.assertThat(actualXmlstr, matchers.XMLMatches(expectedXmlstr))
+    pass
 
 
 class LibvirtConfigTest(LibvirtConfigBaseTest):
@@ -113,14 +112,6 @@ class LibvirtConfigCapsTest(LibvirtConfigBaseTest):
               </cells>
             </topology>
           </host>
-          <guest>
-            <os_type>hvm</os_type>
-            <arch name='x86_64'/>
-          </guest>
-          <guest>
-            <os_type>hvm</os_type>
-            <arch name='i686'/>
-          </guest>
         </capabilities>"""
 
         obj = config.LibvirtConfigCaps()
@@ -154,6 +145,95 @@ class LibvirtConfigCapsTest(LibvirtConfigBaseTest):
         obj.parse_str(xmlin)
         self.assertEqual(128, obj.memory)
         self.assertEqual(0, len(obj.cpus))
+
+    def test_config_guest(self):
+        xmlin = """
+        <capabilities>
+          <guest>
+            <os_type>hvm</os_type>
+            <arch name='x86_64'>
+              <emulator>/usr/bin/qemu-system-x86_64</emulator>
+              <machine maxCpus='255'>pc-i440fx-2.11</machine>
+              <machine canonical='pc-i440fx-2.11' maxCpus='255'>pc</machine>
+              <machine maxCpus='1'>isapc</machine>
+              <machine maxCpus='255'>pc-1.1</machine>
+              <machine maxCpus='255'>pc-i440fx-2.0</machine>
+              <machine maxCpus='288'>pc-q35-2.11</machine>
+              <machine canonical='pc-q35-2.11' maxCpus='288'>q35</machine>
+              <machine maxCpus='1'>xenpv</machine>
+              <machine maxCpus='288'>pc-q35-2.10</machine>
+              <domain type="qemu" />
+              <domain type="kvm">
+                <emulator>/usr/bin/qemu-kvm</emulator>
+                <machine maxCpus='255'>pc-i440fx-2.11</machine>
+                <machine canonical='pc-i440fx-2.11' maxCpus='255'>pc</machine>
+                <machine maxCpus='1'>isapc</machine>
+                <machine maxCpus='255'>pc-1.1</machine>
+                <machine maxCpus='255'>pc-i440fx-2.0</machine>
+                <machine maxCpus='288'>pc-q35-2.11</machine>
+                <machine canonical='pc-q35-2.11' maxCpus='288'>q35</machine>
+                <machine maxCpus='1'>xenpv</machine>
+                <machine maxCpus='288'>pc-q35-2.10</machine>
+              </domain>
+            </arch>
+          </guest>
+          <guest>
+            <os_type>hvm</os_type>
+            <arch name='i686'>
+              <emulator>/usr/bin/qemu-system-i386</emulator>
+              <machine maxCpus='255'>pc-i440fx-2.11</machine>
+              <machine canonical='pc-i440fx-2.11' maxCpus='255'>pc</machine>
+              <machine maxCpus='1'>isapc</machine>
+              <machine maxCpus='255'>pc-1.1</machine>
+              <machine maxCpus='255'>pc-i440fx-2.0</machine>
+              <machine maxCpus='288'>pc-q35-2.11</machine>
+              <machine canonical='pc-q35-2.11' maxCpus='288'>q35</machine>
+              <machine maxCpus='1'>xenpv</machine>
+              <machine maxCpus='288'>pc-q35-2.10</machine>
+              <domain type="qemu" />
+              <domain type="kvm">
+                <emulator>/usr/bin/qemu-kvm</emulator>
+                <machine maxCpus='255'>pc-i440fx-2.11</machine>
+                <machine canonical='pc-i440fx-2.11' maxCpus='255'>pc</machine>
+                <machine maxCpus='1'>isapc</machine>
+                <machine maxCpus='255'>pc-1.1</machine>
+                <machine maxCpus='255'>pc-i440fx-2.0</machine>
+                <machine maxCpus='288'>pc-q35-2.11</machine>
+                <machine canonical='pc-q35-2.11' maxCpus='288'>q35</machine>
+                <machine maxCpus='1'>xenpv</machine>
+                <machine maxCpus='288'>pc-q35-2.10</machine>
+              </domain>
+            </arch>
+          </guest>
+        </capabilities>"""
+        obj = config.LibvirtConfigCaps()
+        obj.parse_str(xmlin)
+
+        self.assertEqual(2, len(obj.guests))
+        for guest in obj.guests:
+            self.assertIsInstance(guest, config.LibvirtConfigCapsGuest)
+            self.assertEqual('hvm', guest.ostype)
+
+        self.assertEqual('x86_64', obj.guests[0].arch)
+        self.assertEqual('i686', obj.guests[1].arch)
+
+        guest = obj.guests[0]
+        self.assertIn('qemu', guest.domains)
+        self.assertIn('kvm', guest.domains)
+        self.assertEqual('qemu', guest.default_domain.domtype)
+        self.assertEqual('/usr/bin/qemu-system-x86_64',
+                         guest.default_domain.emulator)
+        self.assertEqual(guest.default_domain, guest.domains['qemu'])
+        for domtype, domain in guest.domains.items():
+            self.assertEqual(7, len(domain.machines))
+            self.assertIn('pc-i440fx-2.0', domain.machines)
+            self.assertIn('xenpv', domain.machines)
+            self.assertEqual(2, len(domain.aliases))
+            self.assertIn('pc', domain.aliases)
+            self.assertIn('q35', domain.aliases)
+
+        xmlout = obj.to_xml()
+        self.assertXmlEqual(xmlin, xmlout, allow_mixed_nodes=True)
 
 
 class LibvirtConfigGuestTimerTest(LibvirtConfigBaseTest):
@@ -1403,6 +1483,18 @@ class LibvirtConfigGuestInputTest(LibvirtConfigBaseTest):
         self.assertXmlEqual(xml, """
             <input type="tablet" bus="usb"/>""")
 
+    def test_config_input(self):
+        obj = config.LibvirtConfigGuestInput()
+        obj.type = "mouse"
+        obj.bus = "virtio"
+        obj.driver_iommu = True
+
+        xml = obj.to_xml()
+        self.assertXmlEqual("""
+            <input type="mouse" bus="virtio">
+              <driver iommu="on" />
+            </input>""", xml)
+
 
 class LibvirtConfigGuestGraphicsTest(LibvirtConfigBaseTest):
 
@@ -1602,20 +1694,6 @@ class LibvirtConfigGuestConsoleTest(LibvirtConfigBaseTest):
             </console>
             """)
 
-    def test_config_type_file_with_target_type(self):
-        obj = config.LibvirtConfigGuestConsole()
-        obj.type = "file"
-        obj.target_type = "sclplm"
-        obj.source_path = "/var/lib/nova/instances/uuid/console.log"
-
-        xml = obj.to_xml()
-        self.assertXmlEqual(xml, """
-            <console type="file">
-                <source path="/var/lib/nova/instances/uuid/console.log"/>
-                <target type="sclplm"/>
-            </console>
-            """)
-
     def test_config_target_port(self):
         obj = config.LibvirtConfigGuestConsole()
         obj.target_port = 0
@@ -1752,21 +1830,47 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
         obj2.parse_str(xml)
         self.assertXmlEqual(xml, obj2.to_xml())
 
-    def test_config_driver_options(self):
+    def _get_virtio_interface(self):
         obj = config.LibvirtConfigGuestInterface()
         obj.net_type = "ethernet"
         obj.mac_addr = "DE:AD:BE:EF:CA:FE"
         obj.model = "virtio"
         obj.target_dev = "vnet0"
+        return obj
+
+    def test_config_driver_options(self):
+        obj = self._get_virtio_interface()
         obj.driver_name = "vhost"
         obj.vhost_queues = 4
+        obj.driver_iommu = True
 
         xml = obj.to_xml()
         self.assertXmlEqual(xml, """
             <interface type="ethernet">
               <mac address="DE:AD:BE:EF:CA:FE"/>
               <model type="virtio"/>
-              <driver name="vhost" queues="4"/>
+              <driver name="vhost" queues="4" iommu="on"/>
+              <target dev="vnet0"/>
+            </interface>""")
+
+        # parse the xml from the first object into a new object and make sure
+        # they are the same
+        obj2 = config.LibvirtConfigGuestInterface()
+        obj2.parse_str(xml)
+        self.assertXmlEqual(xml, obj2.to_xml())
+
+    def test_config_driver_iommu_option(self):
+        obj = self._get_virtio_interface()
+        # Check that the <driver> element is included even when there is
+        # no driver name or queues
+        obj.driver_iommu = True
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <interface type="ethernet">
+              <mac address="DE:AD:BE:EF:CA:FE"/>
+              <model type="virtio"/>
+              <driver iommu="on"/>
               <target dev="vnet0"/>
             </interface>""")
 
@@ -2179,6 +2283,7 @@ class LibvirtConfigGuestFeatureTest(LibvirtConfigBaseTest):
         obj.relaxed = True
         obj.vapic = True
         obj.spinlocks = True
+        obj.vendorid_spoof = True
 
         xml = obj.to_xml()
         self.assertXmlEqual(xml, """
@@ -2186,10 +2291,44 @@ class LibvirtConfigGuestFeatureTest(LibvirtConfigBaseTest):
             <relaxed state="on"/>
             <vapic state="on"/>
             <spinlocks state="on" retries="4095"/>
+            <vendor_id state="on" value="1234567890ab"/>
           </hyperv>""")
+
+    def test_feature_pmu(self):
+        # NOTE(sean-k-moonmey): LibvirtConfigGuestFeaturePMU uses
+        # bool_from_string internally so assert that boolean and
+        # string inputs work. This does not need to be exhaustive
+        # as bool_from_string is tested in oslo so we just try
+        # some common values.
+
+        for val in ("true", "on", "1", "yes", True):
+            obj = config.LibvirtConfigGuestFeaturePMU(val)
+            xml = obj.to_xml()
+            self.assertXmlEqual(xml, "<pmu state='on'/>")
+        for val in ("false", "off", "0", "no", False):
+            obj = config.LibvirtConfigGuestFeaturePMU(val)
+            xml = obj.to_xml()
+            self.assertXmlEqual(xml, "<pmu state='off'/>")
 
 
 class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
+
+    def test_launch_security(self):
+        # test that sev-specific bits are added to the xml
+
+        obj = config.LibvirtConfigGuestSEVLaunchSecurity()
+        obj.cbitpos = 47
+        obj.reduced_phys_bits = 1
+
+        xml = obj.to_xml()
+        launch_security_expected = """
+            <launchSecurity type="sev">
+              <policy>0x0033</policy>
+              <cbitpos>47</cbitpos>
+              <reducedPhysBits>1</reducedPhysBits>
+            </launchSecurity>"""
+
+        self.assertXmlEqual(launch_security_expected, xml)
 
     def test_config_lxc(self):
         obj = config.LibvirtConfigGuest()
@@ -2371,144 +2510,15 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
             </domain>""")
 
     def test_config_kvm(self):
-        obj = config.LibvirtConfigGuest()
-        obj.virt_type = "kvm"
-        obj.memory = 100 * units.Mi
-        obj.vcpus = 2
-        obj.cpuset = set([0, 1, 3, 4, 5])
+        obj = fake_libvirt_data.fake_kvm_guest()
 
-        obj.cputune = config.LibvirtConfigGuestCPUTune()
-        obj.cputune.shares = 100
-        obj.cputune.quota = 50000
-        obj.cputune.period = 25000
-
-        obj.membacking = config.LibvirtConfigGuestMemoryBacking()
-        page1 = config.LibvirtConfigGuestMemoryBackingPage()
-        page1.size_kb = 2048
-        page1.nodeset = [0, 1, 2, 3, 5]
-        page2 = config.LibvirtConfigGuestMemoryBackingPage()
-        page2.size_kb = 1048576
-        page2.nodeset = [4]
-        obj.membacking.hugepages.append(page1)
-        obj.membacking.hugepages.append(page2)
-
-        obj.memtune = config.LibvirtConfigGuestMemoryTune()
-        obj.memtune.hard_limit = 496
-        obj.memtune.soft_limit = 672
-        obj.memtune.swap_hard_limit = 1638
-        obj.memtune.min_guarantee = 2970
-
-        obj.numatune = config.LibvirtConfigGuestNUMATune()
-
-        numamemory = config.LibvirtConfigGuestNUMATuneMemory()
-        numamemory.mode = "preferred"
-        numamemory.nodeset = [0, 1, 2, 3, 8]
-
-        obj.numatune.memory = numamemory
-
-        numamemnode0 = config.LibvirtConfigGuestNUMATuneMemNode()
-        numamemnode0.cellid = 0
-        numamemnode0.mode = "preferred"
-        numamemnode0.nodeset = [0, 1]
-
-        numamemnode1 = config.LibvirtConfigGuestNUMATuneMemNode()
-        numamemnode1.cellid = 1
-        numamemnode1.mode = "preferred"
-        numamemnode1.nodeset = [2, 3]
-
-        numamemnode2 = config.LibvirtConfigGuestNUMATuneMemNode()
-        numamemnode2.cellid = 2
-        numamemnode2.mode = "preferred"
-        numamemnode2.nodeset = [8]
-
-        obj.numatune.memnodes.extend([numamemnode0,
-                                      numamemnode1,
-                                      numamemnode2])
-
-        obj.name = "demo"
-        obj.uuid = "b38a3f43-4be2-4046-897f-b67c2f5e0147"
-        obj.os_type = "linux"
-        obj.os_boot_dev = ["hd", "cdrom", "fd"]
-        obj.os_smbios = config.LibvirtConfigGuestSMBIOS()
-        obj.features = [
-            config.LibvirtConfigGuestFeatureACPI(),
-            config.LibvirtConfigGuestFeatureAPIC(),
-            config.LibvirtConfigGuestFeaturePAE(),
-            config.LibvirtConfigGuestFeatureKvmHidden()
-        ]
-
-        obj.sysinfo = config.LibvirtConfigGuestSysinfo()
-        obj.sysinfo.bios_vendor = "Acme"
-        obj.sysinfo.system_version = "1.0.0"
-
-        disk = config.LibvirtConfigGuestDisk()
-        disk.source_type = "file"
-        disk.source_path = "/tmp/img"
-        disk.target_dev = "/dev/vda"
-        disk.target_bus = "virtio"
-
-        obj.add_device(disk)
+        launch_security = config.LibvirtConfigGuestSEVLaunchSecurity()
+        launch_security.cbitpos = 47
+        launch_security.reduced_phys_bits = 1
+        obj.launch_security = launch_security
 
         xml = obj.to_xml()
-        self.assertXmlEqual(xml, """
-            <domain type="kvm">
-              <uuid>b38a3f43-4be2-4046-897f-b67c2f5e0147</uuid>
-              <name>demo</name>
-              <memory>104857600</memory>
-              <memoryBacking>
-                <hugepages>
-                  <page size="2048" unit="KiB" nodeset="0-3,5"/>
-                  <page size="1048576" unit="KiB" nodeset="4"/>
-                </hugepages>
-              </memoryBacking>
-              <memtune>
-                <hard_limit units="K">496</hard_limit>
-                <soft_limit units="K">672</soft_limit>
-                <swap_hard_limit units="K">1638</swap_hard_limit>
-                <min_guarantee units="K">2970</min_guarantee>
-              </memtune>
-              <numatune>
-                <memory mode="preferred" nodeset="0-3,8"/>
-                <memnode cellid="0" mode="preferred" nodeset="0-1"/>
-                <memnode cellid="1" mode="preferred" nodeset="2-3"/>
-                <memnode cellid="2" mode="preferred" nodeset="8"/>
-              </numatune>
-              <vcpu cpuset="0-1,3-5">2</vcpu>
-              <sysinfo type='smbios'>
-                 <bios>
-                   <entry name="vendor">Acme</entry>
-                 </bios>
-                 <system>
-                   <entry name="version">1.0.0</entry>
-                 </system>
-              </sysinfo>
-              <os>
-                <type>linux</type>
-                <boot dev="hd"/>
-                <boot dev="cdrom"/>
-                <boot dev="fd"/>
-                <smbios mode="sysinfo"/>
-              </os>
-              <features>
-                <acpi/>
-                <apic/>
-                <pae/>
-                <kvm>
-                  <hidden state='on'/>
-                </kvm>
-              </features>
-              <cputune>
-                <shares>100</shares>
-                <quota>50000</quota>
-                <period>25000</period>
-              </cputune>
-              <devices>
-                <disk type="file" device="disk">
-                  <source file="/tmp/img"/>
-                  <target bus="virtio" dev="/dev/vda"/>
-                </disk>
-              </devices>
-            </domain>""")
+        self.assertXmlEqual(fake_libvirt_data.FAKE_KVM_GUEST, xml)
 
     def test_config_uefi(self):
         obj = config.LibvirtConfigGuest()
@@ -2835,6 +2845,39 @@ class LibvirtConfigGuestSnapshotTest(LibvirtConfigBaseTest):
                <disk name='vdb' snapshot='no'/>
               </disks>
             </domainsnapshot>""")
+
+    def test_config_file_iommu(self):
+        obj = config.LibvirtConfigGuestDisk()
+        obj.driver_iommu = True
+        obj.source_type = "file"
+        obj.source_path = "/tmp/hello.qcow2"
+        obj.target_dev = "/dev/sda"
+        obj.target_bus = "virtio"
+        obj.serial = "7a97c4a3-6f59-41d4-bf47-191d7f97f8e9"
+
+        xml = obj.to_xml()
+        self.assertXmlEqual("""
+            <disk type="file" device="disk">
+              <driver iommu="on"/>
+              <source file="/tmp/hello.qcow2"/>
+              <target bus="virtio" dev="/dev/sda"/>
+              <serial>7a97c4a3-6f59-41d4-bf47-191d7f97f8e9</serial>
+            </disk>""", xml)
+
+    def test_config_file_iommu_parse(self):
+        xml = """
+            <disk type="file" device="disk">
+              <driver iommu="on"/>
+              <source file="/tmp/hello.qcow2"/>
+              <target bus="virtio" dev="/dev/sda"/>
+              <serial>7a97c4a3-6f59-41d4-bf47-191d7f97f8e9</serial>
+            </disk>"""
+        xmldoc = etree.fromstring(xml)
+
+        obj = config.LibvirtConfigGuestDisk()
+        obj.parse_dom(xmldoc)
+
+        self.assertTrue(obj.driver_iommu)
 
 
 class LibvirtConfigNodeDeviceTest(LibvirtConfigBaseTest):
@@ -3282,6 +3325,17 @@ class LibvirtConfigGuestRngTest(LibvirtConfigBaseTest):
     <backend model='random'>/dev/urandom</backend>
 </rng>""")
 
+    def test_config_rng_driver_iommu(self):
+        obj = config.LibvirtConfigGuestRng()
+        obj.driver_iommu = True
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <rng model='virtio'>
+                <backend model='random'/>
+                <driver iommu="on"/>
+            </rng>""")
+
 
 class LibvirtConfigGuestControllerTest(LibvirtConfigBaseTest):
 
@@ -3290,10 +3344,13 @@ class LibvirtConfigGuestControllerTest(LibvirtConfigBaseTest):
         obj.type = 'scsi'
         obj.index = 0
         obj.model = 'virtio-scsi'
+        obj.driver_iommu = True
 
         xml = obj.to_xml()
         self.assertXmlEqual(xml, """
-                <controller type='scsi' index='0' model='virtio-scsi'/>""")
+            <controller type='scsi' index='0' model='virtio-scsi'>
+              <driver iommu="on" />
+            </controller>""")
 
     def test_config_guest_usb_host_controller(self):
         obj = config.LibvirtConfigGuestUSBHostController()
@@ -3438,10 +3495,10 @@ class LibvirtConfigGuestMemoryTuneTest(LibvirtConfigBaseTest):
         xml = obj.to_xml()
         self.assertXmlEqual(xml, """
           <memtune>
-            <hard_limit units="K">28</hard_limit>
-            <soft_limit units="K">6</soft_limit>
-            <swap_hard_limit units="K">140</swap_hard_limit>
-            <min_guarantee units="K">270</min_guarantee>
+            <hard_limit unit="KiB">28</hard_limit>
+            <soft_limit unit="KiB">6</soft_limit>
+            <swap_hard_limit unit="KiB">140</swap_hard_limit>
+            <min_guarantee unit="KiB">270</min_guarantee>
           </memtune>""")
 
 
@@ -3624,6 +3681,19 @@ class LibvirtConfigMemoryBalloonTest(LibvirtConfigBaseTest):
         xml = balloon.to_xml()
         expected_xml = """
         <memballoon model='fake_virtio' />"""
+
+        self.assertXmlEqual(expected_xml, xml)
+
+    def test_config_memory_balloon_driver_iommu(self):
+        balloon = config.LibvirtConfigMemoryBalloon()
+        balloon.model = 'fake_virtio'
+        balloon.driver_iommu = True
+
+        xml = balloon.to_xml()
+        expected_xml = """
+            <memballoon model='fake_virtio'>
+              <driver iommu="on" />
+            </memballoon>"""
 
         self.assertXmlEqual(expected_xml, xml)
 

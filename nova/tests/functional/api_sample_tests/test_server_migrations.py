@@ -13,9 +13,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from concurrent import futures
 import datetime
 
+import futurist
 import mock
 
 from nova.conductor import manager as conductor_manager
@@ -30,6 +30,7 @@ class ServerMigrationsSampleJsonTest(test_servers.ServersSampleBase):
     sample_dir = 'server-migrations'
     scenarios = [('v2_22', {'api_major_version': 'v2.1'})]
     microversion = '2.22'
+    USE_NEUTRON = True
 
     def setUp(self):
         """setUp method for server usage."""
@@ -167,6 +168,7 @@ class ServerMigrationsSampleJsonTestV2_24(test_servers.ServersSampleBase):
     microversion = '2.24'
     sample_dir = "server-migrations"
     scenarios = [('v2_24', {'api_major_version': 'v2.1'})]
+    USE_NEUTRON = True
 
     def setUp(self):
         """setUp method for server usage."""
@@ -233,6 +235,7 @@ class ServerMigrationsSampleJsonTestV2_65(ServerMigrationsSampleJsonTestV2_24):
     ADMIN_API = True
     microversion = '2.65'
     scenarios = [('v2_65', {'api_major_version': 'v2.1'})]
+    USE_NEUTRON = True
 
     @mock.patch.object(conductor_manager.ComputeTaskManager, '_live_migrate')
     def test_live_migrate_abort_migration_queued(self, _live_migrate):
@@ -241,7 +244,7 @@ class ServerMigrationsSampleJsonTestV2_65(ServerMigrationsSampleJsonTestV2_24):
         self._do_post('servers/%s/action' % self.uuid, 'live-migrate-server',
                       {'hostname': self.compute.host})
         self.compute._waiting_live_migrations[self.uuid] = (
-            self.migration, futures.Future())
+            self.migration, futurist.Future())
         uri = 'servers/%s/migrations/%s' % (self.uuid, self.migration.id)
         response = self._do_delete(uri)
         self.assertEqual(202, response.status_code)

@@ -31,6 +31,7 @@ import math
 import re
 
 import netaddr
+from oslo_concurrency import processutils
 from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_service import periodic_task
@@ -67,9 +68,9 @@ CONF = nova.conf.CONF
 
 def get_my_linklocal(interface):
     try:
-        if_str = utils.execute(
+        if_str = processutils.execute(
             'ip', '-f', 'inet6', '-o', 'addr', 'show', interface)
-        condition = '\s+inet6\s+([0-9a-f:]+)/\d+\s+scope\s+link'
+        condition = r'\s+inet6\s+([0-9a-f:]+)/\d+\s+scope\s+link'
         links = [re.search(condition, x) for x in if_str[0].split('\n')]
         address = [w.group(1) for w in links if w is not None]
         if address[0] is not None:
@@ -313,7 +314,7 @@ class NetworkManager(manager.Manager):
                                                 None, None)
             ic = objects.InstanceInfoCache.new(admin_context, instance_id)
             ic.network_info = nw_info
-            ic.save(update_cells=False)
+            ic.save()
         except exception.InstanceInfoCacheNotFound:
             pass
         groups = instance.security_groups
@@ -867,7 +868,7 @@ class NetworkManager(manager.Manager):
                               instance=instance)
                     address = str(fip.address)
 
-                cleanup.append(functools.partial(fip.disassociate, context))
+                cleanup.append(fip.disassociate)
 
                 # NOTE(melwitt): We recheck the quota after creating the object
                 # to prevent users from allocating more resources than their

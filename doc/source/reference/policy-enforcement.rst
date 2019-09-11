@@ -15,39 +15,45 @@
       under the License.
 
 
-Rest API Policy Enforcement
+REST API Policy Enforcement
 ===========================
 
-Here is a vision of how we want policy to be enforced in nova.
+The following describes some of the shortcomings in how policy is used and
+enforced in nova, along with some benefits of fixing those issues. Each issue
+has a section dedicated to describing the underlying cause and historical
+context in greater detail.
 
 Problems with current system
 ----------------------------
 
-There are several problems for current API policy.
+The following is a list of issues with the existing policy enforcement system:
 
-* The permission checking is spread through the various levels of the nova
-  code, also there are some hard-coded permission checks that make some
-  policies not enforceable.
+* Default policies lack exhaustive testing
+* Mismatch between authoritative scope and resources
+* Policies are inconsistently named
+* Current defaults do not use default roles provided from keystone
+* Policy enforcement is spread across multiple levels and components
+* Some policies use hard-coded check strings
+* Some APIs do not use granular rules
 
-* API policy rules need better granularity. Some of extensions just use one
-  rule for all the APIs. Deployer can't get better granularity control for
-  the APIs.
+Addressing the list above helps operators by:
 
-* More easy way to override default policy settings for deployer. And
-  Currently all the API(EC2, V2, V2.1) rules mix in one policy.json file.
+1. Providing them with flexible and useful defaults
+2. Reducing the likelihood of writing and maintaining custom policies
+3. Improving interoperability between deployments
+4. Increasing RBAC confidence through first-class testing and verification
+5. Reducing complexity by using consistent policy naming conventions
+6. Exposing more functionality to end-users, safely, making the entire nova API
+   more self-serviceable resulting in less operational overhead for operators
+   to do things on behalf of users
 
-These are the kinds of things we need to make easier:
+Additionally, the following is a list of benefits to contributors:
 
-1. Operator wants to enable a specific role to access the service API which
-is not possible because there is currently a hard coded admin check.
-
-2. One policy rule per API action. Having a check in the REST API and a
-redundant check in the compute API can confuse developers and deployers.
-
-3. Operator can specify different rules for APIs that in same extension.
-
-4. Operator can override the default policy rule easily without mixing his own
-config and default config in one policy.json file.
+1. Reduce developer maintenance and cost by isolating policy enforcement into a
+   single layer
+2. Reduce complexity by using consistent policy naming conventions
+3. Increased confidence in RBAC refactoring through exhaustive testing that
+   prevents regressions before they merge
 
 Future of policy enforcement
 ----------------------------
@@ -92,14 +98,6 @@ layer to guarantee it won't break the back-compatibility. That may ugly
 some hard-code permission check in API layer, but V2 API will be removed
 once V2.1 API ready, so our choice will reduce the risk.
 
-Port policy.d into nova
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-This feature make deployer can override default policy rule easily. And
-When nova default policy config changed, deployer only need replace default
-policy config files with new one. It won't affect his own policy config in
-other files.
-
 Use different prefix in policy rule name for EC2/V2/V2.1 API
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -125,31 +123,6 @@ group them, and put them in different policy configure file in policy.d
 This will affect EC2 API and V2.1 API. For EC2 API, it need deployer update
 their policy config. For V2.1 API, there isn't any user yet, so there won't
 any effect.
-
-
-Group the policy rules into different policy files
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-After group the policy rules for different API, we can separate them into
-different files. Then deployer will more clear for which rule he can set for
-specific API. The rules can be grouped as below:
-
-* policy.json: It only contains the generic rule, like: ::
-
-  "context_is_admin":  "role:admin",
-  "admin_or_owner":  "is_admin:True or project_id:%(project_id)s",
-  "default": "rule:admin_or_owner",
-
-* policy.d/00-ec2-api.conf: It contains all the policy rules for EC2 API.
-
-* policy.d/00-v2-api.conf: It contains all the policy rules for nova V2 API.
-
-* policy.d/00-v2.1-api.conf: It contains all the policy rules for nova v2.1
-  API.
-
-The prefix '00-' is used to order the configure file. All the files in
-policy.d will be loaded by alphabetical order. '00-' means those files will
-be loaded very early.
 
 Existed Nova API being restricted
 ---------------------------------

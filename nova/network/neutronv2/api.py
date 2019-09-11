@@ -52,12 +52,6 @@ LOG = logging.getLogger(__name__)
 _SESSION = None
 _ADMIN_AUTH = None
 
-DEFAULT_SECGROUP = 'default'
-BINDING_PROFILE = 'binding:profile'
-BINDING_HOST_ID = 'binding:host_id'
-MIGRATING_ATTR = 'migrating_to'
-L3_NETWORK_TYPES = ['vxlan', 'gre', 'geneve']
-
 
 def reset_state():
     global _ADMIN_AUTH
@@ -88,7 +82,7 @@ def _load_auth_plugin(conf):
     raise neutron_client_exc.Unauthorized(message=err_msg)
 
 
-def _get_binding_profile(port):
+def get_binding_profile(port):
     """Convenience method to get the binding:profile from the port
 
     The binding:profile in the port is undefined in the networking service
@@ -98,7 +92,7 @@ def _get_binding_profile(port):
     :param port: dict port response body from the networking service API
     :returns: The port binding:profile dict; empty if not set on the port
     """
-    return port.get(BINDING_PROFILE, {}) or {}
+    return port.get(constants.BINDING_PROFILE, {}) or {}
 
 
 @profiler.trace_cls("neutron_api")
@@ -179,30 +173,21 @@ def get_client(context, admin=False):
     session = _get_session()
     client_args = dict(session=session,
                        auth=auth_plugin,
-                       global_request_id=context.global_request_id)
+                       global_request_id=context.global_id)
 
-    if CONF.neutron.url:
-        # TODO(efried): Remove in Rocky
-        client_args = dict(client_args,
-                           endpoint_override=CONF.neutron.url,
-                           # NOTE(efried): The legacy behavior was to default
-                           # region_name in the conf.
-                           region_name=CONF.neutron.region_name or 'RegionOne')
-    else:
-        # The new way
-        # NOTE(efried): We build an adapter
-        #               to pull conf options
-        #               to pass to neutronclient
-        #               which uses them to build an Adapter.
-        # This should be unwound at some point.
-        adap = utils.get_ksa_adapter(
-            'network', ksa_auth=auth_plugin, ksa_session=session)
-        client_args = dict(client_args,
-                           service_type=adap.service_type,
-                           service_name=adap.service_name,
-                           interface=adap.interface,
-                           region_name=adap.region_name,
-                           endpoint_override=adap.endpoint_override)
+    # NOTE(efried): We build an adapter
+    #               to pull conf options
+    #               to pass to neutronclient
+    #               which uses them to build an Adapter.
+    # This should be unwound at some point.
+    adap = utils.get_ksa_adapter(
+        'network', ksa_auth=auth_plugin, ksa_session=session)
+    client_args = dict(client_args,
+                       service_type=adap.service_type,
+                       service_name=adap.service_name,
+                       interface=adap.interface,
+                       region_name=adap.region_name,
+                       endpoint_override=adap.endpoint_override)
 
     return ClientWrapper(clientv20.Client(**client_args),
                          admin=admin or context.is_admin)
@@ -249,59 +234,6 @@ def _ensure_no_port_binding_failure(port):
     if binding_vif_type == network_model.VIF_TYPE_BINDING_FAILED:
         raise exception.PortBindingFailed(port_id=port['id'])
 
-
-def _filter_hypervisor_macs(instance, requested_ports_dict, hypervisor_macs):
-    """Removes macs from set if used by existing ports
-
-    :param instance: The server instance.
-    :type instance: nova.objects.instance.Instance
-    :param requested_ports_dict: dict, keyed by port ID, of ports requested by
-        the user
-    :type requested_ports_dict: dict
-    :param hypervisor_macs: None or a set of MAC addresses that the
-        instance should use. hypervisor_macs are supplied by the hypervisor
-        driver (contrast with requested_networks which is user supplied).
-        NB: NeutronV2 currently assigns hypervisor supplied MAC addresses
-        to arbitrary networks, which requires openflow switches to
-        function correctly if more than one network is being used with
-        the bare metal hypervisor (which is the only one known to limit
-        MAC addresses).
-    :type hypervisor_macs: set
-    :returns a set of available MAC addresses to use if
-            creating a port later; this is the set of hypervisor_macs
-            after removing any MAC addresses from explicitly
-            requested ports.
-    """
-    if not hypervisor_macs:
-        return None
-
-    # Make a copy we can mutate: records macs that have not been used
-    # to create a port on a network. If we find a mac with a
-    # pre-allocated port we also remove it from this set.
-    available_macs = set(hypervisor_macs)
-    if not requested_ports_dict:
-        return available_macs
-
-    for port in requested_ports_dict.values():
-        mac = port['mac_address']
-        if mac not in hypervisor_macs:
-            LOG.debug("Port %(port)s mac address %(mac)s is "
-                      "not in the set of hypervisor macs: "
-                      "%(hyper_macs)s. Nova will overwrite "
-                      "this with a new mac address.",
-                      {'port': port['id'],
-                       'mac': mac,
-                       'hyper_macs': hypervisor_macs},
-                      instance=instance)
-        else:
-            # Don't try to use this MAC if we need to create a
-            # port on the fly later. Identical MACs may be
-            # configured by users into multiple ports so we
-            # discard rather than popping.
-            available_macs.discard(mac)
-
-    return available_macs
-
 #采用neutron提供网络功能
 class API(base_api.NetworkAPI):
     """API for interacting with the neutron 2.x API."""
@@ -317,7 +249,7 @@ class API(base_api.NetworkAPI):
             self, instance, port_id, port_profile, admin_client):
         try:
             updated_port = admin_client.update_port(
-                port_id, {'port': {BINDING_PROFILE: port_profile}})
+                port_id, {'port': {constants.BINDING_PROFILE: port_profile}})
             return updated_port
         except Exception as ex:
             with excutils.save_and_reraise_exception():
@@ -332,11 +264,11 @@ class API(base_api.NetworkAPI):
             # If the port already has a migration profile and if
             # it is to be torn down, then we need to clean up
             # the migration profile.
-            port_profile = _get_binding_profile(p)
+            port_profile = get_binding_profile(p)
             if not port_profile:
                 continue
-            if MIGRATING_ATTR in port_profile:
-                del port_profile[MIGRATING_ATTR]
+            if constants.MIGRATING_ATTR in port_profile:
+                del port_profile[constants.MIGRATING_ATTR]
                 LOG.debug("Removing port %s migration profile", p['id'],
                           instance=instance)
                 self._update_port_with_migration_profile(
@@ -349,16 +281,16 @@ class API(base_api.NetworkAPI):
             # If the host hasn't changed, there is nothing to do.
             # But if the destination host is different than the
             # current one, please update the port_profile with
-            # the 'migrating_to'(MIGRATING_ATTR) key pointing to
+            # the 'migrating_to'(constants.MIGRATING_ATTR) key pointing to
             # the given 'host'.
-            host_id = p.get(BINDING_HOST_ID)
+            host_id = p.get(constants.BINDING_HOST_ID)
             if host_id != host:
-                port_profile = _get_binding_profile(p)
+                port_profile = get_binding_profile(p)
                 # If the "migrating_to" attribute already points at the given
                 # host, then skip the port update call since we're not changing
                 # anything.
-                if host != port_profile.get(MIGRATING_ATTR):
-                    port_profile[MIGRATING_ATTR] = host
+                if host != port_profile.get(constants.MIGRATING_ATTR):
+                    port_profile[constants.MIGRATING_ATTR] = host
                     self._update_port_with_migration_profile(
                         instance, p['id'], port_profile, admin_client)
                     LOG.debug("Port %(port_id)s updated with migration "
@@ -393,7 +325,7 @@ class API(base_api.NetworkAPI):
         if port_migrating or teardown:
             search_opts = {'device_id': instance.uuid,
                            'tenant_id': instance.project_id,
-                           BINDING_HOST_ID: instance.host}
+                           constants.BINDING_HOST_ID: instance.host}
             # Now get the port details to process the ports
             # binding profile info.
             data = self.list_ports(context, **search_opts)
@@ -473,6 +405,15 @@ class API(base_api.NetworkAPI):
 
         return nets
 
+    def _cleanup_created_port(self, port_client, port_id, instance):
+        try:
+            port_client.delete_port(port_id)
+        except neutron_client_exc.NeutronClientException:
+            LOG.exception(
+                'Failed to delete port %(port_id)s while cleaning up after an '
+                'error.', {'port_id': port_id},
+                instance=instance)
+
     #为虚拟机创建port
     def _create_port_minimal(self, port_client, instance, network_id,
                              fixed_ip=None, security_group_ids=None):
@@ -489,6 +430,8 @@ class API(base_api.NetworkAPI):
         :raises NoMoreFixedIps: If neutron fails with
             IpAddressGenerationFailure error.
         :raises: PortBindingFailed: If port binding failed.
+        :raises NetworksWithQoSPolicyNotSupported: if the created port has
+                resource request.
         """
         # Set the device_id so it's clear who this port was created for,
         # and to stop other instances trying to use it
@@ -509,6 +452,23 @@ class API(base_api.NetworkAPI):
 
             port = port_response['port']
             port_id = port['id']
+
+            # NOTE(gibi): Checking if the created port has resource request as
+            # such ports are currently not supported as they would at least
+            # need resource allocation manipulation in placement but might also
+            # need a new scheduling if resource on this host is not available.
+            if port.get(constants.RESOURCE_REQUEST, None):
+                msg = _(
+                    "The auto-created port %(port_id)s is being deleted due "
+                    "to its network having QoS policy.")
+                LOG.info(msg, {'port_id': port_id})
+                self._cleanup_created_port(port_client, port_id, instance)
+                # NOTE(gibi): This limitation regarding server create can be
+                # removed when the port creation is moved to the conductor. But
+                # this code also limits attaching a network that has QoS
+                # minimum bandwidth rule.
+                raise exception.NetworksWithQoSPolicyNotSupported(
+                    instance_uuid=instance.uuid, network_id=network_id)
             try:
                 #确认port绑定成功
                 _ensure_no_port_binding_failure(port)
@@ -573,18 +533,6 @@ class API(base_api.NetworkAPI):
                         {'network': network_id}, instance=instance)
             raise exception.FixedIpInvalidOnHost(port_id=port_id)
 
-    @staticmethod
-    def _populate_mac_address(instance, port_req_body, available_macs):
-        # NOTE(johngarbutt) On port_update, this will cause us to override
-        # any previous mac address the port may have had.
-        if available_macs is not None:
-            if not available_macs:
-                raise exception.PortNotFree(
-                    instance=instance.uuid)
-            mac_address = available_macs.pop()
-            port_req_body['port']['mac_address'] = mac_address
-            return mac_address
-
     def _check_external_network_attach(self, context, nets):
         """Check if attaching to external network is permitted."""
         if not context.can(servers_policies.NETWORK_ATTACH_EXTERNAL,
@@ -599,8 +547,8 @@ class API(base_api.NetworkAPI):
 
     def _unbind_ports(self, context, ports,
                       neutron, port_client=None):
-        """Unbind the given ports by clearing their device_id and
-        device_owner.
+        """Unbind the given ports by clearing their device_id,
+        device_owner and dns_name.
 
         :param context: The request context.
         :param ports: list of port IDs.
@@ -611,40 +559,54 @@ class API(base_api.NetworkAPI):
         if port_client is None:
             # Requires admin creds to set port bindings
             port_client = get_client(context, admin=True)
+        networks = {}
         for port_id in ports:
             # A port_id is optional in the NetworkRequest object so check here
             # in case the caller forgot to filter the list.
             if port_id is None:
                 continue
             port_req_body = {'port': {'device_id': '', 'device_owner': ''}}
-            port_req_body['port'][BINDING_HOST_ID] = None
+            port_req_body['port'][constants.BINDING_HOST_ID] = None
             try:
-                port = self._show_port(context, port_id,
-                                       neutron_client=neutron,
-                                       fields=BINDING_PROFILE)
+                port = self._show_port(
+                    context, port_id, neutron_client=neutron,
+                    fields=[constants.BINDING_PROFILE, 'network_id'])
             except exception.PortNotFound:
                 LOG.debug('Unable to show port %s as it no longer '
                           'exists.', port_id)
                 return
             except Exception:
-                # NOTE: In case we can't retrieve the binding:profile assume
-                # that they are empty
+                # NOTE: In case we can't retrieve the binding:profile or
+                # network info assume that they are empty
                 LOG.exception("Unable to get binding:profile for port '%s'",
                               port_id)
                 port_profile = {}
+                network = {}
             else:
-                port_profile = port.get(BINDING_PROFILE, {})
+                port_profile = get_binding_profile(port)
+                net_id = port.get('network_id')
+                if net_id in networks:
+                    network = networks.get(net_id)
+                else:
+                    network = neutron.show_network(net_id,
+                                                   fields=['dns_domain']
+                                                   ).get('network')
+                    networks[net_id] = network
 
             # NOTE: We're doing this to remove the binding information
             # for the physical device but don't want to overwrite the other
             # information in the binding profile.
-            for profile_key in ('pci_vendor_info', 'pci_slot'):
+            for profile_key in ('pci_vendor_info', 'pci_slot',
+                                constants.ALLOCATION):
                 if profile_key in port_profile:
                     del port_profile[profile_key]
-            port_req_body['port'][BINDING_PROFILE] = port_profile
-            if self._has_dns_extension():
-                port_req_body['port']['dns_name'] = ''
+            port_req_body['port'][constants.BINDING_PROFILE] = port_profile
 
+            # NOTE: For internal DNS integration (network does not have a
+            # dns_domain), or if we cannot retrieve network info, we use the
+            # admin client to reset dns_name.
+            if self._has_dns_extension() and not network.get('dns_domain'):
+                port_req_body['port']['dns_name'] = ''
             try:
                 port_client.update_port(port_id, port_req_body)
             except neutron_client_exc.PortNotFoundClient:
@@ -653,6 +615,10 @@ class API(base_api.NetworkAPI):
             except Exception:
                 LOG.exception("Unable to clear device ID for port '%s'",
                               port_id)
+            # NOTE: For external DNS integration, we use the neutron client
+            # with user's context to reset the dns_name since the recordset is
+            # under user's zone.
+            self._reset_port_dns_name(network, port_id, neutron)
 
     def _validate_requested_port_ids(self, context, instance, neutron,
                                      requested_networks, attach=False):
@@ -758,7 +724,7 @@ class API(base_api.NetworkAPI):
         """
         if not security_groups:
             security_groups = []
-        elif security_groups == [DEFAULT_SECGROUP]:
+        elif security_groups == [constants.DEFAULT_SECGROUP]:
             security_groups = []
         return security_groups
 
@@ -885,9 +851,9 @@ class API(base_api.NetworkAPI):
         # or if it is indirectly called through allocate_port_for_instance()
         # with None params=(network_id=None, requested_ip=None, port_id=None,
         # pci_request_id=None):
-        if (not requested_networks
-            or requested_networks.is_single_unspecified
-            or requested_networks.auto_allocate):
+        if (not requested_networks or
+            requested_networks.is_single_unspecified or
+            requested_networks.auto_allocate):
             # If no networks were requested and none are available, consider
             # it a bad request.
             if not nets:
@@ -976,28 +942,24 @@ class API(base_api.NetworkAPI):
         return requests_and_created_ports
 
     def allocate_for_instance(self, context, instance, vpn,
-                              requested_networks, macs=None,
+                              requested_networks,
                               security_groups=None, bind_host_id=None,
-                              attach=False):
+                              attach=False, resource_provider_mapping=None):
         """Allocate network resources for the instance.
 
         :param context: The request context.
         :param instance: nova.objects.instance.Instance object.
         :param vpn: A boolean, ignored by this driver.
         :param requested_networks: objects.NetworkRequestList object.
-        :param macs: None or a set of MAC addresses that the instance
-            should use. macs is supplied by the hypervisor driver (contrast
-            with requested_networks which is user supplied).
-            NB: NeutronV2 currently assigns hypervisor supplied MAC addresses
-            to arbitrary networks, which requires openflow switches to
-            function correctly if more than one network is being used with
-            the bare metal hypervisor (which is the only one known to limit
-            MAC addresses).
         :param security_groups: None or security groups to allocate for
             instance.
         :param bind_host_id: the host ID to attach to the ports being created.
         :param attach: Boolean indicating if a port is being attached to an
             existing running instance. Should be False during server create.
+        :param resource_provider_mapping: a dict keyed by ids of the entities
+            (for example Neutron port) requesting resources for this instance
+            mapped to a list of resource provider UUIDs that are fulfilling
+            such a resource request.
         :returns: network info as from get_instance_nw_info()
         """
         LOG.debug('allocate_for_instance()', instance=instance)
@@ -1031,6 +993,25 @@ class API(base_api.NetworkAPI):
         security_group_ids = self._process_security_groups(
                                     instance, neutron, security_groups)
 
+        # Tell Neutron which resource provider fulfills the ports' resource
+        # request.
+        # We only consider pre-created ports here as ports created
+        # below based on requested networks are not scheduled to have their
+        # resource request fulfilled.
+        for port in requested_ports_dict.values():
+            # only communicate the allocations if the port has resource
+            # requests
+            if port.get(constants.RESOURCE_REQUEST):
+                profile = get_binding_profile(port)
+                # NOTE(gibi): In the resource provider mapping there can be
+                # more than one RP fulfilling a request group. But resource
+                # requests of a Neutron port is always mapped to a
+                # numbered request group that is always fulfilled by one
+                # resource provider. So we only pass that single RP UUID here.
+                profile[constants.ALLOCATION] = resource_provider_mapping[
+                    port['id']][0]
+                port[constants.BINDING_PROFILE] = profile
+
         # Create ports from the list of ordered_networks. The returned
         # requests_and_created_ports variable is a list of 2-item tuples of
         # the form (NetworkRequest, created_port_id). Note that a tuple pair
@@ -1046,8 +1027,6 @@ class API(base_api.NetworkAPI):
         #
         # Update existing and newly created ports
         #
-        available_macs = _filter_hypervisor_macs(
-            instance, requested_ports_dict, macs)
 
         # We always need admin_client to build nw_info,
         # we sometimes need it when updating ports
@@ -1057,7 +1036,7 @@ class API(base_api.NetworkAPI):
             created_port_ids = self._update_ports_for_instance(
                 context, instance,
                 neutron, admin_client, requests_and_created_ports, nets,
-                bind_host_id, available_macs, requested_ports_dict)
+                bind_host_id, requested_ports_dict)
 
         #
         # Perform a full update of the network_info_cache,
@@ -1067,8 +1046,7 @@ class API(base_api.NetworkAPI):
             context, instance, networks=ordered_nets,
             port_ids=ordered_port_ids,
             admin_client=admin_client,
-            preexisting_port_ids=preexisting_port_ids,
-            update_cells=True)
+            preexisting_port_ids=preexisting_port_ids)
         # Only return info about ports we processed in this run, which might
         # have been pre-existing neutron ports or ones that nova created. In
         # the initial allocation case (server create), this will be everything
@@ -1082,7 +1060,7 @@ class API(base_api.NetworkAPI):
 
     def _update_ports_for_instance(self, context, instance, neutron,
             admin_client, requests_and_created_ports, nets,
-            bind_host_id, available_macs, requested_ports_dict):
+            bind_host_id, requested_ports_dict):
         """Update ports from network_requests.
 
         Updates the pre-existing ports and the ones created in
@@ -1099,7 +1077,6 @@ class API(base_api.NetworkAPI):
             pre-existing port.
         :param nets: a dict of network_id to networks returned from neutron
         :param bind_host_id: a string for port['binding:host_id']
-        :param available_macs: a list of available mac addresses
         :param requested_ports_dict: dict, keyed by port ID, of ports requested
             by the user
         :returns: tuple with the following::
@@ -1138,9 +1115,9 @@ class API(base_api.NetworkAPI):
                                       'device_owner': zone}}
             if (requested_ports_dict and
                 request.port_id in requested_ports_dict and
-                requested_ports_dict[request.port_id].get(BINDING_PROFILE)):
-                port_req_body['port'][BINDING_PROFILE] = (
-                    requested_ports_dict[request.port_id][BINDING_PROFILE])
+                get_binding_profile(requested_ports_dict[request.port_id])):
+                port_req_body['port'][constants.BINDING_PROFILE] = \
+                    get_binding_profile(requested_ports_dict[request.port_id])
             try:
                 self._populate_neutron_extension_values(
                     context, instance, request.pci_request_id, port_req_body,
@@ -1148,8 +1125,6 @@ class API(base_api.NetworkAPI):
                     bind_host_id=bind_host_id)
                 self._populate_pci_mac_address(instance,
                     request.pci_request_id, port_req_body)
-                self._populate_mac_address(
-                    instance, port_req_body, available_macs)
 
                 if created_port_id:
                     port_id = created_port_id
@@ -1198,8 +1173,8 @@ class API(base_api.NetworkAPI):
     def _refresh_neutron_extensions_cache(self, context, neutron=None):
         """Refresh the neutron extensions cache when necessary."""
         if (not self.last_neutron_extension_sync or
-            ((time.time() - self.last_neutron_extension_sync)
-             >= CONF.neutron.extension_sync_interval)):
+            ((time.time() - self.last_neutron_extension_sync) >=
+             CONF.neutron.extension_sync_interval)):
             if neutron is None:
                 neutron = get_client(context)
             extensions_list = neutron.list_extensions()['extensions']
@@ -1237,7 +1212,7 @@ class API(base_api.NetworkAPI):
         return constants.PORT_BINDING_EXTENDED in self.extensions
 
     def bind_ports_to_host(self, context, instance, host,
-                           vnic_type=None, profile=None):
+                           vnic_types=None, port_profiles=None):
         """Attempts to bind the ports from the instance on the given host
 
         If the ports are already actively bound to another host, like the
@@ -1258,17 +1233,17 @@ class API(base_api.NetworkAPI):
         :param host: the host on which to bind the ports which
                      are attached to the instance
         :type host: str
-        :param vnic_type: optional vnic type string for the host
-                          port binding
-        :type vnic_type: str
-        :param profile: optional vif profile dict for the host port
-                        binding; note that the port binding profile is mutable
+        :param vnic_types: optional dict for the host port binding
+        :type vnic_types: dict of <port_id> : <vnic_type>
+        :param port_profiles: optional dict per port ID for the host port
+                        binding profile.
+                        note that the port binding profile is mutable
                         via the networking "Port Binding" API so callers that
                         pass in a profile should ensure they have the latest
                         version from neutron with their changes merged,
                         which can be determined using the "revision_number"
                         attribute of the port.
-        :type profile: dict
+        :type port_profiles: dict of <port_id> : <port_profile>
         :raises: PortBindingFailed if any of the ports failed to be bound to
                  the destination host
         :returns: dict, keyed by port ID, of a new host port
@@ -1277,29 +1252,37 @@ class API(base_api.NetworkAPI):
         # Get the current ports off the instance. This assumes the cache is
         # current.
         network_info = instance.get_network_info()
-        port_ids = [vif['id'] for vif in network_info]
 
-        if not port_ids:
+        if not network_info:
             # The instance doesn't have any ports so there is nothing to do.
             LOG.debug('Instance does not have any ports.', instance=instance)
             return {}
 
         client = _get_ksa_client(context, admin=True)
 
-        # Now bind each port to the destination host and keep track of each
-        # port that is bound to the resulting binding so we can rollback in
-        # the event of a failure, or return the results if everything is OK.
-        binding = dict(host=host)
-        if vnic_type:
-            binding['vnic_type'] = vnic_type
-        if profile:
-            binding['profile'] = profile
-        data = dict(binding=binding)
+        # TODO(gibi): To support ports with resource request during server
+        # live migrate operation we need to take care of 'allocation' key in
+        # the binding profile per binding.
 
         bindings_by_port_id = {}
-        for port_id in port_ids:
-            resp = client.post('/v2.0/ports/%s/bindings' % port_id,
-                               json=data, raise_exc=False)
+        for vif in network_info:
+            # Now bind each port to the destination host and keep track of each
+            # port that is bound to the resulting binding so we can rollback in
+            # the event of a failure, or return the results if everything is OK
+            port_id = vif['id']
+            binding = dict(host=host)
+            if vnic_types is None or port_id not in vnic_types:
+                binding['vnic_type'] = vif['vnic_type']
+            else:
+                binding['vnic_type'] = vnic_types[port_id]
+
+            if port_profiles is None or port_id not in port_profiles:
+                binding['profile'] = vif['profile']
+            else:
+                binding['profile'] = port_profiles[port_id]
+
+            data = dict(binding=binding)
+            resp = self._create_port_binding(context, client, port_id, data)
             if resp:
                 bindings_by_port_id[port_id] = resp.json()['binding']
             else:
@@ -1321,6 +1304,23 @@ class API(base_api.NetworkAPI):
 
         return bindings_by_port_id
 
+    @staticmethod
+    def _create_port_binding(context, client, port_id, data):
+        """Creates a port binding with the specified data.
+
+        :param context: The request context for the operation.
+        :param client: keystoneauth1.adapter.Adapter
+        :param port_id: The ID of the port on which to create the binding.
+        :param data: dict of port binding data (requires at least the host),
+            for example::
+
+                {'binding': {'host': 'dest.host.com'}}
+        :return: requests.Response object
+        """
+        return client.post(
+            '/v2.0/ports/%s/bindings' % port_id, json=data, raise_exc=False,
+            global_request_id=context.global_id)
+
     def delete_port_binding(self, context, port_id, host):
         """Delete the port binding for the given port ID and host
 
@@ -1334,9 +1334,7 @@ class API(base_api.NetworkAPI):
             response is received from neutron.
         """
         client = _get_ksa_client(context, admin=True)
-        resp = client.delete(
-            '/v2.0/ports/%s/bindings/%s' % (port_id, host),
-            raise_exc=False)
+        resp = self._delete_port_binding(context, client, port_id, host)
         if resp:
             LOG.debug('Deleted binding for port %s and host %s.',
                       port_id, host)
@@ -1351,6 +1349,20 @@ class API(base_api.NetworkAPI):
                           resp.status_code, resp.text)
                 raise exception.PortBindingDeletionFailed(
                     port_id=port_id, host=host)
+
+    @staticmethod
+    def _delete_port_binding(context, client, port_id, host):
+        """Deletes the binding for the given host on the given port.
+
+        :param context: The request context for the operation.
+        :param client: keystoneauth1.adapter.Adapter
+        :param port_id: ID of the port from which to delete the binding
+        :param host: A string name of the host on which the port is bound
+        :return: requests.Response object
+        """
+        return client.delete(
+            '/v2.0/ports/%s/bindings/%s' % (port_id, host), raise_exc=False,
+            global_request_id=context.global_id)
 
     def activate_port_binding(self, context, port_id, host):
         """Activates an inactive port binding.
@@ -1371,7 +1383,8 @@ class API(base_api.NetworkAPI):
         # to ACTIVE, it's more like a POST action method in the compute API.
         resp = client.put(
             '/v2.0/ports/%s/bindings/%s/activate' % (port_id, host),
-            raise_exc=False)
+            raise_exc=False,
+            global_request_id=context.global_id)
         if resp:
             LOG.debug('Activated binding for port %s and host %s.',
                       port_id, host)
@@ -1405,15 +1418,28 @@ class API(base_api.NetworkAPI):
         """Populate neutron binding:profile.
 
         Populate it with SR-IOV related information
+
+        :raises PciDeviceNotFound: If a claimed PCI device for the given
+            pci_request_id cannot be found on the instance.
         """
         if pci_request_id:
-            pci_dev = pci_manager.get_instance_pci_devs(
-                instance, pci_request_id).pop()
-            if port_req_body['port'].get(BINDING_PROFILE) is None:
-                port_req_body['port'][BINDING_PROFILE] = {}
-            profile = copy.deepcopy(port_req_body['port'][BINDING_PROFILE])
+            pci_devices = pci_manager.get_instance_pci_devs(
+                instance, pci_request_id)
+            if not pci_devices:
+                # The pci_request_id likely won't mean much except for tracing
+                # through the logs since it is generated per request.
+                LOG.error('Unable to find PCI device using PCI request ID in '
+                          'list of claimed instance PCI devices: %s. Is the '
+                          '[pci]/passthrough_whitelist configuration correct?',
+                          # Convert to a primitive list to stringify it.
+                          list(instance.pci_devices), instance=instance)
+                raise exception.PciDeviceNotFound(
+                    _('PCI device not found for request ID %s.') %
+                    pci_request_id)
+            pci_dev = pci_devices.pop()
+            profile = copy.deepcopy(get_binding_profile(port_req_body['port']))
             profile.update(self._get_pci_device_profile(pci_dev))
-            port_req_body['port'][BINDING_PROFILE] = profile
+            port_req_body['port'][constants.BINDING_PROFILE] = profile
 
     @staticmethod
     def _populate_pci_mac_address(instance, pci_request_id, port_req_body):
@@ -1433,7 +1459,7 @@ class API(base_api.NetworkAPI):
                 LOG.error("PCI request %s does not have a "
                           "unique device associated with it. Unable to "
                           "determine MAC address",
-                          pci_request, instance=instance)
+                          pci_request_id, instance=instance)
                 return
             pci_dev = pci_devs[0]
             if pci_dev.dev_type == obj_fields.PciDeviceType.SRIOV_PF:
@@ -1459,7 +1485,7 @@ class API(base_api.NetworkAPI):
             flavor = instance.get_flavor()
             rxtx_factor = flavor.get('rxtx_factor')
             port_req_body['port']['rxtx_factor'] = rxtx_factor
-        port_req_body['port'][BINDING_HOST_ID] = bind_host_id
+        port_req_body['port'][constants.BINDING_HOST_ID] = bind_host_id
         self._populate_neutron_binding_profile(instance,
                                                pci_request_id,
                                                port_req_body)
@@ -1501,6 +1527,23 @@ class API(base_api.NetworkAPI):
                 msg = (_('Instance hostname %(hostname)s is not a valid DNS '
                          'name') % {'hostname': instance.hostname})
                 raise exception.InvalidInput(reason=msg)
+
+    def _reset_port_dns_name(self, network, port_id, neutron_client):
+        """Reset an instance port dns_name attribute to empty when using
+        external DNS service.
+
+        _unbind_ports uses a client with admin context to reset the dns_name if
+        the DNS extension is enabled and network does not have dns_domain set.
+        When external DNS service is enabled, we use this method to make the
+        request with a Neutron client using user's context, so that the DNS
+        record can be found under user's zone and domain.
+        """
+        if self._has_dns_extension() and network.get('dns_domain'):
+            try:
+                port_req_body = {'port': {'dns_name': ''}}
+                neutron_client.update_port(port_id, port_req_body)
+            except neutron_client_exc.NeutronClientException:
+                LOG.exception("Failed to reset dns_name for port %s", port_id)
 
     def _delete_ports(self, neutron, instance, ports, raise_if_fail=False):
         exceptions = []
@@ -1572,9 +1615,32 @@ class API(base_api.NetworkAPI):
     def deallocate_port_for_instance(self, context, instance, port_id):
         """Remove a specified port from the instance.
 
-        Return network information for the instance
+        :param context: the request context
+        :param instance: the instance object the port is detached from
+        :param port_id: the UUID of the port being detached
+        :return: A NetworkInfo, port_allocation tuple where the
+                 port_allocation is a dict which contains the resource
+                 allocation of the port per resource provider uuid. E.g.:
+                 {
+                     rp_uuid: {
+                         NET_BW_EGR_KILOBIT_PER_SEC: 10000,
+                         NET_BW_IGR_KILOBIT_PER_SEC: 20000,
+                     }
+                 }
+                 Note that right now this dict only contains a single key as a
+                 neutron port only allocates from a single resource provider.
         """
         neutron = get_client(context)
+        port_allocation = {}
+        try:
+            # NOTE(gibi): we need to read the port resource information from
+            # neutron here as we might delete the port below
+            port = neutron.show_port(port_id)['port']
+        except exception.PortNotFound:
+            LOG.debug('Unable to determine port %s resource allocation '
+                      'information as the port no longer exists.', port_id)
+            port = None
+
         preexisting_ports = self._get_preexisting_port_ids(instance)
         if port_id in preexisting_ports:
             self._unbind_ports(context, [port_id], neutron)
@@ -1592,12 +1658,37 @@ class API(base_api.NetworkAPI):
             LOG.debug('VirtualInterface not found for port: %s',
                       port_id, instance=instance)
 
-        return self.get_instance_nw_info(context, instance)
+        if port:
+            # if there is resource associated to this port then that needs to
+            # be deallocated so lets return info about such allocation
+            resource_request = port.get(constants.RESOURCE_REQUEST)
+            profile = get_binding_profile(port)
+            allocated_rp = profile.get(constants.ALLOCATION)
+            if resource_request and allocated_rp:
+                port_allocation = {
+                    allocated_rp: resource_request.get('resources', {})}
+        else:
+            # Check the info_cache. If the port is still in the info_cache and
+            # in that cache there is allocation in the profile then we suspect
+            # that the port is disappeared without deallocating the resources.
+            for vif in instance.get_network_info():
+                if vif['id'] == port_id:
+                    profile = vif.get('profile') or {}
+                    rp_uuid = profile.get(constants.ALLOCATION)
+                    if rp_uuid:
+                        LOG.warning(
+                            'Port %s disappeared during deallocate but it had '
+                            'resource allocation on resource provider %s. '
+                            'Resource allocation for this port may be '
+                            'leaked.', port_id, rp_uuid, instance=instance)
+                    break
+
+        return self.get_instance_nw_info(context, instance), port_allocation
 
     def _delete_nic_metadata(self, instance, vif):
         for device in instance.device_metadata.devices:
-            if (isinstance(device, objects.NetworkInterfaceMetadata)
-                    and device.mac == vif.address):
+            if (isinstance(device, objects.NetworkInterfaceMetadata) and
+                    device.mac == vif.address):
                 instance.device_metadata.devices.remove(device)
                 instance.save()
                 break
@@ -1650,11 +1741,20 @@ class API(base_api.NetworkAPI):
     def _get_instance_nw_info(self, context, instance, networks=None,
                               port_ids=None, admin_client=None,
                               preexisting_port_ids=None,
-                              refresh_vif_id=None, **kwargs):
+                              refresh_vif_id=None, force_refresh=False,
+                              **kwargs):
         # NOTE(danms): This is an inner method intended to be called
         # by other code that updates instance nwinfo. It *must* be
         # called with the refresh_cache-%(instance_uuid) lock held!
-        LOG.debug('_get_instance_nw_info()', instance=instance)
+        if force_refresh:
+            LOG.debug('Forcefully refreshing network info cache for instance',
+                      instance=instance)
+        elif refresh_vif_id:
+            LOG.debug('Refreshing network info cache for port %s',
+                      refresh_vif_id, instance=instance)
+        else:
+            LOG.debug('Building network info cache for instance',
+                      instance=instance)
         # Ensure that we have an up to date copy of the instance info cache.
         # Otherwise multiple requests could collide and cause cache
         # corruption.
@@ -1662,12 +1762,17 @@ class API(base_api.NetworkAPI):
         nw_info = self._build_network_info_model(context, instance, networks,
                                                  port_ids, admin_client,
                                                  preexisting_port_ids,
-                                                 refresh_vif_id)
+                                                 refresh_vif_id,
+                                                 force_refresh=force_refresh)
         return network_model.NetworkInfo.hydrate(nw_info)
 
     def _gather_port_ids_and_networks(self, context, instance, networks=None,
                                       port_ids=None, neutron=None):
-        """Return an instance's complete list of port_ids and networks."""
+        """Return an instance's complete list of port_ids and networks.
+
+        The results are based on the instance info_cache in the nova db, not
+        the instance's current list of ports in neutron.
+        """
 
         if ((networks is None and port_ids is not None) or
             (port_ids is None and networks is not None)):
@@ -1822,7 +1927,7 @@ class API(base_api.NetworkAPI):
             net_id, fields=['provider:physical_network',
                             'provider:network_type']).get('network')
         return (net.get('provider:physical_network'),
-                net.get('provider:network_type') in L3_NETWORK_TYPES)
+                net.get('provider:network_type') in constants.L3_NETWORK_TYPES)
 
     @staticmethod
     def _get_trusted_mode_from_port(port):
@@ -1831,7 +1936,7 @@ class API(base_api.NetworkAPI):
         If port binding does not provide any information about trusted
         status this function is returning None
         """
-        value = _get_binding_profile(port).get('trusted')
+        value = get_binding_profile(port).get('trusted')
         if value is not None:
             # This allows the user to specify things like '1' and 'yes' in
             # the port binding profile and we can handle it as a boolean.
@@ -1844,13 +1949,14 @@ class API(base_api.NetworkAPI):
         :param neutron: The Neutron client
         :param port_id: The id of port to be queried
 
-        :return: A tuple of vNIC type, trusted status and network ID. Trusted
-            status only affects SR-IOV ports and will always be None for other
-            port types.
+        :return: A tuple of vNIC type, trusted status, network ID and resource
+                 request of the port if any. Trusted status only affects SR-IOV
+                 ports and will always be None for other port types.
         """
-        port = self._show_port(context, port_id, neutron_client=neutron,
-                               fields=['binding:vnic_type', BINDING_PROFILE,
-                                       'network_id'])
+        port = self._show_port(
+            context, port_id, neutron_client=neutron,
+            fields=['binding:vnic_type', constants.BINDING_PROFILE,
+                    'network_id', constants.RESOURCE_REQUEST])
         network_id = port.get('network_id')
         trusted = None
         vnic_type = port.get('binding:vnic_type',
@@ -1858,7 +1964,12 @@ class API(base_api.NetworkAPI):
         if vnic_type in network_model.VNIC_TYPES_SRIOV:
             trusted = self._get_trusted_mode_from_port(port)
 
-        return vnic_type, trusted, network_id
+        # NOTE(gibi): Get the port resource_request which may or may not be
+        # set depending on neutron configuration, e.g. if QoS rules are
+        # applied to the port/network and the port-resource-request API
+        # extension is enabled.
+        resource_request = port.get(constants.RESOURCE_REQUEST, None)
+        return vnic_type, trusted, network_id, resource_request
 
     def create_resource_requests(self, context, requested_networks,
                                  pci_requests=None):
@@ -1867,33 +1978,52 @@ class API(base_api.NetworkAPI):
 
         :param context: The request context.
         :param requested_networks: The networks requested for the server.
-        :type requested_networks: nova.objects.RequestedNetworkList
+        :type requested_networks: nova.objects.NetworkRequestList
         :param pci_requests: The list of PCI requests to which additional PCI
             requests created here will be added.
         :type pci_requests: nova.objects.InstancePCIRequests
 
-        :returns: An instance of ``objects.NetworkMetadata`` for use by the
-            scheduler or None.
+        :returns: A tuple with an instance of ``objects.NetworkMetadata`` for
+                  use by the scheduler or None and a list of RequestGroup
+                  objects representing the resource needs of each requested
+                  port
         """
         if not requested_networks or requested_networks.no_allocate:
-            return None
+            return None, []
 
         physnets = set()
         tunneled = False
 
         neutron = get_client(context, admin=True)
+        resource_requests = []
+
         for request_net in requested_networks:
             physnet = None
             trusted = None
             tunneled_ = False
             vnic_type = network_model.VNIC_TYPE_NORMAL
             pci_request_id = None
+            requester_id = None
 
             if request_net.port_id:
-                vnic_type, trusted, network_id = self._get_port_vnic_info(
+                result = self._get_port_vnic_info(
                     context, neutron, request_net.port_id)
+                vnic_type, trusted, network_id, resource_request = result
                 physnet, tunneled_ = self._get_physnet_tunneled_info(
                     context, neutron, network_id)
+
+                if resource_request:
+                    # InstancePCIRequest.requester_id is semantically linked
+                    # to a port with a resource_request.
+                    requester_id = request_net.port_id
+                    # NOTE(gibi): explicitly orphan the RequestGroup by setting
+                    # context=None as we never intended to save it to the DB.
+                    resource_requests.append(
+                        objects.RequestGroup.from_port_request(
+                            context=None,
+                            port_uuid=request_net.port_id,
+                            port_resource_request=resource_request))
+
             elif request_net.network_id and not request_net.auto_allocate:
                 network_id = request_net.network_id
                 physnet, tunneled_ = self._get_physnet_tunneled_info(
@@ -1930,14 +2060,16 @@ class API(base_api.NetworkAPI):
                 request = objects.InstancePCIRequest(
                     count=1,
                     spec=[spec],
-                    request_id=uuidutils.generate_uuid())
+                    request_id=uuidutils.generate_uuid(),
+                    requester_id=requester_id)
                 pci_requests.requests.append(request)
                 pci_request_id = request.request_id
 
             # Add pci_request_id into the requested network
             request_net.pci_request_id = pci_request_id
 
-        return objects.NetworkMetadata(physnets=physnets, tunneled=tunneled)
+        return (objects.NetworkMetadata(physnets=physnets, tunneled=tunneled),
+                resource_requests)
 
     def _can_auto_allocate_network(self, context, neutron):
         """Helper method to determine if we can auto-allocate networks
@@ -2091,6 +2223,31 @@ class API(base_api.NetworkAPI):
                         raise exception.NetworkNotFound(network_id=id_str)
         return ports_needed_per_instance
 
+    def get_requested_resource_for_instance(self, context, instance_uuid):
+        """Collect resource requests from the ports associated to the instance
+
+        :param context: nova request context
+        :param instance_uuid: The UUID of the instance
+        :return: A list of RequestGroup objects
+        """
+
+        neutron = get_client(context)
+        # get the ports associated to this instance
+        data = neutron.list_ports(
+            device_id=instance_uuid, fields=['id', 'resource_request'])
+        resource_requests = []
+
+        for port in data.get('ports', []):
+            if port.get('resource_request'):
+                # NOTE(gibi): explicitly orphan the RequestGroup by setting
+                # context=None as we never intended to save it to the DB.
+                resource_requests.append(
+                    objects.RequestGroup.from_port_request(
+                        context=None, port_uuid=port['id'],
+                        port_resource_request=port['resource_request']))
+
+        return resource_requests
+
     def validate_networks(self, context, requested_networks, num_instances):
         """Validate that the tenant can use the requested networks.
 
@@ -2181,22 +2338,47 @@ class API(base_api.NetworkAPI):
         except neutron_client_exc.Conflict as e:
             raise exception.FloatingIpAssociateFailed(six.text_type(e))
 
+        # If the floating IP was associated with another server, try to refresh
+        # the cache for that instance to avoid a window of time where multiple
+        # servers in the API say they are using the same floating IP.
         if fip['port_id']:
-            port = self._show_port(context, fip['port_id'],
-                                   neutron_client=client)
-            orig_instance_uuid = port['device_id']
+            # Trap and log any errors from
+            # _update_inst_info_cache_for_disassociated_fip but not let them
+            # raise back up to the caller since this refresh is best effort.
+            try:
+                self._update_inst_info_cache_for_disassociated_fip(
+                    context, instance, client, fip)
+            except Exception as e:
+                LOG.warning('An error occurred while trying to refresh the '
+                            'network info cache for an instance associated '
+                            'with port %s. Error: %s', fip['port_id'], e)
 
-            msg_dict = dict(address=floating_address,
-                            instance_id=orig_instance_uuid)
-            LOG.info('re-assign floating IP %(address)s from '
-                     'instance %(instance_id)s', msg_dict,
-                     instance=instance)
-            orig_instance = objects.Instance.get_by_uuid(context,
-                                                         orig_instance_uuid)
+    def _update_inst_info_cache_for_disassociated_fip(self, context,
+                                                      instance, client, fip):
+        """Update the network info cache when a floating IP is re-assigned.
 
-            # purge cached nw info for the original instance
-            base_api.update_instance_cache_with_nw_info(self, context,
-                                                        orig_instance)
+        :param context: nova auth RequestContext
+        :param instance: The instance to which the floating IP is now assigned
+        :param client: ClientWrapper instance for using the Neutron API
+        :param fip: dict for the floating IP that was re-assigned where the
+                    the ``port_id`` value represents the port that was
+                    associated with another server.
+        """
+        port = self._show_port(context, fip['port_id'],
+                               neutron_client=client)
+        orig_instance_uuid = port['device_id']
+
+        msg_dict = dict(address=fip['floating_ip_address'],
+                        instance_id=orig_instance_uuid)
+        LOG.info('re-assign floating IP %(address)s from '
+                 'instance %(instance_id)s', msg_dict,
+                 instance=instance)
+        orig_instance = objects.Instance.get_by_uuid(context,
+                                                     orig_instance_uuid)
+
+        # purge cached nw info for the original instance
+        base_api.update_instance_cache_with_nw_info(self, context,
+                                                    orig_instance)
 
     def get_all(self, context):
         """Get all networks for client."""
@@ -2375,7 +2557,8 @@ class API(base_api.NetworkAPI):
         return port['device_id']
 
     def get_vifs_by_instance(self, context, instance):
-        raise NotImplementedError()
+        return objects.VirtualInterfaceList.get_by_instance_uuid(context,
+                                                                 instance.uuid)
 
     def get_vif_by_mac_address(self, context, mac_address):
         raise NotImplementedError()
@@ -2567,8 +2750,9 @@ class API(base_api.NetworkAPI):
             # Not all compute migration flows use the port binding-extended
             # API yet, so first check to see if there is a binding for the
             # port and destination host.
-            resp = client.get('/v2.0/ports/%s/bindings/%s' %
-                              (vif['id'], dest_host), raise_exc=False)
+            resp = client.get(
+                '/v2.0/ports/%s/bindings/%s' % (vif['id'], dest_host),
+                raise_exc=False, global_request_id=context.global_id)
             if resp:
                 if resp.json()['binding']['status'] != 'ACTIVE':
                     self.activate_port_binding(context, vif['id'], dest_host)
@@ -2599,11 +2783,12 @@ class API(base_api.NetworkAPI):
                           'Error: %s', vif['id'], dest_host, resp.status_code,
                           resp.text)
 
-    def migrate_instance_finish(self, context, instance, migration):
+    def migrate_instance_finish(
+            self, context, instance, migration, provider_mappings):
         """Finish migrating the network of an instance."""
-        self._update_port_binding_for_instance(context, instance,
-                                               migration['dest_compute'],
-                                               migration=migration)
+        self._update_port_binding_for_instance(
+            context, instance, migration['dest_compute'], migration=migration,
+            provider_mappings=provider_mappings)
 
     def add_network_to_project(self, context, project_id, network_uuid=None):
         """Force add a network to the project."""
@@ -2732,8 +2917,8 @@ class API(base_api.NetworkAPI):
             instance network info cache.
         """
         vif_active = False
-        if (current_neutron_port['admin_state_up'] is False
-            or current_neutron_port['status'] == 'ACTIVE'):
+        if (current_neutron_port['admin_state_up'] is False or
+            current_neutron_port['status'] == 'ACTIVE'):
             vif_active = True
 
         network_IPs = self._nw_info_get_ips(client,
@@ -2758,7 +2943,7 @@ class API(base_api.NetworkAPI):
             vnic_type=current_neutron_port.get('binding:vnic_type',
                                                network_model.VNIC_TYPE_NORMAL),
             type=current_neutron_port.get('binding:vif_type'),
-            profile=_get_binding_profile(current_neutron_port),
+            profile=get_binding_profile(current_neutron_port),
             details=current_neutron_port.get('binding:vif_details'),
             ovs_interfaceid=ovs_interfaceid,
             devname=devname,
@@ -2768,7 +2953,7 @@ class API(base_api.NetworkAPI):
     def _build_network_info_model(self, context, instance, networks=None,
                                   port_ids=None, admin_client=None,
                                   preexisting_port_ids=None,
-                                  refresh_vif_id=None):
+                                  refresh_vif_id=None, force_refresh=False):
         """Return list of ordered VIFs attached to instance.
 
         :param context: Request context.
@@ -2790,6 +2975,10 @@ class API(base_api.NetworkAPI):
                         cache rather than the entire cache. This can be
                         triggered via a "network-changed" server external event
                         from Neutron.
+        :param force_refresh: If ``networks`` and ``port_ids`` are both None,
+                        by default the instance.info_cache will be used to
+                        populate the network info. Pass ``True`` to force
+                        collection of ports and networks from neutron directly.
         """
 
         search_opts = {'tenant_id': instance.project_id,
@@ -2861,11 +3050,28 @@ class API(base_api.NetworkAPI):
                 return nw_info
             # else there is no existing cache and we need to build it
 
+        # Determine if we're doing a full refresh (_heal_instance_info_cache)
+        # or if we are refreshing because we have attached/detached a port.
+        # TODO(mriedem); we should leverage refresh_vif_id in the latter case
+        # since we are unnecessarily rebuilding the entire cache for one port
         nw_info_refresh = networks is None and port_ids is None
-        networks, port_ids = self._gather_port_ids_and_networks(
-                context, instance, networks, port_ids, client)
-        nw_info = network_model.NetworkInfo()
+        if nw_info_refresh and force_refresh:
+            # Use the current set of ports from neutron rather than the cache.
+            port_ids = self._get_ordered_port_list(context, instance,
+                                                   current_neutron_ports)
+            net_ids = [current_neutron_port_map.get(port_id).get('network_id')
+                       for port_id in port_ids]
 
+            # This is copied from _gather_port_ids_and_networks.
+            networks = self._get_available_networks(
+                context, instance.project_id, net_ids, client)
+        else:
+            # We are refreshing the full cache using the existing cache rather
+            # than what is currently in neutron.
+            networks, port_ids = self._gather_port_ids_and_networks(
+                    context, instance, networks, port_ids, client)
+
+        nw_info = network_model.NetworkInfo()
         for port_id in port_ids:
             current_neutron_port = current_neutron_port_map.get(port_id)
             if current_neutron_port:
@@ -2881,6 +3087,43 @@ class API(base_api.NetworkAPI):
 
         return nw_info
 
+    def _get_ordered_port_list(self, context, instance, current_neutron_ports):
+        """Returns ordered port list using nova virtual_interface data."""
+
+        # a dict, keyed by port UUID, of the port's "index"
+        # so that we can order the returned port UUIDs by the
+        # original insertion order followed by any newly-attached
+        # ports
+        port_uuid_to_index_map = {}
+        port_order_list = []
+        ports_without_order = []
+
+        # Get set of ports from nova vifs
+        vifs = self.get_vifs_by_instance(context, instance)
+        for port in current_neutron_ports:
+            # NOTE(mjozefcz): For each port check if we have its index from
+            # nova virtual_interfaces objects. If not - it seems
+            # to be a new port - add it at the end of list.
+
+            # Find port index if it was attached before.
+            for vif in vifs:
+                if vif.uuid == port['id']:
+                    port_uuid_to_index_map[port['id']] = vif.id
+                    break
+
+            if port['id'] not in port_uuid_to_index_map:
+                # Assume that it's new port and add it to the end of port list.
+                ports_without_order.append(port['id'])
+
+        # Lets sort created port order_list by given index.
+        port_order_list = sorted(port_uuid_to_index_map,
+                                 key=lambda k: port_uuid_to_index_map[k])
+
+        # Add ports without order to the end of list
+        port_order_list.extend(ports_without_order)
+
+        return port_order_list
+
     def _get_subnets_from_port(self, context, port, client=None):
         """Return the subnets for a given port."""
 
@@ -2894,7 +3137,7 @@ class API(base_api.NetworkAPI):
             return []
         if not client:
             client = get_client(context)
-        search_opts = {'id': [ip['subnet_id'] for ip in fixed_ips]}
+        search_opts = {'id': list(set(ip['subnet_id'] for ip in fixed_ips))}
         data = client.list_subnets(**search_opts)
         ipam_subnets = data.get('subnets', [])
         subnets = []
@@ -2918,6 +3161,23 @@ class API(base_api.NetworkAPI):
                     if ip_pair['subnet_id'] == subnet['id']:
                         subnet_dict['dhcp_server'] = ip_pair['ip_address']
                         break
+
+            # NOTE(arnaudmorin): If enable_dhcp is set on subnet, but, for
+            # some reason neutron did not have any DHCP port yet, we still
+            # want the network_info to be populated with a valid dhcp_server
+            # value. This is mostly useful for the metadata API (which is
+            # relying on this value to give network_data to the instance).
+            #
+            # This will also help some providers which are using external
+            # DHCP servers not handled by neutron.
+            # In this case, neutron will never create any DHCP port in the
+            # subnet.
+            #
+            # Also note that we cannot set the value to None because then the
+            # value would be discarded by the metadata API.
+            # So the subnet gateway will be used as fallback.
+            if subnet.get('enable_dhcp') and 'dhcp_server' not in subnet_dict:
+                subnet_dict['dhcp_server'] = subnet['gateway_ip']
 
             subnet_object = network_model.Subnet(**subnet_dict)
             for dns in subnet.get('dns_nameservers', []):
@@ -2981,51 +3241,29 @@ class API(base_api.NetworkAPI):
 
     def cleanup_instance_network_on_host(self, context, instance, host):
         """Cleanup network for specified instance on host."""
+        # TODO(mriedem): This should likely be implemented at least for the
+        # shelve offload operation because the instance is being removed from
+        # a compute host, VIFs are unplugged, etc, so the ports should also
+        # be unbound, albeit still logically attached to the instance (for the
+        # shelve scenario). If _unbind_ports was going to be leveraged here, it
+        # would have to be adjusted a bit since it currently clears the
+        # device_id field on the port which is not what we'd want for shelve.
         pass
 
-    def _get_pci_devices_from_migration_context(self, migration_context,
-                                                migration):
-        if migration and migration.get('status') == 'reverted':
-            # In case of revert, swap old and new devices to
-            # update the ports back to the original devices.
-            return (migration_context.new_pci_devices,
-                    migration_context.old_pci_devices)
-        return (migration_context.old_pci_devices,
-                migration_context.new_pci_devices)
-
-    def _get_pci_mapping_for_migration(self, context, instance, migration):
-        """Get the mapping between the old PCI devices and the new PCI
-        devices that have been allocated during this migration.  The
-        correlation is based on PCI request ID which is unique per PCI
-        devices for SR-IOV ports.
-
-        :param context:  The request context.
-        :param instance: Get PCI mapping for this instance.
-        :param migration: The migration for this instance.
-        :Returns: dictionary of mapping {'<old pci address>': <New PciDevice>}
-        """
-        migration_context = instance.migration_context
-        if not migration_context:
+    def _get_pci_mapping_for_migration(self, instance, migration):
+        if not instance.migration_context:
             return {}
-
-        old_pci_devices, new_pci_devices = \
-            self._get_pci_devices_from_migration_context(migration_context,
-                                                         migration)
-        if old_pci_devices and new_pci_devices:
-            LOG.debug("Determining PCI devices mapping using migration"
-                      "context: old_pci_devices: %(old)s, "
-                      "new_pci_devices: %(new)s",
-                      {'old': [dev for dev in old_pci_devices],
-                       'new': [dev for dev in new_pci_devices]})
-            return {old.address: new
-                    for old in old_pci_devices
-                        for new in new_pci_devices
-                            if old.request_id == new.request_id}
-        return {}
+        # In case of revert, swap old and new devices to
+        # update the ports back to the original devices.
+        revert = (migration and
+                  migration.get('status') == 'reverted')
+        return instance.migration_context.get_pci_mapping_for_migration(revert)
 
     #更新port的绑定情况
-    def _update_port_binding_for_instance(self, context, instance, host,
-                                          migration=None):
+    def _update_port_binding_for_instance(
+            self, context, instance, host, migration=None,
+            provider_mappings=None):
+
         neutron = get_client(context, admin=True)
         search_opts = {'device_id': instance.uuid,
                        'tenant_id': instance.project_id}
@@ -3034,22 +3272,30 @@ class API(base_api.NetworkAPI):
         pci_mapping = None
         port_updates = []
         ports = data['ports']
+        FAILED_VIF_TYPES = (network_model.VIF_TYPE_UNBOUND,
+                            network_model.VIF_TYPE_BINDING_FAILED)
         for p in ports:
             updates = {}
-            binding_profile = _get_binding_profile(p)
+            binding_profile = get_binding_profile(p)
 
-            # If the host hasn't changed, like in the case of resizing to the
-            # same host, there is nothing to do.
+            # We need to update the port binding if the host has changed or if
+            # the binding is clearly wrong due to previous lost messages.
+            vif_type = p.get('binding:vif_type')
             #这个port没有绑定到此host上，则使其绑定
-            if p.get(BINDING_HOST_ID) != host:
-                updates[BINDING_HOST_ID] = host
+            if (p.get(constants.BINDING_HOST_ID) != host or
+                    vif_type in FAILED_VIF_TYPES):
+
+                updates[constants.BINDING_HOST_ID] = host
+                # If the host changed, the AZ could have also changed so we
+                # need to update the device_owner.
+                updates['device_owner'] = (
+                        'compute:%s' % instance.availability_zone)
                 # NOTE: Before updating the port binding make sure we
                 # remove the pre-migration status from the binding profile
                 #防迁移
-                if binding_profile.get(MIGRATING_ATTR):
-                    del binding_profile[MIGRATING_ATTR]
-                    updates[BINDING_PROFILE] = binding_profile
-
+                if binding_profile.get(constants.MIGRATING_ATTR):
+                    del binding_profile[constants.MIGRATING_ATTR]
+                    updates[constants.BINDING_PROFILE] = binding_profile
             # Update port with newly allocated PCI devices.  Even if the
             # resize is happening on the same host, a new PCI device can be
             # allocated. Note that this only needs to happen if a migration
@@ -3057,10 +3303,13 @@ class API(base_api.NetworkAPI):
             # that this function is called without a migration object, such
             # as in an unshelve operation.
             vnic_type = p.get('binding:vnic_type')
-            if (vnic_type in network_model.VNIC_TYPES_SRIOV
-                    and migration is not None):
+            if (vnic_type in network_model.VNIC_TYPES_SRIOV and
+                    migration is not None and
+                    migration['migration_type'] != constants.LIVE_MIGRATION):
+                # Note(adrianc): for live migration binding profile was already
+                # updated in conductor when calling bind_ports_to_host()
                 if not pci_mapping:
-                    pci_mapping = self._get_pci_mapping_for_migration(context,
+                    pci_mapping = self._get_pci_mapping_for_migration(
                         instance, migration)
 
                 pci_slot = binding_profile.get('pci_slot')
@@ -3068,11 +3317,33 @@ class API(base_api.NetworkAPI):
                 if new_dev:
                     binding_profile.update(
                         self._get_pci_device_profile(new_dev))
-                    updates[BINDING_PROFILE] = binding_profile
+                    updates[constants.BINDING_PROFILE] = binding_profile
                 else:
                     raise exception.PortUpdateFailed(port_id=p['id'],
                         reason=_("Unable to correlate PCI slot %s") %
                                  pci_slot)
+
+            if p.get('resource_request'):
+                if not provider_mappings:
+                    # NOTE(gibi): This should not happen as the API level
+                    # minimum compute service version check ensures that the
+                    # compute services already send the RequestSpec during
+                    # the move operations between the source and the
+                    # destination and the dest compute calculates the
+                    # mapping based on that.
+                    raise exception.PortUpdateFailed(
+                        port_id=p['id'],
+                        reason=_("Provider mappings wasn't provided for the "
+                                 "port with resource request"))
+
+                # NOTE(gibi): In the resource provider mapping there can be
+                # more than one RP fulfilling a request group. But resource
+                # requests of a Neutron port is always mapped to a
+                # numbered request group that is always fulfilled by one
+                # resource provider. So we only pass that single RP UUID here.
+                binding_profile[constants.ALLOCATION] = \
+                    provider_mappings[p['id']][0]
+                updates[constants.BINDING_PROFILE] = binding_profile
 
             port_updates.append((p['id'], updates))
 

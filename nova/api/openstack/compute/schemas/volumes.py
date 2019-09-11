@@ -87,6 +87,10 @@ create_volume_attachment_v249 = copy.deepcopy(create_volume_attachment)
 create_volume_attachment_v249['properties']['volumeAttachment'][
                               'properties']['tag'] = parameter_types.tag
 
+create_volume_attachment_v279 = copy.deepcopy(create_volume_attachment_v249)
+create_volume_attachment_v279['properties']['volumeAttachment'][
+    'properties']['delete_on_termination'] = parameter_types.boolean
+
 update_volume_attachment = copy.deepcopy(create_volume_attachment)
 del update_volume_attachment['properties']['volumeAttachment'][
     'properties']['device']
@@ -101,9 +105,12 @@ index_query = {
     },
     # NOTE(gmann): This is kept True to keep backward compatibility.
     # As of now Schema validation stripped out the additional parameters and
-    # does not raise 400. In the future, we may block the additional parameters
-    # by bump in Microversion.
+    # does not raise 400. In microversion 2.75, we have blocked the additional
+    # parameters.
     'additionalProperties': True
 }
 
 detail_query = index_query
+
+index_query_275 = copy.deepcopy(index_query)
+index_query_275['additionalProperties'] = False

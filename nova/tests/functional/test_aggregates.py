@@ -21,11 +21,12 @@ from nova import context as nova_context
 from nova.scheduler import weights
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional.api import client
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 import nova.tests.unit.image.fake
 from nova.tests.unit import policy_fixture
 from nova import utils
-from nova.virt import fake
 
 CONF = nova.conf.CONF
 
@@ -71,7 +72,7 @@ class AggregateRequestFiltersTest(test.TestCase,
         self.useFixture(nova_fixtures.NeutronFixture(self))
         self.useFixture(nova_fixtures.AllServicesCurrent())
 
-        placement = self.useFixture(nova_fixtures.PlacementFixture())
+        placement = self.useFixture(func_fixtures.PlacementFixture())
         self.placement_api = placement.api
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -115,8 +116,6 @@ class AggregateRequestFiltersTest(test.TestCase,
                      compute service.
         :return: the nova compute service object
         """
-        fake.set_nodes([host])
-        self.addCleanup(fake.restore_nodes)
         compute = self.start_service('compute', host=host)
         self.computes[host] = compute
         return compute
@@ -148,7 +147,8 @@ class AggregateRequestFiltersTest(test.TestCase,
         # FIXME(efried): This should be a thing we can do without internals
         self.report_client._ensure_resource_provider(
             self.context, host_uuid, name=host)
-        self.report_client.aggregate_add_host(self.context, agg['uuid'], host)
+        self.report_client.aggregate_add_host(self.context, agg['uuid'],
+                                              host_name=host)
 
     def _wait_for_state_change(self, server, from_status):
         for i in range(0, 50):
@@ -190,6 +190,22 @@ class AggregateRequestFiltersTest(test.TestCase,
         }
         self.admin_api.post_aggregate_action(agg['id'], action)
 
+    def _set_metadata(self, agg, metadata):
+        """POST /os-aggregates/{aggregate_id}/action (set_metadata)
+
+        :param agg: Name of the nova aggregate
+        :param metadata: dict of aggregate metadata key/value pairs to add,
+            update, or remove if value=None (note "availability_zone" cannot be
+            nulled out once set).
+        """
+        agg = self.aggregates[agg]
+        action = {
+            'set_metadata': {
+                'metadata': metadata
+            },
+        }
+        self.admin_api.post_aggregate_action(agg['id'], action)
+
     def _grant_tenant_aggregate(self, agg, tenants):
         """Grant a set of tenants access to use an aggregate.
 
@@ -206,6 +222,87 @@ class AggregateRequestFiltersTest(test.TestCase,
             },
         }
         self.admin_api.post_aggregate_action(agg['id'], action)
+
+
+class AggregatePostTest(AggregateRequestFiltersTest):
+
+    def test_set_az_for_aggreate_no_instances(self):
+        """Should be possible to update AZ for an empty aggregate.
+
+        Check you can change the AZ name of an aggregate when it does
+        not contain any servers.
+        """
+        self._set_az_aggregate('only-host1', 'fake-az')
+
+    def test_rename_to_same_az(self):
+        """AZ rename should pass successfully if AZ name is not changed"""
+        az = 'fake-az'
+        self._set_az_aggregate('only-host1', az)
+        self._boot_server(az=az)
+        self._set_az_aggregate('only-host1', az)
+
+    def test_fail_set_az(self):
+        """Check it is not possible to update a non-empty aggregate.
+
+        Check you cannot change the AZ name of an aggregate when it
+        contains any servers.
+        """
+        az = 'fake-az'
+        self._set_az_aggregate('only-host1', az)
+        server = self._boot_server(az=az)
+        self.assertRaisesRegex(
+            client.OpenStackApiException,
+            'One or more hosts contain instances in this zone.',
+            self._set_az_aggregate, 'only-host1', 'new' + az)
+
+        # Configure for the SOFT_DELETED scenario.
+        self.flags(reclaim_instance_interval=300)
+        self.api.delete_server(server['id'])
+        server = self._wait_for_state_change(server, from_status='ACTIVE')
+        self.assertEqual('SOFT_DELETED', server['status'])
+        self.assertRaisesRegex(
+            client.OpenStackApiException,
+            'One or more hosts contain instances in this zone.',
+            self._set_az_aggregate, 'only-host1', 'new' + az)
+        # Force delete the SOFT_DELETED server.
+        self.api.api_post(
+            '/servers/%s/action' % server['id'], {'forceDelete': None})
+        # Wait for it to be deleted since forceDelete is asynchronous.
+        self._wait_until_deleted(server)
+        # Now we can rename the AZ since the server is gone.
+        self._set_az_aggregate('only-host1', 'new' + az)
+
+    def test_cannot_delete_az(self):
+        az = 'fake-az'
+        # Assign the AZ to the aggregate.
+        self._set_az_aggregate('only-host1', az)
+        # Set some metadata on the aggregate; note the "availability_zone"
+        # metadata key is not specified.
+        self._set_metadata('only-host1', {'foo': 'bar'})
+        # Verify the AZ was retained.
+        agg = self.admin_api.api_get(
+            '/os-aggregates/%s' %
+            self.aggregates['only-host1']['id']).body['aggregate']
+        self.assertEqual(az, agg['availability_zone'])
+
+
+# NOTE: this test case has the same test methods as AggregatePostTest
+# but for the AZ update it uses PUT /os-aggregates/{aggregate_id} method
+class AggregatePutTest(AggregatePostTest):
+
+    def _set_az_aggregate(self, agg, az):
+        """Set the availability_zone of an aggregate via PUT
+
+        :param agg: Name of the nova aggregate
+        :param az: Availability zone name
+        """
+        agg = self.aggregates[agg]
+        body = {
+            'aggregate': {
+                'availability_zone': az,
+            },
+        }
+        self.admin_api.put_aggregate(agg['id'], body)
 
 
 class TenantAggregateFilterTest(AggregateRequestFiltersTest):
@@ -372,8 +469,6 @@ class TestAggregateMultiTenancyIsolationFilter(
     test.TestCase, integrated_helpers.InstanceHelperMixin):
 
     def _start_compute(self, host):
-        fake.set_nodes([host])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host=host)
 
     def setUp(self):
@@ -381,7 +476,7 @@ class TestAggregateMultiTenancyIsolationFilter(
         # Stub out glance, placement and neutron.
         nova.tests.unit.image.fake.stub_out_image_service(self)
         self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
         # Start nova services.
         self.start_service('conductor')
@@ -456,3 +551,123 @@ class TestAggregateMultiTenancyIsolationFilter(
             server = user_api.post_server(server_req)
         self._wait_for_state_change(user_api, server, 'ACTIVE')
         self.assertEqual(2, len(self.filtered_hosts))
+
+
+class AggregateMultiTenancyIsolationColdMigrateTest(
+        test.TestCase, integrated_helpers.InstanceHelperMixin):
+
+    @staticmethod
+    def _create_aggregate(admin_api, name):
+        return admin_api.api_post(
+            '/os-aggregates', {'aggregate': {'name': name}}).body['aggregate']
+
+    @staticmethod
+    def _add_host_to_aggregate(admin_api, aggregate, host):
+        add_host_req_body = {
+            "add_host": {
+                "host": host
+            }
+        }
+        admin_api.api_post(
+            '/os-aggregates/%s/action' % aggregate['id'], add_host_req_body)
+
+    @staticmethod
+    def _isolate_aggregate(admin_api, aggregate, tenant_id):
+        set_meta_req_body = {
+            "set_metadata": {
+                "metadata": {
+                    "filter_tenant_id": tenant_id
+                }
+            }
+        }
+        admin_api.api_post(
+            '/os-aggregates/%s/action' % aggregate['id'], set_meta_req_body)
+
+    def setUp(self):
+        super(AggregateMultiTenancyIsolationColdMigrateTest, self).setUp()
+        self.useFixture(policy_fixture.RealPolicyFixture())
+        self.useFixture(nova_fixtures.NeutronFixture(self))
+        self.useFixture(func_fixtures.PlacementFixture())
+        # Intentionally keep these separate since we want to create the
+        # server with the non-admin user in a different project.
+        admin_api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
+            api_version='v2.1', project_id=uuids.admin_project))
+        self.admin_api = admin_api_fixture.admin_api
+        self.admin_api.microversion = 'latest'
+        user_api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
+            api_version='v2.1', project_id=uuids.user_project))
+        self.api = user_api_fixture.api
+        self.api.microversion = 'latest'
+
+        # the image fake backend needed for image discovery
+        nova.tests.unit.image.fake.stub_out_image_service(self)
+        self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
+
+        self.start_service('conductor')
+        # Enable the AggregateMultiTenancyIsolation filter before starting the
+        # scheduler service.
+        enabled_filters = CONF.filter_scheduler.enabled_filters
+        if 'AggregateMultiTenancyIsolation' not in enabled_filters:
+            enabled_filters.append('AggregateMultiTenancyIsolation')
+            self.flags(
+                enabled_filters=enabled_filters, group='filter_scheduler')
+        # Add a custom weigher which will weigh host1, which will be in the
+        # admin project aggregate, higher than the other hosts which are in
+        # the non-admin project aggregate.
+        self.flags(weight_classes=[__name__ + '.HostNameWeigher'],
+                   group='filter_scheduler')
+        self.start_service('scheduler')
+
+        for host in ('host1', 'host2', 'host3'):
+            self.start_service('compute', host=host)
+
+        # Create an admin-only aggregate for the admin project. This is needed
+        # because if host1 is not in an aggregate with the filter_tenant_id
+        # metadata key, the filter will accept that host even for the non-admin
+        # project.
+        admin_aggregate = self._create_aggregate(
+            self.admin_api, 'admin-aggregate')
+        self._add_host_to_aggregate(self.admin_api, admin_aggregate, 'host1')
+
+        # Restrict the admin project to the admin aggregate.
+        self._isolate_aggregate(
+            self.admin_api, admin_aggregate, uuids.admin_project)
+
+        # Create the tenant aggregate for the non-admin project.
+        tenant_aggregate = self._create_aggregate(
+            self.admin_api, 'tenant-aggregate')
+
+        # Add two compute hosts to the tenant aggregate. We exclude host1
+        # since that is weighed higher in HostNameWeigher and we want to
+        # ensure the scheduler properly filters out host1 before we even get
+        # to weighing the selected hosts.
+        for host in ('host2', 'host3'):
+            self._add_host_to_aggregate(self.admin_api, tenant_aggregate, host)
+
+        # Restrict the non-admin project to the tenant aggregate.
+        self._isolate_aggregate(
+            self.admin_api, tenant_aggregate, uuids.user_project)
+
+    def test_cold_migrate_server(self):
+        """Creates a server using the non-admin project, then cold migrates
+        the server and asserts the server goes to the other host in the
+        isolated host aggregate via the AggregateMultiTenancyIsolation filter.
+        """
+        img = nova.tests.unit.image.fake.AUTO_DISK_CONFIG_ENABLED_IMAGE_UUID
+        server_req_body = self._build_minimal_create_server_request(
+            self.api, 'test_cold_migrate_server', image_uuid=img,
+            networks='none')
+        server = self.api.post_server({'server': server_req_body})
+        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        # Ensure the server ended up in host2 or host3
+        original_host = server['OS-EXT-SRV-ATTR:host']
+        self.assertNotEqual('host1', original_host)
+        # Now cold migrate the server and it should end up in the other host
+        # in the same tenant-isolated aggregate.
+        self.admin_api.api_post(
+            '/servers/%s/action' % server['id'], {'migrate': None})
+        server = self._wait_for_state_change(
+            self.admin_api, server, 'VERIFY_RESIZE')
+        # Ensure the server is on the other host in the same aggregate.
+        expected_host = 'host3' if original_host == 'host2' else 'host2'
+        self.assertEqual(expected_host, server['OS-EXT-SRV-ATTR:host'])

@@ -18,20 +18,20 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import remote_consoles
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.policies import remote_consoles as rc_policies
 
 
 class RemoteConsolesController(wsgi.Controller):
-    def __init__(self, *args, **kwargs):
+    def __init__(self):
+        super(RemoteConsolesController, self).__init__()
         self.compute_api = compute.API()
         self.handlers = {'vnc': self.compute_api.get_vnc_console,
                          'spice': self.compute_api.get_spice_console,
                          'rdp': self.compute_api.get_rdp_console,
                          'serial': self.compute_api.get_serial_console,
                          'mks': self.compute_api.get_mks_console}
-        super(RemoteConsolesController, self).__init__(*args, **kwargs)
 
     @wsgi.Controller.api_version("2.1", "2.5")
     @wsgi.expected_errors((400, 404, 409, 501))
@@ -52,8 +52,7 @@ class RemoteConsolesController(wsgi.Controller):
                                                       console_type)
         except exception.ConsoleTypeUnavailable as e:
             raise webob.exc.HTTPBadRequest(explanation=e.format_message())
-        except (exception.InstanceUnknownCell,
-                     exception.InstanceNotFound) as e:
+        except exception.InstanceNotFound as e:
             raise webob.exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceNotReady as e:
             raise webob.exc.HTTPConflict(explanation=e.format_message())
@@ -81,8 +80,7 @@ class RemoteConsolesController(wsgi.Controller):
                                                         console_type)
         except exception.ConsoleTypeUnavailable as e:
             raise webob.exc.HTTPBadRequest(explanation=e.format_message())
-        except (exception.InstanceUnknownCell,
-                     exception.InstanceNotFound) as e:
+        except exception.InstanceNotFound as e:
             raise webob.exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceNotReady as e:
             raise webob.exc.HTTPConflict(explanation=e.format_message())
@@ -112,8 +110,7 @@ class RemoteConsolesController(wsgi.Controller):
                                                       console_type)
         except exception.ConsoleTypeUnavailable as e:
             raise webob.exc.HTTPBadRequest(explanation=e.format_message())
-        except (exception.InstanceUnknownCell,
-                     exception.InstanceNotFound) as e:
+        except exception.InstanceNotFound as e:
             raise webob.exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceNotReady as e:
             raise webob.exc.HTTPConflict(explanation=e.format_message())
@@ -138,8 +135,7 @@ class RemoteConsolesController(wsgi.Controller):
             output = self.compute_api.get_serial_console(context,
                                                          instance,
                                                          console_type)
-        except (exception.InstanceUnknownCell,
-                     exception.InstanceNotFound) as e:
+        except exception.InstanceNotFound as e:
             raise webob.exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceNotReady as e:
             raise webob.exc.HTTPConflict(explanation=e.format_message())

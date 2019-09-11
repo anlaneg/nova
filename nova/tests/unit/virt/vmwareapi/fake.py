@@ -663,8 +663,8 @@ class ClusterComputeResource(ManagedObject):
             summary.numCpuCores += host_summary.hardware.numCpuCores
             summary.numCpuThreads += host_summary.hardware.numCpuThreads
             summary.totalMemory += host_summary.hardware.memorySize
-            free_memory = (host_summary.hardware.memorySize / units.Mi
-                           - host_summary.quickStats.overallMemoryUsage)
+            free_memory = (host_summary.hardware.memorySize / units.Mi -
+                           host_summary.quickStats.overallMemoryUsage)
             summary.effectiveMemory += free_memory if connected else 0
             summary.numEffectiveHosts += 1 if connected else 0
         self.set("summary", summary)
@@ -1101,7 +1101,7 @@ def fake_fetch_image(context, instance, host, port, dc_name, ds_name,
 def _get_vm_mdo(vm_ref):
     """Gets the Virtual Machine with the ref from the db."""
     if _db_content.get("VirtualMachine", None) is None:
-            raise exception.NotFound("There is no VM registered")
+        raise exception.NotFound("There is no VM registered")
     if vm_ref not in _db_content.get("VirtualMachine"):
         raise exception.NotFound("Virtual Machine with ref %s is not "
                                  "there" % vm_ref)

@@ -113,15 +113,18 @@ notification payload:
 
 There is a Nova configuration parameter
 :oslo.config:option:`notifications.notification_format`
-that can be used to specify which notifications are emitted by Nova. The
-possible values are ``unversioned``, ``versioned``, ``both`` and the default
-value is ``both``.
+that can be used to specify which notifications are emitted by Nova.
 
 The versioned notifications are emitted to a different topic than the legacy
 notifications. By default they are emitted to 'versioned_notifications' but it
 is configurable in the nova.conf with the
 :oslo.config:option:`notifications.versioned_notifications_topics`
 config option.
+
+A `presentation from the Train summit`_ goes over the background and usage of
+versioned notifications, and provides a demo.
+
+.. _presentation from the Train summit: https://www.openstack.org/videos/summits/denver-2019/nova-versioned-notifications-the-result-of-a-3-year-journey
 
 How to add a new versioned notification
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -290,7 +293,7 @@ payload.
 
 Note that the notification's publisher instance can be created two different
 ways. It can be created by instantiating the ``NotificationPublisher`` object
-with a ``host`` and a ``binary`` string parameter or it can be generated from a
+with a ``host`` and a ``source`` string parameter or it can be generated from a
 ``Service`` object by calling ``NotificationPublisher.from_service_obj``
 function.
 
@@ -333,10 +336,27 @@ requires the notification.
   object and use the SCHEMA field to map the internal object to the
   notification payload. This way the evolution of the internal object model
   can be decoupled from the evolution of the notification payload.
+
+  .. important:: This does not mean that every field from internal objects
+                 should be mirrored in the notification payload objects.
+                 Think about what is actually needed by a consumer before
+                 adding it to a payload. When in doubt, if no one is requesting
+                 specific information in notifications, then leave it out until
+                 someone asks for it.
+
 * The delete notification should contain the same information as the create or
   update notifications. This makes it possible for the consumer to listen only to
   the delete notifications but still filter on some fields of the entity
   (e.g. project_id).
+
+What should **NOT** be in the notification payload
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* Generally anything that contains sensitive information about the internals
+  of the nova deployment, for example fields that contain access credentials
+  to a cell database or message queue (see `bug 1823104`_).
+
+.. _bug 1823104: https://bugs.launchpad.net/nova/+bug/1823104
 
 Existing versioned notifications
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -351,5 +371,5 @@ Existing versioned notifications
 
 .. versioned_notifications::
 
-.. [1] https://review.openstack.org/#/c/463001/
-.. [2] https://review.openstack.org/#/c/453077/
+.. [1] https://review.opendev.org/#/c/463001/
+.. [2] https://review.opendev.org/#/c/453077/

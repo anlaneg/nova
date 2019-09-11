@@ -17,6 +17,7 @@
 """Tests For miscellaneous util methods used with compute."""
 
 import copy
+import datetime
 import string
 import traceback
 
@@ -26,12 +27,12 @@ from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 import six
 
-from nova.compute import flavors
 from nova.compute import manager
 from nova.compute import power_state
 from nova.compute import task_states
 from nova.compute import utils as compute_utils
 from nova.compute import vm_states
+import nova.conf
 from nova import context
 from nova import exception
 from nova.image import glance
@@ -53,11 +54,13 @@ from nova.tests.unit.objects import test_flavor
 
 FAKE_IMAGE_REF = uuids.image_ref
 
+CONF = nova.conf.CONF
+
 
 def create_instance(context, user_id='fake', project_id='fake', params=None):
     """Create a test instance."""
-    flavor = flavors.get_flavor_by_name('m1.tiny')
-    net_info = model.NetworkInfo([])
+    flavor = objects.Flavor.get_by_name(context, 'm1.tiny')
+    net_info = model.NetworkInfo([model.VIF(id=uuids.port_id)])
     info_cache = objects.InstanceInfoCache(network_info=net_info)
     inst = objects.Instance(context=context,
                             image_ref=uuids.fake_image_ref,
@@ -406,6 +409,7 @@ class UsageInfoTestCase(test.TestCase):
         self.user_id = 'fake'
         self.project_id = 'fake'
         self.context = context.RequestContext(self.user_id, self.project_id)
+        self.flavor = objects.Flavor.get_by_name(self.context, 'm1.tiny')
 
         def fake_show(meh, context, id, **kwargs):
             return {'id': 1, 'properties': {'kernel_id': 1, 'ramdisk_id': 1}}
@@ -436,9 +440,9 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual(payload['user_id'], self.user_id)
         self.assertEqual(payload['instance_id'], instance['uuid'])
         self.assertEqual(payload['instance_type'], 'm1.tiny')
-        type_id = flavors.get_flavor_by_name('m1.tiny')['id']
+        type_id = self.flavor.id
         self.assertEqual(str(payload['instance_type_id']), str(type_id))
-        flavor_id = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        flavor_id = self.flavor.flavorid
         self.assertEqual(str(payload['instance_flavor_id']), str(flavor_id))
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'state_description',
@@ -469,7 +473,7 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual(payload['uuid'], instance['uuid'])
         flavor = payload['flavor']['nova_object.data']
         self.assertEqual(flavor['name'], 'm1.tiny')
-        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        flavorid = self.flavor.flavorid
         self.assertEqual(str(flavor['flavorid']), str(flavorid))
 
         for attr in ('display_name', 'created_at', 'launched_at',
@@ -500,9 +504,9 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual(payload['user_id'], self.user_id)
         self.assertEqual(payload['instance_id'], instance['uuid'])
         self.assertEqual(payload['instance_type'], 'm1.tiny')
-        type_id = flavors.get_flavor_by_name('m1.tiny')['id']
+        type_id = self.flavor.id
         self.assertEqual(str(payload['instance_type_id']), str(type_id))
-        flavor_id = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        flavor_id = self.flavor.flavorid
         self.assertEqual(str(payload['instance_flavor_id']), str(flavor_id))
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'state_description',
@@ -548,9 +552,9 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual(payload['user_id'], self.user_id)
         self.assertEqual(payload['uuid'], instance['uuid'])
 
-        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
-        flavor = payload['flavor']['nova_object.data']
-        self.assertEqual(str(flavor['flavorid']), flavorid)
+        self.assertEqual(
+            self.flavor.flavorid,
+            str(payload['flavor']['nova_object.data']['flavorid']))
 
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'task_state', 'display_description', 'locked',
@@ -594,7 +598,7 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual('fake', payload['user_id'])
         self.assertEqual(instance['uuid'], payload['uuid'])
 
-        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        flavorid = self.flavor.flavorid
         flavor = payload['flavor']['nova_object.data']
         self.assertEqual(flavorid, str(flavor['flavorid']))
 
@@ -637,9 +641,9 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual('fake', payload['user_id'])
         self.assertEqual(instance['uuid'], payload['uuid'])
 
-        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
-        flavor = payload['flavor']['nova_object.data']
-        self.assertEqual(flavorid, str(flavor['flavorid']))
+        self.assertEqual(
+            self.flavor.flavorid,
+            str(payload['flavor']['nova_object.data']['flavorid']))
 
         self.assertEqual(0, len(payload['keypairs']))
         for attr in ('display_name', 'created_at', 'launched_at',
@@ -676,9 +680,9 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual('fake', payload['user_id'])
         self.assertEqual(instance.uuid, payload['uuid'])
 
-        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
-        flavor = payload['flavor']['nova_object.data']
-        self.assertEqual(flavorid, str(flavor['flavorid']))
+        self.assertEqual(
+            self.flavor.flavorid,
+            str(payload['flavor']['nova_object.data']['flavorid']))
 
         self.assertEqual(0, len(payload['keypairs']))
         for attr in ('display_name', 'created_at', 'launched_at',
@@ -714,9 +718,9 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual(self.user_id, payload['user_id'])
         self.assertEqual(instance['uuid'], payload['uuid'])
 
-        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
-        flavor = payload['flavor']['nova_object.data']
-        self.assertEqual(flavorid, str(flavor['flavorid']))
+        self.assertEqual(
+            self.flavor.flavorid,
+            str(payload['flavor']['nova_object.data']['flavorid']))
 
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'task_state'):
@@ -756,9 +760,9 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual(self.user_id, payload['user_id'])
         self.assertEqual(instance['uuid'], payload['uuid'])
 
-        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
-        flavor = payload['flavor']['nova_object.data']
-        self.assertEqual(flavorid, str(flavor['flavorid']))
+        self.assertEqual(
+            self.flavor.flavorid,
+            str(payload['flavor']['nova_object.data']['flavorid']))
 
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'task_state'):
@@ -804,9 +808,9 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual(payload['user_id'], self.user_id)
         self.assertEqual(payload['uuid'], instance['uuid'])
 
-        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
-        flavor = payload['flavor']['nova_object.data']
-        self.assertEqual(str(flavor['flavorid']), flavorid)
+        self.assertEqual(
+            self.flavor.flavorid,
+            str(payload['flavor']['nova_object.data']['flavorid']))
 
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'task_state', 'display_description', 'locked',
@@ -819,7 +823,7 @@ class UsageInfoTestCase(test.TestCase):
     def test_notify_about_resize_prep_instance(self):
         instance = create_instance(self.context)
 
-        new_flavor = flavors.get_flavor_by_name('m1.small')
+        new_flavor = objects.Flavor.get_by_name(self.context, 'm1.small')
 
         compute_utils.notify_about_resize_prep_instance(
             self.context, instance, 'fake-compute', 'start', new_flavor)
@@ -838,9 +842,9 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual(payload['user_id'], self.user_id)
         self.assertEqual(payload['uuid'], instance['uuid'])
 
-        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
-        flavor = payload['flavor']['nova_object.data']
-        self.assertEqual(str(flavor['flavorid']), flavorid)
+        self.assertEqual(
+            self.flavor.flavorid,
+            str(payload['flavor']['nova_object.data']['flavorid']))
 
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'task_state', 'display_description', 'locked',
@@ -865,10 +869,10 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual(payload['user_id'], self.user_id)
         self.assertEqual(payload['instance_id'], instance['uuid'])
         self.assertEqual(payload['instance_type'], 'm1.tiny')
-        type_id = flavors.get_flavor_by_name('m1.tiny')['id']
-        self.assertEqual(str(payload['instance_type_id']), str(type_id))
-        flavor_id = flavors.get_flavor_by_name('m1.tiny')['flavorid']
-        self.assertEqual(str(payload['instance_flavor_id']), str(flavor_id))
+        self.assertEqual(str(self.flavor.id),
+                         str(payload['instance_type_id']))
+        self.assertEqual(str(self.flavor.flavorid),
+                         str(payload['instance_flavor_id']))
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'state_description',
                      'bandwidth', 'audit_period_beginning',
@@ -878,6 +882,44 @@ class UsageInfoTestCase(test.TestCase):
         image_ref_url = "%s/images/%s" % (
             glance.generate_glance_url(self.context), uuids.fake_image_ref)
         self.assertEqual(payload['image_ref_url'], image_ref_url)
+
+    def test_notify_about_volume_usage(self):
+        # Ensure 'volume.usage' notification generates appropriate usage data.
+        vol_usage = objects.VolumeUsage(
+            id=1, volume_id=uuids.volume, instance_uuid=uuids.instance,
+            project_id=self.project_id, user_id=self.user_id,
+            availability_zone='AZ1',
+            tot_last_refreshed=datetime.datetime(second=1, minute=1, hour=1,
+                                                 day=5, month=7, year=2018),
+            tot_reads=100, tot_read_bytes=100,
+            tot_writes=100, tot_write_bytes=100,
+            curr_last_refreshed=datetime.datetime(second=1, minute=1, hour=2,
+                                                  day=5, month=7, year=2018),
+            curr_reads=100, curr_read_bytes=100,
+            curr_writes=100, curr_write_bytes=100)
+
+        compute_utils.notify_about_volume_usage(self.context, vol_usage,
+                                                'fake-compute')
+
+        self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
+
+        self.assertEqual('INFO', notification['priority'])
+        self.assertEqual('volume.usage', notification['event_type'])
+        self.assertEqual('nova-compute:fake-compute',
+                         notification['publisher_id'])
+
+        payload = notification['payload']['nova_object.data']
+        self.assertEqual(uuids.volume, payload['volume_id'])
+        self.assertEqual(uuids.instance, payload['instance_uuid'])
+        self.assertEqual(self.project_id, payload['project_id'])
+        self.assertEqual(self.user_id, payload['user_id'])
+        self.assertEqual('AZ1', payload['availability_zone'])
+        self.assertEqual('2018-07-05T02:01:01Z', payload['last_refreshed'])
+        self.assertEqual(200, payload['read_bytes'])
+        self.assertEqual(200, payload['reads'])
+        self.assertEqual(200, payload['write_bytes'])
+        self.assertEqual(200, payload['writes'])
 
     def test_notify_about_instance_usage(self):
         instance = create_instance(self.context)
@@ -901,10 +943,9 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual(payload['user_id'], self.user_id)
         self.assertEqual(payload['instance_id'], instance['uuid'])
         self.assertEqual(payload['instance_type'], 'm1.tiny')
-        type_id = flavors.get_flavor_by_name('m1.tiny')['id']
-        self.assertEqual(str(payload['instance_type_id']), str(type_id))
-        flavor_id = flavors.get_flavor_by_name('m1.tiny')['flavorid']
-        self.assertEqual(str(payload['instance_flavor_id']), str(flavor_id))
+        self.assertEqual(str(self.flavor.id), str(payload['instance_type_id']))
+        self.assertEqual(str(self.flavor.flavorid),
+                         str(payload['instance_flavor_id']))
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'state_description', 'image_meta'):
             self.assertIn(attr, payload, "Key %s not in payload" % attr)
@@ -1107,7 +1148,7 @@ class ComputeUtilsTestCase(test.NoDBTestCase):
         instance = fake_instance.fake_instance_obj(
             self.context, expected_attrs=('system_metadata',))
         with compute_utils.notify_about_instance_delete(
-            mock.sentinel.notifier, self.context, instance, "fake-mini"):
+            mock.sentinel.notifier, self.context, instance):
             instance.destroy()
         expected_notify_calls = [
             mock.call(mock.sentinel.notifier, self.context, instance,
@@ -1171,6 +1212,39 @@ class ComputeUtilsTestCase(test.NoDBTestCase):
                 self.context, reqspec, mock.sentinel.instance)
         self.assertTrue(reqspec.is_bfv)
         mock_save.assert_called_once_with()
+
+    def test_delete_image(self):
+        """Happy path test for the delete_image utility method"""
+        image_api = mock.Mock()
+        compute_utils.delete_image(
+            self.context, mock.sentinel.instance, image_api, uuids.image_id)
+        image_api.delete.assert_called_once_with(self.context, uuids.image_id)
+
+    @mock.patch('nova.compute.utils.LOG.exception')
+    def test_delete_image_not_found(self, mock_log_exception):
+        """Tests the delete_image method when ImageNotFound is raised."""
+        image_api = mock.Mock()
+        image_api.delete.side_effect = exception.ImageNotFound(
+            image_id=uuids.image_id)
+        compute_utils.delete_image(
+            self.context, mock.sentinel.instance, image_api, uuids.image_id)
+        image_api.delete.assert_called_once_with(self.context, uuids.image_id)
+        # The image was not found but that's OK so no errors should be logged.
+        mock_log_exception.assert_not_called()
+
+    @mock.patch('nova.compute.utils.LOG.exception')
+    def test_delete_image_unknown_error(self, mock_log_exception):
+        """Tests the delete_image method when some unexpected error is raised.
+        """
+        image_api = mock.Mock()
+        image_api.delete.side_effect = test.TestingException
+        compute_utils.delete_image(
+            self.context, mock.sentinel.instance, image_api, uuids.image_id)
+        image_api.delete.assert_called_once_with(self.context, uuids.image_id)
+        # An unexpected error should not be re-raised but just log it.
+        mock_log_exception.assert_called_once()
+        self.assertIn('Error while trying to clean up image',
+                      mock_log_exception.call_args[0][0])
 
 
 class ServerGroupTestCase(test.TestCase):
@@ -1257,8 +1331,8 @@ class ComputeUtilsQuotaTestCase(test.TestCase):
         self.context = context.RequestContext('fake', 'fake')
 
     def test_upsize_quota_delta(self):
-        old_flavor = flavors.get_flavor_by_name('m1.tiny')
-        new_flavor = flavors.get_flavor_by_name('m1.medium')
+        old_flavor = objects.Flavor.get_by_name(self.context, 'm1.tiny')
+        new_flavor = objects.Flavor.get_by_name(self.context, 'm1.medium')
 
         expected_deltas = {
             'cores': new_flavor['vcpus'] - old_flavor['vcpus'],
@@ -1412,3 +1486,65 @@ class IsVolumeBackedInstanceTestCase(test.TestCase):
         self.assertFalse(
             compute_utils.is_volume_backed_instance(ctxt, instance, None))
         mock_bdms.assert_called_with(ctxt, instance.uuid)
+
+
+class TestComputeNodeToInventoryDict(test.NoDBTestCase):
+    def test_compute_node_inventory(self):
+        uuid = uuids.compute_node
+        name = 'computehost'
+        compute_node = objects.ComputeNode(uuid=uuid,
+                                           hypervisor_hostname=name,
+                                           vcpus=2,
+                                           cpu_allocation_ratio=16.0,
+                                           memory_mb=1024,
+                                           ram_allocation_ratio=1.5,
+                                           local_gb=10,
+                                           disk_allocation_ratio=1.0)
+
+        self.flags(reserved_host_memory_mb=1000)
+        self.flags(reserved_host_disk_mb=200)
+        self.flags(reserved_host_cpus=1)
+
+        result = compute_utils.compute_node_to_inventory_dict(compute_node)
+
+        expected = {
+            'VCPU': {
+                'total': compute_node.vcpus,
+                'reserved': CONF.reserved_host_cpus,
+                'min_unit': 1,
+                'max_unit': compute_node.vcpus,
+                'step_size': 1,
+                'allocation_ratio': compute_node.cpu_allocation_ratio,
+            },
+            'MEMORY_MB': {
+                'total': compute_node.memory_mb,
+                'reserved': CONF.reserved_host_memory_mb,
+                'min_unit': 1,
+                'max_unit': compute_node.memory_mb,
+                'step_size': 1,
+                'allocation_ratio': compute_node.ram_allocation_ratio,
+            },
+            'DISK_GB': {
+                'total': compute_node.local_gb,
+                'reserved': 1,  # this is ceil(1000/1024)
+                'min_unit': 1,
+                'max_unit': compute_node.local_gb,
+                'step_size': 1,
+                'allocation_ratio': compute_node.disk_allocation_ratio,
+            },
+        }
+        self.assertEqual(expected, result)
+
+    def test_compute_node_inventory_empty(self):
+        uuid = uuids.compute_node
+        name = 'computehost'
+        compute_node = objects.ComputeNode(uuid=uuid,
+                                           hypervisor_hostname=name,
+                                           vcpus=0,
+                                           cpu_allocation_ratio=16.0,
+                                           memory_mb=0,
+                                           ram_allocation_ratio=1.5,
+                                           local_gb=0,
+                                           disk_allocation_ratio=1.0)
+        result = compute_utils.compute_node_to_inventory_dict(compute_node)
+        self.assertEqual({}, result)

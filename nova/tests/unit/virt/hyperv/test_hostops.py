@@ -16,6 +16,7 @@
 import datetime
 
 import mock
+import os_resource_classes as orc
 from os_win import constants as os_win_const
 from oslo_config import cfg
 from oslo_serialization import jsonutils
@@ -66,7 +67,8 @@ class HostOpsTestCase(test_base.HyperVBaseTestCase):
 
         expected = [mock.call(fkey)
                     for fkey in os_win_const.PROCESSOR_FEATURE.keys()]
-        self._hostops._hostutils.is_cpu_feature_present.has_calls(expected)
+        self._hostops._hostutils.is_cpu_feature_present.assert_has_calls(
+            expected, any_order=True)
         expected_response = self._get_mock_cpu_info()
         self.assertEqual(expected_response, response)
 
@@ -268,3 +270,48 @@ class HostOpsTestCase(test_base.HyperVBaseTestCase):
                    str(mock_time()), str(tdelta))
 
         self.assertEqual(expected, response)
+
+    @mock.patch.object(hostops.HostOps, 'get_available_resource')
+    def test_update_provider_tree(self, mock_get_avail_res):
+        resources = mock.MagicMock()
+        allocation_ratios = mock.MagicMock()
+        provider_tree = mock.Mock()
+
+        mock_get_avail_res.return_value = resources
+
+        self.flags(reserved_host_disk_mb=1)
+
+        exp_inventory = {
+            orc.VCPU: {
+                'total': resources['vcpus'],
+                'min_unit': 1,
+                'max_unit': resources['vcpus'],
+                'step_size': 1,
+                'allocation_ratio': allocation_ratios[orc.VCPU],
+                'reserved': CONF.reserved_host_cpus,
+            },
+            orc.MEMORY_MB: {
+                'total': resources['memory_mb'],
+                'min_unit': 1,
+                'max_unit': resources['memory_mb'],
+                'step_size': 1,
+                'allocation_ratio': allocation_ratios[orc.MEMORY_MB],
+                'reserved': CONF.reserved_host_memory_mb,
+            },
+            orc.DISK_GB: {
+                'total': resources['local_gb'],
+                'min_unit': 1,
+                'max_unit': resources['local_gb'],
+                'step_size': 1,
+                'allocation_ratio': allocation_ratios[orc.DISK_GB],
+                'reserved': 1,
+            },
+        }
+
+        self._hostops.update_provider_tree(
+            provider_tree, mock.sentinel.node_name, allocation_ratios,
+            mock.sentinel.allocations)
+
+        provider_tree.update_inventory.assert_called_once_with(
+            mock.sentinel.node_name,
+            exp_inventory)

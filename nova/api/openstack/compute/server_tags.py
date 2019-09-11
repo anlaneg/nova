@@ -19,7 +19,7 @@ from nova.api.openstack.compute.views import server_tags
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova.api.validation import parameter_types
-from nova import compute
+from nova.compute import api as compute
 from nova.compute import vm_states
 from nova import context as nova_context
 from nova import exception
@@ -45,8 +45,8 @@ class ServerTagsController(wsgi.Controller):
     _view_builder_class = server_tags.ViewBuilder
 
     def __init__(self):
-        self.compute_api = compute.API()
         super(ServerTagsController, self).__init__()
+        self.compute_api = compute.API()
 
     def _check_instance_in_valid_state(self, context, server_id, action):
         instance = common.get_instance(self.compute_api, context, server_id)

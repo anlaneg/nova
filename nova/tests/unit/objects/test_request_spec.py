@@ -11,6 +11,7 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+import collections
 
 import mock
 from oslo_serialization import jsonutils
@@ -24,6 +25,7 @@ from nova.network import model as network_model
 from nova import objects
 from nova.objects import base
 from nova.objects import request_spec
+from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
@@ -150,15 +152,14 @@ class _TestRequestSpecObject(object):
             user_id=fakes.FAKE_USER_ID,
             availability_zone='nova',
             pci_requests=None,
-            numa_topology={'cells': [{'id': 1, 'cpuset': ['1'], 'memory': 8192,
-                                      'pagesize': None, 'cpu_topology': None,
-                                      'cpu_pinning_raw': None}]})
+            numa_topology=fake_request_spec.INSTANCE_NUMA_TOPOLOGY,
+        )
         spec = objects.RequestSpec()
 
         spec._from_instance(instance)
         self.assertIsInstance(spec.numa_topology, objects.InstanceNUMATopology)
         cells = spec.numa_topology.cells
-        self.assertEqual(1, len(cells))
+        self.assertEqual(2, len(cells))
         self.assertIsInstance(cells[0], objects.InstanceNUMACell)
 
     def test_from_flavor_as_object(self):
@@ -230,13 +231,18 @@ class _TestRequestSpecObject(object):
         filt_props['group_policies'] = set(['affinity'])
         filt_props['group_hosts'] = set(['fake1'])
         filt_props['group_members'] = set(['fake-instance1'])
-
-        spec = objects.RequestSpec()
-        spec._populate_group_info(filt_props)
-        self.assertIsInstance(spec.instance_group, objects.InstanceGroup)
-        self.assertEqual('affinity', spec.instance_group.policy)
-        self.assertEqual(['fake1'], spec.instance_group.hosts)
-        self.assertEqual(['fake-instance1'], spec.instance_group.members)
+        # Make sure it can handle group uuid not being present.
+        for group_uuid in (None, uuids.group_uuid):
+            if group_uuid:
+                filt_props['group_uuid'] = group_uuid
+            spec = objects.RequestSpec()
+            spec._populate_group_info(filt_props)
+            self.assertIsInstance(spec.instance_group, objects.InstanceGroup)
+            self.assertEqual('affinity', spec.instance_group.policy)
+            self.assertEqual(['fake1'], spec.instance_group.hosts)
+            self.assertEqual(['fake-instance1'], spec.instance_group.members)
+            if group_uuid:
+                self.assertEqual(uuids.group_uuid, spec.instance_group.uuid)
 
     def test_populate_group_info_missing_values(self):
         filt_props = {}
@@ -319,6 +325,7 @@ class _TestRequestSpecObject(object):
     def test_from_components(self):
         ctxt = context.RequestContext('fake-user', 'fake-project')
         destination = objects.Destination(host='foo')
+        self.assertFalse(destination.allow_cross_cell_move)
         instance = fake_instance.fake_instance_obj(ctxt)
         image = {'id': uuids.image_id, 'properties': {'mappings': []},
                  'status': 'fake-status', 'location': 'far-away'}
@@ -338,6 +345,7 @@ class _TestRequestSpecObject(object):
         # just making sure that the context is set by the method
         self.assertEqual(ctxt, spec._context)
         self.assertEqual(destination, spec.requested_destination)
+        self.assertFalse(spec.requested_destination.allow_cross_cell_move)
 
     @mock.patch('nova.objects.RequestSpec._populate_group_info')
     def test_from_components_with_instance_group(self, mock_pgi):
@@ -391,6 +399,24 @@ class _TestRequestSpecObject(object):
                 flavor, instance.numa_topology, instance.pci_requests,
                 filter_properties, None, instance.availability_zone)
         self.assertNotIn('security_groups', spec)
+
+    def test_from_components_with_port_resource_request(self, ):
+        ctxt = context.RequestContext(fakes.FAKE_USER_ID,
+                                      fakes.FAKE_PROJECT_ID)
+        instance = fake_instance.fake_instance_obj(ctxt)
+        image = {'id': uuids.image_id, 'properties': {'mappings': []},
+                 'status': 'fake-status', 'location': 'far-away'}
+        flavor = fake_flavor.fake_flavor_obj(ctxt)
+        filter_properties = {'fake': 'property'}
+
+        rg = request_spec.RequestGroup()
+
+        spec = objects.RequestSpec.from_components(ctxt, instance.uuid, image,
+                flavor, instance.numa_topology, instance.pci_requests,
+                filter_properties, None, instance.availability_zone,
+                port_resource_requests=[rg])
+
+        self.assertListEqual([rg], spec.requested_resources)
 
     def test_get_scheduler_hint(self):
         spec_obj = objects.RequestSpec(scheduler_hints={'foo_single': ['1'],
@@ -469,7 +495,8 @@ class _TestRequestSpecObject(object):
                                            memory_mb=8192.0),
             instance_group=objects.InstanceGroup(hosts=['fake1'],
                                                  policy='affinity',
-                                                 members=['inst1', 'inst2']),
+                                                 members=['inst1', 'inst2'],
+                                                 uuid=uuids.group_uuid),
             scheduler_hints={'foo': ['bar']},
             requested_destination=fake_dest)
         expected = {'ignore_hosts': ['ignoredhost'],
@@ -485,6 +512,7 @@ class _TestRequestSpecObject(object):
                     'group_hosts': set(['fake1']),
                     'group_policies': set(['affinity']),
                     'group_members': set(['inst1', 'inst2']),
+                    'group_uuid': uuids.group_uuid,
                     'scheduler_hints': {'foo': 'bar'},
                     'requested_destination': fake_dest}
         self.assertEqual(expected, spec.to_legacy_filter_properties_dict())
@@ -555,7 +583,8 @@ class _TestRequestSpecObject(object):
                 fake_spec['instance_uuid'])
 
         self.assertEqual(1, req_obj.num_instances)
-        self.assertEqual(['host2', 'host4'], req_obj.ignore_hosts)
+        # ignore_hosts is not persisted
+        self.assertIsNone(req_obj.ignore_hosts)
         self.assertEqual('fake', req_obj.project_id)
         self.assertEqual({'hint': ['over-there']}, req_obj.scheduler_hints)
         self.assertEqual(['host1', 'host3'], req_obj.force_hosts)
@@ -567,7 +596,8 @@ class _TestRequestSpecObject(object):
         self.assertIsInstance(req_obj.pci_requests,
                 objects.InstancePCIRequests)
         self.assertIsInstance(req_obj.flavor, objects.Flavor)
-        self.assertIsInstance(req_obj.retry, objects.SchedulerRetries)
+        # The 'retry' field is not persistent.
+        self.assertIsNone(req_obj.retry)
         self.assertIsInstance(req_obj.limits, objects.SchedulerLimits)
         self.assertIsInstance(req_obj.instance_group, objects.InstanceGroup)
         self.assertEqual('fresh', req_obj.instance_group.name)
@@ -578,7 +608,7 @@ class _TestRequestSpecObject(object):
                 jsonutils.loads(changes['spec']))
 
         # primitive fields
-        for field in ['instance_uuid', 'num_instances', 'ignore_hosts',
+        for field in ['instance_uuid', 'num_instances',
                 'project_id', 'scheduler_hints', 'force_hosts',
                 'availability_zone', 'force_nodes']:
             self.assertEqual(getattr(req_obj, field),
@@ -594,6 +624,8 @@ class _TestRequestSpecObject(object):
         self.assertIsNone(serialized_obj.instance_group.members)
         self.assertIsNone(serialized_obj.instance_group.hosts)
         self.assertIsNone(serialized_obj.retry)
+        self.assertIsNone(serialized_obj.requested_destination)
+        self.assertIsNone(serialized_obj.ignore_hosts)
 
     def test_create(self):
         req_obj = fake_request_spec.fake_spec_obj(remove_id=True)
@@ -614,8 +646,129 @@ class _TestRequestSpecObject(object):
 
         self.assertRaises(exception.ObjectActionError, req_obj.create)
 
+    def test_create_does_not_persist_requested_fields(self):
+        req_obj = fake_request_spec.fake_spec_obj(remove_id=True)
+
+        expected_network_metadata = objects.NetworkMetadata(
+            physnets=set(['foo', 'bar']), tunneled=True)
+        req_obj.network_metadata = expected_network_metadata
+        expected_destination = request_spec.Destination(host='sample-host')
+        req_obj.requested_destination = expected_destination
+        rg = request_spec.RequestGroup(resources={'fake-rc': 13})
+        req_obj.requested_resources = [rg]
+        expected_retry = objects.SchedulerRetries(
+            num_attempts=2,
+            hosts=objects.ComputeNodeList(objects=[
+                objects.ComputeNode(host='host1', hypervisor_hostname='node1'),
+                objects.ComputeNode(host='host2', hypervisor_hostname='node2'),
+            ]))
+        req_obj.retry = expected_retry
+
+        orig_create_in_db = request_spec.RequestSpec._create_in_db
+        with mock.patch.object(request_spec.RequestSpec, '_create_in_db') \
+                as mock_create_in_db:
+            mock_create_in_db.side_effect = orig_create_in_db
+            req_obj.create()
+            mock_create_in_db.assert_called_once()
+            updates = mock_create_in_db.mock_calls[0][1][1]
+            # assert that the following fields are not stored in the db
+            # 1. network_metadata
+            # 2. requested_destination
+            # 3. requested_resources
+            # 4. retry
+            data = jsonutils.loads(updates['spec'])['nova_object.data']
+            self.assertNotIn('network_metadata', data)
+            self.assertIsNone(data['requested_destination'])
+            self.assertIsNone(data['requested_resources'])
+            self.assertIsNone(data['retry'])
+            self.assertIsNotNone(data['instance_uuid'])
+
+        # also we expect that the following fields are not reset after create
+        # 1. network_metadata
+        # 2. requested_destination
+        # 3. requested_resources
+        # 4. retry
+        self.assertIsNotNone(req_obj.network_metadata)
+        self.assertJsonEqual(expected_network_metadata.obj_to_primitive(),
+                             req_obj.network_metadata.obj_to_primitive())
+        self.assertIsNotNone(req_obj.requested_destination)
+        self.assertJsonEqual(expected_destination.obj_to_primitive(),
+                             req_obj.requested_destination.obj_to_primitive())
+        self.assertIsNotNone(req_obj.requested_resources)
+        self.assertEqual(
+            13, req_obj.requested_resources[0].resources['fake-rc'])
+        self.assertIsNotNone(req_obj.retry)
+        self.assertJsonEqual(expected_retry.obj_to_primitive(),
+                             req_obj.retry.obj_to_primitive())
+
+    def test_save_does_not_persist_requested_fields(self):
+        req_obj = fake_request_spec.fake_spec_obj(remove_id=True)
+        req_obj.create()
+        # change something to make sure _save_in_db is called
+        expected_network_metadata = objects.NetworkMetadata(
+            physnets=set(['foo', 'bar']), tunneled=True)
+        req_obj.network_metadata = expected_network_metadata
+        expected_destination = request_spec.Destination(host='sample-host')
+        req_obj.requested_destination = expected_destination
+        rg = request_spec.RequestGroup(resources={'fake-rc': 13})
+        req_obj.requested_resources = [rg]
+        expected_retry = objects.SchedulerRetries(
+            num_attempts=2,
+            hosts=objects.ComputeNodeList(objects=[
+                objects.ComputeNode(host='host1', hypervisor_hostname='node1'),
+                objects.ComputeNode(host='host2', hypervisor_hostname='node2'),
+            ]))
+        req_obj.retry = expected_retry
+        req_obj.num_instances = 2
+        req_obj.ignore_hosts = [uuids.ignored_host]
+
+        orig_save_in_db = request_spec.RequestSpec._save_in_db
+        with mock.patch.object(request_spec.RequestSpec, '_save_in_db') \
+                as mock_save_in_db:
+            mock_save_in_db.side_effect = orig_save_in_db
+            req_obj.save()
+            mock_save_in_db.assert_called_once()
+            updates = mock_save_in_db.mock_calls[0][1][2]
+            # assert that the following fields are not stored in the db
+            # 1. network_metadata
+            # 2. requested_destination
+            # 3. requested_resources
+            # 4. retry
+            # 5. ignore_hosts
+            data = jsonutils.loads(updates['spec'])['nova_object.data']
+            self.assertNotIn('network_metadata', data)
+            self.assertIsNone(data['requested_destination'])
+            self.assertIsNone(data['requested_resources'])
+            self.assertIsNone(data['retry'])
+            self.assertIsNone(data['ignore_hosts'])
+            self.assertIsNotNone(data['instance_uuid'])
+
+        # also we expect that the following fields are not reset after save
+        # 1. network_metadata
+        # 2. requested_destination
+        # 3. requested_resources
+        # 4. retry
+        # 5. ignore_hosts
+        self.assertIsNotNone(req_obj.network_metadata)
+        self.assertJsonEqual(expected_network_metadata.obj_to_primitive(),
+                             req_obj.network_metadata.obj_to_primitive())
+        self.assertIsNotNone(req_obj.requested_destination)
+        self.assertJsonEqual(expected_destination.obj_to_primitive(),
+                             req_obj.requested_destination.obj_to_primitive())
+        self.assertIsNotNone(req_obj.requested_resources)
+        self.assertEqual(13, req_obj.requested_resources[0].resources
+                             ['fake-rc'])
+        self.assertIsNotNone(req_obj.retry)
+        self.assertJsonEqual(expected_retry.obj_to_primitive(),
+                             req_obj.retry.obj_to_primitive())
+        self.assertIsNotNone(req_obj.ignore_hosts)
+        self.assertEqual([uuids.ignored_host], req_obj.ignore_hosts)
+
     def test_save(self):
         req_obj = fake_request_spec.fake_spec_obj()
+        # Make sure the requested_destination is not persisted since it is
+        # only valid per request/operation.
+        req_obj.requested_destination = objects.Destination(host='fake')
 
         def _test_save_args(self2, context, instance_uuid, changes):
             self._check_update_primitive(req_obj, changes)
@@ -661,11 +814,17 @@ class _TestRequestSpecObject(object):
         mock_reset.assert_called_once_with(['force_hosts', 'force_nodes'])
 
     def test_compat_requested_destination(self):
-        req_obj = objects.RequestSpec()
+        req_obj = objects.RequestSpec(
+            requested_destination=objects.Destination())
         versions = ovo_base.obj_tree_get_versions('RequestSpec')
         primitive = req_obj.obj_to_primitive(target_version='1.5',
                                              version_manifest=versions)
-        self.assertNotIn('requested_destination', primitive)
+        self.assertNotIn(
+            'requested_destination', primitive['nova_object.data'])
+
+        primitive = req_obj.obj_to_primitive(target_version='1.6',
+                                             version_manifest=versions)
+        self.assertIn('requested_destination', primitive['nova_object.data'])
 
     def test_compat_security_groups(self):
         sgl = objects.SecurityGroupList(objects=[])
@@ -673,7 +832,11 @@ class _TestRequestSpecObject(object):
         versions = ovo_base.obj_tree_get_versions('RequestSpec')
         primitive = req_obj.obj_to_primitive(target_version='1.7',
                                              version_manifest=versions)
-        self.assertNotIn('security_groups', primitive)
+        self.assertNotIn('security_groups', primitive['nova_object.data'])
+
+        primitive = req_obj.obj_to_primitive(target_version='1.8',
+                                             version_manifest=versions)
+        self.assertIn('security_groups', primitive['nova_object.data'])
 
     def test_compat_user_id(self):
         req_obj = objects.RequestSpec(project_id=fakes.FAKE_PROJECT_ID,
@@ -696,6 +859,16 @@ class _TestRequestSpecObject(object):
         primitive = primitive['nova_object.data']
         self.assertNotIn('network_metadata', primitive)
         self.assertIn('user_id', primitive)
+
+    def test_compat_requested_resources(self):
+        req_obj = objects.RequestSpec(requested_resources=[],
+                                      instance_uuid=uuids.instance)
+        versions = ovo_base.obj_tree_get_versions('RequestSpec')
+        primitive = req_obj.obj_to_primitive(target_version='1.11',
+                                             version_manifest=versions)
+        primitive = primitive['nova_object.data']
+        self.assertNotIn('requested_resources', primitive)
+        self.assertIn('instance_uuid', primitive)
 
     def test_default_requested_destination(self):
         req_obj = objects.RequestSpec()
@@ -725,10 +898,18 @@ class _TestRequestSpecObject(object):
         destination.require_aggregates(['baz'])
         self.assertEqual(['foo,bar', 'baz'], destination.aggregates)
 
-    def test_destination_1dotoh(self):
-        destination = objects.Destination(aggregates=['foo'])
-        primitive = destination.obj_to_primitive(target_version='1.0')
-        self.assertNotIn('aggregates', primitive['nova_object.data'])
+    def test_destination_obj_make_compatible(self):
+        destination = objects.Destination(
+            aggregates=['foo'], host='fake-host', allow_cross_cell_move=False)
+        primitive = destination.obj_to_primitive(
+            target_version='1.2')['nova_object.data']
+        self.assertIn('aggregates', primitive)
+        self.assertNotIn('allow_cross_cell_move', primitive)
+
+        primitive = destination.obj_to_primitive(
+            target_version='1.0')['nova_object.data']
+        self.assertNotIn('aggregates', primitive)
+        self.assertEqual('fake-host', primitive['host'])
 
     def test_create_raises_on_unchanged_object(self):
         ctxt = context.RequestContext(uuids.user_id, uuids.project_id)
@@ -749,3 +930,630 @@ class TestRequestSpecObject(test_objects._LocalTest,
 class TestRemoteRequestSpecObject(test_objects._RemoteTest,
                                   _TestRequestSpecObject):
     pass
+
+
+class TestRequestGroupObject(test.NoDBTestCase):
+    def setUp(self):
+        super(TestRequestGroupObject, self).setUp()
+        self.user_id = uuids.user_id
+        self.project_id = uuids.project_id
+        self.context = context.RequestContext(uuids.user_id, uuids.project_id)
+
+    def test_fields_defaulted_at_create(self):
+        rg = request_spec.RequestGroup(self.context)
+        self.assertTrue(rg.use_same_provider)
+        self.assertEqual({}, rg.resources)
+        self.assertEqual(set(), rg.required_traits)
+        self.assertEqual(set(), rg.forbidden_traits)
+        self.assertEqual([], rg.aggregates)
+        self.assertIsNone(rg.requester_id)
+        self.assertEqual([], rg.provider_uuids)
+        self.assertIsNone(rg.in_tree)
+
+    def test_from_port_request(self):
+        port_resource_request = {
+            "resources": {
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1000,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1000},
+            "required": ["CUSTOM_PHYSNET_2",
+                         "CUSTOM_VNIC_TYPE_NORMAL"]
+        }
+        rg = request_spec.RequestGroup.from_port_request(
+            self.context, uuids.port_id, port_resource_request)
+
+        self.assertTrue(rg.use_same_provider)
+        self.assertEqual(
+            {"NET_BW_IGR_KILOBIT_PER_SEC": 1000,
+             "NET_BW_EGR_KILOBIT_PER_SEC": 1000},
+            rg.resources)
+        self.assertEqual({"CUSTOM_PHYSNET_2", "CUSTOM_VNIC_TYPE_NORMAL"},
+                         rg.required_traits)
+        self.assertEqual(uuids.port_id, rg.requester_id)
+        # and the rest is defaulted
+        self.assertEqual(set(), rg.forbidden_traits)
+        self.assertEqual([], rg.aggregates)
+        self.assertEqual([], rg.provider_uuids)
+
+    def test_from_port_request_without_traits(self):
+        port_resource_request = {
+            "resources": {
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1000,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1000}}
+        rg = request_spec.RequestGroup.from_port_request(
+            self.context, uuids.port_id, port_resource_request)
+
+        self.assertTrue(rg.use_same_provider)
+        self.assertEqual(
+            {"NET_BW_IGR_KILOBIT_PER_SEC": 1000,
+             "NET_BW_EGR_KILOBIT_PER_SEC": 1000},
+            rg.resources)
+        self.assertEqual(uuids.port_id, rg.requester_id)
+        # and the rest is defaulted
+        self.assertEqual(set(), rg.required_traits)
+        self.assertEqual(set(), rg.forbidden_traits)
+        self.assertEqual([], rg.aggregates)
+        self.assertEqual([], rg.provider_uuids)
+
+    def test_compat_requester_and_provider(self):
+        req_obj = objects.RequestGroup(
+            requester_id=uuids.requester, provider_uuids=[uuids.rp1],
+            required_traits=set(['CUSTOM_PHYSNET_2']))
+        versions = ovo_base.obj_tree_get_versions('RequestGroup')
+        primitive = req_obj.obj_to_primitive(
+            target_version='1.2',
+            version_manifest=versions)['nova_object.data']
+        self.assertIn('in_tree', primitive)
+        self.assertIn('requester_id', primitive)
+        self.assertIn('provider_uuids', primitive)
+        self.assertIn('required_traits', primitive)
+        primitive = req_obj.obj_to_primitive(
+            target_version='1.1',
+            version_manifest=versions)['nova_object.data']
+        self.assertNotIn('in_tree', primitive)
+        self.assertIn('requester_id', primitive)
+        self.assertIn('provider_uuids', primitive)
+        self.assertIn('required_traits', primitive)
+        primitive = req_obj.obj_to_primitive(
+            target_version='1.0',
+            version_manifest=versions)['nova_object.data']
+        self.assertNotIn('in_tree', primitive)
+        self.assertNotIn('requester_id', primitive)
+        self.assertNotIn('provider_uuids', primitive)
+        self.assertIn('required_traits', primitive)
+
+
+class TestMappingRequestGroupsToProviders(test.NoDBTestCase):
+    def setUp(self):
+        super(TestMappingRequestGroupsToProviders, self).setUp()
+        self.spec = request_spec.RequestSpec()
+
+    def test_no_groups(self):
+        allocations = None
+        provider_traits = {}
+
+        self.spec.map_requested_resources_to_providers(
+            allocations, provider_traits)
+
+        # we cannot assert much, at least we see that the above call doesn't
+        # blow
+        self.assertIsNone(self.spec.requested_resources)
+
+    def test_unnumbered_group_not_supported(self):
+        allocations = {}
+        provider_traits = {}
+        group1 = request_spec.RequestGroup(
+            use_same_provider=False)
+        self.spec.requested_resources = [group1]
+
+        self.assertRaises(
+            NotImplementedError,
+            self.spec.map_requested_resources_to_providers, allocations,
+            provider_traits)
+
+    def test_forbidden_traits_not_supported(self):
+        allocations = {}
+        provider_traits = {}
+        group1 = request_spec.RequestGroup(
+            forbidden_traits={'STORAGE_DISK_HDD'})
+        self.spec.requested_resources = [group1]
+
+        self.assertRaises(
+            NotImplementedError,
+            self.spec.map_requested_resources_to_providers, allocations,
+            provider_traits)
+
+    def test_aggregates_not_supported(self):
+        allocations = {}
+        provider_traits = {}
+        group1 = request_spec.RequestGroup(
+            aggregates=[[uuids.agg1]])
+        self.spec.requested_resources = [group1]
+
+        self.assertRaises(
+            NotImplementedError,
+            self.spec.map_requested_resources_to_providers, allocations,
+            provider_traits)
+
+    def test_one_group(self):
+        allocations = {
+            uuids.compute1_rp: {
+                "resources": {
+                    'VCPU': 1
+                }
+            },
+            uuids.net_dev1_rp: {
+                "resources": {
+                    'NET_BW_IGR_KILOBIT_PER_SEC': 1,
+                    'NET_BW_EGR_KILOBIT_PER_SEC': 1,
+                }
+            }
+        }
+        provider_traits = {
+            uuids.compute1_rp: [],
+            uuids.net_dev1_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0',
+                'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+        }
+        group1 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        self.spec.requested_resources = [group1]
+
+        self.spec.map_requested_resources_to_providers(
+            allocations, provider_traits)
+
+        self.assertEqual([uuids.net_dev1_rp], group1.provider_uuids)
+
+    def test_one_group_no_matching_allocation(self):
+        # NOTE(gibi): This negative test scenario should not happen in real
+        # end to end test as we assume that placement only returns candidates
+        # that are valid. But still we want to cover the error case in our
+        # implementation
+
+        allocations = {
+            uuids.compute1_rp: {
+                "resources": {
+                    'VCPU': 1
+                }
+            },
+            uuids.net_dev1_rp: {
+                "resources": {
+                    'NET_BW_IGR_KILOBIT_PER_SEC': 1,
+                }
+            }
+        }
+        provider_traits = {
+            uuids.compute1_rp: [],
+            uuids.net_dev1_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0', 'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+        }
+        group1 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        self.spec.requested_resources = [group1]
+
+        self.assertRaises(
+            ValueError, self.spec.map_requested_resources_to_providers,
+            allocations, provider_traits)
+
+    def test_one_group_no_matching_trait(self):
+        # NOTE(gibi): This negative test scenario should not happen in real
+        # end to end test as we assume that placement only returns candidates
+        # that are valid. But still we want to cover the error case in our
+        # implementation
+
+        allocations = {
+            uuids.compute1_rp: {
+                "resources": {
+                    'VCPU': 1
+                }
+            },
+            uuids.net_dev1_rp: {
+                "resources": {
+                    'NET_BW_IGR_KILOBIT_PER_SEC': 1,
+                    'NET_BW_EGR_KILOBIT_PER_SEC': 1,
+                }
+            }
+        }
+        provider_traits = {
+            uuids.compute1_rp: [],
+            uuids.net_dev1_rp: [
+                'CUSTOM_PHYSNET_PHYSNET1',
+                'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+        }
+        group1 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        self.spec.requested_resources = [group1]
+
+        self.assertRaises(
+            ValueError, self.spec.map_requested_resources_to_providers,
+            allocations, provider_traits)
+
+    def test_two_groups_same_provider(self):
+        allocations = {
+            uuids.compute1_rp: {
+                "resources": {
+                    'VCPU': 1
+                }
+            },
+            uuids.net_dev1_rp: {
+                "resources": {
+                    'NET_BW_IGR_KILOBIT_PER_SEC': 3,
+                    'NET_BW_EGR_KILOBIT_PER_SEC': 3,
+                }
+            }
+        }
+        provider_traits = {
+            uuids.compute1_rp: [],
+            uuids.net_dev1_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0',
+                'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+        }
+
+        group1 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        group2 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 2,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 2,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        self.spec.requested_resources = [group1, group2]
+
+        self.spec.map_requested_resources_to_providers(
+            allocations, provider_traits)
+
+        self.assertEqual([uuids.net_dev1_rp], group1.provider_uuids)
+        self.assertEqual([uuids.net_dev1_rp], group2.provider_uuids)
+
+    def test_two_groups_different_providers(self):
+        # NOTE(gibi): we use OrderedDict here to make the test deterministic
+        allocations = collections.OrderedDict()
+        allocations[uuids.compute1_rp] = {
+            "resources": {
+                    'VCPU': 1
+                }
+        }
+        allocations[uuids.net_dev1_rp] = {
+            "resources": {
+                'NET_BW_IGR_KILOBIT_PER_SEC': 2,
+                'NET_BW_EGR_KILOBIT_PER_SEC': 2,
+            }
+        }
+        allocations[uuids.net_dev2_rp] = {
+            "resources": {
+                'NET_BW_IGR_KILOBIT_PER_SEC': 1,
+                'NET_BW_EGR_KILOBIT_PER_SEC': 1,
+            }
+        }
+        provider_traits = {
+            uuids.compute1_rp: [],
+            uuids.net_dev1_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0',
+                'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+            uuids.net_dev2_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0',
+                'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+        }
+        group1 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        group2 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 2,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 2,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        self.spec.requested_resources = [group1, group2]
+
+        self.spec.map_requested_resources_to_providers(
+            allocations, provider_traits)
+
+        self.assertEqual([uuids.net_dev2_rp], group1.provider_uuids)
+        self.assertEqual([uuids.net_dev1_rp], group2.provider_uuids)
+
+    def test_two_groups_different_providers_reverse(self):
+        """Similar as test_two_groups_different_providers but reorder the
+        groups to exercises another code path
+        """
+        # NOTE(gibi): we use OrderedDict here to make the test deterministic
+        allocations = collections.OrderedDict()
+        allocations[uuids.compute1_rp] = {
+            "resources": {
+                    'VCPU': 1
+                }
+        }
+        allocations[uuids.net_dev1_rp] = {
+            "resources": {
+                'NET_BW_IGR_KILOBIT_PER_SEC': 2,
+                'NET_BW_EGR_KILOBIT_PER_SEC': 2,
+            }
+        }
+        allocations[uuids.net_dev2_rp] = {
+            "resources": {
+                'NET_BW_IGR_KILOBIT_PER_SEC': 1,
+                'NET_BW_EGR_KILOBIT_PER_SEC': 1,
+            }
+        }
+        provider_traits = {
+            uuids.compute1_rp: [],
+            uuids.net_dev1_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0', 'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+            uuids.net_dev2_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0', 'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+        }
+        group1 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 2,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 2,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        group2 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        self.spec.requested_resources = [group1, group2]
+
+        self.spec.map_requested_resources_to_providers(
+            allocations, provider_traits)
+
+        self.assertEqual([uuids.net_dev1_rp], group1.provider_uuids)
+        self.assertEqual([uuids.net_dev2_rp], group2.provider_uuids)
+
+    def test_two_groups_different_providers_different_traits(self):
+
+        allocations = collections.OrderedDict()
+        allocations[uuids.compute1_rp] = {
+            "resources": {
+                'VCPU': 1
+            }
+        }
+        allocations[uuids.net_dev1_physnet1_rp] = {
+            "resources": {
+                'NET_BW_IGR_KILOBIT_PER_SEC': 1,
+                'NET_BW_EGR_KILOBIT_PER_SEC': 1,
+            }
+        }
+        allocations[uuids.net_dev2_physnet0_rp] = {
+            "resources": {
+                'NET_BW_IGR_KILOBIT_PER_SEC': 1,
+                'NET_BW_EGR_KILOBIT_PER_SEC': 1,
+            }
+        }
+        provider_traits = {
+            uuids.compute1_rp: [],
+            uuids.net_dev1_physnet1_rp: [
+                'CUSTOM_PHYSNET_PHYSNET1', 'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+            uuids.net_dev2_physnet0_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0', 'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+        }
+        group1 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        group2 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET1",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        self.spec.requested_resources = [group1, group2]
+
+        self.spec.map_requested_resources_to_providers(
+            allocations, provider_traits)
+
+        self.assertEqual([uuids.net_dev2_physnet0_rp], group1.provider_uuids)
+        self.assertEqual([uuids.net_dev1_physnet1_rp], group2.provider_uuids)
+
+    def test_three_groups(self):
+        """A complex example where a lot of mappings are tried before the
+        solution is found.
+        """
+        allocations = collections.OrderedDict()
+        allocations[uuids.compute1_rp] = {
+            "resources": {
+                'VCPU': 1
+            }
+        }
+        allocations[uuids.net_dev1_rp] = {
+            "resources": {
+                'NET_BW_IGR_KILOBIT_PER_SEC': 3,
+                'NET_BW_EGR_KILOBIT_PER_SEC': 3,
+            }
+        }
+        allocations[uuids.net_dev2_rp] = {
+            "resources": {
+                'NET_BW_IGR_KILOBIT_PER_SEC': 2,
+                'NET_BW_EGR_KILOBIT_PER_SEC': 2,
+            }
+        }
+        allocations[uuids.net_dev3_rp] = {
+            "resources": {
+                'NET_BW_IGR_KILOBIT_PER_SEC': 1,
+                'NET_BW_EGR_KILOBIT_PER_SEC': 3,
+            }
+        }
+        provider_traits = {
+            uuids.compute1_rp: [],
+            uuids.net_dev1_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0', 'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+            uuids.net_dev2_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0', 'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+            uuids.net_dev3_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0', 'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+        }
+        # this fits to 2 RPs
+        group1 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 3,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        # this fits to 2 RPs
+        group2 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 2,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 2,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        # this fits to only one RPs
+        group3 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 3,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 3,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        self.spec.requested_resources = [group1, group2, group3]
+
+        orig_validator = self.spec._is_valid_group_rp_mapping
+        with mock.patch.object(
+                self.spec, '_is_valid_group_rp_mapping',
+                side_effect=orig_validator
+        ) as mock_validator:
+            self.spec.map_requested_resources_to_providers(
+                allocations, provider_traits)
+
+        self.assertEqual([uuids.net_dev3_rp], group1.provider_uuids)
+        self.assertEqual([uuids.net_dev2_rp], group2.provider_uuids)
+        self.assertEqual([uuids.net_dev1_rp], group3.provider_uuids)
+
+        # the algorithm tried out many possible mappings before found the
+        # the solution
+        self.assertEqual(58, mock_validator.call_count)
+
+    @mock.patch.object(request_spec.LOG, 'debug')
+    def test_two_groups_matches_but_allocation_leftover(self, mock_debug):
+        # NOTE(gibi): This negative test scenario should not happen in real
+        # end to end test as we assume that placement only returns candidates
+        # that are valid and this candidate is not valid as it provides more
+        # resources than the ports are requesting. Still we want to cover the
+        # error case in our implementation
+
+        allocations = collections.OrderedDict()
+        allocations[uuids.compute1_rp] = {
+            "resources": {
+                'VCPU': 1
+            }
+        }
+        allocations[uuids.net_dev1_physnet0_rp] = {
+            "resources": {
+                'NET_BW_IGR_KILOBIT_PER_SEC': 2,
+                'NET_BW_EGR_KILOBIT_PER_SEC': 2,
+            }
+        }
+        allocations[uuids.net_dev2_physnet0_rp] = {
+            "resources": {
+                'NET_BW_IGR_KILOBIT_PER_SEC': 1,
+                'NET_BW_EGR_KILOBIT_PER_SEC': 1,
+            }
+        }
+        provider_traits = {
+            uuids.compute1_rp: [],
+            uuids.net_dev1_physnet0_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0', 'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+            uuids.net_dev2_physnet0_rp: [
+                'CUSTOM_PHYSNET_PHYSNET0', 'CUSTOM_VNIC_TYPE_NORMAL'
+            ],
+        }
+        group1 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        group2 = request_spec.RequestGroup(
+            resources={
+                "NET_BW_IGR_KILOBIT_PER_SEC": 1,
+                "NET_BW_EGR_KILOBIT_PER_SEC": 1,
+            },
+            required_traits={
+                "CUSTOM_PHYSNET_PHYSNET0",
+                "CUSTOM_VNIC_TYPE_NORMAL",
+            })
+        self.spec.requested_resources = [group1, group2]
+
+        self.assertRaises(
+            ValueError, self.spec.map_requested_resources_to_providers,
+            allocations, provider_traits)
+
+        self.assertIn('allocations leftover', mock_debug.mock_calls[3][1][0])

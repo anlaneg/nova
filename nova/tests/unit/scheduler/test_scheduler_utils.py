@@ -59,10 +59,12 @@ class SchedulerUtilsTestCase(test.NoDBTestCase):
             mock_get.assert_called_once_with()
         self.assertIsInstance(request_spec['instance_properties'], dict)
 
+    @mock.patch('nova.compute.utils.notify_about_compute_task_error')
     @mock.patch('nova.rpc.LegacyValidatingNotifier')
     @mock.patch.object(compute_utils, 'add_instance_fault_from_exc')
     @mock.patch.object(objects.Instance, 'save')
     def _test_set_vm_state_and_notify(self, mock_save, mock_add, mock_notifier,
+                                      mock_notify_task,
                                       request_spec, payload_request_spec):
         expected_uuid = uuids.instance
         updates = dict(vm_state='fake-vm-state')
@@ -94,6 +96,10 @@ class SchedulerUtilsTestCase(test.NoDBTestCase):
         mock_notifier.return_value.error.assert_called_once_with(self.context,
                                                                  event_type,
                                                                  payload)
+        mock_notify_task.assert_called_once_with(
+            self.context, method, expected_uuid,
+            payload_request_spec, updates['vm_state'],
+            exc_info, test.MatchType(str))
 
     def test_set_vm_state_and_notify_request_spec_dict(self):
         """Tests passing a legacy dict format request spec to
@@ -157,8 +163,8 @@ class SchedulerUtilsTestCase(test.NoDBTestCase):
         if force_nodes is None:
             force_nodes = []
         if with_retry:
-            if ((len(force_hosts) == 1 and len(force_nodes) <= 1)
-                 or (len(force_nodes) == 1 and len(force_hosts) <= 1)):
+            if ((len(force_hosts) == 1 and len(force_nodes) <= 1) or
+                 (len(force_nodes) == 1 and len(force_hosts) <= 1)):
                 filter_properties = dict(force_hosts=force_hosts,
                                          force_nodes=force_nodes)
             elif len(force_hosts) > 1 or len(force_nodes) > 1:
@@ -202,8 +208,8 @@ class SchedulerUtilsTestCase(test.NoDBTestCase):
         self.assertEqual(expected_limits,
                          filter_properties.get('limits'))
 
-        if (with_retry and enable_retry_force_hosts
-                       and enable_retry_force_nodes):
+        if (with_retry and enable_retry_force_hosts and
+                enable_retry_force_nodes):
             self.assertEqual([['fake-host', 'fake-node'],
                               ['fake-host', 'fake-node']],
                              filter_properties['retry']['hosts'])

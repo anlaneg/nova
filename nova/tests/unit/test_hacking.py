@@ -15,7 +15,7 @@
 import textwrap
 
 import mock
-import pep8
+import pycodestyle
 
 from nova.hacking import checks
 from nova import test
@@ -23,10 +23,10 @@ from nova import test
 
 class HackingTestCase(test.NoDBTestCase):
     """This class tests the hacking checks in nova.hacking.checks by passing
-    strings to the check methods like the pep8/flake8 parser would. The parser
-    loops over each line in the file and then passes the parameters to the
-    check method. The parameter names in the check method dictate what type of
-    object is passed to the check method. The parameter types are::
+    strings to the check methods like the pycodestyle/flake8 parser would. The
+    parser loops over each line in the file and then passes the parameters to
+    the check method. The parameter names in the check method dictate what type
+    of object is passed to the check method. The parameter types are::
 
         logical_line: A processed line with the following modifications:
             - Multi-line statements converted to a single line.
@@ -43,7 +43,7 @@ class HackingTestCase(test.NoDBTestCase):
         indent_level: indentation (with tabs expanded to multiples of 8)
         previous_indent_level: indentation on previous line
         previous_logical: previous logical line
-        filename: Path of the file being run through pep8
+        filename: Path of the file being run through pycodestyle
 
     When running a test on a check method the return will be False/None if
     there is no violation in the sample input. If there is an error a tuple is
@@ -268,20 +268,20 @@ class HackingTestCase(test.NoDBTestCase):
             len(list(checks.use_jsonutils("json.dumb",
                                  "./nova/virt/xenapi/driver.py"))))
 
-    # We are patching pep8 so that only the check under test is actually
+    # We are patching pycodestyle so that only the check under test is actually
     # installed.
-    @mock.patch('pep8._checks',
+    @mock.patch('pycodestyle._checks',
                 {'physical_line': {}, 'logical_line': {}, 'tree': {}})
     def _run_check(self, code, checker, filename=None):
-        pep8.register_check(checker)
+        pycodestyle.register_check(checker)
 
-        lines = textwrap.dedent(code).strip().splitlines(True)
+        lines = textwrap.dedent(code).lstrip().splitlines(True)
 
-        checker = pep8.Checker(filename=filename, lines=lines)
+        checker = pycodestyle.Checker(filename=filename, lines=lines)
         # NOTE(sdague): the standard reporter has printing to stdout
         # as a normal part of check_all, which bleeds through to the
         # test output stream in an unhelpful way. This blocks that printing.
-        with mock.patch('pep8.StandardReport.get_file_results'):
+        with mock.patch('pycodestyle.StandardReport.get_file_results'):
             checker.check_all()
         checker.report._deferred_print.sort()
         return checker.report._deferred_print
@@ -580,12 +580,14 @@ class HackingTestCase(test.NoDBTestCase):
     def test_check_doubled_words(self):
         errors = [(1, 0, "N343")]
 
-        # Artificial break to stop pep8 detecting the test !
-        code = "This is the" + " the best comment"
+        # Explicit addition of line-ending here and below since this isn't a
+        # block comment and without it we trigger #1804062. Artificial break is
+        # necessary to stop flake8 detecting the test
+        code = "'This is the" + " the best comment'\n"
         self._assert_has_errors(code, checks.check_doubled_words,
                                 expected_errors=errors)
 
-        code = "This is the then best comment"
+        code = "'This is the then best comment'\n"
         self._assert_has_no_errors(code, checks.check_doubled_words)
 
     def test_dict_iteritems(self):
@@ -839,3 +841,181 @@ class HackingTestCase(test.NoDBTestCase):
                   yieldx_func(a, b)
                """
         self._assert_has_no_errors(code, checks.yield_followed_by_space)
+
+    def test_assert_regexpmatches(self):
+        code = """
+                   self.assertRegexpMatches("Test", output)
+                   self.assertNotRegexpMatches("Notmatch", output)
+               """
+        errors = [(x + 1, 0, 'N361') for x in range(2)]
+        self._assert_has_errors(code, checks.assert_regexpmatches,
+                                expected_errors=errors)
+        code = """
+                   self.assertRegexpMatchesfoo("Test", output)
+                   self.assertNotRegexpMatchesbar("Notmatch", output)
+               """
+        self._assert_has_no_errors(code, checks.assert_regexpmatches)
+
+    def test_import_alias_privsep(self):
+        code = """
+                  from nova import privsep
+                  import nova.privsep as nova_privsep
+                  from nova.privsep import linux_net
+                  import nova.privsep.linux_net as privsep_linux_net
+               """
+        errors = [(x + 1, 0, 'N362') for x in range(4)]
+        bad_filenames = ('nova/foo/bar.py',
+                         'nova/foo/privsep.py',
+                         'nova/privsep_foo/bar.py')
+        for filename in bad_filenames:
+            self._assert_has_errors(
+                code, checks.privsep_imports_not_aliased,
+                expected_errors=errors,
+                filename=filename)
+        good_filenames = ('nova/privsep.py',
+                          'nova/privsep/__init__.py',
+                          'nova/privsep/foo.py')
+        for filename in good_filenames:
+            self._assert_has_no_errors(
+                code, checks.privsep_imports_not_aliased, filename=filename)
+        code = """
+                  import nova.privsep
+                  import nova.privsep.foo
+                  import nova.privsep.foo.bar
+                  import nova.foo.privsep
+                  import nova.foo.privsep.bar
+                  import nova.tests.unit.whatever
+               """
+        for filename in (good_filenames + bad_filenames):
+            self._assert_has_no_errors(
+                code, checks.privsep_imports_not_aliased, filename=filename)
+
+    def test_did_you_mean_tuple(self):
+        code = """
+                    if foo in (bar):
+                    if foo in ('bar'):
+                    if foo in (path.to.CONST_1234):
+                    if foo in (
+                        bar):
+               """
+        errors = [(x + 1, 0, 'N363') for x in range(4)]
+        self._assert_has_errors(
+            code, checks.did_you_mean_tuple, expected_errors=errors)
+        code = """
+                    def in(this_would_be_weird):
+                        # A match in (any) comment doesn't count
+                        if foo in (bar,)
+                            or foo in ('bar',)
+                            or foo in ("bar",)
+                            or foo in (set1 + set2)
+                            or foo in ("string continuations "
+                                "are probably okay")
+                            or foo in (method_call_should_this_work()):
+               """
+        self._assert_has_no_errors(code, checks.did_you_mean_tuple)
+
+    def test_nonexistent_assertion_methods_and_attributes(self):
+        code = """
+                   mock_sample.called_once()
+                   mock_sample.called_once_with(a, "TEST")
+                   mock_sample.has_calls([mock.call(x), mock.call(y)])
+                   mock_sample.mock_assert_called()
+                   mock_sample.mock_assert_called_once()
+                   mock_sample.mock_assert_called_with(a, "xxxx")
+                   mock_sample.mock_assert_called_once_with(a, b)
+                   mock_sample.mock_assert_any_call(1, 2, instance=instance)
+                   sample.mock_assert_has_calls([mock.call(x), mock.call(y)])
+                   mock_sample.mock_assert_not_called()
+                   mock_sample.asser_called()
+                   mock_sample.asser_called_once()
+                   mock_sample.asser_called_with(a, "xxxx")
+                   mock_sample.asser_called_once_with(a, b)
+                   mock_sample.asser_any_call(1, 2, instance=instance)
+                   mock_sample.asser_has_calls([mock.call(x), mock.call(y)])
+                   mock_sample.asser_not_called()
+                   mock_sample.asset_called()
+                   mock_sample.asset_called_once()
+                   mock_sample.asset_called_with(a, "xxxx")
+                   mock_sample.asset_called_once_with(a, b)
+                   mock_sample.asset_any_call(1, 2, instance=instance)
+                   mock_sample.asset_has_calls([mock.call(x), mock.call(y)])
+                   mock_sample.asset_not_called()
+                   mock_sample.asssert_called()
+                   mock_sample.asssert_called_once()
+                   mock_sample.asssert_called_with(a, "xxxx")
+                   mock_sample.asssert_called_once_with(a, b)
+                   mock_sample.asssert_any_call(1, 2, instance=instance)
+                   mock_sample.asssert_has_calls([mock.call(x), mock.call(y)])
+                   mock_sample.asssert_not_called()
+                   mock_sample.assset_called()
+                   mock_sample.assset_called_once()
+                   mock_sample.assset_called_with(a, "xxxx")
+                   mock_sample.assset_called_once_with(a, b)
+                   mock_sample.assset_any_call(1, 2, instance=instance)
+                   mock_sample.assset_has_calls([mock.call(x), mock.call(y)])
+                   mock_sample.assset_not_called()
+                   mock_sample.retrun_value = 100
+                   sample.call_method(mock_sample.retrun_value, 100)
+                   mock.Mock(retrun_value=100)
+               """
+        errors = [(x + 1, 0, 'N364') for x in range(41)]
+        # Check errors in 'nova/tests' directory.
+        self._assert_has_errors(
+            code, checks.nonexistent_assertion_methods_and_attributes,
+            expected_errors=errors, filename="nova/tests/unit/test_context.py")
+        # Check no errors in other than 'nova/tests' directory.
+        self._assert_has_no_errors(
+            code, checks.nonexistent_assertion_methods_and_attributes,
+            filename="nova/compute/api.py")
+
+        code = """
+                   mock_sample.assert_called()
+                   mock_sample.assert_called_once()
+                   mock_sample.assert_called_with(a, "xxxx")
+                   mock_sample.assert_called_once_with(a, b)
+                   mock_sample.assert_any_call(1, 2, instance=instance)
+                   mock_sample.assert_has_calls([mock.call(x), mock.call(y)])
+                   mock_sample.assert_not_called()
+                   mock_sample.return_value = 100
+                   sample.call_method(mock_sample.return_value, 100)
+                   mock.Mock(return_value=100)
+
+                   sample.has_other_calls([1, 2, 3, 4])
+                   sample.get_called_once("TEST")
+                   sample.check_called_once_with("TEST")
+                   mock_assert_method.assert_called()
+                   test.asset_has_all(test)
+                   test_retrun_value = 99
+                   test.retrun_values = 100
+               """
+        self._assert_has_no_errors(
+            code, checks.nonexistent_assertion_methods_and_attributes,
+            filename="nova/tests/unit/test_context.py")
+
+    def test_useless_assertion(self):
+        code = """
+                   self.assertIsNone(None, status)
+                   self.assertTrue(True, flag)
+                   self.assertTrue(10, count)
+                   self.assertTrue('active', status)
+                   self.assertTrue("building", status)
+               """
+        errors = [(x + 1, 0, 'N365') for x in range(5)]
+        # Check errors in 'nova/tests' directory.
+        self._assert_has_errors(
+            code, checks.useless_assertion,
+            expected_errors=errors, filename="nova/tests/unit/test_context.py")
+        # Check no errors in other than 'nova/tests' directory.
+        self._assert_has_no_errors(
+            code, checks.nonexistent_assertion_methods_and_attributes,
+            filename="nova/compute/api.py")
+        code = """
+                   self.assertIsNone(None_test_var, "Fails")
+                   self.assertTrue(True_test_var, 'Fails')
+                   self.assertTrue(var2, "Fails")
+                   self.assertTrue(test_class.is_active('active'), 'Fails')
+                   self.assertTrue(check_status("building"), 'Fails')
+               """
+        self._assert_has_no_errors(
+            code, checks.useless_assertion,
+            filename="nova/tests/unit/test_context.py")

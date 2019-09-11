@@ -17,7 +17,7 @@ from oslo_utils import versionutils
 
 from nova import exception
 from nova.objects import base
-from nova.objects import fields
+from nova.objects import fields as obj_fields
 from nova.virt import hardware
 
 
@@ -47,16 +47,16 @@ class NUMACell(base.NovaObject):
     VERSION = '1.3'
 
     fields = {
-        'id': fields.IntegerField(read_only=True),
-        'cpuset': fields.SetOfIntegersField(),
-        'memory': fields.IntegerField(),
-        'cpu_usage': fields.IntegerField(default=0),
-        'memory_usage': fields.IntegerField(default=0),
-        'pinned_cpus': fields.SetOfIntegersField(),
-        'siblings': fields.ListOfSetsOfIntegersField(),
-        'mempages': fields.ListOfObjectsField('NUMAPagesTopology'),
-        'network_metadata': fields.ObjectField('NetworkMetadata'),
-        }
+        'id': obj_fields.IntegerField(read_only=True),
+        'cpuset': obj_fields.SetOfIntegersField(),
+        'memory': obj_fields.IntegerField(),
+        'cpu_usage': obj_fields.IntegerField(default=0),
+        'memory_usage': obj_fields.IntegerField(default=0),
+        'pinned_cpus': obj_fields.SetOfIntegersField(),
+        'siblings': obj_fields.ListOfSetsOfIntegersField(),
+        'mempages': obj_fields.ListOfObjectsField('NUMAPagesTopology'),
+        'network_metadata': obj_fields.ObjectField('NetworkMetadata'),
+    }
 
     def obj_make_compatible(self, primitive, target_version):
         super(NUMACell, self).obj_make_compatible(primitive, target_version)
@@ -95,20 +95,21 @@ class NUMACell(base.NovaObject):
     def pin_cpus(self, cpus):
         if cpus - self.cpuset:
             raise exception.CPUPinningUnknown(requested=list(cpus),
-                                              cpuset=list(self.cpuset))
+                                              available=list(self.cpuset))
         if self.pinned_cpus & cpus:
             raise exception.CPUPinningInvalid(requested=list(cpus),
-                                              free=list(self.cpuset -
-                                                        self.pinned_cpus))
+                                              available=list(self.cpuset -
+                                                             self.pinned_cpus))
         self.pinned_cpus |= cpus
 
     def unpin_cpus(self, cpus):
         if cpus - self.cpuset:
             raise exception.CPUUnpinningUnknown(requested=list(cpus),
-                                                cpuset=list(self.cpuset))
+                                                available=list(self.cpuset))
         if (self.pinned_cpus & cpus) != cpus:
             raise exception.CPUUnpinningInvalid(requested=list(cpus),
-                                                pinned=list(self.pinned_cpus))
+                                                available=list(
+                                                    self.pinned_cpus))
         self.pinned_cpus -= cpus
 
     def pin_cpus_with_siblings(self, cpus):
@@ -137,19 +138,23 @@ class NUMACell(base.NovaObject):
                    cpu_usage=cpu_usage, memory_usage=memory_usage,
                    mempages=[], pinned_cpus=set([]), siblings=[])
 
-    def can_fit_hugepages(self, pagesize, memory):
-        """Returns whether memory can fit into hugepages size
+    def can_fit_pagesize(self, pagesize, memory, use_free=True):
+        """Returns whether memory can fit into a given pagesize.
 
         :param pagesize: a page size in KibB
         :param memory: a memory size asked to fit in KiB
+        :param use_free: if true, assess based on free memory rather than total
+            memory. This means overcommit is not allowed, which should be the
+            case for hugepages since these are memlocked by the kernel and
+            can't be swapped out.
 
         :returns: whether memory can fit in hugepages
         :raises: MemoryPageSizeNotSupported if page size not supported
         """
         for pages in self.mempages:
+            avail_kb = pages.free_kb if use_free else pages.total_kb
             if pages.size_kb == pagesize:
-                return (memory <= pages.free_kb and
-                        (memory % pages.size_kb) == 0)
+                return memory <= avail_kb and (memory % pages.size_kb) == 0
         raise exception.MemoryPageSizeNotSupported(pagesize=pagesize)
 
 
@@ -160,10 +165,10 @@ class NUMAPagesTopology(base.NovaObject):
     VERSION = '1.1'
 
     fields = {
-        'size_kb': fields.IntegerField(),
-        'total': fields.IntegerField(),
-        'used': fields.IntegerField(default=0),
-        'reserved': fields.IntegerField(default=0),
+        'size_kb': obj_fields.IntegerField(),
+        'total': obj_fields.IntegerField(),
+        'used': obj_fields.IntegerField(default=0),
+        'reserved': obj_fields.IntegerField(default=0),
         }
 
     def obj_make_compatible(self, primitive, target_version):
@@ -193,6 +198,11 @@ class NUMAPagesTopology(base.NovaObject):
         """Returns the avail memory size in KiB."""
         return self.free * self.size_kb
 
+    @property
+    def total_kb(self):
+        """Returns the total memory size in KiB."""
+        return self.total * self.size_kb
+
 
 @base.NovaObjectRegistry.register
 class NUMATopology(base.NovaObject):
@@ -202,7 +212,7 @@ class NUMATopology(base.NovaObject):
     VERSION = '1.2'
 
     fields = {
-        'cells': fields.ListOfObjectsField('NUMACell'),
+        'cells': obj_fields.ListOfObjectsField('NUMACell'),
     }
 
     def __eq__(self, other):
@@ -258,9 +268,9 @@ class NUMATopologyLimits(base.NovaObject):
     VERSION = '1.1'
 
     fields = {
-        'cpu_allocation_ratio': fields.FloatField(),
-        'ram_allocation_ratio': fields.FloatField(),
-        'network_metadata': fields.ObjectField('NetworkMetadata'),
+        'cpu_allocation_ratio': obj_fields.FloatField(),
+        'ram_allocation_ratio': obj_fields.FloatField(),
+        'network_metadata': obj_fields.ObjectField('NetworkMetadata'),
     }
 
     def obj_make_compatible(self, primitive, target_version):

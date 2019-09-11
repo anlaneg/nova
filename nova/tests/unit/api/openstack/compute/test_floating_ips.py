@@ -61,7 +61,8 @@ def network_api_get_floating_ips_by_project(self, context):
              'fixed_ip': None}]
 
 
-def compute_api_get(self, context, instance_id, expected_attrs=None):
+def compute_api_get(self, context, instance_id, expected_attrs=None,
+                    cell_down_support=False):
     return objects.Instance(uuid=FAKE_UUID, id=instance_id,
                             instance_type_id=1, host='bob')
 
@@ -87,12 +88,13 @@ def network_api_disassociate(self, context, instance, floating_address):
 
 
 def fake_instance_get(context, instance_id):
-        return objects.Instance(**{
+    return objects.Instance(**{
         "id": 1,
         "uuid": uuids.fake,
         "name": 'fake',
         "user_id": 'fakeuser',
-        "project_id": '123'})
+        "project_id": '123'
+    })
 
 
 def stub_nw_info(test):
@@ -672,7 +674,8 @@ class FloatingIpTestV21(test.TestCase):
 
     def test_floating_ip_associate_invalid_instance(self):
 
-        def fake_get(self, context, id, expected_attrs=None):
+        def fake_get(self, context, id, expected_attrs=None,
+                     cell_down_support=False):
             raise exception.InstanceNotFound(instance_id=id)
 
         self.stubs.Set(compute.api.API, "get", fake_get)
@@ -757,8 +760,8 @@ class FloatingIpTestV21(test.TestCase):
                                              fixed_address=None):
             floating_ips = ["10.10.10.10", "10.10.10.11"]
             if floating_address not in floating_ips:
-                    raise exception.FloatingIpNotFoundForAddress(
-                            address=floating_address)
+                raise exception.FloatingIpNotFoundForAddress(
+                    address=floating_address)
 
         self.stubs.Set(network.api.API, "associate_floating_ip",
                        fake_network_api_associate)
@@ -773,8 +776,8 @@ class FloatingIpTestV21(test.TestCase):
                                                          floating_address):
             floating_ips = ["10.10.10.10", "10.10.10.11"]
             if floating_address not in floating_ips:
-                    raise exception.FloatingIpNotFoundForAddress(
-                            address=floating_address)
+                raise exception.FloatingIpNotFoundForAddress(
+                    address=floating_address)
 
         self.stubs.Set(network.api.API, "get_floating_ip_by_address",
                        network_api_get_floating_ip_by_address)

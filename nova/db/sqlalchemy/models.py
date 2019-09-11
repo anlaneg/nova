@@ -87,15 +87,15 @@ class Service(BASE, NovaBase, models.SoftDeleteMixin):
 
     id = Column(Integer, primary_key=True)
     uuid = Column(String(36), nullable=True)
-    host = Column(String(255))  # , ForeignKey('hosts.id')) #存储主机名
-    binary = Column(String(255))                            #存储例如nova-compute
-    topic = Column(String(255))                             #存储例如compute
+    host = Column(String(255))   #存储主机名
+    binary = Column(String(255)) #存储例如nova-compute
+    topic = Column(String(255))  #存储例如compute
     report_count = Column(Integer, nullable=False, default=0) #上报次数
-    disabled = Column(Boolean, default=False)                 #是否被禁用
-    disabled_reason = Column(String(255))                     #禁用原因
-    last_seen_up = Column(DateTime, nullable=True)            #上次上报的时间
-    forced_down = Column(Boolean, default=False)              #强制down的时间
-    version = Column(Integer, default=0)                      #版本号
+    disabled = Column(Boolean, default=False) #是否被禁用
+    disabled_reason = Column(String(255))     #禁用原因
+    last_seen_up = Column(DateTime, nullable=True) #上次上报的时间
+    forced_down = Column(Boolean, default=False) #强制down的时间
+    version = Column(Integer, default=0) #版本号
 
     instance = orm.relationship(
         "Instance",
@@ -280,7 +280,7 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
 
     # This is not related to hostname, above.  It refers
     #  to the nova node.
-    host = Column(String(255))  # , ForeignKey('hosts.id'))
+    host = Column(String(255))
     # To identify the "ComputeNode" which the instance resides in.
     # This equals to ComputeNode.hypervisor_hostname.
     node = Column(String(255))
@@ -343,6 +343,7 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
 
     # OpenStack compute cell name.  This will only be set at the top of
     # the cells tree and it'll be a full cell name such as 'api!hop1!hop2'
+    # TODO(stephenfin): Remove this
     cell_name = Column(String(255))
 
     # NOTE(pumaranikar): internal_id attribute is no longer used (bug 1441242)
@@ -353,6 +354,8 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
 
     # Records whether an instance has been deleted from disk
     cleaned = Column(Integer, default=0)
+
+    hidden = Column(Boolean, default=False)
 
 
 class InstanceInfoCache(BASE, NovaBase, models.SoftDeleteMixin):
@@ -391,6 +394,7 @@ class InstanceExtra(BASE, NovaBase, models.SoftDeleteMixin):
     migration_context = orm.deferred(Column(Text))
     keypairs = orm.deferred(Column(Text))
     trusted_certs = orm.deferred(Column(Text))
+    vpmems = orm.deferred(Column(Text))
     instance = orm.relationship(Instance,
                             backref=orm.backref('extra',
                                                 uselist=False),
@@ -630,6 +634,8 @@ class BlockDeviceMapping(BASE, NovaBase, models.SoftDeleteMixin):
     volume_id = Column(String(36))
     volume_size = Column(Integer)
 
+    volume_type = Column(String(255))
+
     image_id = Column(String(36))
 
     # for no device to suppress devices.
@@ -792,6 +798,7 @@ class Migration(BASE, NovaBase, models.SoftDeleteMixin):
     disk_total = Column(BigInteger, nullable=True)
     disk_processed = Column(BigInteger, nullable=True)
     disk_remaining = Column(BigInteger, nullable=True)
+    cross_cell_move = Column(Boolean, default=False)
 
     instance = orm.relationship("Instance", foreign_keys=instance_uuid,
                             primaryjoin='and_(Migration.instance_uuid == '
@@ -842,7 +849,7 @@ class Network(BASE, NovaBase, models.SoftDeleteMixin):
 
     project_id = Column(String(255))
     priority = Column(Integer)
-    host = Column(String(255))  # , ForeignKey('hosts.id'))
+    host = Column(String(255))
     uuid = Column(String(36))
 
     mtu = Column(Integer)
@@ -944,7 +951,7 @@ class FloatingIp(BASE, NovaBase, models.SoftDeleteMixin):
     address = Column(types.IPAddress())
     fixed_ip_id = Column(Integer)
     project_id = Column(String(255))
-    host = Column(String(255))  # , ForeignKey('hosts.id'))
+    host = Column(String(255))
     auto_assigned = Column(Boolean, default=False)
     # TODO(sshturm) add default in db
     pool = Column(String(255))
@@ -1089,6 +1096,8 @@ class InstanceTypeExtraSpecs(BASE, NovaBase, models.SoftDeleteMixin):
                  'InstanceTypeExtraSpecs.deleted == 0)')
 
 
+# TODO(stephenfin): Remove this in the U release or later, once we're sure we
+# won't want it back (it's for cells v1, so we won't)
 class Cell(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents parent and child cells of this cell.  Cells can
     have multiple parents and children, so there could be any number

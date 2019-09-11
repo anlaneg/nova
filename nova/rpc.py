@@ -12,6 +12,21 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import functools
+
+from oslo_log import log as logging
+import oslo_messaging as messaging
+from oslo_messaging.rpc import dispatcher
+from oslo_serialization import jsonutils
+from oslo_service import periodic_task
+from oslo_utils import importutils
+import six
+
+import nova.conf
+import nova.context
+import nova.exception
+from nova.i18n import _
+
 __all__ = [
     'init',
     'cleanup',
@@ -25,20 +40,6 @@ __all__ = [
     'get_notifier',
 ]
 
-import functools
-
-from oslo_log import log as logging
-import oslo_messaging as messaging
-from oslo_messaging.rpc import dispatcher
-from oslo_serialization import jsonutils
-from oslo_service import periodic_task
-from oslo_utils import importutils
-
-import nova.conf
-import nova.context
-import nova.exception
-from nova.i18n import _
-
 profiler = importutils.try_import("osprofiler.profiler")
 
 
@@ -46,6 +47,7 @@ CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
 
+# TODO(stephenfin): These should be private
 TRANSPORT = None
 LEGACY_NOTIFIER = None
 NOTIFICATION_TRANSPORT = None
@@ -118,9 +120,27 @@ def get_allowed_exmods():
 
 
 class JsonPayloadSerializer(messaging.NoOpSerializer):
+
     @staticmethod
-    def serialize_entity(context, entity):
-        return jsonutils.to_primitive(entity, convert_instances=True)
+    def fallback(obj):
+        """Serializer fallback
+
+        This method is used to serialize an object which jsonutils.to_primitive
+        does not otherwise know how to handle.
+
+        This is mostly only needed in tests because of the use of the nova
+        CheatingSerializer fixture which keeps some non-serializable fields
+        on the RequestContext, like db_connection.
+        """
+        if isinstance(obj, nova.context.RequestContext):
+            # This matches RequestContextSerializer.serialize_context().
+            return obj.to_dict()
+        # The default fallback in jsonutils.to_primitive() is six.text_type.
+        return six.text_type(obj)
+
+    def serialize_entity(self, context, entity):
+        return jsonutils.to_primitive(entity, convert_instances=True,
+                                      fallback=self.fallback)
 
 
 class RequestContextSerializer(messaging.Serializer):
@@ -412,9 +432,7 @@ class ClientRouter(periodic_task.PeriodicTasks):
         self.default_client = default_client
         self.target = default_client.target
         self.version_cap = default_client.version_cap
-        # NOTE(melwitt): Cells v1 does its own serialization and won't
-        # have a serializer available on the client object.
-        self.serializer = getattr(default_client, 'serializer', None)
+        self.serializer = default_client.serializer
 
     def client(self, context):
         transport = context.mq_connection

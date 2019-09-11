@@ -30,7 +30,6 @@ The following examples show the host usage statistics for a host called
      | devstack  | compute     | nova     |
      | devstack  | network     | internal |
      | devstack  | scheduler   | internal |
-     | devstack  | consoleauth | internal |
      +-----------+-------------+----------+
 
 * Get a summary of resource usage of all of the instances running on the host:
@@ -95,7 +94,7 @@ Show instance usage statistics
         have a standard format as below. Before microversion 2.48, each hypervisor
         had its own format. For more details on diagnostics response message see
         `server diagnostics api
-        <https://developer.openstack.org/api-ref/compute/#servers-diagnostics-servers-diagnostics>`__
+        <https://docs.openstack.org/api-ref/compute/#servers-diagnostics-servers-diagnostics>`__
         documentation.
 
      .. code-block:: console

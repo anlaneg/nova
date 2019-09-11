@@ -5,8 +5,12 @@
 ================================
 
 Creates and manages host aggregates. An aggregate assigns metadata to
-groups of compute nodes. Aggregates are only visible to the cloud
-provider.
+groups of compute nodes.
+
+Policy defaults enable only users with the administrative role to perform
+operations with aggregates. Cloud providers can change these permissions
+through `policy file configuration
+<https://docs.openstack.org/nova/latest/configuration/policy.html>`__.
 
 List Aggregates
 ===============
@@ -31,7 +35,7 @@ Response
   - deleted: deleted
   - hosts: aggregate_host_list
   - id: aggregate_id_body
-  - metadata: aggregate_metadata
+  - metadata: aggregate_metadata_response
   - name: aggregate_name
   - updated_at: updated_consider_null
   - uuid: aggregate_uuid
@@ -60,7 +64,7 @@ Request
 
   - aggregate: aggregate
   - name: aggregate_name
-  - availability_zone: aggregate_az_optional
+  - availability_zone: aggregate_az_optional_create
 
 **Example Create Aggregate: JSON request**
 
@@ -117,7 +121,7 @@ Response
   - deleted: deleted
   - hosts: hosts
   - id: aggregate_id_body
-  - metadata: aggregate_metadata
+  - metadata: aggregate_metadata_response
   - name: aggregate_name
   - updated_at: updated_consider_null
   - uuid: aggregate_uuid
@@ -149,7 +153,7 @@ Request
   - aggregate_id: aggregate_id
   - aggregate: aggregate
   - name: aggregate_name_optional
-  - availability_zone: aggregate_az_optional
+  - availability_zone: aggregate_az_optional_update
 
 **Example Update Aggregate: JSON request**
 
@@ -168,7 +172,7 @@ Response
   - deleted: deleted
   - hosts: hosts
   - id: aggregate_id_body
-  - metadata: aggregate_metadata
+  - metadata: aggregate_metadata_response
   - name: aggregate_name
   - updated_at: updated_consider_null
   - uuid: aggregate_uuid
@@ -241,7 +245,7 @@ Response
   - deleted: deleted
   - hosts: hosts
   - id: aggregate_id_body
-  - metadata: aggregate_metadata
+  - metadata: aggregate_metadata_response
   - name: aggregate_name
   - updated_at: updated_consider_null
   - uuid: aggregate_uuid
@@ -291,7 +295,7 @@ Response
   - deleted: deleted
   - hosts: hosts
   - id: aggregate_id_body
-  - metadata: aggregate_metadata
+  - metadata: aggregate_metadata_response
   - name: aggregate_name
   - updated_at: updated_consider_null
   - uuid: aggregate_uuid
@@ -322,7 +326,7 @@ Request
 
   - aggregate_id: aggregate_id
   - set_metadata: set_metadata
-  - metadata: metadata_object 
+  - metadata: aggregate_metadata_request
 
 **Example Create Or Update Aggregate Metadata: JSON request**
 
@@ -341,7 +345,7 @@ Response
   - deleted: deleted
   - hosts: hosts
   - id: aggregate_id_body
-  - metadata: aggregate_metadata
+  - metadata: aggregate_metadata_response
   - name: aggregate_name
   - updated_at: updated_consider_null
   - uuid: aggregate_uuid

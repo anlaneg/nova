@@ -82,6 +82,14 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
                 vmFolder='fake_vm_folder')
         cluster = vmwareapi_fake.create_cluster('fake_cluster', fake_ds_ref)
         self._uuid = uuidsentinel.foo
+        fake_info_cache = {
+            'created_at': None,
+            'updated_at': None,
+            'deleted_at': None,
+            'deleted': False,
+            'instance_uuid': self._uuid,
+            'network_info': '[]',
+        }
         self._instance_values = {
             'name': 'fake_name',
             'display_name': 'fake_display_name',
@@ -91,7 +99,8 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
             'image_ref': self._image_id,
             'root_gb': 10,
             'node': '%s(%s)' % (cluster.mo_id, cluster.name),
-            'expected_attrs': ['system_metadata'],
+            'info_cache': fake_info_cache,
+            'expected_attrs': ['system_metadata', 'info_cache'],
         }
         self._instance = fake_instance.fake_instance_obj(
                                  self._context, **self._instance_values)
@@ -792,6 +801,127 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
 
     def test_finish_revert_migration_power_off(self):
         self._test_finish_revert_migration(power_on=False)
+
+    def _test_find_esx_host(self, cluster_hosts, ds_hosts):
+        def mock_call_method(module, method, *args, **kwargs):
+            if args[0] == 'fake_cluster':
+                ret = mock.MagicMock()
+                ret.ManagedObjectReference = cluster_hosts
+                return ret
+            elif args[0] == 'fake_ds':
+                ret = mock.MagicMock()
+                ret.DatastoreHostMount = ds_hosts
+                return ret
+
+        with mock.patch.object(self._session, '_call_method',
+                               mock_call_method):
+            return self._vmops._find_esx_host('fake_cluster', 'fake_ds')
+
+    def test_find_esx_host(self):
+        ch1 = vmwareapi_fake.ManagedObjectReference(value='host-10')
+        ch2 = vmwareapi_fake.ManagedObjectReference(value='host-12')
+        ch3 = vmwareapi_fake.ManagedObjectReference(value='host-15')
+        dh1 = vmwareapi_fake.DatastoreHostMount('host-8')
+        dh2 = vmwareapi_fake.DatastoreHostMount('host-12')
+        dh3 = vmwareapi_fake.DatastoreHostMount('host-17')
+        ret = self._test_find_esx_host([ch1, ch2, ch3], [dh1, dh2, dh3])
+        self.assertEqual('host-12', ret.value)
+
+    def test_find_esx_host_none(self):
+        ch1 = vmwareapi_fake.ManagedObjectReference(value='host-10')
+        ch2 = vmwareapi_fake.ManagedObjectReference(value='host-12')
+        ch3 = vmwareapi_fake.ManagedObjectReference(value='host-15')
+        dh1 = vmwareapi_fake.DatastoreHostMount('host-8')
+        dh2 = vmwareapi_fake.DatastoreHostMount('host-13')
+        dh3 = vmwareapi_fake.DatastoreHostMount('host-17')
+        ret = self._test_find_esx_host([ch1, ch2, ch3], [dh1, dh2, dh3])
+        self.assertIsNone(ret)
+
+    @mock.patch.object(vm_util, 'get_vmdk_info')
+    @mock.patch.object(ds_obj, 'get_datastore_by_ref')
+    def test_find_datastore_for_migration(self, mock_get_ds, mock_get_vmdk):
+        def mock_call_method(module, method, *args, **kwargs):
+            ds1 = vmwareapi_fake.ManagedObjectReference(value='datastore-10')
+            ds2 = vmwareapi_fake.ManagedObjectReference(value='datastore-12')
+            ds3 = vmwareapi_fake.ManagedObjectReference(value='datastore-15')
+            ret = mock.MagicMock()
+            ret.ManagedObjectReference = [ds1, ds2, ds3]
+            return ret
+        ds_ref = vmwareapi_fake.ManagedObjectReference(value='datastore-12')
+        vmdk_dev = mock.MagicMock()
+        vmdk_dev.device.backing.datastore = ds_ref
+        mock_get_vmdk.return_value = vmdk_dev
+        ds = ds_obj.Datastore(ds_ref, 'datastore1')
+        mock_get_ds.return_value = ds
+        with mock.patch.object(self._session, '_call_method',
+                               mock_call_method):
+            ret = self._vmops._find_datastore_for_migration(self._instance,
+                                                   'fake_vm', 'cluster_ref',
+                                                   None)
+            self.assertIs(ds, ret)
+            mock_get_vmdk.assert_called_once_with(self._session, 'fake_vm',
+                                                  uuid=self._instance.uuid)
+            mock_get_ds.assert_called_once_with(self._session, ds_ref)
+
+    @mock.patch.object(vm_util, 'get_vmdk_info')
+    @mock.patch.object(ds_util, 'get_datastore')
+    def test_find_datastore_for_migration_other(self, mock_get_ds,
+                                                mock_get_vmdk):
+        def mock_call_method(module, method, *args, **kwargs):
+            ds1 = vmwareapi_fake.ManagedObjectReference(value='datastore-10')
+            ds2 = vmwareapi_fake.ManagedObjectReference(value='datastore-12')
+            ds3 = vmwareapi_fake.ManagedObjectReference(value='datastore-15')
+            ret = mock.MagicMock()
+            ret.ManagedObjectReference = [ds1, ds2, ds3]
+            return ret
+        ds_ref = vmwareapi_fake.ManagedObjectReference(value='datastore-18')
+        vmdk_dev = mock.MagicMock()
+        vmdk_dev.device.backing.datastore = ds_ref
+        mock_get_vmdk.return_value = vmdk_dev
+        ds = ds_obj.Datastore(ds_ref, 'datastore1')
+        mock_get_ds.return_value = ds
+        with mock.patch.object(self._session, '_call_method',
+                               mock_call_method):
+            ret = self._vmops._find_datastore_for_migration(self._instance,
+                                                   'fake_vm', 'cluster_ref',
+                                                   None)
+            self.assertIs(ds, ret)
+            mock_get_vmdk.assert_called_once_with(self._session, 'fake_vm',
+                                                  uuid=self._instance.uuid)
+            mock_get_ds.assert_called_once_with(self._session, 'cluster_ref',
+                                                None)
+
+    @mock.patch.object(vm_util, 'relocate_vm')
+    @mock.patch.object(vm_util, 'get_vm_ref', return_value='fake_vm')
+    @mock.patch.object(vm_util, 'get_cluster_ref_by_name',
+                       return_value='fake_cluster')
+    @mock.patch.object(vm_util, 'get_res_pool_ref', return_value='fake_pool')
+    @mock.patch.object(vmops.VMwareVMOps, '_find_datastore_for_migration')
+    @mock.patch.object(vmops.VMwareVMOps, '_find_esx_host',
+                       return_value='fake_host')
+    def test_live_migration(self, mock_find_host, mock_find_datastore,
+                            mock_get_respool, mock_get_cluster, mock_get_vm,
+                            mock_relocate):
+        post_method = mock.MagicMock()
+        migrate_data = objects.VMwareLiveMigrateData()
+        migrate_data.cluster_name = 'fake-cluster'
+        migrate_data.datastore_regex = 'ds1|ds2'
+        mock_find_datastore.return_value = ds_obj.Datastore('ds_ref', 'ds')
+        with mock.patch.object(self._session, '_call_method',
+                               return_value='hardware-devices'):
+            self._vmops.live_migration(
+                self._context, self._instance, 'fake-host',
+                post_method, None, False, migrate_data)
+        mock_get_vm.assert_called_once_with(self._session, self._instance)
+        mock_get_cluster.assert_called_once_with(self._session, 'fake-cluster')
+        mock_find_datastore.assert_called_once_with(self._instance, 'fake_vm',
+                                                    'fake_cluster', mock.ANY)
+        mock_find_host.assert_called_once_with('fake_cluster', 'ds_ref')
+        mock_relocate.assert_called_once_with(self._session, 'fake_vm',
+                                    'fake_pool', 'ds_ref', 'fake_host',
+                                    devices=[])
+        post_method.assert_called_once_with(self._context, self._instance,
+                                            'fake-host', False, migrate_data)
 
     @mock.patch.object(vmops.VMwareVMOps, '_get_instance_metadata')
     @mock.patch.object(vmops.VMwareVMOps, '_get_extra_specs')
@@ -2062,6 +2192,104 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         flavor_extra_specs = self._vmops._get_extra_specs(flavor, None)
         self._validate_extra_specs(expected, flavor_extra_specs)
 
+    """
+    The test covers the negative failure scenario, where `hw_video_ram`,
+    coming from the image is bigger than the maximum allowed video ram from
+    the flavor.
+    """
+    def test_video_ram(self):
+        meta_dict = {'id': self._image_id, 'properties': {'hw_video_ram': 120}}
+        image_meta, flavor = self._get_image_and_flavor_for_test_video(
+            meta_dict)
+
+        self.assertRaises(exception.RequestedVRamTooHigh,
+                          self._vmops._get_extra_specs,
+                          flavor,
+                          image_meta)
+
+    """
+    Testing VM provisioning result in the case where `hw_video_ram`,
+    coming from the image is not specified. This is a success scenario,
+    in the case where `hw_video_ram` property is not set.
+    """
+    def test_video_ram_if_none(self):
+        meta_dict = {'id': self._image_id, 'properties': {}}
+        image_meta, flavor = self._get_image_and_flavor_for_test_video(
+            meta_dict)
+
+        extra_specs = self._vmops._get_extra_specs(flavor, image_meta)
+        self.assertIsNone(extra_specs.hw_video_ram)
+
+    """
+    Testing VM provisioning result in the case where `hw_video:ram_max_mb`,
+    coming from the flavor is not specified. This is a success scenario,
+    in the case where `hw_video_ram` property is not set.
+    """
+    def test_max_video_ram_none(self):
+        meta_dict = {'id': self._image_id, 'properties': {'hw_video_ram': 120}}
+        image_meta = objects.ImageMeta.from_dict(meta_dict)
+        flavor_extra_specs = {'quota:cpu_limit': 7,
+                              'quota:cpu_reservation': 6}
+        flavor = objects.Flavor(name='my-flavor',
+                                memory_mb=6,
+                                vcpus=28,
+                                root_gb=496,
+                                ephemeral_gb=8128,
+                                swap=33550336,
+                                extra_specs=flavor_extra_specs)
+
+        self.assertRaises(exception.RequestedVRamTooHigh,
+                          self._vmops._get_extra_specs,
+                          flavor,
+                          image_meta)
+
+    """
+    Testing VM provisioning result in the case where `hw_video_ram`,
+    coming from the image is less than the maximum allowed video ram from
+    the flavor. This is a success scenario, in the case where `hw_video_ram`
+    property is set in the extra spec.
+    """
+    def test_success_video_ram(self):
+        expected_video_ram = 90
+        meta_dict = {'id': self._image_id, 'properties': {
+            'hw_video_ram': expected_video_ram}}
+        image_meta, flavor = self._get_image_and_flavor_for_test_video(
+            meta_dict)
+
+        extra_specs = self._vmops._get_extra_specs(flavor, image_meta)
+        self.assertEqual(self._calculate_expected_fake_video_ram(
+            expected_video_ram), extra_specs.hw_video_ram)
+
+    """
+    Testing VM provisioning result in the case where `hw_video_ram`,
+    coming from the image is equal to 0. This is a success scenario, in the
+    case where `hw_video_ram` property is not set in the extra spec.
+    """
+    def test_zero_video_ram(self):
+        meta_dict = {'id': self._image_id, 'properties': {'hw_video_ram': 0}}
+        image_meta, flavor = self._get_image_and_flavor_for_test_video(
+            meta_dict)
+
+        extra_specs = self._vmops._get_extra_specs(flavor, image_meta)
+        self.assertIsNone(extra_specs.hw_video_ram)
+
+    def _calculate_expected_fake_video_ram(self, amount):
+        return amount * units.Mi / units.Ki
+
+    def _get_image_and_flavor_for_test_video(self, meta_dict):
+        image_meta = objects.ImageMeta.from_dict(meta_dict)
+        flavor_extra_specs = {'quota:cpu_limit': 7,
+                              'quota:cpu_reservation': 6,
+                              'hw_video:ram_max_mb': 100}
+        flavor = objects.Flavor(name='my-flavor',
+                                memory_mb=6,
+                                vcpus=28,
+                                root_gb=496,
+                                ephemeral_gb=8128,
+                                swap=33550336,
+                                extra_specs=flavor_extra_specs)
+        return image_meta, flavor
+
     def test_extra_specs_cpu_limit(self):
         flavor_extra_specs = {'quota:cpu_limit': 7}
         cpu_limits = vm_util.Limits(limit=7)
@@ -2602,15 +2830,16 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         self._vmops.attach_interface(self._context, self._instance,
                                      self._image_meta, self._network_values)
         mock_get_vm_ref.assert_called_once_with(self._session, self._instance)
-        mock_get_attach_port_index(self._session, 'fake-ref')
+        mock_get_attach_port_index.assert_called_once_with(self._session,
+                                                           'fake-ref')
         mock_get_network_attach_config_spec.assert_called_once_with(
             self._session.vim.client.factory, vif_info, 1,
             extra_specs.vif_limits)
         mock_reconfigure_vm.assert_called_once_with(self._session,
                                                     'fake-ref',
                                                     'fake-attach-spec')
-        _network_api.update_instance_vnic_index(mock.ANY,
-            self._instance, self._network_values, 1)
+        _network_api.update_instance_vnic_index.assert_called_once_with(
+            mock.ANY, self._instance, self._network_values, 1)
 
     @mock.patch.object(vif, 'get_network_device', return_value='device')
     @mock.patch.object(vm_util, 'reconfigure_vm')
@@ -2631,14 +2860,15 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
             self._vmops.detach_interface(self._context, self._instance,
                                          self._network_values)
         mock_get_vm_ref.assert_called_once_with(self._session, self._instance)
-        mock_get_detach_port_index(self._session, 'fake-ref')
+        mock_get_detach_port_index.assert_called_once_with(self._session,
+                                                           'fake-ref', None)
         mock_get_network_detach_config_spec.assert_called_once_with(
             self._session.vim.client.factory, 'device', 1)
         mock_reconfigure_vm.assert_called_once_with(self._session,
                                                     'fake-ref',
                                                     'fake-detach-spec')
-        _network_api.update_instance_vnic_index(mock.ANY,
-            self._instance, self._network_values, None)
+        _network_api.update_instance_vnic_index.assert_called_once_with(
+            mock.ANY, self._instance, self._network_values, None)
 
     @mock.patch.object(vm_util, 'get_vm_ref', return_value='fake-ref')
     def test_get_mks_console(self, mock_get_vm_ref):
@@ -2709,12 +2939,13 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
                                      self._image_meta,
                                      self._network_values)
         mock_get_vm_ref.assert_called_once_with(self._session, self._instance)
-        mock_get_attach_port_index(self._session, 'fake-ref')
+        mock_get_attach_port_index.assert_called_once_with(self._session,
+                                                           'fake-ref')
         mock_get_network_attach_config_spec.assert_called_once_with(
             self._session.vim.client.factory, vif_info, 1,
             extra_specs.vif_limits)
         mock_reconfigure_vm.assert_called_once_with(self._session,
                                                     'fake-ref',
                                                     'fake-attach-spec')
-        _network_api.update_instance_vnic_index(mock.ANY,
-            self._instance, self._network_values, 1)
+        _network_api.update_instance_vnic_index.assert_called_once_with(
+            mock.ANY, self._instance, self._network_values, 1)

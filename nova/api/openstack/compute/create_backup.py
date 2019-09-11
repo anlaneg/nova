@@ -20,14 +20,14 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import create_backup
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.policies import create_backup as cb_policies
 
 
 class CreateBackupController(wsgi.Controller):
-    def __init__(self, *args, **kwargs):
-        super(CreateBackupController, self).__init__(*args, **kwargs)
+    def __init__(self):
+        super(CreateBackupController, self).__init__()
         self.compute_api = compute.API()
 
     @wsgi.response(202)
@@ -68,8 +68,6 @@ class CreateBackupController(wsgi.Controller):
         try:
             image = self.compute_api.backup(context, instance, image_name,
                     backup_type, rotation, extra_properties=props)
-        except exception.InstanceUnknownCell as e:
-            raise webob.exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'createBackup', id)

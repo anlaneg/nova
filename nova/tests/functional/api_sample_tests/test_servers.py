@@ -16,11 +16,13 @@
 import base64
 import time
 
+from oslo_utils import fixture as utils_fixture
 from oslo_utils import timeutils
 import six
 
 from nova.api.openstack import api_version_request as avr
 import nova.conf
+from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api_sample_tests import api_sample_base
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit.image import fake
@@ -41,9 +43,9 @@ class ServersSampleBase(api_sample_base.ApiSampleTestBaseV21):
         ('2.57', None, 'server-create-req-v257')
     ]
 
-    def _get_request_name(self, use_common):
+    def _get_request_name(self, use_common, sample_name=None):
         if not use_common:
-            return 'server-create-req'
+            return sample_name or 'server-create-req'
 
         api_version = self.microversion or '2.1'
         for min, max, name in self.common_req_names:
@@ -51,7 +53,8 @@ class ServersSampleBase(api_sample_base.ApiSampleTestBaseV21):
                     avr.APIVersionRequest(min), avr.APIVersionRequest(max)):
                 return name
 
-    def _post_server(self, use_common_server_api_samples=True, name=None):
+    def _post_server(self, use_common_server_api_samples=True, name=None,
+                     extra_subs=None, sample_name=None):
         # param use_common_server_api_samples: Boolean to set whether tests use
         # common sample files for server post request and response.
         # Default is True which means _get_sample_path method will fetch the
@@ -71,13 +74,25 @@ class ServersSampleBase(api_sample_base.ApiSampleTestBaseV21):
                     '-[0-9a-f]{4}-[0-9a-f]{12}',
             'name': 'new-server-test' if name is None else name,
         }
+        # If the template is requesting an explicit availability zone and
+        # the test is setup to have AZs, use the first one in the list which
+        # should default to "us-west".
+        if self.availability_zones:
+            subs['availability_zone'] = self.availability_zones[0]
+        if extra_subs:
+            subs.update(extra_subs)
 
         orig_value = self.__class__._use_common_server_api_samples
         try:
             self.__class__._use_common_server_api_samples = (
                                         use_common_server_api_samples)
+            # If using common samples, we could only put samples under
+            # api_samples/servers. We will put a lot of samples when we
+            # have more and more microversions.
+            # Callers can specify the sample_name param so that we can add
+            # samples into api_samples/servers/v2.xx.
             response = self._do_post('servers', self._get_request_name(
-                use_common_server_api_samples), subs)
+                use_common_server_api_samples, sample_name), subs)
             status = self._verify_response('server-create-resp', subs,
                                            response, 202)
             return status
@@ -108,7 +123,7 @@ class ServersSampleJsonTest(ServersSampleBase):
         subs = {}
         subs['hostid'] = '[a-f0-9]+'
         subs['id'] = uuid
-        subs['instance_name'] = 'instance-\d{8}'
+        subs['instance_name'] = r'instance-\d{8}'
         subs['hypervisor_hostname'] = r'[\w\.\-]+'
         subs['hostname'] = r'[\w\.\-]+'
         subs['mac_addr'] = '(?:[a-f0-9]{2}:){5}[a-f0-9]{2}'
@@ -135,7 +150,7 @@ class ServersSampleJsonTest(ServersSampleBase):
         subs = {}
         subs['hostid'] = '[a-f0-9]+'
         subs['id'] = uuid
-        subs['instance_name'] = 'instance-\d{8}'
+        subs['instance_name'] = r'instance-\d{8}'
         subs['hypervisor_hostname'] = r'[\w\.\-]+'
         subs['hostname'] = r'[\w\.\-]+'
         subs['mac_addr'] = '(?:[a-f0-9]{2}:){5}[a-f0-9]{2}'
@@ -251,7 +266,7 @@ class ServersSampleJson263Test(ServersSampleBase):
         super(ServersSampleJson263Test, self).setUp()
         self.common_subs = {
             'hostid': '[a-f0-9]+',
-            'instance_name': 'instance-\d{8}',
+            'instance_name': r'instance-\d{8}',
             'hypervisor_hostname': r'[\w\.\-]+',
             'hostname': r'[\w\.\-]+',
             'access_ip_v4': '1.2.3.4',
@@ -320,7 +335,7 @@ class ServersSampleJson266Test(ServersSampleBase):
         super(ServersSampleJson266Test, self).setUp()
         self.common_subs = {
             'hostid': '[a-f0-9]+',
-            'instance_name': 'instance-\d{8}',
+            'instance_name': r'instance-\d{8}',
             'hypervisor_hostname': r'[\w\.\-]+',
             'hostname': r'[\w\.\-]+',
             'access_ip_v4': '1.2.3.4',
@@ -353,6 +368,243 @@ class ServersSampleJson266Test(ServersSampleBase):
             'servers-details-with-changes-before', subs, response, 200)
 
 
+class ServersSampleJson267Test(ServersSampleBase):
+    microversion = '2.67'
+    scenarios = [('v2_67', {'api_major_version': 'v2.1'})]
+
+    def setUp(self):
+        super(ServersSampleJson267Test, self).setUp()
+        self.useFixture(nova_fixtures.CinderFixture(self))
+
+    def test_servers_post(self):
+        return self._post_server(use_common_server_api_samples=False)
+
+
+class ServersSampleJson269Test(ServersSampleBase):
+    microversion = '2.69'
+    scenarios = [('v2_69', {'api_major_version': 'v2.1'})]
+
+    def setUp(self):
+        super(ServersSampleJson269Test, self).setUp()
+
+        def _fake_instancemapping_get_by_cell_and_project(*args, **kwargs):
+            # global cell based on which rest of the functions are stubbed out
+            cell_fixture = nova_fixtures.SingleCellSimple()
+            return [{
+                'id': 1,
+                'updated_at': None,
+                'created_at': None,
+                'instance_uuid': utils_fixture.uuidsentinel.inst,
+                'cell_id': 1,
+                'project_id': "6f70656e737461636b20342065766572",
+                'cell_mapping': cell_fixture._fake_cell_list()[0],
+                'queued_for_delete': False
+            }]
+
+        self.stub_out('nova.objects.InstanceMappingList.'
+            '_get_not_deleted_by_cell_and_project_from_db',
+            _fake_instancemapping_get_by_cell_and_project)
+
+    def test_servers_list_from_down_cells(self):
+        uuid = self._post_server(use_common_server_api_samples=False)
+        with nova_fixtures.DownCellFixture():
+            response = self._do_get('servers')
+        subs = {'id': uuid}
+        self._verify_response('servers-list-resp', subs, response, 200)
+
+    def test_servers_details_from_down_cells(self):
+        uuid = self._post_server(use_common_server_api_samples=False)
+        with nova_fixtures.DownCellFixture():
+            response = self._do_get('servers/detail')
+        subs = {'id': uuid}
+        self._verify_response('servers-details-resp', subs, response, 200)
+
+    def test_server_get_from_down_cells(self):
+        uuid = self._post_server(use_common_server_api_samples=False)
+        with nova_fixtures.DownCellFixture():
+            response = self._do_get('servers/%s' % uuid)
+        subs = {'id': uuid}
+        self._verify_response('server-get-resp', subs, response, 200)
+
+
+class ServersSampleJson271Test(ServersSampleBase):
+    microversion = '2.71'
+    scenarios = [('v2_71', {'api_major_version': 'v2.1'})]
+
+    def setUp(self):
+        super(ServersSampleJson271Test, self).setUp()
+        self.common_subs = {
+            'hostid': '[a-f0-9]+',
+            'instance_name': r'instance-\d{8}',
+            'hypervisor_hostname': r'[\w\.\-]+',
+            'hostname': r'[\w\.\-]+',
+            'access_ip_v4': '1.2.3.4',
+            'access_ip_v6': '80fe::',
+            'user_data': (self.user_data if six.PY2
+                          else self.user_data.decode('utf-8')),
+            'cdrive': '.*',
+        }
+
+        # create server group
+        subs = {'name': 'test'}
+        response = self._do_post('os-server-groups',
+                                 'server-groups-post-req', subs)
+        self.sg_uuid = self._verify_response('server-groups-post-resp',
+                                              subs, response, 200)
+
+    def _test_servers_post(self):
+        return self._post_server(
+            use_common_server_api_samples=False,
+            extra_subs={'sg_uuid': self.sg_uuid})
+
+    def test_servers_get_with_server_group(self):
+        uuid = self._test_servers_post()
+        response = self._do_get('servers/%s' % uuid)
+        subs = self.common_subs.copy()
+        subs['id'] = uuid
+        self._verify_response('server-get-resp', subs, response, 200)
+
+    def test_servers_update_with_server_groups(self):
+        uuid = self._test_servers_post()
+        subs = self.common_subs.copy()
+        subs['id'] = uuid
+        response = self._do_put('servers/%s' % uuid,
+                                'server-update-req', subs)
+        self._verify_response('server-update-resp', subs, response, 200)
+
+    def test_servers_rebuild_with_server_groups(self):
+        uuid = self._test_servers_post()
+        fakes.stub_out_key_pair_funcs(self)
+        image = fake.get_valid_image_id()
+        params = {
+            'uuid': image,
+            'name': 'foobar',
+            'key_name': 'new-key',
+            'description': 'description of foobar',
+            'pass': 'seekr3t',
+            'access_ip_v4': '1.2.3.4',
+            'access_ip_v6': '80fe::',
+        }
+        resp = self._do_post('servers/%s/action' % uuid,
+                             'server-action-rebuild', params)
+        subs = self.common_subs.copy()
+        subs.update(params)
+        subs['id'] = uuid
+        del subs['uuid']
+        self._verify_response('server-action-rebuild-resp', subs, resp, 202)
+
+    def test_server_get_from_down_cells(self):
+        def _fake_instancemapping_get_by_cell_and_project(*args, **kwargs):
+            # global cell based on which rest of the functions are stubbed out
+            cell_fixture = nova_fixtures.SingleCellSimple()
+            return [{
+                'id': 1,
+                'updated_at': None,
+                'created_at': None,
+                'instance_uuid': utils_fixture.uuidsentinel.inst,
+                'cell_id': 1,
+                'project_id': "6f70656e737461636b20342065766572",
+                'cell_mapping': cell_fixture._fake_cell_list()[0],
+                'queued_for_delete': False
+            }]
+
+        self.stub_out('nova.objects.InstanceMappingList.'
+            '_get_not_deleted_by_cell_and_project_from_db',
+            _fake_instancemapping_get_by_cell_and_project)
+
+        uuid = self._test_servers_post()
+        with nova_fixtures.DownCellFixture():
+            response = self._do_get('servers/%s' % uuid)
+        subs = {'id': uuid}
+        self._verify_response('server-get-down-cell-resp',
+                              subs, response, 200)
+
+
+class ServersSampleJson273Test(ServersSampleBase):
+    microversion = '2.73'
+    scenarios = [('v2_73', {'api_major_version': 'v2.1'})]
+
+    def _post_server_and_lock(self):
+        uuid = self._post_server(use_common_server_api_samples=False)
+        reason = "I don't want to work"
+        self._do_post('servers/%s/action' % uuid,
+            'lock-server-with-reason',
+            {"locked_reason": reason})
+        return uuid
+
+    def test_servers_details_with_locked_reason(self):
+        uuid = self._post_server_and_lock()
+        response = self._do_get('servers/detail')
+        subs = {'id': uuid}
+        self._verify_response('servers-details-resp', subs, response, 200)
+
+    def test_server_get_with_locked_reason(self):
+        uuid = self._post_server_and_lock()
+        response = self._do_get('servers/%s' % uuid)
+        subs = {'id': uuid}
+        self._verify_response('server-get-resp', subs, response, 200)
+
+    def test_server_rebuild_with_empty_locked_reason(self):
+        uuid = self._post_server(use_common_server_api_samples=False)
+        image = fake.get_valid_image_id()
+        params = {
+            'uuid': image,
+            'name': 'foobar',
+            'pass': 'seekr3t',
+            'hostid': '[a-f0-9]+',
+            'access_ip_v4': '1.2.3.4',
+            'access_ip_v6': '80fe::',
+        }
+
+        resp = self._do_post('servers/%s/action' % uuid,
+                             'server-action-rebuild', params)
+        subs = params.copy()
+        del subs['uuid']
+        self._verify_response('server-action-rebuild-resp', subs, resp, 202)
+
+    def test_update_server_with_empty_locked_reason(self):
+        uuid = self._post_server(use_common_server_api_samples=False)
+        subs = {}
+        subs['hostid'] = '[a-f0-9]+'
+        subs['access_ip_v4'] = '1.2.3.4'
+        subs['access_ip_v6'] = '80fe::'
+        response = self._do_put('servers/%s' % uuid,
+                                'server-update-req', subs)
+        self._verify_response('server-update-resp', subs, response, 200)
+
+
+class ServersSampleJson274Test(ServersSampleBase):
+    """Supporting host and/or hypervisor_hostname is an admin API
+    to create servers.
+    """
+    ADMIN_API = True
+    SUPPORTS_CELLS = True
+    microversion = '2.74'
+    scenarios = [('v2_74', {'api_major_version': 'v2.1'})]
+    # Do not put an availability_zone in the API sample request since it would
+    # be confusing with the requested host/hypervisor_hostname and forced
+    # host/node zone:host:node case.
+    availability_zones = []
+
+    def _setup_compute_service(self):
+        return self.start_service('compute', host='openstack-node-01')
+
+    def setUp(self):
+        super(ServersSampleJson274Test, self).setUp()
+
+    def test_servers_post_with_only_host(self):
+        self._post_server(use_common_server_api_samples=False,
+                          sample_name='server-create-req-with-only-host')
+
+    def test_servers_post_with_only_node(self):
+        self._post_server(use_common_server_api_samples=False,
+                          sample_name='server-create-req-with-only-node')
+
+    def test_servers_post_with_host_and_node(self):
+        self._post_server(use_common_server_api_samples=False,
+                          sample_name='server-create-req-with-host-and-node')
+
+
 class ServersUpdateSampleJsonTest(ServersSampleBase):
 
     def test_update_server(self):
@@ -369,6 +621,29 @@ class ServersUpdateSampleJsonTest(ServersSampleBase):
 class ServersUpdateSampleJson247Test(ServersUpdateSampleJsonTest):
     microversion = '2.47'
     scenarios = [('v2_47', {'api_major_version': 'v2.1'})]
+
+
+class ServersSampleJson275Test(ServersUpdateSampleJsonTest):
+    microversion = '2.75'
+    scenarios = [('v2_75', {'api_major_version': 'v2.1'})]
+
+    def test_server_rebuild(self):
+        uuid = self._post_server()
+        image = fake.get_valid_image_id()
+        params = {
+            'uuid': image,
+            'name': 'foobar',
+            'pass': 'seekr3t',
+            'hostid': '[a-f0-9]+',
+            'access_ip_v4': '1.2.3.4',
+            'access_ip_v6': '80fe::',
+        }
+
+        resp = self._do_post('servers/%s/action' % uuid,
+                             'server-action-rebuild', params)
+        subs = params.copy()
+        del subs['uuid']
+        self._verify_response('server-action-rebuild-resp', subs, resp, 202)
 
 
 class ServerSortKeysJsonTests(ServersSampleBase):
@@ -399,6 +674,7 @@ class _ServersActionsJsonTestMixin(object):
 
 
 class ServersActionsJsonTest(ServersSampleBase, _ServersActionsJsonTestMixin):
+    USE_NEUTRON = True
 
     def test_server_reboot_hard(self):
         uuid = self._post_server()
@@ -449,6 +725,12 @@ class ServersActionsJsonTest(ServersSampleBase, _ServersActionsJsonTestMixin):
         self._test_server_action(uuid, "confirmResize",
                                  'server-action-confirm-resize',
                                  code=204)
+
+
+class ServersActionsJsonTestNovaNet(
+        ServersSampleBase, _ServersActionsJsonTestMixin):
+    # TODO(gibi): fix the tests to work with neutron as nova net is deprecated
+    USE_NEUTRON = False
 
     def _wait_for_active_server(self, uuid):
         """Wait 10 seconds for the server to be ACTIVE, else fail.

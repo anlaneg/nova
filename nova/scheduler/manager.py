@@ -25,6 +25,7 @@ from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
 from oslo_service import periodic_task
+import six
 from stevedore import driver
 
 import nova.conf
@@ -33,7 +34,7 @@ from nova import manager
 from nova import objects
 from nova.objects import host_mapping as host_mapping_obj
 from nova import quota
-from nova.scheduler import client as scheduler_client
+from nova.scheduler.client import report
 from nova.scheduler import request_filter
 from nova.scheduler import utils
 
@@ -44,6 +45,8 @@ CONF = nova.conf.CONF
 
 QUOTAS = quota.QUOTAS
 
+HOST_MAPPING_EXISTS_WARNING = False
+
 
 class SchedulerManager(manager.Manager):
     """Chooses a host to run instances on."""
@@ -53,8 +56,7 @@ class SchedulerManager(manager.Manager):
     _sentinel = object()
 
     def __init__(self, scheduler_driver=None, *args, **kwargs):
-        client = scheduler_client.SchedulerClient()
-        self.placement_client = client.reportclient
+        self.placement_client = report.SchedulerReportClient()
         if not scheduler_driver:
             scheduler_driver = CONF.scheduler.driver
         self.driver = driver.DriverManager(
@@ -68,13 +70,24 @@ class SchedulerManager(manager.Manager):
         spacing=CONF.scheduler.discover_hosts_in_cells_interval,
         run_immediately=True)
     def _discover_hosts_in_cells(self, context):
-        host_mappings = host_mapping_obj.discover_hosts(context)
-        if host_mappings:
-            LOG.info('Discovered %(count)i new hosts: %(hosts)s',
-                     {'count': len(host_mappings),
-                      'hosts': ','.join(['%s:%s' % (hm.cell_mapping.name,
-                                                    hm.host)
-                                         for hm in host_mappings])})
+        global HOST_MAPPING_EXISTS_WARNING
+        try:
+            host_mappings = host_mapping_obj.discover_hosts(context)
+            if host_mappings:
+                LOG.info('Discovered %(count)i new hosts: %(hosts)s',
+                         {'count': len(host_mappings),
+                          'hosts': ','.join(['%s:%s' % (hm.cell_mapping.name,
+                                                        hm.host)
+                                             for hm in host_mappings])})
+        except exception.HostMappingExists as exp:
+            msg = ('This periodic task should only be enabled on a single '
+                   'scheduler to prevent collisions between multiple '
+                   'schedulers: %s' % six.text_type(exp))
+            if not HOST_MAPPING_EXISTS_WARNING:
+                LOG.warning(msg)
+                HOST_MAPPING_EXISTS_WARNING = True
+            else:
+                LOG.debug(msg)
 
     @periodic_task.periodic_task(spacing=CONF.scheduler.periodic_task_interval,
                                  run_immediately=True)
@@ -86,6 +99,9 @@ class SchedulerManager(manager.Manager):
         # and enabled cells caches in the host manager. So every time an
         # existing cell is disabled or enabled or a new cell is created, a
         # SIGHUP signal has to be sent to the scheduler for proper scheduling.
+        # NOTE(mriedem): Similarly there is a host-to-cell cache which should
+        # be reset if a host is deleted from a cell and "discovered" in another
+        # cell.
         self.driver.host_manager.refresh_cells_caches()
 
     @messaging.expected_exceptions(exception.NoValidHost)
@@ -134,7 +150,8 @@ class SchedulerManager(manager.Manager):
             except exception.RequestFilterFailed as e:
                 raise exception.NoValidHost(reason=e.message)
 
-            resources = utils.resources_from_request_spec(spec_obj)
+            resources = utils.resources_from_request_spec(
+                ctxt, spec_obj, self.driver.host_manager)
             res = self.placement_client.get_allocation_candidates(ctxt,
                                                                   resources)
             if res is None:
@@ -147,10 +164,10 @@ class SchedulerManager(manager.Manager):
                 (alloc_reqs, provider_summaries,
                             allocation_request_version) = res
             if not alloc_reqs:
-                LOG.debug("Got no allocation candidates from the Placement "
-                          "API. This could be due to insufficient resources "
-                          "or a temporary occurrence as compute nodes start "
-                          "up.")
+                LOG.info("Got no allocation candidates from the Placement "
+                         "API. This could be due to insufficient resources "
+                         "or a temporary occurrence as compute nodes start "
+                         "up.")
                 raise exception.NoValidHost(reason="")
             else:
                 # Build a dict of lists of allocation requests, keyed by

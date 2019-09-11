@@ -22,8 +22,6 @@ from nova.policies import attach_interfaces
 from nova.policies import availability_zone
 from nova.policies import baremetal_nodes
 from nova.policies import base
-from nova.policies import cells
-from nova.policies import cells_scheduler
 from nova.policies import console_auth_tokens
 from nova.policies import console_output
 from nova.policies import consoles
@@ -35,7 +33,6 @@ from nova.policies import extensions
 from nova.policies import flavor_access
 from nova.policies import flavor_extra_specs
 from nova.policies import flavor_manage
-from nova.policies import flavors
 from nova.policies import floating_ip_pools
 from nova.policies import floating_ips
 from nova.policies import hosts
@@ -64,6 +61,7 @@ from nova.policies import server_groups
 from nova.policies import server_metadata
 from nova.policies import server_password
 from nova.policies import server_tags
+from nova.policies import server_topology
 from nova.policies import servers
 from nova.policies import servers_migrations
 from nova.policies import services
@@ -87,8 +85,6 @@ def list_rules():
         attach_interfaces.list_rules(),
         availability_zone.list_rules(),
         baremetal_nodes.list_rules(),
-        cells.list_rules(),
-        cells_scheduler.list_rules(),
         console_auth_tokens.list_rules(),
         console_output.list_rules(),
         consoles.list_rules(),
@@ -100,7 +96,6 @@ def list_rules():
         flavor_access.list_rules(),
         flavor_extra_specs.list_rules(),
         flavor_manage.list_rules(),
-        flavors.list_rules(),
         floating_ip_pools.list_rules(),
         floating_ips.list_rules(),
         hosts.list_rules(),
@@ -129,6 +124,7 @@ def list_rules():
         server_metadata.list_rules(),
         server_password.list_rules(),
         server_tags.list_rules(),
+        server_topology.list_rules(),
         servers.list_rules(),
         servers_migrations.list_rules(),
         services.list_rules(),

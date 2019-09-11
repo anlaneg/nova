@@ -66,7 +66,12 @@ class EventType(NotificationObject):
     # Version 1.15: LIVE_MIGRATION_FORCE_COMPLETE is added to the
     #               NotificationActionField enum
     # Version 1.16: CONNECT is added to NotificationActionField enum
-    VERSION = '1.16'
+    # Version 1.17: USAGE is added to NotificationActionField enum
+    # Version 1.18: ComputeTask related values have been added to
+    #               NotificationActionField enum
+    # Version 1.19: SELECT_DESTINATIONS is added to the NotificationActionField
+    #               enum
+    VERSION = '1.19'
 
     fields = {
         'object': fields.StringField(nullable=False),
@@ -118,7 +123,7 @@ class NotificationPayloadBase(NotificationObject):
         self.populated = not self.SCHEMA
 
     @rpc.if_notifications_enabled
-    def populate_schema(self, **kwargs):
+    def populate_schema(self, set_none=True, **kwargs):
         """Populate the object based on the SCHEMA and the source objects
 
         :param kwargs: A dict contains the source object at the key defined in
@@ -136,14 +141,15 @@ class NotificationPayloadBase(NotificationObject):
                     NotImplementedError,
                     exception.OrphanedObjectError,
                     ovo_exception.OrphanedObjectError):
-                # If it is unset or non lazy loadable in the source object
-                # then we cannot do anything else but try to default it in the
-                # payload object we are generating here.
-                # NOTE(gibi): This will fail if the payload field is not
-                # nullable, but that means that either the source object is not
-                # properly initialized or the payload field needs to be defined
-                # as nullable
-                setattr(self, key, None)
+                if set_none:
+                    # If it is unset or non lazy loadable in the source object
+                    # then we cannot do anything else but try to default it
+                    # in the payload object we are generating here.
+                    # NOTE(gibi): This will fail if the payload field is not
+                    # nullable, but that means that either the source object
+                    # is not properly initialized or the payload field needs
+                    # to be defined as nullable
+                    setattr(self, key, None)
             except Exception:
                 with excutils.save_and_reraise_exception():
                     LOG.error('Failed trying to populate attribute "%s" '
@@ -166,6 +172,8 @@ class NotificationPublisher(NotificationObject):
     #         2.2: New enum for source fields added
     VERSION = '2.2'
 
+    # TODO(stephenfin): Remove 'nova-cells' from 'NotificationSourceField' enum
+    # when bumping this object to version 3.0
     fields = {
         'host': fields.StringField(nullable=False),
         'source': fields.NotificationSourceField(nullable=False),

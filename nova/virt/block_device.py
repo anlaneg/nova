@@ -171,6 +171,14 @@ class DriverBlockDevice(dict):
         """Transform bdm to the format that is passed to drivers."""
         raise NotImplementedError()
 
+    def get(self, name, default=None):
+        if name in self._proxy_as_attr:
+            return getattr(self._bdm_obj, name)
+        elif name in self._fields:
+            return self[name]
+        else:
+            return super(DriverBlockDevice, self).get(name, default)
+
     def legacy(self):
         """Basic legacy transformation.
 
@@ -265,15 +273,14 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
     _valid_source = 'volume'
     _valid_destination = 'volume'
 
-    _proxy_as_attr_inherited = set(['volume_size', 'volume_id'])
+    _proxy_as_attr_inherited = set(['volume_size', 'volume_id', 'volume_type'])
     _update_on_save = {'disk_bus': None,
                        'device_name': 'mount_device',
                        'device_type': None}
 
     def _transform(self):
-        if (not self._bdm_obj.source_type == self._valid_source
-                or not self._bdm_obj.destination_type ==
-                self._valid_destination):
+        if (not self._bdm_obj.source_type == self._valid_source or
+                not self._bdm_obj.destination_type == self._valid_destination):
             raise _InvalidType
 
         self.update(
@@ -281,11 +288,17 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
              if k in self._new_fields | set(['delete_on_termination'])}
         )
         self['mount_device'] = self._bdm_obj.device_name
+        # connection_info might not be set so default to an empty dict so that
+        # it can be serialized to an empty JSON object.
         try:
             self['connection_info'] = jsonutils.loads(
                 self._bdm_obj.connection_info)
         except TypeError:
-            self['connection_info'] = None
+            self['connection_info'] = {}
+        # volume_type might not be set on the internal bdm object so default
+        # to None if not set
+        self['volume_type'] = (
+            self.volume_type if 'volume_type' in self._bdm_obj else None)
 
     def _preserve_multipath_id(self, connection_info):
         if self['connection_info'] and 'data' in self['connection_info']:
@@ -710,7 +723,8 @@ class DriverVolSnapshotBlockDevice(DriverVolumeBlockDevice):
             snapshot = volume_api.get_snapshot(context,
                                                self.snapshot_id)
             vol = volume_api.create(context, self.volume_size, '', '',
-                                    snapshot, availability_zone=av_zone)
+                                    snapshot, volume_type=self.volume_type,
+                                    availability_zone=av_zone)
             if wait_func:
                 self._call_wait_func(context, wait_func, volume_api, vol['id'])
 
@@ -735,6 +749,7 @@ class DriverVolImageBlockDevice(DriverVolumeBlockDevice):
             av_zone = _get_volume_create_az_value(instance)
             vol = volume_api.create(context, self.volume_size,
                                     '', '', image_id=self.image_id,
+                                    volume_type=self.volume_type,
                                     availability_zone=av_zone)
             if wait_func:
                 self._call_wait_func(context, wait_func, volume_api, vol['id'])
@@ -759,6 +774,7 @@ class DriverVolBlankBlockDevice(DriverVolumeBlockDevice):
             vol_name = instance.uuid + '-blank-vol'
             av_zone = _get_volume_create_az_value(instance)
             vol = volume_api.create(context, self.volume_size, vol_name, '',
+                                    volume_type=self.volume_type,
                                     availability_zone=av_zone)
             if wait_func:
                 self._call_wait_func(context, wait_func, volume_api, vol['id'])
@@ -910,9 +926,9 @@ def is_implemented(bdm):
 
 
 def is_block_device_mapping(bdm):
-    return (bdm.source_type in ('image', 'volume', 'snapshot', 'blank')
-            and bdm.destination_type == 'volume'
-            and is_implemented(bdm))
+    return (bdm.source_type in ('image', 'volume', 'snapshot', 'blank') and
+            bdm.destination_type == 'volume' and
+            is_implemented(bdm))
 
 
 def get_volume_id(connection_info):

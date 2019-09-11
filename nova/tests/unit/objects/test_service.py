@@ -56,6 +56,7 @@ def _fake_service(**kwargs):
     fake_service.update(kwargs)
     return fake_service
 
+
 fake_service = _fake_service()
 
 OPTIONAL = ['availability_zone', 'compute_node']
@@ -450,7 +451,7 @@ class TestRemoteServiceObject(test_objects._RemoteTest,
     pass
 
 
-class TestServiceVersion(test.TestCase):
+class TestServiceVersion(test.NoDBTestCase):
     def setUp(self):
         self.ctxt = context.get_admin_context()
         super(TestServiceVersion, self).setUp()
@@ -550,7 +551,7 @@ class TestServiceVersionCells(test.TestCase):
     def test_version_all_cells_with_fail(self, mock_scatter):
         mock_scatter.return_value = {
             'foo': {'nova-compute': 13},
-            'bar': context.raised_exception_sentinel,
+            'bar': exception.ServiceNotFound(service_id='fake'),
         }
         self.assertEqual(13, service.get_minimum_version_all_cells(
             self.context, ['nova-compute']))

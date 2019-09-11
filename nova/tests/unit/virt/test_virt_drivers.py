@@ -20,6 +20,7 @@ import traceback
 import fixtures
 import mock
 import netaddr
+import os_resource_classes as orc
 import os_vif
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
@@ -28,6 +29,7 @@ from oslo_utils import timeutils
 import six
 
 from nova.compute import manager
+from nova import conf
 from nova.console import type as ctype
 from nova import context
 from nova import exception
@@ -37,7 +39,6 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit import fake_block_device
 from nova.tests.unit.image import fake as fake_image
 from nova.tests.unit import utils as test_utils
-from nova.tests.unit.virt.libvirt import fake_libvirt_utils
 from nova.virt import block_device as driver_block_device
 from nova.virt import event as virtevent
 from nova.virt import fake
@@ -46,6 +47,7 @@ from nova.virt import libvirt
 from nova.virt.libvirt import imagebackend
 
 LOG = logging.getLogger(__name__)
+CONF = conf.CONF
 
 
 def catch_notimplementederror(f):
@@ -83,19 +85,12 @@ class _FakeDriverBackendTestCase(object):
             self.saved_libvirt = None
 
         from nova.tests.unit.virt.libvirt import fake_imagebackend
-        from nova.tests.unit.virt.libvirt import fake_libvirt_utils
         from nova.tests.unit.virt.libvirt import fakelibvirt
 
         from nova.tests.unit.virt.libvirt import fake_os_brick_connector
 
         self.useFixture(fake_imagebackend.ImageBackendFixture())
         self.useFixture(fakelibvirt.FakeLibvirtFixture())
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.virt.libvirt.driver.libvirt_utils',
-            fake_libvirt_utils))
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.virt.libvirt.imagebackend.libvirt_utils',
-            fake_libvirt_utils))
 
         self.useFixture(fixtures.MonkeyPatch(
             'nova.virt.libvirt.driver.connector',
@@ -307,7 +302,8 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
 
     @catch_notimplementederror
     @mock.patch('os.unlink')
-    def test_unrescue_unrescued_instance(self, mock_unlink):
+    @mock.patch('nova.virt.libvirt.utils.load_file', return_value='')
+    def test_unrescue_unrescued_instance(self, mock_load_file, mock_unlink):
         instance_ref, network_info = self._get_running_instance()
         self.connection.unrescue(instance_ref, network_info)
 
@@ -550,7 +546,6 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
 
     @catch_notimplementederror
     def test_get_console_output(self):
-        fake_libvirt_utils.files['dummy.log'] = ''
         instance_ref, network_info = self._get_running_instance()
         console_output = self.connection.get_console_output(self.ctxt,
             instance_ref)
@@ -809,6 +804,47 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         self.assertEqual(instance.host,
             self.connection.network_binding_host_id(self.ctxt, instance))
 
+    def test_get_allocation_ratio(self):
+        inv = {}
+        self.flags(cpu_allocation_ratio=16.1)
+        self.flags(ram_allocation_ratio=1.6)
+        self.flags(disk_allocation_ratio=1.1)
+        expeced_ratios = {
+            orc.VCPU: CONF.cpu_allocation_ratio,
+            orc.MEMORY_MB: CONF.ram_allocation_ratio,
+            orc.DISK_GB: CONF.disk_allocation_ratio
+        }
+        # If conf is set, return conf
+        self.assertEqual(expeced_ratios,
+                         self.connection._get_allocation_ratios(inv))
+
+        self.flags(cpu_allocation_ratio=None)
+        self.flags(ram_allocation_ratio=None)
+        self.flags(disk_allocation_ratio=None)
+        self.flags(initial_cpu_allocation_ratio=15.9)
+        self.flags(initial_ram_allocation_ratio=1.4)
+        self.flags(initial_disk_allocation_ratio=0.9)
+        expeced_ratios = {
+            orc.VCPU: CONF.initial_cpu_allocation_ratio,
+            orc.MEMORY_MB: CONF.initial_ram_allocation_ratio,
+            orc.DISK_GB: CONF.initial_disk_allocation_ratio
+        }
+        # if conf is unset and inv doesn't exists, return init conf
+        self.assertEqual(expeced_ratios,
+                         self.connection._get_allocation_ratios(inv))
+
+        inv = {orc.VCPU: {'allocation_ratio': 3.0},
+               orc.MEMORY_MB: {'allocation_ratio': 3.1},
+               orc.DISK_GB: {'allocation_ratio': 3.2}}
+        expeced_ratios = {
+            orc.VCPU: inv[orc.VCPU]['allocation_ratio'],
+            orc.MEMORY_MB: inv[orc.MEMORY_MB]['allocation_ratio'],
+            orc.DISK_GB: inv[orc.DISK_GB]['allocation_ratio']
+        }
+        # if conf is unset and inv exists, return inv
+        self.assertEqual(expeced_ratios,
+                         self.connection._get_allocation_ratios(inv))
+
 
 class AbstractDriverTestCase(_VirtDriverTestCase, test.TestCase):
     def setUp(self):
@@ -823,8 +859,8 @@ class AbstractDriverTestCase(_VirtDriverTestCase, test.TestCase):
 class FakeConnectionTestCase(_VirtDriverTestCase, test.TestCase):
     def setUp(self):
         self.driver_module = 'nova.virt.fake.FakeDriver'
-        fake.set_nodes(['myhostname'])
         super(FakeConnectionTestCase, self).setUp()
+        self.connection.init_host('myhostname')
 
     def _check_available_resource_fields(self, host_status):
         super(FakeConnectionTestCase, self)._check_available_resource_fields(
@@ -856,6 +892,22 @@ class LibvirtConnTestCase(_VirtDriverTestCase, test.TestCase):
         # will try to execute some commands which hangs tests so let's just
         # stub out the unplug call to os-vif since we don't care about it.
         self.stub_out('os_vif.unplug', lambda a, kw: None)
+        self.stub_out('nova.compute.utils.get_machine_ips', lambda: [])
+
+    def test_init_host_image_type_rbd_force_raw_images_true(self):
+        CONF.set_override('images_type', 'rbd', group='libvirt')
+        CONF.set_override('force_raw_images', True)
+        self.connection.init_host('myhostname')
+
+    def test_init_host_image_type_non_rbd(self):
+        CONF.set_override('images_type', 'default', group='libvirt')
+        self.connection.init_host('myhostname')
+
+    def test_init_host_raise_invalid_configuration(self):
+        CONF.set_override('images_type', 'rbd', group='libvirt')
+        CONF.set_override('force_raw_images', False)
+        self.assertRaises(exception.InvalidConfiguration,
+                          self.connection.init_host, 'myhostname')
 
     def test_force_hard_reboot(self):
         self.flags(wait_soft_reboot_seconds=0, group='libvirt')

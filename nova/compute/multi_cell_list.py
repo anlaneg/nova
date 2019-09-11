@@ -25,8 +25,6 @@ from nova import exception
 from nova.i18n import _
 
 LOG = logging.getLogger(__name__)
-CELL_FAIL_SENTINELS = (context.did_not_respond_sentinel,
-                       context.raised_exception_sentinel)
 
 CONF = nova.conf.CONF
 
@@ -77,9 +75,9 @@ class RecordWrapper(object):
         # $limit results from good cells before we noticed the failed
         # cells, and would not properly report them as failed for
         # fix-up in the higher layers.
-        if self._db_record in CELL_FAIL_SENTINELS:
+        if context.is_cell_failure_sentinel(self._db_record):
             return True
-        elif other._db_record in CELL_FAIL_SENTINELS:
+        elif context.is_cell_failure_sentinel(other._db_record):
             return False
 
         r = self._sort_ctx.compare_records(self._db_record,
@@ -107,13 +105,13 @@ def query_wrapper(ctx, fn, *args, **kwargs):
             # we won't call into the implementation's comparison routines)
             # wrapping the sentinel indicating timeout.
             yield RecordWrapper(ctx, None, context.did_not_respond_sentinel)
-            raise StopIteration
-        except Exception:
+            return
+        except Exception as e:
             # Here, we yield a RecordWrapper (no sort_ctx needed since
             # we won't call into the implementation's comparison routines)
-            # wrapping the sentinel indicating failure.
-            yield RecordWrapper(ctx, None, context.raised_exception_sentinel)
-            raise StopIteration
+            # wrapping the exception object indicating failure.
+            yield RecordWrapper(ctx, None, e.__class__(e.args))
+            return
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -238,7 +236,17 @@ class CrossCellLister(object):
         output of this function. Meaning, we will still query $limit from each
         database, but only return $limit total results.
 
+        :param cell_down_support: True if the API (and caller) support
+                                  returning a minimal instance
+                                  construct if the relevant cell is
+                                  down. If its True, then the value of
+                                  CONF.api.list_records_by_skipping_down_cells
+                                  is ignored and if its False, results are
+                                  either skipped or erred based on the value of
+                                  CONF.api.list_records_by_skipping_down_cells.
         """
+
+        cell_down_support = kwargs.pop('cell_down_support', False)
 
         if marker:
             # A marker identifier was provided from the API. Call this
@@ -403,17 +411,27 @@ class CrossCellLister(object):
             except StopIteration:
                 return
 
-            if item._db_record in CELL_FAIL_SENTINELS:
-                if not CONF.api.list_records_by_skipping_down_cells:
+            if context.is_cell_failure_sentinel(item._db_record):
+                if (not CONF.api.list_records_by_skipping_down_cells and
+                        not cell_down_support):
+                    # Value the config
+                    # ``CONF.api.list_records_by_skipping_down_cells`` only if
+                    # cell_down_support is False and generate the exception
+                    # if CONF.api.list_records_by_skipping_down_cells is False.
+                    # In all other cases the results from the down cell should
+                    # be skipped now to either construct minimal constructs
+                    # later if cell_down_support is True or to simply return
+                    # the skipped results if cell_down_support is False.
                     raise exception.NovaException(
                         _('Cell %s is not responding but configuration '
-                          'indicates that we should fail.') % item.cell_uuid)
+                          'indicates that we should fail.')
+                          % item.cell_uuid)
                 LOG.warning('Cell %s is not responding and hence is '
                             'being omitted from the results',
                             item.cell_uuid)
                 if item._db_record == context.did_not_respond_sentinel:
                     self._cells_timed_out.add(item.cell_uuid)
-                elif item._db_record == context.raised_exception_sentinel:
+                elif isinstance(item._db_record, Exception):
                     self._cells_failed.add(item.cell_uuid)
                 # We might have received one batch but timed out or failed
                 # on a later one, so be sure we fix the accounting.

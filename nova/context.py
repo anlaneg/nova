@@ -19,7 +19,6 @@
 
 from contextlib import contextmanager
 import copy
-import warnings
 
 import eventlet.queue
 import eventlet.timeout
@@ -45,9 +44,6 @@ CELL_CACHE = {}
 # NOTE(melwitt): Used for the scatter-gather utility to indicate we timed out
 # waiting for a result from a cell.
 did_not_respond_sentinel = object()
-# NOTE(melwitt): Used for the scatter-gather utility to indicate an exception
-# was raised gathering a result from a cell.
-raised_exception_sentinel = object()
 # FIXME(danms): Keep a global cache of the cells we find the
 # first time we look. This needs to be refreshed on a timer or
 # trigger.
@@ -100,9 +96,6 @@ class RequestContext(context.RequestContext):
            :param overwrite: Set to False to ensure that the greenthread local
                 copy of the index is not overwritten.
 
-           :param instance_lock_checked: This is not used and will be removed
-                in a future release.
-
            :param user_auth_plugin: The auth plugin for the current request's
                 authentication data.
         """
@@ -110,12 +103,6 @@ class RequestContext(context.RequestContext):
             kwargs['user_id'] = user_id
         if project_id:
             kwargs['project_id'] = project_id
-
-        if kwargs.pop('instance_lock_checked', None) is not None:
-            # TODO(mriedem): Let this be a hard failure in 19.0.0 (S).
-            warnings.warn("The 'instance_lock_checked' kwarg to "
-                          "nova.context.RequestContext is no longer used and "
-                          "will be removed in a future version.")
 
         super(RequestContext, self).__init__(is_admin=is_admin, **kwargs)
 
@@ -235,14 +222,14 @@ class RequestContext(context.RequestContext):
         return context
 
     def can(self, action, target=None, fatal=True):
-        """Verifies that the given action is valid on the target in this context.
+        """Verifies that the given action is valid on the target in this
+        context.
 
         :param action: string representing the action to be checked.
         :param target: dictionary representing the object of the action
             for object creation this should be a dictionary representing the
-            location of the object e.g. ``{'project_id': context.project_id}``.
-            If None, then this default target will be considered:
-            {'project_id': self.project_id, 'user_id': self.user_id}
+            location of the object
+            e.g. ``{'project_id': instance.project_id}``.
         :param fatal: if False, will return False when an exception.Forbidden
            occurs.
 
@@ -252,10 +239,6 @@ class RequestContext(context.RequestContext):
         :return: returns a non-False value (not necessarily "True") if
             authorized and False if not authorized and fatal is False.
         """
-        if target is None:
-            target = {'project_id': self.project_id,
-                      'user_id': self.user_id}
-
         try:
             return policy.authorize(self, action, target)
         except exception.Forbidden:
@@ -429,7 +412,7 @@ def scatter_gather_cells(context, cell_mappings, timeout, fn, *args, **kwargs):
     :param kwargs: The kwargs for the function to call for each cell
     :returns: A dict {cell_uuid: result} containing the joined results. The
               did_not_respond_sentinel will be returned if a cell did not
-              respond within the timeout. The raised_exception_sentinel will
+              respond within the timeout. The exception object will
               be returned if the call to a cell raised an exception. The
               exception will be logged.
     """
@@ -437,21 +420,22 @@ def scatter_gather_cells(context, cell_mappings, timeout, fn, *args, **kwargs):
     queue = eventlet.queue.LightQueue()
     results = {}
 
-    def gather_result(cell_mapping, fn, context, *args, **kwargs):
-        cell_uuid = cell_mapping.uuid
+    def gather_result(cell_uuid, fn, *args, **kwargs):
         try:
-            with target_cell(context, cell_mapping) as cctxt:
-                result = fn(cctxt, *args, **kwargs)
-        except Exception:
-            LOG.exception('Error gathering result from cell %s', cell_uuid)
-            result = raised_exception_sentinel
+            result = fn(*args, **kwargs)
+        except Exception as e:
+            # Only log the exception traceback for non-nova exceptions.
+            if not isinstance(e, exception.NovaException):
+                LOG.exception('Error gathering result from cell %s', cell_uuid)
+            result = e.__class__(e.args)
         # The queue is already synchronized.
         queue.put((cell_uuid, result))
 
     for cell_mapping in cell_mappings:
-        greenthreads.append((cell_mapping.uuid,
-                             utils.spawn(gather_result, cell_mapping,
-                                         fn, context, *args, **kwargs)))
+        with target_cell(context, cell_mapping) as cctxt:
+            greenthreads.append((cell_mapping.uuid,
+                                 utils.spawn(gather_result, cell_mapping.uuid,
+                                             fn, cctxt, *args, **kwargs)))
 
     with eventlet.timeout.Timeout(timeout, exception.CellTimeout):
         try:
@@ -488,6 +472,11 @@ def load_cells():
         LOG.error('No cells are configured, unable to continue')
 
 
+def is_cell_failure_sentinel(record):
+    return (record is did_not_respond_sentinel or
+            isinstance(record, Exception))
+
+
 def scatter_gather_skip_cell0(context, fn, *args, **kwargs):
     """Target all cells except cell0 in parallel and return their results.
 
@@ -502,7 +491,7 @@ def scatter_gather_skip_cell0(context, fn, *args, **kwargs):
     :param kwargs: The kwargs for the function to call for each cell
     :returns: A dict {cell_uuid: result} containing the joined results. The
               did_not_respond_sentinel will be returned if a cell did not
-              respond within the timeout. The raised_exception_sentinel will
+              respond within the timeout. The exception object will
               be returned if the call to a cell raised an exception. The
               exception will be logged.
     """
@@ -510,6 +499,29 @@ def scatter_gather_skip_cell0(context, fn, *args, **kwargs):
     cell_mappings = [cell for cell in CELLS if not cell.is_cell0()]
     return scatter_gather_cells(context, cell_mappings, CELL_TIMEOUT,
                                 fn, *args, **kwargs)
+
+
+def scatter_gather_single_cell(context, cell_mapping, fn, *args, **kwargs):
+    """Target the provided cell and return its results or sentinels in case of
+    failure.
+
+    The first parameter in the signature of the function to call for each cell
+    should be of type RequestContext.
+
+    :param context: The RequestContext for querying cells
+    :param cell_mapping: The CellMapping to target
+    :param fn: The function to call for each cell
+    :param args: The args for the function to call for each cell, not including
+                 the RequestContext
+    :param kwargs: The kwargs for the function to call for this cell
+    :returns: A dict {cell_uuid: result} containing the joined results. The
+              did_not_respond_sentinel will be returned if the cell did not
+              respond within the timeout. The exception object will
+              be returned if the call to the cell raised an exception. The
+              exception will be logged.
+    """
+    return scatter_gather_cells(context, [cell_mapping], CELL_TIMEOUT, fn,
+                                *args, **kwargs)
 
 
 def scatter_gather_all_cells(context, fn, *args, **kwargs):
@@ -526,7 +538,7 @@ def scatter_gather_all_cells(context, fn, *args, **kwargs):
     :param kwargs: The kwargs for the function to call for each cell
     :returns: A dict {cell_uuid: result} containing the joined results. The
               did_not_respond_sentinel will be returned if a cell did not
-              respond within the timeout. The raised_exception_sentinel will
+              respond within the timeout. The exception object will
               be returned if the call to a cell raised an exception. The
               exception will be logged.
     """

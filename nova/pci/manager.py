@@ -163,23 +163,47 @@ class PciDevTracker(object):
 
         for existed in self.pci_devs:
             if existed.address in exist_addrs - new_addrs:
+                # Remove previously tracked PCI devices that are either
+                # no longer reported by the hypervisor or have been removed
+                # from the pci whitelist.
                 try:
                     existed.remove()
                 except exception.PciDeviceInvalidStatus as e:
-                    LOG.warning("Trying to remove device with %(status)s "
+                    LOG.warning("Unable to remove device with %(status)s "
                                 "ownership %(instance_uuid)s because of "
-                                "%(pci_exception)s",
+                                "%(pci_exception)s. "
+                                "Check your [pci]passthrough_whitelist "
+                                "configuration to make sure this allocated "
+                                "device is whitelisted. If you have removed "
+                                "the device from the whitelist intentionally "
+                                "or the device is no longer available on the "
+                                "host you will need to delete the server or "
+                                "migrate it to another host to silence this "
+                                "warning.",
                                 {'status': existed.status,
                                  'instance_uuid': existed.instance_uuid,
                                  'pci_exception': e.format_message()})
-                    # Note(yjiang5): remove the device by force so that
-                    # db entry is cleaned in next sync.
-                    existed.status = fields.PciDeviceStatus.REMOVED
+                    # NOTE(sean-k-mooney): the device may not be tracked for
+                    # two reasons: first the device could have been removed
+                    # from the host or second the whitelist could have been
+                    # updated. While force removing may seam reasonable, if
+                    # the device is allocated to a vm, force removing the
+                    # device entry from the resource tracker can prevent the vm
+                    # from rebooting. If the PCI device was removed due to an
+                    # update to the PCI whitelist which was later reverted,
+                    # removing the entry from the database and adding it back
+                    # later may lead to the scheduler incorrectly selecting
+                    # this host and the ResourceTracker assigning the PCI
+                    # device to a second vm. To prevent this bug we skip
+                    # deleting the device from the db in this iteration and
+                    # will try again on the next sync.
+                    continue
                 else:
                     # Note(yjiang5): no need to update stats if an assigned
                     # device is hot removed.
                     self.stats.remove_device(existed)
             else:
+                # Update tracked devices.
                 new_value = next((dev for dev in devices if
                     dev['address'] == existed.address))
                 new_value['compute_node_id'] = self.node_id
@@ -202,6 +226,7 @@ class PciDevTracker(object):
                 else:
                     existed.update_device(new_value)
 
+        # Track newly discovered devices.
         for dev in [dev for dev in devices if
                     dev['address'] in new_addrs - exist_addrs]:
             dev['compute_node_id'] = self.node_id
@@ -289,23 +314,43 @@ class PciDevTracker(object):
         for dev in freed_devs:
             self.stats.add_device(dev)
 
-    def _free_instance(self, instance):
+    def free_instance_allocations(self, context, instance):
+        """Free devices that are in ALLOCATED state for instance.
+
+        :param context: user request context (nova.context.RequestContext)
+        :param instance: instance object
+        """
+        if self.allocations.pop(instance['uuid'], None):
+            for dev in self.pci_devs:
+                if (dev.status == fields.PciDeviceStatus.ALLOCATED and
+                        dev.instance_uuid == instance['uuid']):
+                    self._free_device(dev)
+
+    def free_instance_claims(self, context, instance):
+        """Free devices that are in CLAIMED state for instance.
+
+        :param context: user request context (nova.context.RequestContext)
+        :param instance: instance object
+        """
+        if self.claims.pop(instance['uuid'], None):
+            for dev in self.pci_devs:
+                if (dev.status == fields.PciDeviceStatus.CLAIMED and
+                        dev.instance_uuid == instance['uuid']):
+                    self._free_device(dev)
+
+    def free_instance(self, context, instance):
+        """Free devices that are in CLAIMED or ALLOCATED state for instance.
+
+        :param context: user request context (nova.context.RequestContext)
+        :param instance: instance object
+        """
         # Note(yjiang5): When an instance is resized, the devices in the
         # destination node are claimed to the instance in prep_resize stage.
         # However, the instance contains only allocated devices
         # information, not the claimed one. So we can't use
         # instance['pci_devices'] to check the devices to be freed.
-        for dev in self.pci_devs:
-            if dev.status in (fields.PciDeviceStatus.CLAIMED,
-                              fields.PciDeviceStatus.ALLOCATED):
-                if dev.instance_uuid == instance['uuid']:
-                    self._free_device(dev)
-
-    def free_instance(self, context, instance):
-        if self.allocations.pop(instance['uuid'], None):
-            self._free_instance(instance)
-        elif self.claims.pop(instance['uuid'], None):
-            self._free_instance(instance)
+        self.free_instance_allocations(context, instance)
+        self.free_instance_claims(context, instance)
 
     def update_pci_for_instance(self, context, instance, sign):
         """Update PCI usage information if devices are de/allocated.

@@ -108,8 +108,7 @@ class GetFunctionByIfnameTestCase(test.NoDBTestCase):
         totalvf_path = "/sys/class/net/%s/device/%s" % (ifname,
                                                         utils._SRIOV_TOTALVFS)
         mock_readlink.return_value = '../../../0000:00:00.1'
-        with mock.patch.object(
-            builtins, 'open', mock.mock_open(read_data='4')) as mock_open:
+        with self.patch_open(totalvf_path, '4') as mock_open:
             address, physical_function = utils.get_function_by_ifname('eth0')
             self.assertEqual(address, '0000:00:00.1')
             self.assertTrue(physical_function)
@@ -291,15 +290,15 @@ class GetNetNameByVfPciAddressTestCase(test.NoDBTestCase):
         self.mock_get_ifname.return_value = self.if_name
         net_name = utils.get_net_name_by_vf_pci_address(self.pci_address)
         self.assertEqual(ref_net_name, net_name)
-        self.mock_get_mac.called_once_with(self.pci_address)
-        self.mock_get_ifname.called_once_with(self.pci_address)
+        self.mock_get_mac.assert_called_once_with(self.pci_address)
+        self.mock_get_ifname.assert_called_once_with(self.pci_address)
 
     def test_wrong_mac(self):
         self.mock_get_mac.side_effect = (
             exception.PciDeviceNotFoundById(self.pci_address))
         net_name = utils.get_net_name_by_vf_pci_address(self.pci_address)
         self.assertIsNone(net_name)
-        self.mock_get_mac.called_once_with(self.pci_address)
+        self.mock_get_mac.assert_called_once_with(self.pci_address)
         self.mock_get_ifname.assert_not_called()
 
     def test_wrong_ifname(self):
@@ -308,5 +307,5 @@ class GetNetNameByVfPciAddressTestCase(test.NoDBTestCase):
             exception.PciDeviceNotFoundById(self.pci_address))
         net_name = utils.get_net_name_by_vf_pci_address(self.pci_address)
         self.assertIsNone(net_name)
-        self.mock_get_mac.called_once_with(self.pci_address)
-        self.mock_get_ifname.called_once_with(self.pci_address)
+        self.mock_get_mac.assert_called_once_with(self.pci_address)
+        self.mock_get_ifname.assert_called_once_with(self.pci_address)

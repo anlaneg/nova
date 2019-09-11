@@ -16,7 +16,6 @@
 """Policy Engine For Nova."""
 import copy
 import re
-import sys
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -123,7 +122,7 @@ def set_rules(rules, overwrite=True, use_conf=False):
     _ENFORCER.set_rules(rules, overwrite, use_conf)
 
 
-def authorize(context, action, target, do_raise=True, exc=None):
+def authorize(context, action, target=None, do_raise=True, exc=None):
     """Verifies that the action is valid on the target in this context.
 
        :param context: nova context
@@ -134,7 +133,9 @@ def authorize(context, action, target, do_raise=True, exc=None):
            ``volume:attach_volume``
        :param target: dictionary representing the object of the action
            for object creation this should be a dictionary representing the
-           location of the object e.g. ``{'project_id': context.project_id}``
+           location of the object e.g. ``{'project_id': instance.project_id}``
+            If None, then this default target will be considered:
+            {'project_id': self.project_id, 'user_id': self.user_id}
        :param do_raise: if True (the default), raises PolicyNotAuthorized;
            if False, returns False
        :param exc: Class of the exception to raise if the check fails.
@@ -155,6 +156,12 @@ def authorize(context, action, target, do_raise=True, exc=None):
     credentials = context.to_policy_values()
     if not exc:
         exc = exception.PolicyNotAuthorized
+
+    # Legacy fallback for emtpy target from context.can()
+    # should be removed once we improve testing and scope checks
+    if target is None:
+        target = default_target(context)
+
     try:
         result = _ENFORCER.authorize(action, target, credentials,
                                      do_raise=do_raise, exc=exc, action=action)
@@ -169,6 +176,10 @@ def authorize(context, action, target, do_raise=True, exc=None):
     return result
 
 
+def default_target(context):
+    return {'project_id': context.project_id, 'user_id': context.user_id}
+
+
 def check_is_admin(context):
     """Whether or not roles contains 'admin' role according to policy setting.
 
@@ -177,7 +188,7 @@ def check_is_admin(context):
     init()
     # the target is user-self
     credentials = context.to_policy_values()
-    target = credentials
+    target = default_target(context)
     return _ENFORCER.authorize('context_is_admin', target, credentials)
 
 
@@ -208,21 +219,9 @@ def register_rules(enforcer):
 
 
 def get_enforcer():
-    # This method is for use by oslopolicy CLI scripts. Those scripts need the
-    # 'output-file' and 'namespace' options, but having those in sys.argv means
-    # loading the Nova config options will fail as those are not expected to
-    # be present. So we pass in an arg list with those stripped out.
-    conf_args = []
-    # Start at 1 because cfg.CONF expects the equivalent of sys.argv[1:]
-    i = 1
-    while i < len(sys.argv):
-        if sys.argv[i].strip('-') in ['namespace', 'output-file']:
-            i += 2
-            continue
-        conf_args.append(sys.argv[i])
-        i += 1
-
-    cfg.CONF(conf_args, project='nova')
+    # This method is used by oslopolicy CLI scripts in order to generate policy
+    # files from overrides on disk and defaults in code.
+    cfg.CONF([], project='nova')
     init()
     return _ENFORCER
 
@@ -247,10 +246,10 @@ def verify_deprecated_policy(old_policy, new_policy, default_rule, context):
         current_rule = None
 
     if current_rule != default_rule:
-        LOG.warning("Start using the new action '{0}'. The existing "
-                    "action '{1}' is being deprecated and will be "
-                    "removed in future release.".format(new_policy,
-                                                        old_policy))
+        LOG.warning("Start using the new action '%(new_policy)s'. "
+                    "The existing action '%(old_policy)s' is being deprecated "
+                    "and will be removed in future release.",
+                    {'new_policy': new_policy, 'old_policy': old_policy})
         context.can(old_policy)
         return True
     else:

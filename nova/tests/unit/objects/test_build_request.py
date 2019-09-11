@@ -59,7 +59,7 @@ class _TestBuildRequestObject(object):
         instance = fake_instance.fake_instance_obj(self.context,
                 objects.Instance, uuid=fake_req['instance_uuid'])
         instance.VERSION = '99'
-        fake_req['instance'] = jsonutils.dumps(instance.obj_to_primitive)
+        fake_req['instance'] = jsonutils.dumps(instance.obj_to_primitive())
         get_by_uuid.return_value = fake_req
 
         self.assertRaises(exception.BuildRequestNotFound,
@@ -152,16 +152,17 @@ class _TestBuildRequestObject(object):
             self.assertEqual(getattr(build_request.instance, field),
                              getattr(instance, field))
 
-    def test_from_db_object_set_deleted(self):
+    def test_from_db_object_set_deleted_hidden(self):
         # Assert that if we persisted an instance not yet having the deleted
-        # field being set, we still return a value for that field.
+        # or hidden field being set, we still return a value for that field.
         fake_req = fake_build_request.fake_db_req()
         with mock.patch.object(o_vo_base.VersionedObject,
                                'obj_set_defaults') as mock_obj_set_defaults:
             build_request = objects.BuildRequest._from_db_object(
                 self.context, objects.BuildRequest(), fake_req)
-        mock_obj_set_defaults.assert_called_once_with('deleted')
+        mock_obj_set_defaults.assert_called_once_with('deleted', 'hidden')
         self.assertFalse(build_request.instance.deleted)
+        self.assertFalse(build_request.instance.hidden)
 
     def test_obj_make_compatible_pre_1_3(self):
         obj = fake_build_request.fake_req_obj(self.context)
@@ -185,8 +186,9 @@ class _TestBuildRequestObject(object):
                          len(build_request_obj.instance.tags))
         # Can't compare list objects directly, just compare the single
         # item they contain.
-        base.obj_equal_prims(build_request_obj.tags[0],
-                             build_request_obj.instance.tags[0])
+        self.assertTrue(base.obj_equal_prims(
+                            build_request_obj.tags[0],
+                            build_request_obj.instance.tags[0]))
 
 
 class TestBuildRequestObject(test_objects._LocalTest,

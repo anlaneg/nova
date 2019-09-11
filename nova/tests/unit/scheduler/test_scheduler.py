@@ -22,8 +22,8 @@ import oslo_messaging as messaging
 from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova import context
+from nova import exception
 from nova import objects
-from nova.scheduler import caching_scheduler
 from nova.scheduler import filter_scheduler
 from nova.scheduler import host_manager
 from nova.scheduler import manager
@@ -44,15 +44,6 @@ class SchedulerManagerInitTestCase(test.NoDBTestCase):
                                                 mock_init_inst):
         driver = self.manager_cls().driver
         self.assertIsInstance(driver, filter_scheduler.FilterScheduler)
-
-    @mock.patch.object(host_manager.HostManager, '_init_instance_info')
-    @mock.patch.object(host_manager.HostManager, '_init_aggregates')
-    def test_init_using_caching_schedulerdriver(self,
-                                                mock_init_agg,
-                                                mock_init_inst):
-        self.flags(driver='caching_scheduler', group='scheduler')
-        driver = self.manager_cls().driver
-        self.assertIsInstance(driver, caching_scheduler.CachingScheduler)
 
     @mock.patch.object(host_manager.HostManager, '_init_instance_info')
     @mock.patch.object(host_manager.HostManager, '_init_aggregates')
@@ -77,8 +68,7 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
     def setUp(self, mock_init_agg, mock_init_inst):
         super(SchedulerManagerTestCase, self).setUp()
         self.flags(driver=self.driver_plugin_name, group='scheduler')
-        with mock.patch.object(host_manager.HostManager, '_init_aggregates'):
-            self.manager = self.manager_cls()
+        self.manager = self.manager_cls()
         self.context = context.RequestContext('fake_user', 'fake_project')
         self.topic = 'fake_topic'
         self.fake_args = (1, 2, 3)
@@ -90,10 +80,11 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
         manager = self.manager
         self.assertIsInstance(manager.driver, self.driver_cls)
 
+    @mock.patch('nova.scheduler.request_filter.process_reqspec')
     @mock.patch('nova.scheduler.utils.resources_from_request_spec')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'get_allocation_candidates')
-    def test_select_destination(self, mock_get_ac, mock_rfrs):
+    def test_select_destination(self, mock_get_ac, mock_rfrs, mock_process):
         fake_spec = objects.RequestSpec()
         fake_spec.instance_uuid = uuids.instance
         fake_version = "9.42"
@@ -107,6 +98,7 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
                 ) as select_destinations:
             self.manager.select_destinations(self.context, spec_obj=fake_spec,
                     instance_uuids=[fake_spec.instance_uuid])
+            mock_process.assert_called_once_with(self.context, fake_spec)
             select_destinations.assert_called_once_with(
                 self.context, fake_spec,
                 [fake_spec.instance_uuid], expected_alloc_reqs_by_rp_uuid,
@@ -124,11 +116,12 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
                 [fake_spec.instance_uuid], expected_alloc_reqs_by_rp_uuid,
                 mock.sentinel.p_sums, fake_version, True)
 
+    @mock.patch('nova.scheduler.request_filter.process_reqspec')
     @mock.patch('nova.scheduler.utils.resources_from_request_spec')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'get_allocation_candidates')
     def test_select_destination_return_objects(self, mock_get_ac,
-            mock_rfrs):
+            mock_rfrs, mock_process):
         fake_spec = objects.RequestSpec()
         fake_spec.instance_uuid = uuids.instance
         fake_version = "9.42"
@@ -150,6 +143,7 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
                     return_objects=True, return_alternates=True)
             sel_host = dests[0][0]
             self.assertIsInstance(sel_host, objects.Selection)
+            mock_process.assert_called_once_with(None, fake_spec)
             # Since both return_objects and return_alternates are True, the
             # driver should have been called with True for return_alternates.
             select_destinations.assert_called_once_with(None, fake_spec,
@@ -172,11 +166,12 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
                     [fake_spec.instance_uuid], expected_alloc_reqs_by_rp_uuid,
                     mock.sentinel.p_sums, fake_version, False)
 
+    @mock.patch('nova.scheduler.request_filter.process_reqspec')
     @mock.patch('nova.scheduler.utils.resources_from_request_spec')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'get_allocation_candidates')
     def _test_select_destination(self, get_allocation_candidates_response,
-                                 mock_get_ac, mock_rfrs):
+                                 mock_get_ac, mock_rfrs, mock_process):
         fake_spec = objects.RequestSpec()
         fake_spec.instance_uuid = uuids.instance
         place_res = get_allocation_candidates_response
@@ -188,6 +183,7 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
                     spec_obj=fake_spec,
                     instance_uuids=[fake_spec.instance_uuid])
             select_destinations.assert_not_called()
+            mock_process.assert_called_once_with(self.context, fake_spec)
             mock_get_ac.assert_called_once_with(
                 self.context, mock_rfrs.return_value)
 
@@ -236,10 +232,12 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
             mock_get_ac.assert_not_called()
             mock_process.assert_not_called()
 
+    @mock.patch('nova.scheduler.request_filter.process_reqspec')
     @mock.patch('nova.scheduler.utils.resources_from_request_spec')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'get_allocation_candidates')
-    def test_select_destination_with_4_3_client(self, mock_get_ac, mock_rfrs):
+    def test_select_destination_with_4_3_client(self, mock_get_ac, mock_rfrs,
+                                                mock_process):
         fake_spec = objects.RequestSpec()
         place_res = (fakes.ALLOC_REQS, mock.sentinel.p_sums, "42.0")
         mock_get_ac.return_value = place_res
@@ -250,6 +248,7 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
         with mock.patch.object(self.manager.driver, 'select_destinations'
                 ) as select_destinations:
             self.manager.select_destinations(self.context, spec_obj=fake_spec)
+            mock_process.assert_called_once_with(self.context, fake_spec)
             select_destinations.assert_called_once_with(self.context,
                 fake_spec, None, expected_alloc_reqs_by_rp_uuid,
                 mock.sentinel.p_sums, "42.0", False)
@@ -257,12 +256,13 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
                 self.context, mock_rfrs.return_value)
 
     # TODO(sbauza): Remove that test once the API v4 is removed
+    @mock.patch('nova.scheduler.request_filter.process_reqspec')
     @mock.patch('nova.scheduler.utils.resources_from_request_spec')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'get_allocation_candidates')
     @mock.patch.object(objects.RequestSpec, 'from_primitives')
     def test_select_destination_with_old_client(self, from_primitives,
-            mock_get_ac, mock_rfrs):
+            mock_get_ac, mock_rfrs, mock_process):
         fake_spec = objects.RequestSpec()
         fake_spec.instance_uuid = uuids.instance
         from_primitives.return_value = fake_spec
@@ -278,6 +278,7 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
                 self.context, request_spec='fake_spec',
                 filter_properties='fake_props',
                 instance_uuids=[fake_spec.instance_uuid])
+            mock_process.assert_called_once_with(self.context, fake_spec)
             select_destinations.assert_called_once_with(
                 self.context, fake_spec,
                 [fake_spec.instance_uuid], expected_alloc_reqs_by_rp_uuid,
@@ -344,6 +345,27 @@ class SchedulerManagerTestCase(test.NoDBTestCase):
                                       objects.HostMapping(host='b',
                                                           cell_mapping=cm2)]
         self.manager._discover_hosts_in_cells(mock.sentinel.context)
+
+    @mock.patch('nova.scheduler.manager.LOG.debug')
+    @mock.patch('nova.scheduler.manager.LOG.warning')
+    @mock.patch('nova.objects.host_mapping.discover_hosts')
+    def test_discover_hosts_duplicate_host_mapping(self, mock_discover,
+                                                   mock_log_warning,
+                                                   mock_log_debug):
+        # This tests the scenario of multiple schedulers running discover_hosts
+        # at the same time.
+        mock_discover.side_effect = exception.HostMappingExists(name='a')
+        self.manager._discover_hosts_in_cells(mock.sentinel.context)
+        msg = ("This periodic task should only be enabled on a single "
+               "scheduler to prevent collisions between multiple "
+               "schedulers: Host 'a' mapping already exists")
+        mock_log_warning.assert_called_once_with(msg)
+        mock_log_debug.assert_not_called()
+        # Second collision should log at debug, not warning.
+        mock_log_warning.reset_mock()
+        self.manager._discover_hosts_in_cells(mock.sentinel.context)
+        mock_log_warning.assert_not_called()
+        mock_log_debug.assert_called_once_with(msg)
 
 
 class SchedulerTestCase(test.NoDBTestCase):

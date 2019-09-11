@@ -162,6 +162,55 @@ REST_API_VERSION_HISTORY = """REST API Version History:
              ``updated_at`` time to filter nova resources, the resources
              include the servers API, os-instance-action API and
              os-migrations API.
+    * 2.67 - Adds the optional ``volume_type`` field to the
+             ``block_device_mapping_v2`` parameter when creating a server.
+    * 2.68 - Remove support for forced live migration and evacuate server
+             actions.
+    * 2.69 - Add support for returning minimal constructs for ``GET /servers``,
+             ``GET /servers/detail``, ``GET /servers/{server_id}`` and
+             ``GET /os-services`` when there is a transient unavailability
+             condition in the deployment like an infrastructure failure.
+    * 2.70 - Exposes virtual device tags in the response of the
+             ``os-volume_attachments`` and ``os-interface`` APIs.
+    * 2.71 - Adds the ``server_groups`` field to ``GET /servers/{id}``,
+            ``PUT /servers/{server_id}`` and
+            ``POST /servers/{server_id}/action`` (rebuild) responses.
+    * 2.72 - Add support for neutron ports with resource request during server
+             create. Server move operations are not yet supported for servers
+             with such ports.
+    * 2.73 - Adds support for specifying a reason when locking the server and
+             exposes this via the response from ``GET /servers/detail``,
+             ``GET /servers/{server_id}``, ``PUT servers/{server_id}`` and
+             ``POST /servers/{server_id}/action`` where the action is rebuild.
+             It also supports ``locked`` as a filter/sort parameter for
+             ``GET /servers/detail`` and ``GET /servers``.
+    * 2.74 - Add support for specifying ``host`` and/or ``hypervisor_hostname``
+             in request body to ``POST /servers``. Allow users to specify which
+             host/node they want their servers to land on and still be
+             validated by the scheduler.
+    * 2.75 - Multiple API cleanup listed below:
+             - 400 for unknown param for query param and for request body.
+             - Making server representation always consistent among GET, PUT
+               and Rebuild serevr APIs response.
+             - Change the default return value of swap field from the empty
+               string to 0 (integer) in flavor APIs.
+             - Return ``servers`` field always in the response of GET
+               hypervisors API even there are no servers on hypervisor.
+    * 2.76 - Adds ``power-update`` event to ``os-server-external-events`` API.
+             The changes to the power state of an instance caused by this event
+             can be viewed through
+             ``GET /servers/{server_id}/os-instance-actions`` and
+             ``GET /servers/{server_id}/os-instance-actions/{request_id}``.
+    * 2.77 - Add support for specifying ``availability_zone`` to unshelve of a
+             shelved offload server.
+    * 2.78 - Adds new API ``GET /servers/{server_id}/topology`` which shows
+             NUMA topology of a given server.
+    * 2.79 - Adds support for specifying ``delete_on_termination`` field in the
+             request body to
+             ``POST /servers/{server_id}/os-volume_attachments`` and exposes
+             this via the response from
+             ``GET /servers/{server_id}/os-volume_attachments`` and
+             ``GET /servers/{server_id}/os-volume_attachments/{volume_id}``.
 """
 
 # The minimum and maximum versions of the API supported
@@ -170,7 +219,7 @@ REST_API_VERSION_HISTORY = """REST API Version History:
 # Note(cyeoh): This only applies for the v2.1 API once microversions
 # support is fully merged. It does not affect the V2 API.
 _MIN_API_VERSION = "2.1"
-_MAX_API_VERSION = "2.66"
+_MAX_API_VERSION = "2.79"
 DEFAULT_API_VERSION = _MIN_API_VERSION
 
 # Almost all proxy APIs which are related to network, images and baremetal

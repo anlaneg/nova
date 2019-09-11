@@ -24,25 +24,6 @@ from nova import test
 
 class InstanceTypeTestCase(test.TestCase):
     """Test cases for flavor  code."""
-    def test_will_not_get_bad_default_instance_type(self):
-        # ensures error raised on bad default flavor.
-        self.flags(default_flavor='unknown_flavor')
-        self.assertRaises(exception.FlavorNotFound,
-                          flavors.get_default_flavor)
-
-    def test_flavor_get_by_None_name_returns_default(self):
-        # Ensure get by name returns default flavor with no name.
-        default = flavors.get_default_flavor()
-        actual = flavors.get_flavor_by_name(None)
-        self.assertIsInstance(default, objects.Flavor)
-        self.assertIsInstance(actual, objects.Flavor)
-        self.assertEqual(default.flavorid, actual.flavorid)
-
-    def test_will_not_get_flavor_with_bad_name(self):
-        # Ensure get by name returns default flavor with bad name.
-        self.assertRaises(exception.FlavorNotFound,
-                          flavors.get_flavor_by_name, 10000)
-
     def test_will_not_get_instance_by_unknown_flavor_id(self):
         # Ensure get by flavor raises error with wrong flavorid.
         self.assertRaises(exception.FlavorNotFound,
@@ -50,7 +31,8 @@ class InstanceTypeTestCase(test.TestCase):
                           'unknown_flavor')
 
     def test_will_get_instance_by_flavor_id(self):
-        default_instance_type = flavors.get_default_flavor()
+        default_instance_type = objects.Flavor.get_by_name(
+            context.get_admin_context(), 'm1.small')
         flavorid = default_instance_type.flavorid
         fetched = flavors.get_flavor_by_flavor_id(flavorid)
         self.assertIsInstance(fetched, objects.Flavor)
@@ -58,11 +40,16 @@ class InstanceTypeTestCase(test.TestCase):
 
 
 class InstanceTypeToolsTest(test.TestCase):
+
+    def setUp(self):
+        super(InstanceTypeToolsTest, self).setUp()
+        self.context = context.get_admin_context()
+
     def _dict_to_metadata(self, data):
         return [{'key': key, 'value': value} for key, value in data.items()]
 
     def _test_extract_flavor(self, prefix):
-        instance_type = flavors.get_default_flavor()
+        instance_type = objects.Flavor.get_by_name(self.context, 'm1.small')
         instance_type_p = obj_base.obj_to_primitive(instance_type)
 
         metadata = {}
@@ -92,7 +79,7 @@ class InstanceTypeToolsTest(test.TestCase):
         self._test_extract_flavor('foo_')
 
     def test_save_flavor_info(self):
-        instance_type = flavors.get_default_flavor()
+        instance_type = objects.Flavor.get_by_name(self.context, 'm1.small')
 
         example = {}
         example_prefix = {}
@@ -110,7 +97,7 @@ class InstanceTypeToolsTest(test.TestCase):
         self.assertEqual(example_prefix, metadata)
 
     def test_flavor_numa_extras_are_saved(self):
-        instance_type = flavors.get_default_flavor()
+        instance_type = objects.Flavor.get_by_name(self.context, 'm1.small')
         instance_type['extra_specs'] = {
             'hw:numa_mem.0': '123',
             'hw:numa_cpus.0': '456',
@@ -171,49 +158,6 @@ class CreateInstanceTypeTest(test.TestCase):
     def assertInvalidInput(self, *create_args, **create_kwargs):
         self.assertRaises(exception.InvalidInput, flavors.create,
                           *create_args, **create_kwargs)
-
-    def test_create_with_valid_name(self):
-        # Names can contain alphanumeric and [_.- ]
-        flavors.create('azAZ09. -_', 64, 1, 120)
-        # And they are not limited to ascii characters
-        # E.g.: m1.huge in simplified Chinese
-        flavors.create(u'm1.\u5DE8\u5927', 6400, 100, 12000)
-
-    def test_name_with_special_characters(self):
-        # Names can contain all printable characters
-        flavors.create('_foo.bar-123', 64, 1, 120)
-
-        # Ensure instance types raises InvalidInput for invalid characters.
-        self.assertInvalidInput('foobar\x00', 64, 1, 120)
-
-    def test_name_with_non_printable_characters(self):
-        # Names cannot contain printable characters
-        self.assertInvalidInput(u'm1.\u0868 #', 64, 1, 120)
-
-    def test_name_length_checks(self):
-        MAX_LEN = 255
-
-        # Flavor name with 255 characters or less is valid.
-        flavors.create('a' * MAX_LEN, 64, 1, 120)
-
-        # Flavor name which is more than 255 characters will cause error.
-        self.assertInvalidInput('a' * (MAX_LEN + 1), 64, 1, 120)
-
-        # Flavor name which is empty should cause an error
-        self.assertInvalidInput('', 64, 1, 120)
-
-    def test_all_whitespace_flavor_names_rejected(self):
-        self.assertInvalidInput(' ', 64, 1, 120)
-
-    def test_flavorid_with_invalid_characters(self):
-        # Ensure Flavor ID can only contain [a-zA-Z0-9_.- ]
-        self.assertInvalidInput('a', 64, 1, 120, flavorid=u'\u2605')
-        self.assertInvalidInput('a', 64, 1, 120, flavorid='%%$%$@#$#@$@#$^%')
-
-    def test_flavorid_length_checks(self):
-        MAX_LEN = 255
-        # Flavor ID which is more than 255 characters will cause error.
-        self.assertInvalidInput('a', 64, 1, 120, flavorid='a' * (MAX_LEN + 1))
 
     def test_memory_must_be_positive_db_integer(self):
         self.assertInvalidInput('flavor1', 'foo', 1, 120)

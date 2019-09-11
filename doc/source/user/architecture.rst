@@ -18,7 +18,7 @@
 Nova System Architecture
 ========================
 
-Nova is comprised of multiple server processes, each performing different
+Nova comprises multiple server processes, each performing different
 functions. The user-facing interface is a REST API, while internally Nova
 components communicate via an RPC message passing mechanism.
 
@@ -59,6 +59,6 @@ of a typical Nova deployment.
 * Compute: manages communication with hypervisor and virtual machines.
 * Conductor: handles requests that need coordination (build/resize), acts as a
   database proxy, or handles object conversions.
-* `Placement <https://docs.openstack.org/nova/latest/user/placement.html>`__: tracks resource provider inventories and usages.
+* :placement-doc:`Placement <>`: tracks resource provider inventories and usages.
 
 While all services are designed to be horizontally scalable, you should have significantly more computes than anything else.

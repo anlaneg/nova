@@ -112,10 +112,6 @@ use.
 The choice of this type must match the underlying virtualization strategy
 you have chosen for this host.
 
-Possible values:
-
-* See the predefined set of case-sensitive values.
-
 Related options:
 
 * ``connection_uri``: depends on this
@@ -243,9 +239,25 @@ Related options:
   spice agent is disabled, the config value of ``use_usb_tablet`` will have
   an effect.
 """),
-    cfg.StrOpt('live_migration_inbound_addr',
+    cfg.StrOpt('live_migration_scheme',
                help="""
-The IP address or hostname to be used as the target for live migration traffic.
+URI scheme used for live migration.
+
+Override the default libvirt live migration scheme (which is dependent on
+virt_type). If this option is set to None, nova will automatically choose a
+sensible default based on the hypervisor. It is not recommended that you change
+this unless you are very sure that hypervisor supports a particular scheme.
+
+Related options:
+
+* ``virt_type``: This option is meaningful only when ``virt_type`` is set to
+  `kvm` or `qemu`.
+* ``live_migration_uri``: If ``live_migration_uri`` value is not None, the
+  scheme used for live migration is taken from ``live_migration_uri`` instead.
+"""),
+    cfg.HostAddressOpt('live_migration_inbound_addr',
+                       help="""
+Target used for live migration traffic.
 
 If this option is set to None, the hostname of the migration target compute
 node will be used.
@@ -254,10 +266,6 @@ This option is useful in environments where the live-migration traffic can
 impact the network plane significantly. A separate network for live-migration
 traffic can then use this config option and avoids the impact on the
 management network.
-
-Possible values:
-
-* A valid IP address or hostname, else None.
 
 Related options:
 
@@ -296,22 +304,6 @@ Related options:
   the uri for live migration.
 * ``live_migration_scheme``: If ``live_migration_uri`` is not set, the scheme
   used for live migration is taken from ``live_migration_scheme`` instead.
-"""),
-    cfg.StrOpt('live_migration_scheme',
-               help="""
-URI scheme used for live migration.
-
-Override the default libvirt live migration scheme (which is dependent on
-virt_type). If this option is set to None, nova will automatically choose a
-sensible default based on the hypervisor. It is not recommended that you change
-this unless you are very sure that hypervisor supports a particular scheme.
-
-Related options:
-
-* ``virt_type``: This option is meaningful only when ``virt_type`` is set to
-  `kvm` or `qemu`.
-* ``live_migration_uri``: If ``live_migration_uri`` value is not None, the
-  scheme used for live migration is taken from ``live_migration_uri`` instead.
 """),
     cfg.BoolOpt('live_migration_tunnelled',
                 default=False,
@@ -379,6 +371,7 @@ transferred, with lower bound of a minimum of 2 GiB per device.
 """),
     cfg.IntOpt('live_migration_completion_timeout',
                default=800,
+               min=0,
                mutable=True,
                help="""
 Time to wait, in seconds, for migration to successfully complete transferring
@@ -394,23 +387,22 @@ Related options:
 * live_migration_downtime_steps
 * live_migration_downtime_delay
 """),
-    cfg.IntOpt('live_migration_progress_timeout',
-               default=0,
-               deprecated_for_removal=True,
-               deprecated_reason="""
-Serious bugs found in this feature, see
-https://bugs.launchpad.net/nova/+bug/1644248 for details.
-""",
+    cfg.StrOpt('live_migration_timeout_action',
+               default='abort',
+               choices=('abort', 'force_complete'),
                mutable=True,
                help="""
-Time to wait, in seconds, for migration to make forward progress in
-transferring data before aborting the operation.
+This option will be used to determine what action will be taken against a
+VM after ``live_migration_completion_timeout`` expires. By default, the live
+migrate operation will be aborted after completion timeout. If it is set to
+``force_complete``, the compute service will either pause the VM or trigger
+post-copy depending on if post copy is enabled and available
+(``live_migration_permit_post_copy`` is set to True).
 
-Set to 0 to disable timeouts.
+Related options:
 
-This is deprecated, and now disabled by default because we have found serious
-bugs in this feature that caused false live-migration timeout failures. This
-feature will be removed or replaced in a future release.
+* live_migration_completion_timeout
+* live_migration_permit_post_copy
 """),
     cfg.BoolOpt('live_migration_permit_post_copy',
                 default=False,
@@ -420,21 +412,25 @@ mode, i.e., switch the active VM to the one on the destination node before the
 migration is complete, therefore ensuring an upper bound on the memory that
 needs to be transferred. Post-copy requires libvirt>=1.3.3 and QEMU>=2.5.0.
 
-When permitted, post-copy mode will be automatically activated if a
-live-migration memory copy iteration does not make percentage increase of at
-least 10% over the last iteration.
+When permitted, post-copy mode will be automatically activated if
+we reach the timeout defined by ``live_migration_completion_timeout`` and
+``live_migration_timeout_action`` is set to 'force_complete'. Note if you
+change to no timeout or choose to use 'abort',
+i.e. ``live_migration_completion_timeout = 0``, then there will be no
+automatic switch to post-copy.
 
 The live-migration force complete API also uses post-copy when permitted. If
 post-copy mode is not available, force complete falls back to pausing the VM
 to ensure the live-migration operation will complete.
 
-When using post-copy mode, if the source and destination hosts loose network
+When using post-copy mode, if the source and destination hosts lose network
 connectivity, the VM being live-migrated will need to be rebooted. For more
 details, please see the Administration guide.
 
 Related options:
 
-    * live_migration_permit_auto_converge
+* live_migration_permit_auto_converge
+* live_migration_timeout_action
 """),
     cfg.BoolOpt('live_migration_permit_auto_converge',
                 default=False,
@@ -451,21 +447,58 @@ Related options:
     * live_migration_permit_post_copy
 """),
     cfg.StrOpt('snapshot_image_format',
-               choices=('raw', 'qcow2', 'vmdk', 'vdi'),
-               help="""
+        choices=[
+            ('raw', 'RAW disk format'),
+            ('qcow2', 'KVM default disk format'),
+            ('vmdk', 'VMWare default disk format'),
+            ('vdi', 'VirtualBox default disk format'),
+        ],
+        help="""
 Determine the snapshot image format when sending to the image service.
 
 If set, this decides what format is used when sending the snapshot to the
-image service.
-If not set, defaults to same type as source image.
+image service. If not set, defaults to same type as source image.
+"""),
+    cfg.BoolOpt('live_migration_with_native_tls',
+                default=False,
+                help="""
+Use QEMU-native TLS encryption when live migrating.
 
-Possible values:
+This option will allow both migration stream (guest RAM plus device
+state) *and* disk stream to be transported over native TLS, i.e. TLS
+support built into QEMU.
 
-* ``raw``: RAW disk format
-* ``qcow2``: KVM default disk format
-* ``vmdk``: VMWare default disk format
-* ``vdi``: VirtualBox default disk format
-* If not set, defaults to same type as source image.
+Prerequisite: TLS environment is configured correctly on all relevant
+Compute nodes.  This means, Certificate Authority (CA), server, client
+certificates, their corresponding keys, and their file permisssions are
+in place, and are validated.
+
+Notes:
+
+* To have encryption for migration stream and disk stream (also called:
+  "block migration"), ``live_migration_with_native_tls`` is the
+  preferred config attribute instead of ``live_migration_tunnelled``.
+
+* The ``live_migration_tunnelled`` will be deprecated in the long-term
+  for two main reasons: (a) it incurs a huge performance penalty; and
+  (b) it is not compatible with block migration.  Therefore, if your
+  compute nodes have at least libvirt 4.4.0 and QEMU 2.11.0, it is
+  strongly recommended to use ``live_migration_with_native_tls``.
+
+* The ``live_migration_tunnelled`` and
+  ``live_migration_with_native_tls`` should not be used at the same
+  time.
+
+* Unlike ``live_migration_tunnelled``, the
+  ``live_migration_with_native_tls`` *is* compatible with block
+  migration.  That is, with this option, NBD stream, over which disks
+  are migrated to a target host, will be encrypted.
+
+Related options:
+
+``live_migration_tunnelled``: This transports migration stream (but not
+disk stream) over libvirtd.
+
 """),
     cfg.StrOpt('disk_prefix',
                help="""
@@ -491,22 +524,20 @@ Related options:
                     ' soft reboot request is made. We fall back to hard reboot'
                     ' if instance does not shutdown within this window.'),
     cfg.StrOpt('cpu_mode',
-               choices=('host-model', 'host-passthrough', 'custom', 'none'),
-               help="""
+        choices=[
+            ('host-model', 'Clone the host CPU feature flags'),
+            ('host-passthrough', 'Use the host CPU model exactly'),
+            ('custom', 'Use the CPU model in ``[libvirt]cpu_model``'),
+            ('none', "Don't set a specific CPU model. For instances with "
+             "``[libvirt] virt_type`` as KVM/QEMU, the default CPU model from "
+             "QEMU will be used, which provides a basic set of CPU features "
+             "that are compatible with most hosts"),
+        ],
+        help="""
 Is used to set the CPU mode an instance should have.
 
-If virt_type="kvm|qemu", it will default to "host-model", otherwise it will
-default to "none".
-
-Possible values:
-
-* ``host-model``: Clones the host CPU feature flags
-* ``host-passthrough``: Use the host CPU model exactly
-* ``custom``: Use a named CPU model
-* ``none``: Don't set a specific CPU model. For instances with
-  ``virt_type`` as KVM/QEMU, the default CPU model from QEMU will be used,
-  which provides a basic set of CPU features that are compatible with most
-  hosts.
+If ``virt_type="kvm|qemu"``, it will default to ``host-model``, otherwise it
+will default to ``none``.
 
 Related options:
 
@@ -520,7 +551,9 @@ Set the name of the libvirt CPU model the instance should use.
 
 Possible values:
 
-* The named CPU models listed in ``/usr/share/libvirt/cpu_map.xml``
+* The named CPU models listed in ``/usr/share/libvirt/cpu_map.xml`` for
+  libvirt prior to version 4.7.0 or ``/usr/share/libvirt/cpu_map/*.xml``
+  for version 4.7.0 and higher.
 
 Related options:
 
@@ -569,8 +602,9 @@ expose that CPU flag to the Nova instance, the you need to explicitly
 ask for it.
 
 The possible values for ``cpu_model_extra_flags`` depends on the CPU
-model in use.  Refer to ``/usr/share/libvirt/cpu_map.xml`` possible CPU
-feature flags for a given CPU model.
+model in use. Refer to ``/usr/share/libvirt/cpu_map.xml`` for libvirt
+prior to version 4.7.0 or ``/usr/share/libvirt/cpu_map/*.xml`` thereafter
+for possible CPU feature flags for a given CPU model.
 
 Note that when using this config attribute to set the 'PCID' CPU flag
 with the ``custom`` CPU mode, not all virtual (i.e. libvirt / QEMU) CPU
@@ -623,7 +657,11 @@ this environment.
 
 Possible cache modes:
 
-* default: Same as writethrough.
+* default: "It Depends" -- For Nova-managed disks, ``none``, if the host
+  file system is capable of Linux's 'O_DIRECT' semantics; otherwise
+  ``writeback``.  For volume drivers, the default is driver-dependent:
+  ``none`` for everything except for SMBFS and Virtuzzo (which use
+  ``writeback``).
 * none: With caching mode set to none, the host page cache is disabled, but
   the disk write cache is enabled for the guest. In this mode, the write
   performance in the guest is optimal because write operations bypass the host
@@ -636,25 +674,25 @@ Possible cache modes:
   writethrough mode. Shareable disk devices, like for a multi-attachable block
   storage volume, will have their cache mode set to 'none' regardless of
   configuration.
-* writethrough: writethrough mode is the default caching mode. With
-  caching set to writethrough mode, the host page cache is enabled, but the
-  disk write cache is disabled for the guest. Consequently, this caching mode
-  ensures data integrity even if the applications and storage stack in the
-  guest do not transfer data to permanent storage properly (either through
-  fsync operations or file system barriers). Because the host page cache is
-  enabled in this mode, the read performance for applications running in the
-  guest is generally better. However, the write performance might be reduced
-  because the disk write cache is disabled.
-* writeback: With caching set to writeback mode, both the host page cache
-  and the disk write cache are enabled for the guest. Because of this, the
-  I/O performance for applications running in the guest is good, but the data
-  is not protected in a power failure. As a result, this caching mode is
-  recommended only for temporary data where potential data loss is not a
-  concern.
-  NOTE: Certain backend disk mechanisms may provide safe writeback cache
-  semantics. Specifically those that bypass the host page cache, such as
-  QEMU's integrated RBD driver. Ceph documentation recommends setting this
-  to writeback for maximum performance while maintaining data safety.
+* writethrough: With caching set to writethrough mode, the host page cache is
+  enabled, but the disk write cache is disabled for the guest. Consequently,
+  this caching mode ensures data integrity even if the applications and storage
+  stack in the guest do not transfer data to permanent storage properly (either
+  through fsync operations or file system barriers). Because the host page
+  cache is enabled in this mode, the read performance for applications running
+  in the guest is generally better. However, the write performance might be
+  reduced because the disk write cache is disabled.
+* writeback: With caching set to writeback mode, both the host page
+  cache and the disk write cache are enabled for the guest. Because of
+  this, the I/O performance for applications running in the guest is
+  good, but the data is not protected in a power failure. As a result,
+  this caching mode is recommended only for temporary data where
+  potential data loss is not a concern.
+  NOTE: Certain backend disk mechanisms may provide safe
+  writeback cache semantics. Specifically those that bypass the host
+  page cache, such as QEMU's integrated RBD driver. Ceph documentation
+  recommends setting this to writeback for maximum performance while
+  maintaining data safety.
 * directsync: Like "writethrough", but it bypasses the host page cache.
 * unsafe: Caching mode of unsafe ignores cache transfer operations
   completely. As its name implies, this caching mode should be used only for
@@ -681,14 +719,35 @@ http://man7.org/linux/man-pages/man7/random.7.html.
                      'a default machine type per host architecture. '
                      'You can find a list of supported machine types '
                      'in your environment by checking the output of '
-                     'the "virsh capabilities"command. The format of the '
+                     'the "virsh capabilities" command. The format of the '
                      'value for this config option is host-arch=machine-type. '
                      'For example: x86_64=machinetype1,armv7l=machinetype2'),
     cfg.StrOpt('sysinfo_serial',
-               default='auto',
-               choices=('none', 'os', 'hardware', 'auto'),
-               help='The data source used to the populate the host "serial" '
-                    'UUID exposed to guest in the virtual BIOS.'),
+               default='unique',
+               choices=(
+                   ('none', 'A serial number entry is not added to the guest '
+                            'domain xml.'),
+                   ('os', 'A UUID serial number is generated from the host '
+                          '``/etc/machine-id`` file.'),
+                   ('hardware', 'A UUID for the host hardware as reported by '
+                                'libvirt. This is typically from the host '
+                                'SMBIOS data, unless it has been overridden '
+                                'in ``libvirtd.conf``.'),
+                   ('auto', 'Uses the "os" source if possible, else '
+                            '"hardware".'),
+                   ('unique', 'Uses instance UUID as the serial number.'),
+               ),
+               help="""
+The data source used to the populate the host "serial" UUID exposed to guest
+in the virtual BIOS. All choices except ``unique`` will change the serial when
+migrating the instance to another host. Changing the choice of this option will
+also affect existing instances on this host once they are stopped and started
+again. It is recommended to use the default choice (``unique``) since that will
+not change when an instance is migrated. However, if you have a need for
+per-host serials in addition to per-instance serial numbers, then consider
+restricting flavors via host aggregates.
+"""
+               ),
     cfg.IntOpt('mem_stats_period_seconds',
                default=10,
                help='A number of seconds to memory usage statistics period. '
@@ -697,12 +756,12 @@ http://man7.org/linux/man-pages/man7/random.7.html.
     cfg.ListOpt('uid_maps',
                 default=[],
                 help='List of uid targets and ranges.'
-                     'Syntax is guest-uid:host-uid:count'
+                     'Syntax is guest-uid:host-uid:count. '
                      'Maximum of 5 allowed.'),
     cfg.ListOpt('gid_maps',
                 default=[],
                 help='List of guid targets and ranges.'
-                     'Syntax is guest-gid:host-gid:count'
+                     'Syntax is guest-gid:host-gid:count. '
                      'Maximum of 5 allowed.'),
     cfg.IntOpt('realtime_scheduler_priority',
                default=1,
@@ -797,8 +856,10 @@ one.
 
 Related options:
 
-* virt.use_cow_images
+* compute.use_cow_images
 * images_volume_group
+* [workarounds]/ensure_libvirt_rbd_instance_dir_cleanup
+* compute.force_raw_images
 """),
     cfg.StrOpt('images_volume_group',
                help="""
@@ -840,52 +901,23 @@ Requires:
 ]
 
 libvirt_imagecache_opts = [
-    cfg.StrOpt('image_info_filename_pattern',
-               default='$instances_path/$image_cache_subdirectory_name/'
-                       '%(image)s.info',
-               deprecated_for_removal=True,
-               deprecated_since='14.0.0',
-               deprecated_reason='Image info files are no longer used by the '
-                                 'image cache',
-               help='Allows image information files to be stored in '
-                    'non-standard locations'),
     cfg.IntOpt('remove_unused_resized_minimum_age_seconds',
                default=3600,
                help='Unused resized base images younger than this will not be '
                     'removed'),
-    cfg.BoolOpt('checksum_base_images',
-                default=False,
-                deprecated_for_removal=True,
-                deprecated_since='14.0.0',
-                deprecated_reason='The image cache no longer periodically '
-                                  'calculates checksums of stored images. '
-                                  'Data integrity can be checked at the block '
-                                  'or filesystem level.',
-                help='Write a checksum for files in _base to disk'),
-    cfg.IntOpt('checksum_interval_seconds',
-               default=3600,
-               deprecated_for_removal=True,
-               deprecated_since='14.0.0',
-               deprecated_reason='The image cache no longer periodically '
-                                 'calculates checksums of stored images. '
-                                 'Data integrity can be checked at the block '
-                                 'or filesystem level.',
-               help='How frequently to checksum base images'),
 ]
 
 libvirt_lvm_opts = [
     cfg.StrOpt('volume_clear',
-               default='zero',
-               choices=('none', 'zero', 'shred'),
-               help="""
+        default='zero',
+        choices=[
+            ('zero', 'Overwrite volumes with zeroes'),
+            ('shred', 'Overwrite volumes repeatedly'),
+            ('none', 'Do not wipe deleted volumes'),
+        ],
+        help="""
 Method used to wipe ephemeral disks when they are deleted. Only takes effect
 if LVM is set as backing storage.
-
-Possible values:
-
-* none - do not wipe deleted volumes
-* zero - overwrite volumes with zeroes
-* shred - overwrite volume repeatedly
 
 Related options:
 
@@ -1012,6 +1044,11 @@ the Ceph RBD server.
     cfg.StrOpt('rbd_secret_uuid',
                help="""
 The libvirt UUID of the secret for the rbd_user volumes.
+"""),
+    cfg.IntOpt('rbd_connect_timeout',
+               default=5,
+               help="""
+The RADOS client timeout in seconds when initially connecting to the cluster.
 """),
 ]
 
@@ -1235,7 +1272,7 @@ v2.10."""),
 
 libvirt_volume_nvmeof_opts = [
     cfg.IntOpt('num_nvme_discover_tries',
-               default=3,
+               default=5,
                help="""
 Number of times to rediscover NVMe target to find volume
 

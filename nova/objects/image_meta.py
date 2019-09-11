@@ -170,12 +170,31 @@ class ImageMetaProps(base.NovaObject):
     # Version 1.18: Pull signature properties from cursive library
     # Version 1.19: Added 'img_hide_hypervisor_id' type field
     # Version 1.20: Added 'traits_required' list field
-    VERSION = '1.20'
+    # Version 1.21: Added 'hw_time_hpet' field
+    # Version 1.22: Added 'gop', 'virtio' and 'none' to hw_video_model field
+    # Version 1.23: Added 'hw_pmu' field
+    # Version 1.24: Added 'hw_mem_encryption' field
+    VERSION = '1.24'
 
     def obj_make_compatible(self, primitive, target_version):
         super(ImageMetaProps, self).obj_make_compatible(primitive,
                                                         target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 24):
+            primitive.pop('hw_mem_encryption', None)
+        if target_version < (1, 23):
+            primitive.pop('hw_pmu', None)
+        # NOTE(sean-k-mooney): unlike other nova object we version this object
+        # when composed object are updated.
+        if target_version < (1, 22):
+            video = primitive.get('hw_video_model', None)
+            if video in ('gop', 'virtio', 'none'):
+                raise exception.ObjectActionError(
+                    action='obj_make_compatible',
+                    reason='hw_video_model=%s not supported in version %s' % (
+                        video, target_version))
+        if target_version < (1, 21):
+            primitive.pop('hw_time_hpet', None)
         if target_version < (1, 20):
             primitive.pop('traits_required', None)
         if target_version < (1, 19):
@@ -296,6 +315,10 @@ class ImageMetaProps(base.NovaObject):
         # form string
         'hw_machine_type': fields.StringField(),
 
+        # boolean indicating that the guest needs to be booted with
+        # encrypted memory
+        'hw_mem_encryption': fields.FlexibleBooleanField(),
+
         # One of the magic strings 'small', 'any', 'large'
         # or an explicit page size in KB (eg 4, 2048, ...)
         'hw_mem_page_size': fields.StringField(),
@@ -314,6 +337,10 @@ class ImageMetaProps(base.NovaObject):
         # Generic property to specify the pointer model type.
         'hw_pointer_model': fields.PointerModelField(),
 
+        # boolean 'true' or 'false' to enable virtual performance
+        # monitoring unit (vPMU).
+        'hw_pmu': fields.FlexibleBooleanField(),
+
         # boolean 'yes' or 'no' to enable QEMU guest agent
         'hw_qemu_guest_agent': fields.FlexibleBooleanField(),
 
@@ -325,6 +352,9 @@ class ImageMetaProps(base.NovaObject):
 
         # name of the RNG device type eg virtio
         'hw_rng_model': fields.RNGModelField(),
+
+        # boolean 'true' or 'false' to enable HPET
+        'hw_time_hpet': fields.FlexibleBooleanField(),
 
         # number of serial ports to create
         'hw_serial_port_count': fields.IntegerField(),
@@ -564,8 +594,8 @@ class ImageMetaProps(base.NovaObject):
 
     def _set_attr_from_trait_names(self, image_props):
         for trait in [six.text_type(k[6:]) for k, v in image_props.items()
-                      if six.text_type(k).startswith("trait:")
-                      and six.text_type(v) == six.text_type('required')]:
+                      if six.text_type(k).startswith("trait:") and
+                      six.text_type(v) == six.text_type('required')]:
             if 'traits_required' not in self:
                 self.traits_required = []
             self.traits_required.append(trait)

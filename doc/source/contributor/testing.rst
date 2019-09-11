@@ -79,13 +79,22 @@ The correct level of unit test coverage is very subjective, and as such we are
 not aiming for a particular percentage of coverage, rather we are aiming for
 good coverage.
 Generally, every code change should have a related unit test:
-https://github.com/openstack/nova/blob/master/HACKING.rst#creating-unit-tests
+https://opendev.org/openstack/nova/src/branch/master/HACKING.rst#creating-unit-tests
 
 Integration tests
 -----------------
 
 Today, our integration tests involve running the Tempest test suite on a
-variety of Nova deployment scenarios.
+variety of Nova deployment scenarios. The integration job setup is defined
+in the ``.zuul.yaml`` file in the root of the nova repository. Jobs are
+restricted by queue:
+
+* ``check``: jobs in this queue automatically run on all proposed changes even
+  with non-voting jobs
+* ``gate``: jobs in this queue automatically run on all approved changes
+  (voting jobs only)
+* ``experimental``: jobs in this queue are non-voting and run on-demand by
+  leaving a review comment on the change of "check experimental"
 
 In addition, we have third parties running the tests on their preferred Nova
 deployment scenario.
@@ -107,4 +116,4 @@ Interoperability tests
 
 The DefCore committee maintains a list that contains a subset of Tempest tests.
 These are used to verify if a particular Nova deployment's API responds as
-expected. For more details, see: https://github.com/openstack/defcore
+expected. For more details, see: https://opendev.org/openstack/interop

@@ -14,11 +14,11 @@ import time
 
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import fake_network
 import nova.tests.unit.image.fake
 from nova.tests.unit import policy_fixture
-from nova.virt import fake
 
 
 class TestLiveMigrateOneOfConcurrentlyCreatedInstances(
@@ -46,7 +46,7 @@ class TestLiveMigrateOneOfConcurrentlyCreatedInstances(
 
         self.useFixture(policy_fixture.RealPolicyFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -60,17 +60,7 @@ class TestLiveMigrateOneOfConcurrentlyCreatedInstances(
         self.start_service('conductor')
         self.start_service('scheduler')
 
-        # set_nodes() is needed to have each compute service return a
-        # different nodename, so we get two hosts in the list of candidates
-        # for scheduling. Otherwise both hosts will have the same default
-        # nodename "fake-mini". The host passed to start_service controls the
-        # "host" attribute and set_nodes() sets the "nodename" attribute.
-        # We set_nodes() to make host and nodename the same for each compute.
-        fake.set_nodes(['host1'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host1')
-        fake.set_nodes(['host2'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host2')
 
         fake_network.set_stub_network_methods(self)

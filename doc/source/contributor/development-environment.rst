@@ -71,7 +71,7 @@ Getting the code
 
 Grab the code from git::
 
-    git clone https://git.openstack.org/openstack/nova
+    git clone https://opendev.org/openstack/nova
     cd nova
 
 
@@ -105,7 +105,7 @@ On Fedora-based distributions (e.g., Fedora/RHEL/CentOS/Scientific Linux)::
   tox -e bindep
   sudo yum install <indicated missing package names>
 
-On openSUSE-based distributions (SLES 12, openSUSE Leap 42.1 or Tumbleweed)::
+On openSUSE-based distributions (SLES, openSUSE Leap / Tumbleweed)::
 
   sudo zypper in python-pip
   sudo pip install tox
@@ -129,6 +129,12 @@ or Mac OS X 10.7 (OpenSSL 0.9.8r) or Mac OS X  10.10.3 (OpenSSL 0.9.8zc) works
 fine with nova. OpenSSL versions from brew like OpenSSL 1.0.1k work fine
 as well.
 
+Brew is very useful for installing dependencies. As a minimum for running tests,
+install the following::
+
+    brew install python3 postgres
+    python3 -mpip install tox
+
 
 Building the Documentation
 ==========================
@@ -151,7 +157,7 @@ Running unit tests
 
 See `Running Python Unit Tests`_.
 
-.. _`Running Python Unit Tests`: http://docs.openstack.org/infra/manual/python.html#running-python-unit-tests
+.. _`Running Python Unit Tests`: https://docs.openstack.org/project-team-guide/project-setup/python.html#running-python-unit-tests
 
 Note that some unit and functional tests use a database. See the file
 ``tools/test-setup.sh`` on how the databases are set up in the
@@ -178,11 +184,8 @@ Using fake computes for tests
 
 The number of instances supported by fake computes is not limited by physical
 constraints. It allows you to perform stress tests on a deployment with few
-resources (typically a laptop). But you must avoid using scheduler filters
-limiting the number of instances per compute (like RamFilter, DiskFilter,
-AggregateCoreFilter), otherwise they will limit the number of instances per
-compute.
-
+resources (typically a laptop). Take care to avoid using scheduler filters
+that will limit the number of instances per compute, such as ``AggregateCoreFilter``.
 
 Fake computes can also be used in multi hypervisor-type deployments in order to
 take advantage of fake and "real" computes during tests:

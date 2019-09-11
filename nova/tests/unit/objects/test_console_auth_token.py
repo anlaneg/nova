@@ -19,6 +19,7 @@ import mock
 from oslo_db.exception import DBDuplicateEntry
 from oslo_utils.fixture import uuidsentinel
 from oslo_utils import timeutils
+import six.moves.urllib.parse as urlparse
 
 from nova import exception
 from nova.objects import console_auth_token as token_obj
@@ -70,9 +71,9 @@ class _TestConsoleAuthToken(object):
         self.compare_obj(obj, expected)
 
         url = obj.access_url
-        expected_url = '%s?token=%s' % (
-            fakes.fake_token_dict['access_url_base'],
-            fakes.fake_token)
+        path = urlparse.urlencode({'path': '?token=%s' % fakes.fake_token})
+        expected_url = '%s?%s' % (
+            fakes.fake_token_dict['access_url_base'], path)
         self.assertEqual(expected_url, url)
 
     @mock.patch('nova.db.api.console_auth_token_create')
@@ -146,6 +147,11 @@ class _TestConsoleAuthToken(object):
             self.context, uuidsentinel.instance)
         mock_destroy.assert_called_once_with(
             self.context, uuidsentinel.instance)
+
+    @mock.patch('nova.db.api.console_auth_token_destroy_expired')
+    def test_clean_expired_console_auths(self, mock_destroy):
+        token_obj.ConsoleAuthToken.clean_expired_console_auths(self.context)
+        mock_destroy.assert_called_once_with(self.context)
 
     @mock.patch('nova.db.api.console_auth_token_destroy_expired_by_host')
     def test_clean_expired_console_auths_for_host(self, mock_destroy):

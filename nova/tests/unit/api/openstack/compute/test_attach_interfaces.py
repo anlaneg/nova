@@ -14,6 +14,7 @@
 #    under the License.
 
 import mock
+import six
 from webob import exc
 
 from nova.api.openstack import common
@@ -308,6 +309,20 @@ class InterfaceAttachTestsV21(test.NoDBTestCase):
                           self.attachments.create, self.req, FAKE_UUID1,
                           body=body)
 
+    def test_attach_interface_port_limit_exceeded(self):
+        """Tests the scenario where nova-compute attempts to create a port to
+        attach but the tenant port quota is exceeded and PortLimitExceeded
+        is raised from the neutron API code which results in a 403 response.
+        """
+        with mock.patch.object(self.attachments.compute_api,
+                               'attach_interface',
+                               side_effect=exception.PortLimitExceeded):
+            body = {'interfaceAttachment': {}}
+            ex = self.assertRaises(
+                exc.HTTPForbidden, self.attachments.create,
+                self.req, FAKE_UUID1, body=body)
+        self.assertIn('Maximum number of ports exceeded', six.text_type(ex))
+
     def test_detach_interface_with_invalid_state(self):
         def fake_detach_interface_invalid_state(*args, **kwargs):
             raise exception.InstanceInvalidState(
@@ -357,7 +372,8 @@ class InterfaceAttachTestsV21(test.NoDBTestCase):
         attach_mock.assert_called_once_with(ctxt, fake_instance, None,
                                             None, None, tag=None)
         get_mock.assert_called_once_with(ctxt, FAKE_UUID1,
-                                         expected_attrs=None)
+                                         expected_attrs=None,
+                                         cell_down_support=False)
 
     @mock.patch.object(compute_api.API, 'get')
     @mock.patch.object(compute_api.API, 'attach_interface')
@@ -376,7 +392,8 @@ class InterfaceAttachTestsV21(test.NoDBTestCase):
         attach_mock.assert_called_once_with(ctxt, fake_instance, None,
                                             None, None, tag=None)
         get_mock.assert_called_once_with(ctxt, FAKE_UUID1,
-                                         expected_attrs=None)
+                                         expected_attrs=None,
+                                         cell_down_support=False)
 
     @mock.patch.object(compute_api.API, 'get')
     @mock.patch.object(compute_api.API, 'attach_interface')
@@ -396,7 +413,8 @@ class InterfaceAttachTestsV21(test.NoDBTestCase):
         attach_mock.assert_called_once_with(ctxt, fake_instance, None,
                                             None, None, tag=None)
         get_mock.assert_called_once_with(ctxt, FAKE_UUID1,
-                                         expected_attrs=None)
+                                         expected_attrs=None,
+                                         cell_down_support=False)
 
     @mock.patch.object(compute_api.API, 'get')
     @mock.patch.object(compute_api.API, 'attach_interface')
@@ -412,7 +430,8 @@ class InterfaceAttachTestsV21(test.NoDBTestCase):
         attach_mock.assert_called_once_with(ctxt, fake_instance, None,
                                             None, None, tag=None)
         get_mock.assert_called_once_with(ctxt, FAKE_UUID1,
-                                         expected_attrs=None)
+                                         expected_attrs=None,
+                                         cell_down_support=False)
 
     @mock.patch.object(compute_api.API, 'get')
     @mock.patch.object(compute_api.API, 'attach_interface')
@@ -431,7 +450,8 @@ class InterfaceAttachTestsV21(test.NoDBTestCase):
         attach_mock.assert_called_once_with(ctxt, fake_instance, None,
                                             None, None, tag=None)
         get_mock.assert_called_once_with(ctxt, FAKE_UUID1,
-                                         expected_attrs=None)
+                                         expected_attrs=None,
+                                         cell_down_support=False)
 
     @mock.patch.object(compute_api.API, 'get')
     @mock.patch.object(compute_api.API, 'attach_interface')
@@ -448,7 +468,8 @@ class InterfaceAttachTestsV21(test.NoDBTestCase):
         attach_mock.assert_called_once_with(ctxt, fake_instance, None,
                                             None, None, tag=None)
         get_mock.assert_called_once_with(ctxt, FAKE_UUID1,
-                                         expected_attrs=None)
+                                         expected_attrs=None,
+                                         cell_down_support=False)
 
     def _test_attach_interface_with_invalid_parameter(self, param):
         self.stub_out('nova.compute.api.API.attach_interface',
@@ -505,6 +526,48 @@ class InterfaceAttachTestsV249(test.NoDBTestCase):
                                         'tag': 'foo'}}
         with mock.patch.object(self.attachments, 'show'):
             self.attachments.create(self.req, FAKE_UUID1, body=body)
+
+
+class InterfaceAttachTestsV270(test.NoDBTestCase):
+    """os-interface API tests for microversion 2.70"""
+    def setUp(self):
+        super(InterfaceAttachTestsV270, self).setUp()
+        self.attachments = (
+            attach_interfaces_v21.InterfaceAttachmentController())
+        self.req = fakes.HTTPRequest.blank('', version='2.70')
+        self.stub_out('nova.compute.api.API.get', fake_get_instance)
+
+    @mock.patch('nova.objects.VirtualInterface.get_by_uuid', return_value=None)
+    def test_show_interface_no_vif(self, mock_get_by_uuid):
+        """Tests GET /servers/{server_id}/os-interface/{id} where there is no
+        corresponding VirtualInterface database record for the attached port.
+        """
+        with mock.patch.object(self.attachments.network_api, 'show_port',
+                               fake_show_port):
+            attachment = self.attachments.show(
+                self.req, FAKE_UUID1, FAKE_PORT_ID1)['interfaceAttachment']
+        self.assertIn('tag', attachment)
+        self.assertIsNone(attachment['tag'])
+        ctxt = self.req.environ['nova.context']
+        mock_get_by_uuid.assert_called_once_with(ctxt, FAKE_PORT_ID1)
+
+    @mock.patch('nova.objects.VirtualInterfaceList.get_by_instance_uuid',
+                return_value=objects.VirtualInterfaceList())
+    def test_list_interfaces_no_vifs(self, mock_get_by_instance_uuid):
+        """Tests GET /servers/{server_id}/os-interface where there is no
+        corresponding VirtualInterface database record for the attached ports.
+        """
+        with mock.patch.object(self.attachments.network_api, 'list_ports',
+                               return_value={'ports': ports}) as list_ports:
+            attachments = self.attachments.index(
+                self.req, FAKE_UUID1)['interfaceAttachments']
+        for attachment in attachments:
+            self.assertIn('tag', attachment)
+            self.assertIsNone(attachment['tag'])
+        ctxt = self.req.environ['nova.context']
+        list_ports.assert_called_once_with(ctxt, device_id=FAKE_UUID1)
+        mock_get_by_instance_uuid.assert_called_once_with(
+            self.req.environ['nova.context'], FAKE_UUID1)
 
 
 class AttachInterfacesPolicyEnforcementv21(test.NoDBTestCase):

@@ -14,12 +14,17 @@
 import copy
 from keystoneauth1 import exceptions as kse
 import mock
+import os_resource_classes as orc
+from oslo_config import cfg
+from oslo_config import fixture as config_fixture
 from oslo_utils.fixture import uuidsentinel as uuids
 import pkg_resources
+from placement import direct
+from placement.tests.functional.fixtures import placement
 
-from nova.api.openstack.placement import direct
 from nova.cmd import status
 from nova.compute import provider_tree
+from nova.compute import utils as compute_utils
 from nova import conf
 from nova import context
 # TODO(cdent): This points to the nova, not placement, exception for
@@ -28,7 +33,6 @@ from nova import context
 # and is not testing the placement service itself.
 from nova import exception
 from nova import objects
-from nova import rc_fields as fields
 from nova.scheduler.client import report
 from nova.scheduler import utils
 from nova import test
@@ -82,6 +86,17 @@ class VersionCheckingReportClient(report.SchedulerReportClient):
 
 class SchedulerReportClientTestBase(test.TestCase):
 
+    def setUp(self):
+        super(SchedulerReportClientTestBase, self).setUp()
+        # Because these tests use PlacementDirect we need to manage
+        # the database and other config ourselves.
+        config = cfg.ConfigOpts()
+        placement_conf = self.useFixture(config_fixture.Config(config))
+        self.useFixture(
+            placement.PlacementFixture(conf_fixture=placement_conf, db=True,
+                                       use_intercept=False))
+        self.placement_conf = placement_conf.conf
+
     def _interceptor(self, app=None, latest_microversion=True):
         """Set up an intercepted placement API to test against.
 
@@ -110,7 +125,7 @@ class SchedulerReportClientTestBase(test.TestCase):
                 return client
 
         interceptor = ReportClientInterceptor(
-            CONF, latest_microversion=latest_microversion)
+            self.placement_conf, latest_microversion=latest_microversion)
         if app:
             interceptor.app = app
         return interceptor
@@ -167,14 +182,14 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
         # TODO(cdent): We should probably also have a test that
         # tests that when allocation or inventory errors happen, we
         # are resilient.
-        res_class = fields.ResourceClass.VCPU
+        res_class = orc.VCPU
         with self._interceptor():
             # When we start out there are no resource providers.
             rp = self.client._get_resource_provider(self.context,
                                                     self.compute_uuid)
             self.assertIsNone(rp)
-            rps = self.client._get_providers_in_tree(self.context,
-                                                     self.compute_uuid)
+            rps = self.client.get_providers_in_tree(self.context,
+                                                    self.compute_uuid)
             self.assertEqual([], rps)
             # But get_provider_tree_and_ensure_root creates one (via
             # _ensure_resource_provider)
@@ -183,14 +198,19 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             self.assertEqual([self.compute_uuid], ptree.get_provider_uuids())
 
             # Now let's update status for our compute node.
-            self.client.update_compute_node(self.context, self.compute_node)
+            self.client._ensure_resource_provider(
+                self.context, self.compute_uuid, name=self.compute_name)
+            self.client.set_inventory_for_provider(
+                self.context, self.compute_uuid,
+                compute_utils.compute_node_to_inventory_dict(
+                    self.compute_node))
 
             # So now we have a resource provider
             rp = self.client._get_resource_provider(self.context,
                                                     self.compute_uuid)
             self.assertIsNotNone(rp)
-            rps = self.client._get_providers_in_tree(self.context,
-                                                     self.compute_uuid)
+            rps = self.client.get_providers_in_tree(self.context,
+                                                    self.compute_uuid)
             self.assertEqual(1, len(rps))
 
             # We should also have empty sets of aggregate and trait
@@ -223,10 +243,16 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # Update allocations with our instance
             alloc_dict = utils.resources_from_flavor(self.instance,
                                                      self.instance.flavor)
+            payload = {
+                "allocations": {
+                    self.compute_uuid: {"resources": alloc_dict}
+                },
+                "project_id": self.instance.project_id,
+                "user_id": self.instance.user_id,
+                "consumer_generation": None
+            }
             self.client.put_allocations(
-                self.context, self.compute_uuid, self.instance_uuid,
-                alloc_dict, self.instance.project_id, self.instance.user_id,
-                None)
+                self.context, self.instance_uuid, payload)
 
             # Check that allocations were made
             resp = self.client.get('/allocations/%s' % self.instance_uuid)
@@ -252,12 +278,19 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             vcpu_data = usage_data[res_class]
             self.assertEqual(0, vcpu_data)
 
+            # Allocation bumped the generation, so refresh to get the latest
+            self.client._refresh_and_get_inventory(self.context,
+                                                   self.compute_uuid)
+
             # Trigger the reporting client deleting all inventory by setting
             # the compute node's CPU, RAM and disk amounts to 0.
             self.compute_node.vcpus = 0
             self.compute_node.memory_mb = 0
             self.compute_node.local_gb = 0
-            self.client.update_compute_node(self.context, self.compute_node)
+            self.client.set_inventory_for_provider(
+                self.context, self.compute_uuid,
+                compute_utils.compute_node_to_inventory_dict(
+                    self.compute_node))
 
             # Check there's no more inventory records
             resp = self.client.get(inventory_url)
@@ -271,80 +304,6 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             self.assertEqual([self.compute_uuid], ptree.get_provider_uuids())
             # But the inventory is gone
             self.assertFalse(ptree.has_inventory(self.compute_uuid))
-
-            # Try setting some invalid inventory and make sure the report
-            # client raises the expected error.
-            inv_data = {
-                'CUSTOM_BOGU$_CLA$$': {
-                    'total': 100,
-                    'reserved': 0,
-                    'min_unit': 1,
-                    'max_unit': 100,
-                    'step_size': 1,
-                    'allocation_ratio': 1.0,
-                },
-            }
-            self.assertRaises(exception.InvalidResourceClass,
-                              self.client.set_inventory_for_provider,
-                              self.context, self.compute_uuid,
-                              self.compute_name, inv_data)
-
-    @mock.patch('nova.compute.utils.is_volume_backed_instance',
-                new=mock.Mock(return_value=False))
-    @mock.patch('nova.objects.compute_node.ComputeNode.save', new=mock.Mock())
-    def test_ensure_standard_resource_class(self):
-        """Test case for bug #1746615: If placement is running a newer version
-        of code than compute, it may have new standard resource classes we
-        don't know about.  Make sure this scenario doesn't cause errors in
-        set_inventory_for_provider.
-        """
-        inv = {
-            'VCPU': {
-                'total': 10,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 2,
-                'step_size': 1,
-                'allocation_ratio': 10.0,
-            },
-            'MEMORY_MB': {
-                'total': 1048576,
-                'reserved': 2048,
-                'min_unit': 1024,
-                'max_unit': 131072,
-                'step_size': 1024,
-                'allocation_ratio': 1.0,
-            },
-            'DISK_GB': {
-                'total': 100,
-                'reserved': 1,
-                'min_unit': 1,
-                'max_unit': 10,
-                'step_size': 2,
-                'allocation_ratio': 10.0,
-            },
-            # A standard resource class known by placement, but not locally
-            'PCI_DEVICE': {
-                'total': 4,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 4,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            'CUSTOM_BANDWIDTH': {
-                'total': 1250000,
-                'reserved': 10000,
-                'min_unit': 5000,
-                'max_unit': 250000,
-                'step_size': 5000,
-                'allocation_ratio': 8.0,
-            },
-        }
-        with self._interceptor():
-            self.client.update_compute_node(self.context, self.compute_node)
-            self.client.set_inventory_for_provider(
-                self.context, self.compute_uuid, self.compute_name, inv)
 
     def test_global_request_id(self):
         global_request_id = 'req-%s' % uuids.global_request_id
@@ -372,7 +331,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                             global_request_id=global_request_id)
 
     def test_get_provider_tree_with_nested_and_aggregates(self):
-        """A more in-depth test of get_provider_tree_and_ensure_root with
+        r"""A more in-depth test of get_provider_tree_and_ensure_root with
         nested and sharing resource providers.
 
                ss1(DISK)    ss2(DISK)           ss3(DISK)
@@ -386,7 +345,12 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
         """
         with self._interceptor():
             # Register the compute node and its inventory
-            self.client.update_compute_node(self.context, self.compute_node)
+            self.client._ensure_resource_provider(
+                self.context, self.compute_uuid, name=self.compute_name)
+            self.client.set_inventory_for_provider(
+                self.context, self.compute_uuid,
+                compute_utils.compute_node_to_inventory_dict(
+                    self.compute_node))
             # The compute node is associated with two of the shared storages
             self.client.set_aggregates_for_provider(
                 self.context, self.compute_uuid,
@@ -396,9 +360,12 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             for x in (1, 2):
                 name = 'pf%d' % x
                 uuid = getattr(uuids, name)
+                self.client._ensure_resource_provider(
+                    self.context, uuid, name=name,
+                    parent_provider_uuid=self.compute_uuid)
                 self.client.set_inventory_for_provider(
-                    self.context, uuid, name, {
-                        fields.ResourceClass.SRIOV_NET_VF: {
+                    self.context, uuid, {
+                        orc.SRIOV_NET_VF: {
                             'total': 24 * x,
                             'reserved': x,
                             'min_unit': 1,
@@ -414,7 +381,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                             'step_size': 5000,
                             'allocation_ratio': 1.0,
                         },
-                    }, parent_provider_uuid=self.compute_uuid)
+                    })
                 # They're associated with an IP address aggregate
                 self.client.set_aggregates_for_provider(self.context, uuid,
                                                         [uuids.agg_ip])
@@ -426,9 +393,11 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             for x in (1, 2, 3):
                 name = 'ss%d' % x
                 uuid = getattr(uuids, name)
+                self.client._ensure_resource_provider(self.context, uuid,
+                                                      name=name)
                 self.client.set_inventory_for_provider(
-                    self.context, uuid, name, {
-                        fields.ResourceClass.DISK_GB: {
+                    self.context, uuid, {
+                        orc.DISK_GB: {
                             'total': 100 * x,
                             'reserved': x,
                             'min_unit': 1,
@@ -447,9 +416,11 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                                                         [agg])
 
             # Register a shared IP address provider with IP address inventory
+            self.client._ensure_resource_provider(self.context, uuids.sip,
+                                                  name='sip')
             self.client.set_inventory_for_provider(
-                self.context, uuids.sip, 'sip', {
-                    fields.ResourceClass.IPV4_ADDRESS: {
+                self.context, uuids.sip, {
+                    orc.IPV4_ADDRESS: {
                         'total': 128,
                         'reserved': 0,
                         'min_unit': 1,
@@ -467,8 +438,10 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                                                     [uuids.agg_ip])
 
             # Register a shared network bandwidth provider
+            self.client._ensure_resource_provider(self.context, uuids.sbw,
+                                                  name='sbw')
             self.client.set_inventory_for_provider(
-                self.context, uuids.sbw, 'sbw', {
+                self.context, uuids.sbw, {
                     'CUSTOM_BANDWIDTH': {
                         'total': 1250000,
                         'reserved': 10000,
@@ -489,7 +462,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             prov_tree = self.client.get_provider_tree_and_ensure_root(
                 self.context, self.compute_uuid)
 
-            # All providers show up because we used set_inventory_for_provider
+            # All providers show up because we used _ensure_resource_provider
             self.assertEqual(set([self.compute_uuid, uuids.ss1, uuids.ss2,
                                   uuids.pf1, uuids.pf2, uuids.sip, uuids.ss3,
                                   uuids.sbw]),
@@ -518,7 +491,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
 
             # Make sure we can set reserved value equal to total
             inv = {
-                fields.ResourceClass.SRIOV_NET_VF: {
+                orc.SRIOV_NET_VF: {
                     'total': 24,
                     'reserved': 24,
                     'min_unit': 1,
@@ -527,20 +500,19 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                     'allocation_ratio': 1.0,
                 },
             }
-            self.client._set_inventory_for_provider(
+            self.client.set_inventory_for_provider(
                 self.context, uuids.cn, inv)
             self.assertEqual(
                 inv,
                 self.client._get_inventory(
                     self.context, uuids.cn)['inventories'])
 
-    def test__set_inventory_for_provider(self):
-        """Tests for SchedulerReportClient._set_inventory_for_provider, NOT
-        set_inventory_for_provider.
+    def test_set_inventory_for_provider(self):
+        """Tests for SchedulerReportClient.set_inventory_for_provider.
         """
         with self._interceptor():
             inv = {
-                fields.ResourceClass.SRIOV_NET_VF: {
+                orc.SRIOV_NET_VF: {
                     'total': 24,
                     'reserved': 1,
                     'min_unit': 1,
@@ -552,7 +524,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # Provider doesn't exist in our cache
             self.assertRaises(
                 ValueError,
-                self.client._set_inventory_for_provider,
+                self.client.set_inventory_for_provider,
                 self.context, uuids.cn, inv)
             self.assertIsNone(self.client._get_inventory(
                 self.context, uuids.cn))
@@ -566,7 +538,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                     self.context, uuids.cn)['inventories'])
 
             # Now set the inventory
-            self.client._set_inventory_for_provider(
+            self.client.set_inventory_for_provider(
                 self.context, uuids.cn, inv)
             self.assertEqual(
                 inv,
@@ -575,7 +547,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
 
             # Make sure we can change it
             inv = {
-                fields.ResourceClass.SRIOV_NET_VF: {
+                orc.SRIOV_NET_VF: {
                     'total': 24,
                     'reserved': 1,
                     'min_unit': 1,
@@ -583,7 +555,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                     'step_size': 1,
                     'allocation_ratio': 1.0,
                 },
-                fields.ResourceClass.IPV4_ADDRESS: {
+                orc.IPV4_ADDRESS: {
                     'total': 128,
                     'reserved': 0,
                     'min_unit': 1,
@@ -592,7 +564,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                     'allocation_ratio': 1.0,
                 },
             }
-            self.client._set_inventory_for_provider(
+            self.client.set_inventory_for_provider(
                 self.context, uuids.cn, inv)
             self.assertEqual(
                 inv,
@@ -603,7 +575,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             self.assertFalse(
                 self.client.get('/resource_classes/CUSTOM_BANDWIDTH'))
             inv = {
-                fields.ResourceClass.SRIOV_NET_VF: {
+                orc.SRIOV_NET_VF: {
                     'total': 24,
                     'reserved': 1,
                     'min_unit': 1,
@@ -611,7 +583,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                     'step_size': 1,
                     'allocation_ratio': 1.0,
                 },
-                fields.ResourceClass.IPV4_ADDRESS: {
+                orc.IPV4_ADDRESS: {
                     'total': 128,
                     'reserved': 0,
                     'min_unit': 1,
@@ -628,7 +600,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                     'allocation_ratio': 8.0,
                 },
             }
-            self.client._set_inventory_for_provider(
+            self.client.set_inventory_for_provider(
                 self.context, uuids.cn, inv)
             self.assertEqual(
                 inv,
@@ -650,7 +622,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             }
             self.assertRaises(
                 exception.InvalidResourceClass,
-                self.client._set_inventory_for_provider,
+                self.client.set_inventory_for_provider,
                 self.context, uuids.cn, bogus_inv)
             self.assertFalse(
                 self.client.get('/resource_classes/BOGUS'))
@@ -661,7 +633,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
 
             # Create a generation conflict by doing an "out of band" update
             oob_inv = {
-                fields.ResourceClass.IPV4_ADDRESS: {
+                orc.IPV4_ADDRESS: {
                     'total': 128,
                     'reserved': 0,
                     'min_unit': 1,
@@ -683,7 +655,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
 
             # Now try to update again.
             inv = {
-                fields.ResourceClass.SRIOV_NET_VF: {
+                orc.SRIOV_NET_VF: {
                     'total': 24,
                     'reserved': 1,
                     'min_unit': 1,
@@ -703,7 +675,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # Cached generation is off, so this will bounce with a conflict.
             self.assertRaises(
                 exception.ResourceProviderUpdateConflict,
-                self.client._set_inventory_for_provider,
+                self.client.set_inventory_for_provider,
                 self.context, uuids.cn, inv)
             # Inventory still corresponds to the out-of-band update
             self.assertEqual(
@@ -713,19 +685,24 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # Force refresh to get the latest generation
             self.client._refresh_and_get_inventory(self.context, uuids.cn)
             # Now the update should work
-            self.client._set_inventory_for_provider(
+            self.client.set_inventory_for_provider(
                 self.context, uuids.cn, inv)
             self.assertEqual(
                 inv,
                 self.client._get_inventory(
                     self.context, uuids.cn)['inventories'])
-
+            payload = {
+                "allocations": {
+                    uuids.cn: {"resources": {orc.SRIOV_NET_VF: 1}}
+                },
+                "project_id": uuids.proj,
+                "user_id": uuids.user,
+                "consumer_generation": None
+            }
             # Now set up an InventoryInUse case by creating a VF allocation...
             self.assertTrue(
                 self.client.put_allocations(
-                    self.context, uuids.cn, uuids.consumer,
-                    {fields.ResourceClass.SRIOV_NET_VF: 1},
-                    uuids.proj, uuids.user, None))
+                    self.context, uuids.consumer, payload))
             # ...and trying to delete the provider's VF inventory
             bad_inv = {
                 'CUSTOM_BANDWIDTH': {
@@ -739,10 +716,11 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             }
             # Allocation bumped the generation, so refresh to get the latest
             self.client._refresh_and_get_inventory(self.context, uuids.cn)
-            self.assertRaises(
-                exception.InventoryInUse,
-                self.client._set_inventory_for_provider,
-                self.context, uuids.cn, bad_inv)
+            msgre = (".*update conflict: Inventory for 'SRIOV_NET_VF' on "
+                     "resource provider '%s' in use..*" % uuids.cn)
+            with self.assertRaisesRegex(exception.InventoryInUse, msgre):
+                self.client.set_inventory_for_provider(self.context, uuids.cn,
+                                                       bad_inv)
             self.assertEqual(
                 inv,
                 self.client._get_inventory(
@@ -750,10 +728,9 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
 
             # Same result if we try to clear all the inventory
             bad_inv = {}
-            self.assertRaises(
-                exception.InventoryInUse,
-                self.client._set_inventory_for_provider,
-                self.context, uuids.cn, bad_inv)
+            with self.assertRaisesRegex(exception.InventoryInUse, msgre):
+                self.client.set_inventory_for_provider(self.context, uuids.cn,
+                                                       bad_inv)
             self.assertEqual(
                 inv,
                 self.client._get_inventory(
@@ -764,7 +741,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # Force refresh to get the latest generation
             self.client._refresh_and_get_inventory(self.context, uuids.cn)
             inv = {}
-            self.client._set_inventory_for_provider(
+            self.client.set_inventory_for_provider(
                 self.context, uuids.cn, inv)
             self.assertEqual(
                 inv,
@@ -816,7 +793,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             new_tree.update_traits(uuids.gc1_1, ['CUSTOM_PHYSNET_2'])
             new_tree.new_root('ssp', uuids.ssp)
             new_tree.update_inventory('ssp', {
-                fields.ResourceClass.DISK_GB: {
+                orc.DISK_GB: {
                     'total': 100,
                     'reserved': 1,
                     'min_unit': 1,
@@ -831,7 +808,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # Swizzle properties
             # Give the root some everything
             new_tree.update_inventory(uuids.root, {
-                fields.ResourceClass.VCPU: {
+                orc.VCPU: {
                     'total': 10,
                     'reserved': 0,
                     'min_unit': 1,
@@ -839,7 +816,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                     'step_size': 1,
                     'allocation_ratio': 10.0,
                 },
-                fields.ResourceClass.MEMORY_MB: {
+                orc.MEMORY_MB: {
                     'total': 1048576,
                     'reserved': 2048,
                     'min_unit': 1024,
@@ -855,7 +832,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             new_tree.update_aggregates(uuids.child1, [])
             # Grandchild gets some inventory
             ipv4_inv = {
-                fields.ResourceClass.IPV4_ADDRESS: {
+                orc.IPV4_ADDRESS: {
                     'total': 128,
                     'reserved': 0,
                     'min_unit': 1,
@@ -887,12 +864,18 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             self.assertRaises(
                 exception.ResourceProviderSyncFailed,
                 self.client.update_from_provider_tree, self.context, new_tree)
-            # The inventory update didn't get synced...
+            # The inventory update didn't get synced.
             self.assertIsNone(self.client._get_inventory(
                 self.context, uuids.grandchild1_1))
-            # ...and the grandchild was removed from the cache
-            self.assertFalse(
-                self.client._provider_tree.exists('grandchild1_1'))
+            # We invalidated the cache for the entire tree around grandchild1_1
+            # but did not invalidate the other root (the SSP)
+            self.assertEqual([uuids.ssp],
+                             self.client._provider_tree.get_provider_uuids())
+            # This is a little under-the-hood-looking, but make sure we cleared
+            # the association refresh timers for everything in the grandchild's
+            # tree
+            self.assertEqual(set([uuids.ssp]),
+                             set(self.client._association_refresh_time))
 
             # Fix that problem so we can try the next one
             new_tree.update_inventory(
@@ -916,7 +899,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                 self.client.update_from_provider_tree, self.context, new_tree)
             # Placement didn't get updated
             self.assertEqual(set(['HW_CPU_X86_AVX', 'HW_CPU_X86_AVX2']),
-                             self.client._get_provider_traits(
+                             self.client.get_provider_traits(
                                  self.context, uuids.root).traits)
             # ...and the root was removed from the cache
             self.assertFalse(self.client._provider_tree.exists(uuids.root))
@@ -944,7 +927,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                                                'STORAGE_DISK_SSD',
                                                'CUSTOM_FAST'])
             self.assertRaises(
-                exception.ResourceProviderSyncFailed,
+                exception.ResourceProviderUpdateConflict,
                 self.client.update_from_provider_tree, self.context, new_tree)
             # ...but the next iteration will refresh the cache with the latest
             # generation and so the next attempt should succeed.
@@ -1007,7 +990,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # Now associate the compute **host name** with an aggregate and
             # ensure the aggregate association is saved properly
             self.client.aggregate_add_host(
-                self.context, agg_uuid, self.compute_name)
+                self.context, agg_uuid, host_name=self.compute_name)
 
             # Check that the ProviderTree cache hasn't been modified (since
             # the aggregate_add_host() method is only called from nova-api and
@@ -1036,12 +1019,15 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
 
     def test_alloc_cands_smoke(self):
         """Simple call to get_allocation_candidates for version checking."""
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0)
+        req_spec = objects.RequestSpec(flavor=flavor, is_bfv=False)
         with self._interceptor():
             self.client.get_allocation_candidates(
-                self.context, utils.ResourceRequest())
+                self.context, utils.ResourceRequest(req_spec))
 
     def _set_up_provider_tree(self):
-        """Create two compute nodes in placement ("this" one, and another one)
+        r"""Create two compute nodes in placement ("this" one, and another one)
         and a storage provider sharing with both.
 
              +-----------------------+      +------------------------+
@@ -1107,29 +1093,12 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
         )
 
         # A sharing provider that's not part of the compute node's tree.
-        # We avoid the report client's convenience methods to get bonus
-        # coverage of the subsequent update_from_provider_tree pulling it
-        # into the cache for us.
-        resp = self.client.post(
-            '/resource_providers',
-            {'uuid': uuids.ssp, 'name': 'ssp'}, version='1.20')
-        inv = {'DISK_GB': {'total': 500}}
-        resp = self.client.put(
-            '/resource_providers/%s/inventories' % uuids.ssp,
-            {'inventories': inv,
-             'resource_provider_generation': resp.json()['generation']})
+        ptree.new_root('ssp', uuids.ssp)
+        inv = dict(DISK_GB={'total': 500})
+        ptree.update_inventory(uuids.ssp, inv)
         # Part of the shared storage aggregate
-        resp = self.client.put(
-            '/resource_providers/%s/aggregates' % uuids.ssp,
-            {'aggregates': [uuids.agg1],
-             'resource_provider_generation':
-                 resp.json()['resource_provider_generation']},
-            version='1.19')
-        self.client.put(
-            '/resource_providers/%s/traits' % uuids.ssp,
-            {'traits': ['MISC_SHARES_VIA_AGGREGATE'],
-             'resource_provider_generation':
-                 resp.json()['resource_provider_generation']})
+        ptree.update_aggregates(uuids.ssp, [uuids.agg1])
+        ptree.update_traits(uuids.ssp, ['MISC_SHARES_VIA_AGGREGATE'])
         ret[uuids.ssp] = dict(
             name='ssp',
             parent_uuid=None,
@@ -1179,13 +1148,20 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # care to check.
             for k, expected in pdict.items():
                 # For inventories, we're only validating totals
-                if k is 'inventory':
-                    self.assertEqual(set(expected), set(actual_data.inventory))
+                if k == 'inventory':
+                    self.assertEqual(
+                        set(expected), set(actual_data.inventory),
+                        "Mismatched inventory keys for provider %s" % uuid)
                     for rc, totaldict in expected.items():
-                        self.assertEqual(totaldict['total'],
-                                         actual_data.inventory[rc]['total'])
+                        self.assertEqual(
+                            totaldict['total'],
+                            actual_data.inventory[rc]['total'],
+                            "Mismatched inventory totals for provider %s" %
+                            uuid)
                 else:
-                    self.assertEqual(expected, getattr(actual_data, k))
+                    self.assertEqual(expected, getattr(actual_data, k),
+                                     "Mismatched %s for provider %s" %
+                                     (k, uuid))
 
     def _set_up_provider_tree_allocs(self):
         """Create some allocations on our compute (with sharing).
@@ -1216,8 +1192,10 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                 'user_id': uuids.user,
             },
         }
-        self.client.put('/allocations/' + uuids.cn_inst1, ret[uuids.cn_inst1])
-        self.client.put('/allocations/' + uuids.cn_inst2, ret[uuids.cn_inst2])
+        self.client.put('/allocations/' + uuids.cn_inst1, ret[uuids.cn_inst1],
+                        version='1.28')
+        self.client.put('/allocations/' + uuids.cn_inst2, ret[uuids.cn_inst2],
+                        version='1.28')
         # And on the other compute (with sharing)
         self.client.put(
             '/allocations/' + uuids.othercn_inst,
@@ -1228,7 +1206,8 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                 'consumer_generation': None,
                 'project_id': uuids.proj,
                 'user_id': uuids.user,
-            })
+            },
+            version='1.28')
 
         return ret
 
@@ -1294,6 +1273,14 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # in gabbits and via update_from_provider_tree.
             self._set_up_provider_tree()
             self._set_up_provider_tree_allocs()
+            # Updating allocations bumps generations for affected providers.
+            # In real life, the subsequent update_from_provider_tree will
+            # bounce 409, the cache will be cleared, and the operation will be
+            # retried. We don't care about any of that retry logic in the scope
+            # of this test case, so just clear the cache so
+            # get_provider_tree_and_ensure_root repopulates it and we avoid the
+            # conflict exception.
+            self.client.clear_provider_cache()
 
             ptree = self.client.get_provider_tree_and_ensure_root(
                 self.context, self.compute_uuid)
@@ -1336,6 +1323,14 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             exp_allocs = self._set_up_provider_tree_allocs()
             # Save a copy of this for later
             orig_exp_allocs = copy.deepcopy(exp_allocs)
+            # Updating allocations bumps generations for affected providers.
+            # In real life, the subsequent update_from_provider_tree will
+            # bounce 409, the cache will be cleared, and the operation will be
+            # retried. We don't care about any of that retry logic in the scope
+            # of this test case, so just clear the cache so
+            # get_provider_tree_and_ensure_root repopulates it and we avoid the
+            # conflict exception.
+            self.client.clear_provider_cache()
             # Another null reshape: no inv changes, no alloc changes
             ptree = self.client.get_provider_tree_and_ensure_root(
                 self.context, self.compute_uuid)

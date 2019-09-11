@@ -137,11 +137,6 @@ class HyperVDriverTestCase(test_base.HyperVBaseTestCase):
         self.driver.list_instances()
         self.driver._vmops.list_instances.assert_called_once_with()
 
-    def test_estimate_instance_overhead(self):
-        self.driver.estimate_instance_overhead(mock.sentinel.instance)
-        self.driver._vmops.estimate_instance_overhead.assert_called_once_with(
-            mock.sentinel.instance)
-
     def test_spawn(self):
         self.driver.spawn(
             mock.sentinel.context, mock.sentinel.instance,
@@ -424,8 +419,8 @@ class HyperVDriverTestCase(test_base.HyperVBaseTestCase):
     def test_finish_revert_migration(self):
         self.driver.finish_revert_migration(
             mock.sentinel.context, mock.sentinel.instance,
-            mock.sentinel.network_info, mock.sentinel.block_device_info,
-            mock.sentinel.power_on)
+            mock.sentinel.network_info, mock.sentinel.migration,
+            mock.sentinel.block_device_info, mock.sentinel.power_on)
 
         finish_revert_migr = self.driver._migrationops.finish_revert_migration
         finish_revert_migr.assert_called_once_with(
@@ -486,3 +481,17 @@ class HyperVDriverTestCase(test_base.HyperVBaseTestCase):
                                        mock.sentinel.all_instances)
         self.driver._imagecache.update.assert_called_once_with(
             mock.sentinel.context, mock.sentinel.all_instances)
+
+    @mock.patch.object(driver.HyperVDriver, '_get_allocation_ratios')
+    def test_update_provider_tree(self, mock_get_alloc_ratios):
+        mock_ptree = mock.Mock()
+        mock_inventory = mock_ptree.data.return_value.inventory
+
+        self.driver.update_provider_tree(
+            mock_ptree, mock.sentinel.nodename, mock.sentinel.allocations)
+
+        mock_get_alloc_ratios.assert_called_once_with(mock_inventory)
+        self.driver._hostops.update_provider_tree.assert_called_once_with(
+            mock_ptree, mock.sentinel.nodename,
+            mock_get_alloc_ratios.return_value,
+            mock.sentinel.allocations)

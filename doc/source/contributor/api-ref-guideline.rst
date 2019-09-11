@@ -2,15 +2,14 @@
 API reference guideline
 =======================
 
-The API reference should be updated when compute or placement APIs are modified
+The API reference should be updated when compute APIs are modified
 (microversion is bumped, etc.).
 This page describes the guideline for updating the API reference.
 
 API reference
 =============
 
-* `Compute API reference <https://developer.openstack.org/api-ref/compute/>`_
-* `Placement API reference <https://developer.openstack.org/api-ref/placement/>`_
+* `Compute API reference <https://docs.openstack.org/api-ref/compute/>`_
 
 The guideline to write the API reference
 ========================================
@@ -24,20 +23,19 @@ Compute API reference
 * Parameter definition: ``api-ref/source/parameters.yaml``
 * JSON request/response samples: ``doc/api_samples/*``
 
-Placement API reference
------------------------
-
-* API reference text: ``placement-api-ref/source/*.inc``
-* Parameter definition: ``placement-api-ref/source/parameters.yaml``
-* JSON request/response samples: ``placement-api-ref/source/samples/*``
-
 Structure of inc file
 ---------------------
 
 Each REST API is described in the text file (\*.inc).
 The structure of inc file is as follows:
 
-- Title
+- Title (Resource name)
+
+  - Introductory text and context
+
+    The introductory text and the context for the resource in question should
+    be added. This might include links to the API Concept guide, or building
+    other supporting documents to explain a concept (like versioning).
 
   - API Name
 
@@ -45,8 +43,9 @@ The structure of inc file is as follows:
 
       - URL
       - Description
-      - Normal status code
-      - Error status code
+
+        See the `Description`_ section for more details.
+      - Response codes
       - Request
 
         - Parameters
@@ -93,6 +92,159 @@ what is in the code. For instance, the title for the section on method
 "Get Rdp Console" should be "Get Rdp Console (os-getRDPConsole Action)"
 NOT "Get Rdp Console (Os-Getrdpconsole Action)"
 
+Description
+-----------
+
+The following items should be described in each API.
+Or links to the pages describing them should be added.
+
+* The purpose of the API(s)
+
+  - e.g. Lists, creates, shows details for, updates, and deletes servers.
+  - e.g. Creates a server.
+
+* Microversion
+
+  - Deprecated
+
+    - Warning
+    - Microversion to start deprecation
+    - Alternatives (superseded ways) and
+      their links (if document is available)
+
+  - Added
+
+    - Microversion in which the API has been added
+
+  - Changed behavior
+
+    - Microversion to change behavior
+    - Explanation of the behavior
+
+  - Changed HTTP response codes
+
+    - Microversion to change the response code
+    - Explanation of the response code
+
+* Warning if direct use is not recommended
+
+  - e.g. This is an admin level service API only designed to be used by other
+    OpenStack services. The point of this API is to coordinate between Nova
+    and Neutron, Nova and Cinder (and potentially future services) on
+    activities they both need to be involved in, such as network hotplugging.
+    Unless you are writing Neutron or Cinder code you should not be using this API.
+
+* Explanation about statuses of resource in question
+
+  - e.g. The server status.
+
+    - ``ACTIVE``. The server is active.
+
+* Supplementary explanation for parameters
+
+  - Examples of query parameters
+  - Parameters that are not specified at the same time
+  - Values that cannot be specified.
+
+    - e.g. A destination host is the same host.
+
+* Behavior
+
+  - Config options to change the behavior and the effect
+  - Effect to resource status
+
+    - Ephemeral disks, attached volumes, attached network ports and others
+    - Data loss or preserve contents
+
+  - Scheduler
+
+    - Whether the scheduler choose a destination host or not
+
+* Sort order of response results
+
+  - Describe sorting order of response results if the API implements the order
+    (e.g. The response is sorted by ``created_at`` and ``id``
+    in descending order by default)
+
+* Policy
+
+  - Default policy (the admin only, the admin or the owner)
+  - How to change the policy
+
+* Preconditions
+
+  - Server status
+  - Task state
+  - Policy for locked servers
+  - Quota
+  - Limited support
+
+    - e.g. Only qcow2 is supported
+
+  - Compute driver support
+
+    - If very few compute drivers support the operation, add a warning and
+      a link to the support matrix of virt driver.
+
+  - Cases that are not supported
+
+    - e.g. A volume-backed server
+
+* Postconditions
+
+  - If the operation is asynchronous,
+    it should be "Asynchronous postconditions".
+
+  - Describe what status/state resource in question becomes by the operation
+
+    - Server status
+    - Task state
+    - Path of output file
+
+* Troubleshooting
+
+  - e.g. If the server status remains ``BUILDING`` or shows another error status,
+    the request failed. Ensure you meet the preconditions then investigate
+    the compute node.
+
+* Related operations
+
+  - Operations to be paired
+
+    - e.g. Start and stop
+
+  - Subsequent operation
+
+    - e.g. "Confirm resize" after "Resize" operation
+
+* Performance
+
+  - e.g. The progress of this operation depends on the location of
+    the requested image, network I/O, host load, selected flavor, and other
+    factors.
+
+* Progress
+
+  - How to get progress of the operation if the operation is asynchronous.
+
+* Restrictions
+
+  - Range that ID is unique
+
+    - e.g. HostId is unique per account and is not globally unique.
+
+* How to avoid errors
+
+  - e.g. The server to get console log from should set
+    ``export LC_ALL=en_US.UTF-8`` in order to avoid incorrect unicode error.
+
+* Reference
+
+  - Links to the API Concept guide, or building other supporting documents to
+    explain a concept (like versioning).
+
+* Other notices
+
 Response codes
 ~~~~~~~~~~~~~~
 
@@ -121,6 +273,12 @@ The description of typical error response codes are as follows:
      - notImplemented(501)
    * - 503
      - serviceUnavailable(503)
+
+In addition, the following explanations should be described.
+
+- Conditions under which each normal response code is returned
+  (If there are multiple normal response codes.)
+- Conditions under which each error response code is returned
 
 Parameters
 ----------
@@ -196,6 +354,45 @@ If a parameter must be specified in the request or always appears
 in the response in the micoversion added or later,
 the parameter must be defined as required (``true``).
 
+Microversion
+~~~~~~~~~~~~
+
+If a parameter is available starting from a microversion,
+the microversion must be described by ``min_version``
+in the parameter file.
+However, if the minimum microversion is the same as a microversion
+that the API itself is added, it is not necessary to describe the microversion.
+
+For example::
+
+  aggregate_uuid:
+    description: |
+      The UUID of the host aggregate.
+    in: body
+    required: true
+    type: string
+    min_version: 2.41
+
+This example describes that ``aggregate_uuid`` is available starting
+from microversion 2.41.
+
+If a parameter is available up to a microversion,
+the microversion must be described by ``max_version``
+in the parameter file.
+
+For example::
+
+  security_group_rules:
+    description: |
+      The number of allowed rules for each security group.
+    in: body
+    required: false
+    type: integer
+    max_version: 2.35
+
+This example describes that ``security_group_rules`` is available up to
+microversion 2.35 (and has been removed since microversion 2.36).
+
 The order of parameters in the parameter file
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -213,17 +410,20 @@ The order of parameters in the parameter file has to be kept as follows:
 Example
 -------
 
-.. TODO::
+One or more examples should be provided for operations whose request and/or
+response contains a payload. The example should describe what the operation
+is attempting to do and provide a sample payload for the request and/or
+response as appropriate.
+Sample files should be created in the ``doc/api_samples`` directory and inlined
+by inclusion.
 
-  The guideline for request/response JSON bodies should be added.
+When an operation has no payload in the response, a suitable message should be
+included. For example::
 
-Body
-----
+  There is no body content for the response of a successful DELETE query.
 
-.. TODO::
-
-  The guideline for the introductory text and the context for the resource
-  in question should be added.
+Examples for multiple microversions should be included in ascending
+microversion order.
 
 Reference
 =========
@@ -231,3 +431,4 @@ Reference
 * `Verifying the Nova API Ref <https://wiki.openstack.org/wiki/NovaAPIRef>`_
 * `The description for Parameters whose values are null <http://lists.openstack.org/pipermail/openstack-dev/2017-January/109868.html>`_
 * `The definition of "Optional" parameter <http://lists.openstack.org/pipermail/openstack-dev/2017-July/119239.html>`_
+* `How to document your OpenStack API service <https://docs.openstack.org/doc-contrib-guide/api-guides.html#how-to-document-your-openstack-api-service>`_

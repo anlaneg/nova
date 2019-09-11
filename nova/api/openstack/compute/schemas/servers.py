@@ -136,7 +136,7 @@ _hints = {
         'build_near_host_ip': parameter_types.ip_address,
         'cidr': {
             'type': 'string',
-            'pattern': '^\/[0-9a-f.:]+$'
+            'pattern': '^/[0-9a-f.:]+$'
         },
     },
     # NOTE: As this Mail:
@@ -266,7 +266,7 @@ base_create_v232['properties']['server'][
 # to keep the above mentioned behavior while merging the extension schema code
 # into server schema file. Below is the ref code where BDM tag was originally
 # got added for 2.32 microversion *only*.
-# Ref- https://github.com/openstack/nova/blob/
+# Ref- https://opendev.org/openstack/nova/src/commit/
 #      9882a60e69a5ab8da314a199a56defc05098b743/nova/api/
 #      openstack/compute/block_device_mapping.py#L71
 base_create_v233 = copy.deepcopy(base_create_v219)
@@ -347,6 +347,21 @@ base_create_v257['properties']['server']['properties'].pop('personality')
 base_create_v263 = copy.deepcopy(base_create_v257)
 base_create_v263['properties']['server']['properties'][
     'trusted_image_certificates'] = parameter_types.trusted_certs
+
+
+# Add volume type in block_device_mapping_v2.
+base_create_v267 = copy.deepcopy(base_create_v263)
+base_create_v267['properties']['server']['properties'][
+    'block_device_mapping_v2']['items'][
+    'properties']['volume_type'] = parameter_types.volume_type
+
+
+# Add host and hypervisor_hostname in server
+base_create_v274 = copy.deepcopy(base_create_v267)
+base_create_v274['properties']['server'][
+    'properties']['host'] = parameter_types.hostname
+base_create_v274['properties']['server'][
+    'properties']['hypervisor_hostname'] = parameter_types.hostname
 
 
 base_update = {
@@ -524,6 +539,9 @@ SERVER_LIST_IGNORE_SORT_KEY = [
     'shutdown_terminate', 'user_data', 'vcpus', 'vm_mode'
 ]
 
+# From microversion 2.73 we start offering locked as a valid sort key.
+SERVER_LIST_IGNORE_SORT_KEY_V273 = list(SERVER_LIST_IGNORE_SORT_KEY)
+SERVER_LIST_IGNORE_SORT_KEY_V273.remove('locked')
 
 VALID_SORT_KEYS = {
     "type": "string",
@@ -536,6 +554,14 @@ VALID_SORT_KEYS = {
              'task_state', 'terminated_at', 'updated_at', 'user_id', 'uuid',
              'vm_state'] +
             SERVER_LIST_IGNORE_SORT_KEY
+}
+
+# We reuse the existing list and add locked to the list of valid sort keys.
+VALID_SORT_KEYS_V273 = {
+    "type": "string",
+    "enum": ['locked'] + list(
+            set(VALID_SORT_KEYS["enum"]) - set(SERVER_LIST_IGNORE_SORT_KEY)) +
+            SERVER_LIST_IGNORE_SORT_KEY_V273
 }
 
 query_params_v21 = {
@@ -599,6 +625,8 @@ query_params_v21 = {
     # For backward-compatible additionalProperties is set to be True here.
     # And we will either strip the extra params out or raise HTTP 400
     # according to the params' value in the later process.
+    # This has been changed to False in microversion 2.75. From
+    # microversion 2.75, no additional unknown parameter will be allowed.
     'additionalProperties': True,
     # Prevent internal-attributes that are started with underscore from
     # being striped out in schema validation, and raise HTTP 400 in API.
@@ -627,3 +655,28 @@ query_params_v266['properties'].update({
     'changes-before': multi_params({'type': 'string',
                                     'format': 'date-time'}),
 })
+
+query_params_v273 = copy.deepcopy(query_params_v266)
+query_params_v273['properties'].update({
+    'sort_key': multi_params(VALID_SORT_KEYS_V273),
+    'locked': parameter_types.common_query_param,
+})
+
+# Microversion 2.75 makes query schema to disallow any invalid or unknown
+# query parameters (filter or sort keys).
+# *****Schema updates for microversion 2.75 start here*******
+query_params_v275 = copy.deepcopy(query_params_v273)
+# 1. Update sort_keys to allow only valid sort keys:
+# NOTE(gmann): Remove the ignored sort keys now because 'additionalProperties'
+# is Flase for query schema. Starting from miceoversion 2.75, API will
+# raise 400 for any not-allowed sort keys instead of ignoring them.
+VALID_SORT_KEYS_V275 = copy.deepcopy(VALID_SORT_KEYS_V273)
+VALID_SORT_KEYS_V275['enum'] = list(
+            set(VALID_SORT_KEYS_V273["enum"]) - set(
+            SERVER_LIST_IGNORE_SORT_KEY_V273))
+query_params_v275['properties'].update({
+    'sort_key': multi_params(VALID_SORT_KEYS_V275),
+})
+# 2. Make 'additionalProperties' False.
+query_params_v275['additionalProperties'] = False
+# *****Schema updates for microversion 2.75 end here*******

@@ -18,9 +18,15 @@ assigned to only one guest and cannot be shared.
 .. note::
 
    For information on creating servers with virtual SR-IOV devices, refer to
-   the :neutron-doc:`Networking Guide <admin/config-sriov>`. Attaching
-   SR-IOV ports to existing servers is not currently supported, see
-   `bug 1708433 <https://bugs.launchpad.net/nova/+bug/1708433>`_ for details.
+   the :neutron-doc:`Networking Guide <admin/config-sriov>`.
+
+   **Limitations**
+
+   * Attaching SR-IOV ports to existing servers is not currently supported, see
+     `bug 1708433 <https://bugs.launchpad.net/nova/+bug/1708433>`_ for details.
+   * Cold migration (resize) of servers with SR-IOV devices attached was not
+     supported until the 14.0.0 Newton release, see
+     `bug 1512800 <https://bugs.launchpad.net/nova/+bug/1512880>`_ for details.
 
 To enable PCI passthrough, follow the steps below:
 
@@ -44,7 +50,7 @@ Configure nova-scheduler (Controller)
 
 #. Configure ``nova-scheduler`` as specified in :neutron-doc:`Configure
    nova-scheduler
-   <admin/config-sriov.html#configure-nova-scheduler-controller`.
+   <admin/config-sriov.html#configure-nova-scheduler-controller>`.
 
 #. Restart the ``nova-scheduler`` service.
 
@@ -64,8 +70,7 @@ Configure nova-api (Controller)
       [pci]
       alias = { "vendor_id":"8086", "product_id":"154d", "device_type":"type-PF", "name":"a1" }
 
-   For more information about the syntax of ``alias``, refer to
-   :doc:`/configuration/config`.
+   Refer to :oslo.config:option:`pci.alias` for syntax information.
 
 #. Restart the ``nova-api`` service.
 
@@ -80,14 +85,14 @@ Configure a flavor to request two PCI devices, each with ``vendor_id`` of
    # openstack flavor set m1.large --property "pci_passthrough:alias"="a1:2"
 
 For more information about the syntax for ``pci_passthrough:alias``, refer to
-:doc:`/admin/flavors`.
+:ref:`Flavors <extra-spec-pci-passthrough>`.
 
 Enable PCI passthrough (Compute)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Enable VT-d and IOMMU. For more information, refer to steps one and two in
 :neutron-doc:`Create Virtual Functions
-<admin/config-sriov.html#create-virtual-functions-compute`.
+<admin/config-sriov.html#create-virtual-functions-compute>`.
 
 For Hyper-V compute nodes, the requirements are as follows:
 
@@ -98,10 +103,10 @@ For Hyper-V compute nodes, the requirements are as follows:
 In order to check the requirements above and if there are any assignable PCI
 devices, run the following Powershell commands:
 
-   .. code-block:: console
+.. code-block:: console
 
-       Start-BitsTransfer https://raw.githubusercontent.com/Microsoft/Virtualization-Documentation/master/hyperv-samples/benarm-powershell/DDA/survey-dda.ps1
-        .\survey-dda.ps1
+    Start-BitsTransfer https://raw.githubusercontent.com/Microsoft/Virtualization-Documentation/master/hyperv-samples/benarm-powershell/DDA/survey-dda.ps1
+     .\survey-dda.ps1
 
 If the compute node passes all the requirements, the desired assignable PCI
 devices to be disabled and unmounted from the host, in order to be assignable
@@ -131,8 +136,8 @@ Configure PCI devices (Compute)
    All PCI devices matching the ``vendor_id`` and ``product_id`` are added to
    the pool of PCI devices available for passthrough to VMs.
 
-   For more information about the syntax of ``passthrough_whitelist``,
-   refer to :doc:`/configuration/config`.
+   Refer to :oslo.config:option:`pci.passthrough_whitelist` for syntax
+   information.
 
 #. Specify the PCI alias for the device.
 
@@ -150,7 +155,7 @@ Configure PCI devices (Compute)
       [pci]
       alias = { "vendor_id":"8086", "product_id":"154d", "device_type":"type-PF", "name":"a1" }
 
-   For more information about the syntax of ``alias``, refer to :doc:`/configuration/config`.
+   Refer to :oslo.config:option:`pci.alias` for syntax information.
 
 #. Restart the ``nova-compute`` service.
 

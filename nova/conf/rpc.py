@@ -27,6 +27,8 @@ instead of the global rpc_response_timeout value.
 Operations with RPC calls that utilize this value:
 
 * live migration
+* scheduling
+* enabling/disabling a compute service
 
 Related options:
 

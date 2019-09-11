@@ -67,9 +67,8 @@ Manual selection of the destination host
       +----+------------------+-------+----------+---------+-------+----------------------------+
       |  3 | nova-conductor   | HostA | internal | enabled | up    | 2017-02-18T09:42:29.000000 |
       |  4 | nova-scheduler   | HostA | internal | enabled | up    | 2017-02-18T09:42:26.000000 |
-      |  5 | nova-consoleauth | HostA | internal | enabled | up    | 2017-02-18T09:42:29.000000 |
-      |  6 | nova-compute     | HostB | nova     | enabled | up    | 2017-02-18T09:42:29.000000 |
-      |  7 | nova-compute     | HostC | nova     | enabled | up    | 2017-02-18T09:42:29.000000 |
+      |  5 | nova-compute     | HostB | nova     | enabled | up    | 2017-02-18T09:42:29.000000 |
+      |  6 | nova-compute     | HostC | nova     | enabled | up    | 2017-02-18T09:42:29.000000 |
       +----+------------------+-------+----------+---------+-------+----------------------------+
 
 #. Check that ``HostC`` has enough resources for migration:
@@ -218,9 +217,25 @@ What to do when the migration times out
 During the migration process, the instance may write to a memory page after
 that page has been copied to the destination. When that happens, the same page
 has to be copied again. The instance may write to memory pages faster than they
-can be copied, so that the migration cannot complete.  The Compute service will
-cancel it when the ``live_migration_completion_timeout``, a configuration
-parameter, is reached.
+can be copied, so that the migration cannot complete. There are two optional
+actions, controlled by
+:oslo.config:option:`libvirt.live_migration_timeout_action`, which can be
+taken against a VM after
+:oslo.config:option:`libvirt.live_migration_completion_timeout` is reached:
+
+1. ``abort`` (default): The live migration operation will be cancelled after
+   the completion timeout is reached. This is similar to using API
+   ``DELETE /servers/{server_id}/migrations/{migration_id}``.
+
+2. ``force_complete``: The compute service will either pause the VM or trigger
+   post-copy depending on if post copy is enabled and available
+   (:oslo.config:option:`libvirt.live_migration_permit_post_copy` is set to
+   `True`). This is similar to using API
+   ``POST /servers/{server_id}/migrations/{migration_id}/action (force_complete)``.
+
+You can also read the
+:oslo.config:option:`libvirt.live_migration_timeout_action`
+configuration option help for more details.
 
 The following remarks assume the KVM/Libvirt hypervisor.
 
@@ -237,19 +252,6 @@ out:
    ...
    WARNING nova.virt.libvirt.migration [req-...] [instance: ...]
    live migration not completed after 1800 sec
-
-The Compute service also cancels migrations when the memory copy seems to make
-no progress. This feature is `disabled by default`_, but it can be enabled
-using the configuration parameter
-:oslo.config:option:`libvirt.live_migration_progress_timeout`. Should
-this be the case, you may find the following message in the log:
-
-.. code-block:: console
-
-   WARNING nova.virt.libvirt.migration [req-...] [instance: ...]
-   live migration stuck for 150 sec
-
-.. _disabled by default: https://review.openstack.org/#/c/431635/
 
 Addressing migration timeouts
 -----------------------------
@@ -315,3 +317,7 @@ To make live-migration succeed, you have several options:
 
      - Post-copy may lead to an increased page fault rate during migration,
        which can slow the instance down.
+
+If live migrations routinely timeout or fail during cleanup operations due
+to the user token timing out, consider configuring nova to use
+:ref:`service user tokens <user_token_timeout>`.

@@ -421,6 +421,10 @@ class TestOpenStackClient(object):
     def delete_server_group(self, group_id):
         self.api_delete('/os-server-groups/%s' % group_id)
 
+    def create_server_external_events(self, events):
+        body = {'events': events}
+        return self.api_post('/os-server-external-events', body).body['events']
+
     def get_instance_actions(self, server_id):
         return self.api_get('/servers/%s/os-instance-actions' %
                             (server_id)).body['instanceActions']
@@ -441,6 +445,14 @@ class TestOpenStackClient(object):
 
     def get_limits(self):
         return self.api_get('/limits').body['limits']
+
+    def get_server_tags(self, server_id):
+        """Get the tags on the given server.
+
+        :param server_id: The server uuid
+        :return: The list of tags from the response
+        """
+        return self.api_get('/servers/%s/tags' % server_id).body['tags']
 
     def put_server_tags(self, server_id, tags):
         """Put (or replace) a list of tags on the given server.
@@ -518,3 +530,6 @@ class TestOpenStackClient(object):
             'forced_down': forced_down
         }
         return self.api_put('os-services/%s' % service_id, req).body['service']
+
+    def get_server_diagnostics(self, server_id):
+        return self.api_get('/servers/%s/diagnostics' % server_id).body

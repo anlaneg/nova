@@ -46,12 +46,10 @@ daemonize correctly after starting up.
    nova-api
    nova-compute
    nova-conductor
-   nova-console
    nova-novncproxy
    nova-scheduler
    nova-serialproxy
    nova-spicehtml5proxy
-   nova-xvpvncproxy
 
 WSGI Services
 -------------
@@ -87,7 +85,7 @@ deployments, but are documented for existing ones.
 .. toctree::
    :maxdepth: 1
 
-   nova-cells
    nova-dhcpbridge
    nova-network
-   nova-consoleauth
+   nova-console
+   nova-xvpvncproxy

@@ -38,8 +38,8 @@ class KeypairController(wsgi.Controller):
     _view_builder_class = keypairs_view.ViewBuilder
 
     def __init__(self):
-        self.api = compute_api.KeypairAPI()
         super(KeypairController, self).__init__()
+        self.api = compute_api.KeypairAPI()
 
     def _filter_keypair(self, keypair, **attrs):
         # TODO(claudiub): After v2 and v2.1 is no longer supported,
@@ -160,7 +160,8 @@ class KeypairController(wsgi.Controller):
         self._delete(req, id)
 
     @wsgi.Controller.api_version("2.10")    # noqa
-    @validation.query_schema(keypairs.delete_query_schema_v210)
+    @validation.query_schema(keypairs.delete_query_schema_v275, '2.75')
+    @validation.query_schema(keypairs.delete_query_schema_v210, '2.10', '2.74')
     @wsgi.response(204)
     @wsgi.expected_errors(404)
     def delete(self, req, id):
@@ -187,7 +188,8 @@ class KeypairController(wsgi.Controller):
             return user_id
 
     @wsgi.Controller.api_version("2.10")
-    @validation.query_schema(keypairs.show_query_schema_v210)
+    @validation.query_schema(keypairs.show_query_schema_v275, '2.75')
+    @validation.query_schema(keypairs.show_query_schema_v210, '2.10', '2.74')
     @wsgi.expected_errors(404)
     def show(self, req, id):
         # handle optional user-id for admin only
@@ -230,7 +232,8 @@ class KeypairController(wsgi.Controller):
         return {'keypair': keypair}
 
     @wsgi.Controller.api_version("2.35")
-    @validation.query_schema(keypairs.index_query_schema_v235)
+    @validation.query_schema(keypairs.index_query_schema_v275, '2.75')
+    @validation.query_schema(keypairs.index_query_schema_v235, '2.35', '2.74')
     @wsgi.expected_errors(400)
     def index(self, req):
         user_id = self._get_user_id(req)

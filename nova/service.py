@@ -57,11 +57,9 @@ SERVICE_MANAGERS = {
     #负责在各计算节点上处理虚拟机创建，删除等任务
     'nova-compute': 'nova.compute.manager.ComputeManager',
     'nova-console': 'nova.console.manager.ConsoleProxyManager',
-    'nova-consoleauth': 'nova.consoleauth.manager.ConsoleAuthManager',
     'nova-conductor': 'nova.conductor.manager.ConductorManager',
     'nova-metadata': 'nova.api.manager.MetadataManager',
     'nova-scheduler': 'nova.scheduler.manager.SchedulerManager',
-    'nova-cells': 'nova.cells.manager.CellsManager',
 }
 
 

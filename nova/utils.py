@@ -28,12 +28,14 @@ import random
 import re
 import shutil
 import tempfile
-import time
 
 import eventlet
 from keystoneauth1 import exceptions as ks_exc
 from keystoneauth1 import loading as ks_loading
 import netaddr
+from openstack import connection
+from openstack import exceptions as sdk_exc
+import os_resource_classes as orc
 from os_service_types import service_types
 from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
@@ -48,12 +50,10 @@ from oslo_utils import timeutils
 from oslo_utils import units
 import six
 from six.moves import range
-from six.moves import reload_module
 
 import nova.conf
-from nova import debugger
 from nova import exception
-from nova.i18n import _, _LE, _LI, _LW
+from nova.i18n import _, _LE, _LW
 import nova.network
 from nova import safe_utils
 
@@ -99,6 +99,8 @@ else:
     getargspec = inspect.getargspec
 
 
+# NOTE(mikal): this seems to have to stay for now to handle os-brick
+# requirements. This makes me a sad panda.
 def get_root_helper():
     if CONF.workarounds.disable_rootwrap:
         cmd = 'sudo'
@@ -107,146 +109,23 @@ def get_root_helper():
     return cmd
 
 
-class RootwrapProcessHelper(object):
-    def trycmd(self, *cmd, **kwargs):
-        kwargs['root_helper'] = get_root_helper()
-        return processutils.trycmd(*cmd, **kwargs)
-
-    def execute(self, *cmd, **kwargs):
-        kwargs['root_helper'] = get_root_helper()
-        return processutils.execute(*cmd, **kwargs)
-
-
-class RootwrapDaemonHelper(RootwrapProcessHelper):
-    _clients = {}
-
-    @synchronized('daemon-client-lock')
-    def _get_client(cls, rootwrap_config):
-        try:
-            return cls._clients[rootwrap_config]
-        except KeyError:
-            from oslo_rootwrap import client
-            new_client = client.Client([
-                "sudo", "nova-rootwrap-daemon", rootwrap_config])
-            cls._clients[rootwrap_config] = new_client
-            return new_client
-
-    def __init__(self, rootwrap_config):
-        self.client = self._get_client(rootwrap_config)
-
-    def trycmd(self, *args, **kwargs):
-        discard_warnings = kwargs.pop('discard_warnings', False)
-        try:
-            out, err = self.execute(*args, **kwargs)
-            failed = False
-        except processutils.ProcessExecutionError as exn:
-            out, err = '', six.text_type(exn)
-            failed = True
-        if not failed and discard_warnings and err:
-            # Handle commands that output to stderr but otherwise succeed
-            err = ''
-        return out, err
-
-    def execute(self, *cmd, **kwargs):
-        # NOTE(dims): This method is to provide compatibility with the
-        # processutils.execute interface. So that calling daemon or direct
-        # rootwrap to honor the same set of flags in kwargs and to ensure
-        # that we don't regress any current behavior.
-        cmd = [str(c) for c in cmd]
-        loglevel = kwargs.pop('loglevel', logging.DEBUG)
-        log_errors = kwargs.pop('log_errors', None)
-        process_input = kwargs.pop('process_input', None)
-        delay_on_retry = kwargs.pop('delay_on_retry', True)
-        attempts = kwargs.pop('attempts', 1)
-        check_exit_code = kwargs.pop('check_exit_code', [0])
-        ignore_exit_code = False
-        if isinstance(check_exit_code, bool):
-            ignore_exit_code = not check_exit_code
-            check_exit_code = [0]
-        elif isinstance(check_exit_code, int):
-            check_exit_code = [check_exit_code]
-
-        sanitized_cmd = strutils.mask_password(' '.join(cmd))
-        LOG.info(_LI('Executing RootwrapDaemonHelper.execute '
-                     'cmd=[%(cmd)r] kwargs=[%(kwargs)r]'),
-                 {'cmd': sanitized_cmd, 'kwargs': kwargs})
-
-        while attempts > 0:
-            attempts -= 1
-            try:
-                start_time = time.time()
-                LOG.log(loglevel, _('Running cmd (subprocess): %s'),
-                        sanitized_cmd)
-
-                (returncode, out, err) = self.client.execute(
-                    cmd, process_input)
-
-                end_time = time.time() - start_time
-                LOG.log(loglevel,
-                        'CMD "%(sanitized_cmd)s" returned: %(return_code)s '
-                        'in %(end_time)0.3fs',
-                        {'sanitized_cmd': sanitized_cmd,
-                         'return_code': returncode,
-                         'end_time': end_time})
-
-                if not ignore_exit_code and returncode not in check_exit_code:
-                    out = strutils.mask_password(out)
-                    err = strutils.mask_password(err)
-                    raise processutils.ProcessExecutionError(
-                        exit_code=returncode,
-                        stdout=out,
-                        stderr=err,
-                        cmd=sanitized_cmd)
-                return (out, err)
-
-            except processutils.ProcessExecutionError as err:
-                # if we want to always log the errors or if this is
-                # the final attempt that failed and we want to log that.
-                if log_errors == processutils.LOG_ALL_ERRORS or (
-                                log_errors == processutils.LOG_FINAL_ERROR and
-                            not attempts):
-                    format = _('%(desc)r\ncommand: %(cmd)r\n'
-                               'exit code: %(code)r\nstdout: %(stdout)r\n'
-                               'stderr: %(stderr)r')
-                    LOG.log(loglevel, format, {"desc": err.description,
-                                               "cmd": err.cmd,
-                                               "code": err.exit_code,
-                                               "stdout": err.stdout,
-                                               "stderr": err.stderr})
-                if not attempts:
-                    LOG.log(loglevel, _('%r failed. Not Retrying.'),
-                            sanitized_cmd)
-                    raise
-                else:
-                    LOG.log(loglevel, _('%r failed. Retrying.'),
-                            sanitized_cmd)
-                    if delay_on_retry:
-                        time.sleep(random.randint(20, 200) / 100.0)
-
-#执行shell命令
-def execute(*cmd, **kwargs):
-    """Convenience wrapper around oslo's execute() method."""
-    if 'run_as_root' in kwargs and kwargs.get('run_as_root'):
-        if CONF.use_rootwrap_daemon:
-            return RootwrapDaemonHelper(CONF.rootwrap_config).execute(
-                *cmd, **kwargs)
-        else:
-            return RootwrapProcessHelper().execute(*cmd, **kwargs)
-    return processutils.execute(*cmd, **kwargs)
-
 #连接到dest上，并执行cmd,执行时传入kwargs
 def ssh_execute(dest, *cmd, **kwargs):
     """Convenience wrapper to execute ssh command."""
     ssh_cmd = ['ssh', '-o', 'BatchMode=yes']
     ssh_cmd.append(dest)
     ssh_cmd.extend(cmd)
-    return execute(*ssh_cmd, **kwargs)
+    return processutils.execute(*ssh_cmd, **kwargs)
 
 
 def generate_uid(topic, size=8):
+    random_string = generate_random_string(size)
+    return '%s-%s' % (topic, random_string)
+
+
+def generate_random_string(size=8):
     characters = '01234567890abcdefghijklmnopqrstuvwxyz'
-    choices = [random.choice(characters) for _x in range(size)]
-    return '%s-%s' % (topic, ''.join(choices))
+    return ''.join([random.choice(characters) for _x in range(size)])
 
 
 # Default symbols to use for passwords. Avoids visually confusing characters.
@@ -288,8 +167,6 @@ def last_completed_audit_period(unit=None, before=None):
         rightnow = before
     else:
         rightnow = timeutils.utcnow()
-    if unit not in ('month', 'day', 'year', 'hour'):
-        raise ValueError(_('Time period must be hour, day, month or year'))
     if unit == 'month':
         if offset == 0:
             offset = 1
@@ -339,7 +216,7 @@ def last_completed_audit_period(unit=None, before=None):
             end = end - datetime.timedelta(days=1)
         begin = end - datetime.timedelta(days=1)
 
-    elif unit == 'hour':
+    else:  # unit == 'hour'
         end = rightnow.replace(minute=offset, second=0, microsecond=0)
         if end >= rightnow:
             end = end - datetime.timedelta(hours=1)
@@ -514,7 +391,7 @@ def sanitize_hostname(hostname, default_name=None):
 
     hostname = truncate_hostname(hostname)
     hostname = re.sub('[ _]', '-', hostname)
-    hostname = re.sub('[^\w.-]+', '', hostname)
+    hostname = re.sub(r'[^\w.-]+', '', hostname)
     hostname = hostname.lower()
     hostname = hostname.strip('.-')
     # NOTE(eliqiao): set hostname to default_display_name to avoid
@@ -942,7 +819,7 @@ def get_image_metadata_from_volume(volume):
             image_meta[attr] = int(val or 0)
     # NOTE(mriedem): Set the status to 'active' as a really old hack
     # from when this method was in the compute API class and is
-    # needed for _check_requested_image which makes sure the image
+    # needed for _validate_flavor_image which makes sure the image
     # is 'active'. For volume-backed servers, if the volume is not
     # available because the image backing the volume is not active,
     # then the compute API trying to reserve the volume should fail.
@@ -983,104 +860,6 @@ def get_obj_repr_unicode(obj):
     if not six.PY3:
         obj_repr = six.text_type(obj_repr, 'utf-8')
     return obj_repr
-
-
-def filter_and_format_resource_metadata(resource_type, resource_list,
-        search_filts, metadata_type=None):
-    """Get all metadata for a list of resources after filtering.
-
-    Search_filts is a list of dictionaries, where the values in the dictionary
-    can be string or regex string, or a list of strings/regex strings.
-
-    Let's call a dict a 'filter block' and an item in the dict
-    a 'filter'. A tag is returned if it matches ALL the filters in
-    a filter block. If more than one values are specified for a
-    filter, a tag is returned if it matches ATLEAST ONE value of the filter. If
-    more than one filter blocks are specified, the tag should match ALL the
-    filter blocks.
-
-    For example:
-
-        search_filts = [{'key': ['key1', 'key2'], 'value': 'val1'},
-                        {'value': 'val2'}]
-
-    The filter translates to 'match any tag for which':
-        ((key=key1 AND value=val1) OR (key=key2 AND value=val1)) AND
-            (value=val2)
-
-    This example filter will never match a tag.
-
-        :param resource_type: The resource type as a string, e.g. 'instance'
-        :param resource_list: List of resource objects
-        :param search_filts: Filters to filter metadata to be returned. Can be
-            dict (e.g. {'key': 'env', 'value': 'prod'}, or a list of dicts
-            (e.g. [{'key': 'env'}, {'value': 'beta'}]. Note that the values
-            of the dict can be regular expressions.
-        :param metadata_type: Provided to search for a specific metadata type
-            (e.g. 'system_metadata')
-
-        :returns: List of dicts where each dict is of the form {'key':
-            'somekey', 'value': 'somevalue', 'instance_id':
-            'some-instance-uuid-aaa'} if resource_type is 'instance'.
-    """
-
-    if isinstance(search_filts, dict):
-        search_filts = [search_filts]
-
-    def _get_id(resource):
-        if resource_type == 'instance':
-            return resource.get('uuid')
-
-    def _match_any(pattern_list, string):
-        if isinstance(pattern_list, six.string_types):
-            pattern_list = [pattern_list]
-        return any([re.match(pattern, string)
-                    for pattern in pattern_list])
-
-    def _filter_metadata(resource, search_filt, input_metadata):
-        ids = search_filt.get('resource_id', [])
-        keys_filter = search_filt.get('key', [])
-        values_filter = search_filt.get('value', [])
-        output_metadata = {}
-
-        if ids and _get_id(resource) not in ids:
-            return {}
-
-        for k, v in input_metadata.items():
-            # Both keys and value defined -- AND
-            if (keys_filter and values_filter and
-               not _match_any(keys_filter, k) and
-               not _match_any(values_filter, v)):
-                continue
-            # Only keys or value is defined
-            elif ((keys_filter and not _match_any(keys_filter, k)) or
-                  (values_filter and not _match_any(values_filter, v))):
-                continue
-
-            output_metadata[k] = v
-        return output_metadata
-
-    formatted_metadata_list = []
-    for res in resource_list:
-
-        if resource_type == 'instance':
-            # NOTE(rushiagr): metadata_type should be 'metadata' or
-            # 'system_metadata' if resource_type is instance. Defaulting to
-            # 'metadata' if not specified.
-            if metadata_type is None:
-                metadata_type = 'metadata'
-            metadata = res.get(metadata_type, {})
-
-        for filt in search_filts:
-            # By chaining the input to the output, the filters are
-            # ANDed together
-            metadata = _filter_metadata(res, filt, metadata)
-
-        for (k, v) in metadata.items():
-            formatted_metadata_list.append({'key': k, 'value': v,
-                             '%s_id' % resource_type: _get_id(res)})
-
-    return formatted_metadata_list
 
 
 def safe_truncate(value, length):
@@ -1157,6 +936,38 @@ def strtime(at):
     return at.strftime("%Y-%m-%dT%H:%M:%S.%f")
 
 
+def _get_conf_group(service_type):
+    # Get the conf group corresponding to the service type.
+    confgrp = _SERVICE_TYPES.get_project_name(service_type)
+    if not confgrp or not hasattr(CONF, confgrp):
+        # Try the service type as the conf group.  This is necessary for e.g.
+        # placement, while it's still part of the nova project.
+        # Note that this might become the first thing we try if/as we move to
+        # using service types for conf group names in general.
+        confgrp = service_type
+        if not confgrp or not hasattr(CONF, confgrp):
+            raise exception.ConfGroupForServiceTypeNotFound(stype=service_type)
+    return confgrp
+
+
+def _get_auth_and_session(confgrp, ksa_auth=None, ksa_session=None):
+    # Ensure we have an auth.
+    # NOTE(efried): This could be None, and that could be okay - e.g. if the
+    # result is being used for get_endpoint() and the conf only contains
+    # endpoint_override.
+    if not ksa_auth:
+        if ksa_session and ksa_session.auth:
+            ksa_auth = ksa_session.auth
+        else:
+            ksa_auth = ks_loading.load_auth_from_conf_options(CONF, confgrp)
+
+    if not ksa_session:
+        ksa_session = ks_loading.load_session_from_conf_options(
+            CONF, confgrp, auth=ksa_auth)
+
+    return ksa_auth, ksa_session
+
+
 def get_ksa_adapter(service_type, ksa_auth=None, ksa_session=None,
                     min_version=None, max_version=None):
     """Construct a keystoneauth1 Adapter for a given service type.
@@ -1190,34 +1001,43 @@ def get_ksa_adapter(service_type, ksa_auth=None, ksa_session=None,
     :raise: ConfGroupForServiceTypeNotFound If no conf group name could be
             found for the specified service_type.
     """
-    # Get the conf group corresponding to the service type.
-    confgrp = _SERVICE_TYPES.get_project_name(service_type)
-    if not confgrp or not hasattr(CONF, confgrp):
-        # Try the service type as the conf group.  This is necessary for e.g.
-        # placement, while it's still part of the nova project.
-        # Note that this might become the first thing we try if/as we move to
-        # using service types for conf group names in general.
-        confgrp = service_type
-        if not confgrp or not hasattr(CONF, confgrp):
-            raise exception.ConfGroupForServiceTypeNotFound(stype=service_type)
+    confgrp = _get_conf_group(service_type)
 
-    # Ensure we have an auth.
-    # NOTE(efried): This could be None, and that could be okay - e.g. if the
-    # result is being used for get_endpoint() and the conf only contains
-    # endpoint_override.
-    if not ksa_auth:
-        if ksa_session and ksa_session.auth:
-            ksa_auth = ksa_session.auth
-        else:
-            ksa_auth = ks_loading.load_auth_from_conf_options(CONF, confgrp)
-
-    if not ksa_session:
-        ksa_session = ks_loading.load_session_from_conf_options(
-            CONF, confgrp, auth=ksa_auth)
+    ksa_auth, ksa_session = _get_auth_and_session(
+        confgrp, ksa_auth, ksa_session)
 
     return ks_loading.load_adapter_from_conf_options(
         CONF, confgrp, session=ksa_session, auth=ksa_auth,
         min_version=min_version, max_version=max_version, raise_exc=False)
+
+
+def get_sdk_adapter(service_type, check_service=False):
+    """Construct an openstacksdk-brokered Adapter for a given service type.
+
+    We expect to find a conf group whose name corresponds to the service_type's
+    project according to the service-types-authority.  That conf group must
+    provide ksa auth, session, and adapter options.
+
+    :param service_type: String name of the service type for which the Adapter
+                         is to be constructed.
+    :param check_service: If True, we will query the endpoint to make sure the
+            service is alive, raising ServiceUnavailable if it is not.
+    :return: An openstack.proxy.Proxy object for the specified service_type.
+    :raise: ConfGroupForServiceTypeNotFound If no conf group name could be
+            found for the specified service_type.
+    :raise: ServiceUnavailable if check_service is True and the service is down
+    """
+    confgrp = _get_conf_group(service_type)
+    sess = _get_auth_and_session(confgrp)[1]
+    try:
+        conn = connection.Connection(
+            session=sess, oslo_conf=CONF, service_types={service_type},
+            strict_proxies=check_service)
+    except sdk_exc.ServiceDiscoveryException as e:
+        raise exception.ServiceUnavailable(
+            _("The %(service_type)s service is unavailable: %(error)s") %
+            {'service_type': service_type, 'error': six.text_type(e)})
+    return getattr(conn, service_type)
 
 
 def get_endpoint(ksa_adapter):
@@ -1290,16 +1110,65 @@ def generate_hostid(host, project_id):
     return ""
 
 
-def monkey_patch():
-    if debugger.enabled():
-        # turn off thread patching to enable the remote debugger
-        eventlet.monkey_patch(os=False, thread=False)
-    else:
-        eventlet.monkey_patch(os=False)
+if six.PY2:
+    nested_contexts = contextlib.nested
+else:
+    @contextlib.contextmanager
+    def nested_contexts(*contexts):
+        with contextlib.ExitStack() as stack:
+            yield [stack.enter_context(c) for c in contexts]
 
-    # NOTE(rgerganov): oslo.context is storing a global thread-local variable
-    # which keeps the request context for the current thread. If oslo.context
-    # is imported before calling monkey_patch(), then this thread-local won't
-    # be green. To workaround this, reload the module after calling
-    # monkey_patch()
-    reload_module(importutils.import_module('oslo_context.context'))
+
+def run_once(message, logger, cleanup=None):
+    """This is a utility function decorator to ensure a function
+    is run once and only once in an interpreter instance.
+    The decorated function object can be reset by calling its
+    reset function. All exceptions raised by the wrapped function,
+    logger and cleanup function will be propagated to the caller.
+    """
+    def outer_wrapper(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if not wrapper.called:
+                # Note(sean-k-mooney): the called state is always
+                # updated even if the wrapped function completes
+                # by raising an exception. If the caller catches
+                # the exception it is their responsibility to call
+                # reset if they want to re-execute the wrapped function.
+                try:
+                    return func(*args, **kwargs)
+                finally:
+                    wrapper.called = True
+            else:
+                logger(message)
+
+        wrapper.called = False
+
+        def reset(wrapper, *args, **kwargs):
+            # Note(sean-k-mooney): we conditionally call the
+            # cleanup function if one is provided only when the
+            # wrapped function has been called previously. We catch
+            # and reraise any exception that may be raised and update
+            # the called state in a finally block to ensure its
+            # always updated if reset is called.
+            try:
+                if cleanup and wrapper.called:
+                    return cleanup(*args, **kwargs)
+            finally:
+                wrapper.called = False
+
+        wrapper.reset = functools.partial(reset, wrapper)
+        return wrapper
+    return outer_wrapper
+
+
+def normalize_rc_name(rc_name):
+    """Normalize a resource class name to standard form."""
+    if rc_name is None:
+        return None
+    # Replace non-alphanumeric characters with underscores
+    norm_name = re.sub('[^0-9A-Za-z]+', '_', rc_name)
+    # Bug #1762789: Do .upper after replacing non alphanumerics.
+    norm_name = norm_name.upper()
+    norm_name = orc.CUSTOM_NAMESPACE + norm_name
+    return norm_name

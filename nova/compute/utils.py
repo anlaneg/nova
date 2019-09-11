@@ -19,10 +19,10 @@ import functools
 import inspect
 import itertools
 import math
-import string
 import traceback
 
 import netifaces
+import os_resource_classes as orc
 from oslo_log import log
 from oslo_serialization import jsonutils
 import six
@@ -36,13 +36,17 @@ from nova import exception
 from nova import notifications
 from nova.notifications.objects import aggregate as aggregate_notification
 from nova.notifications.objects import base as notification_base
+from nova.notifications.objects import compute_task as task_notification
 from nova.notifications.objects import exception as notification_exception
 from nova.notifications.objects import flavor as flavor_notification
 from nova.notifications.objects import instance as instance_notification
 from nova.notifications.objects import keypair as keypair_notification
 from nova.notifications.objects import libvirt as libvirt_notification
 from nova.notifications.objects import metrics as metrics_notification
+from nova.notifications.objects import request_spec as reqspec_notification
+from nova.notifications.objects import scheduler as scheduler_notification
 from nova.notifications.objects import server_group as sg_notification
+from nova.notifications.objects import volume as volume_notification
 from nova import objects
 from nova.objects import fields
 from nova import rpc
@@ -55,7 +59,20 @@ LOG = log.getLogger(__name__)
 
 
 def exception_to_dict(fault, message=None):
-    """Converts exceptions to a dict for use in notifications."""
+    """Converts exceptions to a dict for use in notifications.
+
+    :param fault: Exception that occurred
+    :param message: Optional fault message, otherwise the message is derived
+        from the fault itself.
+    :returns: dict with the following items:
+
+        - exception: the fault itself
+        - message: one of (in priority order):
+                   - the provided message to this method
+                   - a formatted NovaException message
+                   - the fault class name
+        - code: integer code for the fault (defaults to 500)
+    """
     # TODO(johngarbutt) move to nova/exception.py to share with wrap_exception
 
     code = 500
@@ -70,11 +87,17 @@ def exception_to_dict(fault, message=None):
     # These exception handlers are broad so we don't fail to log the fault
     # just because there is an unexpected error retrieving the message
     except Exception:
-        try:
-            message = six.text_type(fault)
-        except Exception:
-            message = None
-    if not message:
+        # In this case either we have a NovaException which failed to format
+        # the message or we have a non-nova exception which could contain
+        # sensitive details. Since we're not sure, be safe and set the message
+        # to the exception class name. Note that we don't guard on
+        # context.is_admin here because the message is always shown in the API,
+        # even to non-admin users (e.g. NoValidHost) but only the traceback
+        # details are shown to users with the admin role. Checking for admin
+        # context here is also not helpful because admins can perform
+        # operations on a tenant user's server (migrations, reboot, etc) and
+        # service startup and periodic tasks could take actions on a server
+        # and those use an admin context.
         message = fault.__class__.__name__
     # NOTE(dripton) The message field in the database is limited to 255 chars.
     # MySQL silently truncates overly long messages, but PostgreSQL throws an
@@ -88,10 +111,14 @@ def exception_to_dict(fault, message=None):
 
 def _get_fault_details(exc_info, error_code):
     details = ''
+    # TODO(mriedem): Why do we only include the details if the code is 500?
+    # Though for non-nova exceptions the code will probably be 500.
     if exc_info and error_code == 500:
-        tb = exc_info[2]
-        if tb:
-            details = ''.join(traceback.format_tb(tb))
+        # We get the full exception details including the value since
+        # the fault message may not contain that information for non-nova
+        # exceptions (see exception_to_dict).
+        details = ''.join(traceback.format_exception(
+            exc_info[0], exc_info[1], exc_info[2]))
     return six.text_type(details)
 
 
@@ -113,6 +140,9 @@ def get_device_name_for_instance(instance, bdms, device):
 
     This method is a wrapper for get_next_device_name that gets the list
     of used devices and the root device from a block device mapping.
+
+    :raises TooManyDiskDevices: if the maxmimum allowed devices to attach to a
+                                single instance is exceeded.
     """
     mappings = block_device.instance_block_mapping(instance, bdms)
     return get_next_device_name(instance, mappings.values(),
@@ -121,7 +151,12 @@ def get_device_name_for_instance(instance, bdms, device):
 
 def default_device_names_for_instance(instance, root_device_name,
                                       *block_device_lists):
-    """Generate missing device names for an instance."""
+    """Generate missing device names for an instance.
+
+
+    :raises TooManyDiskDevices: if the maxmimum allowed devices to attach to a
+                                single instance is exceeded.
+    """
 
     dev_list = [bdm.device_name
                 for bdm in itertools.chain(*block_device_lists)
@@ -139,6 +174,15 @@ def default_device_names_for_instance(instance, root_device_name,
             dev_list.append(dev)
 
 
+def check_max_disk_devices_to_attach(num_devices):
+    maximum = CONF.compute.max_disk_devices_to_attach
+    if maximum < 0:
+        return
+
+    if num_devices > maximum:
+        raise exception.TooManyDiskDevices(maximum=maximum)
+
+
 def get_next_device_name(instance, device_name_list,
                          root_device_name=None, device=None):
     """Validates (or generates) a device name for instance.
@@ -149,6 +193,9 @@ def get_next_device_name(instance, device_name_list,
     name is valid but applicable to a different backend (for example
     /dev/vdc is specified but the backend uses /dev/xvdc), the device
     name will be converted to the appropriate format.
+
+    :raises TooManyDiskDevices: if the maxmimum allowed devices to attach to a
+                                single instance is exceeded.
     """
 
     req_prefix = None
@@ -191,6 +238,8 @@ def get_next_device_name(instance, device_name_list,
 
         if flavor.swap:
             used_letters.add('c')
+
+    check_max_disk_devices_to_attach(len(used_letters) + 1)
 
     if not req_letter:
         req_letter = _get_unused_letter(used_letters)
@@ -257,13 +306,13 @@ def convert_mb_to_ceil_gb(mb_value):
 
 
 def _get_unused_letter(used_letters):
-    doubles = [first + second for second in string.ascii_lowercase
-               for first in string.ascii_lowercase]
-    all_letters = set(list(string.ascii_lowercase) + doubles)
-    letters = list(all_letters - used_letters)
-    # NOTE(vish): prepend ` so all shorter sequences sort first
-    letters.sort(key=lambda x: x.rjust(2, '`'))
-    return letters[0]
+    # Return the first unused device letter
+    index = 0
+    while True:
+        letter = block_device.generate_device_letter(index)
+        if letter not in used_letters:
+            return letter
+        index += 1
 
 
 def get_value_from_system_metadata(instance, key, type, default):
@@ -464,6 +513,31 @@ def notify_about_instance_create(context, instance, host, phase=None,
         event_type=notification_base.EventType(
             object='instance',
             action=fields.NotificationAction.CREATE,
+            phase=phase),
+        payload=payload)
+    notification.emit(context)
+
+
+@rpc.if_notifications_enabled
+def notify_about_scheduler_action(context, request_spec, action, phase=None,
+                                  source=fields.NotificationSource.SCHEDULER):
+    """Send versioned notification about the action made by the scheduler
+    :param context: the RequestContext object
+    :param request_spec: the RequestSpec object
+    :param action: the name of the action
+    :param phase: the phase of the action
+    :param source: the source of the notification
+    """
+    payload = reqspec_notification.RequestSpecPayload(
+        request_spec=request_spec)
+    notification = scheduler_notification.SelectDestinationsNotification(
+        context=context,
+        priority=fields.NotificationPriority.INFO,
+        publisher=notification_base.NotificationPublisher(
+            host=CONF.host, source=source),
+        event_type=notification_base.EventType(
+            object='scheduler',
+            action=action,
             phase=phase),
         payload=payload)
     notification.emit(context)
@@ -834,6 +908,63 @@ def notify_about_libvirt_connect_error(context, ip, exception, tb):
     notification.emit(context)
 
 
+@rpc.if_notifications_enabled
+def notify_about_volume_usage(context, vol_usage, host):
+    """Send versioned notification about the volume usage
+
+    :param context: the request context
+    :param vol_usage: the volume usage object
+    :param host: the host emitting the notification
+    """
+    payload = volume_notification.VolumeUsagePayload(
+            vol_usage=vol_usage)
+    notification = volume_notification.VolumeUsageNotification(
+            context=context,
+            priority=fields.NotificationPriority.INFO,
+            publisher=notification_base.NotificationPublisher(
+                host=host, source=fields.NotificationSource.COMPUTE),
+            event_type=notification_base.EventType(
+                object='volume',
+                action=fields.NotificationAction.USAGE),
+            payload=payload)
+    notification.emit(context)
+
+
+@rpc.if_notifications_enabled
+def notify_about_compute_task_error(context, action, instance_uuid,
+                                    request_spec, state, exception, tb):
+    """Send a versioned notification about compute task error.
+
+    :param context: the request context
+    :param action: the name of the action
+    :param instance_uuid: the UUID of the instance
+    :param request_spec: the request spec object or
+                         the dict includes request spec information
+    :param state: the vm state of the instance
+    :param exception: the thrown exception
+    :param tb: the traceback
+    """
+    if (request_spec is not None and
+            not isinstance(request_spec, objects.RequestSpec)):
+        request_spec = objects.RequestSpec.from_primitives(
+            context, request_spec, {})
+
+    fault, _ = _get_fault_and_priority_from_exc_and_tb(exception, tb)
+    payload = task_notification.ComputeTaskPayload(
+        instance_uuid=instance_uuid, request_spec=request_spec, state=state,
+        reason=fault)
+    notification = task_notification.ComputeTaskNotification(
+        priority=fields.NotificationPriority.ERROR,
+        publisher=notification_base.NotificationPublisher(
+            host=CONF.host, source=fields.NotificationSource.CONDUCTOR),
+        event_type=notification_base.EventType(
+            object='compute_task',
+            action=action,
+            phase=fields.NotificationPhase.ERROR),
+        payload=payload)
+    notification.emit(context)
+
+
 def refresh_info_cache_for_instance(context, instance):
     """Refresh the info cache for an instance.
 
@@ -847,37 +978,6 @@ def refresh_info_cache_for_instance(context, instance):
         except exception.InstanceInfoCacheNotFound:
             LOG.debug("Can not refresh info_cache because instance "
                       "was not found", instance=instance)
-
-
-def usage_volume_info(vol_usage):
-    def null_safe_str(s):
-        return str(s) if s else ''
-
-    tot_refreshed = vol_usage.tot_last_refreshed
-    curr_refreshed = vol_usage.curr_last_refreshed
-    if tot_refreshed and curr_refreshed:
-        last_refreshed_time = max(tot_refreshed, curr_refreshed)
-    elif tot_refreshed:
-        last_refreshed_time = tot_refreshed
-    else:
-        # curr_refreshed must be set
-        last_refreshed_time = curr_refreshed
-
-    usage_info = dict(
-          volume_id=vol_usage.volume_id,
-          tenant_id=vol_usage.project_id,
-          user_id=vol_usage.user_id,
-          availability_zone=vol_usage.availability_zone,
-          instance_id=vol_usage.instance_uuid,
-          last_refreshed=null_safe_str(last_refreshed_time),
-          reads=vol_usage.tot_reads + vol_usage.curr_reads,
-          read_bytes=vol_usage.tot_read_bytes +
-                vol_usage.curr_read_bytes,
-          writes=vol_usage.tot_writes + vol_usage.curr_writes,
-          write_bytes=vol_usage.tot_write_bytes +
-                vol_usage.curr_write_bytes)
-
-    return usage_info
 
 
 def get_reboot_type(task_state, current_power_state):
@@ -1065,6 +1165,113 @@ def remove_shelved_keys_from_system_metadata(instance):
             del (instance.system_metadata[key])
 
 
+def create_image(context, instance, name, image_type, image_api,
+                 extra_properties=None):
+    """Create new image entry in the image service.  This new image
+    will be reserved for the compute manager to upload a snapshot
+    or backup.
+
+    :param context: security context
+    :param instance: nova.objects.instance.Instance object
+    :param name: string for name of the snapshot
+    :param image_type: snapshot | backup
+    :param image_api: instance of nova.image.API
+    :param extra_properties: dict of extra image properties to include
+
+    """
+    properties = {
+        'instance_uuid': instance.uuid,
+        'user_id': str(context.user_id),
+        'image_type': image_type,
+    }
+    properties.update(extra_properties or {})
+
+    image_meta = initialize_instance_snapshot_metadata(
+        context, instance, name, properties)
+    # if we're making a snapshot, omit the disk and container formats,
+    # since the image may have been converted to another format, and the
+    # original values won't be accurate.  The driver will populate these
+    # with the correct values later, on image upload.
+    if image_type == 'snapshot':
+        image_meta.pop('disk_format', None)
+        image_meta.pop('container_format', None)
+    return image_api.create(context, image_meta)
+
+
+def initialize_instance_snapshot_metadata(context, instance, name,
+                                          extra_properties=None):
+    """Initialize new metadata for a snapshot of the given instance.
+
+    :param context: authenticated RequestContext; note that this may not
+            be the owner of the instance itself, e.g. an admin creates a
+            snapshot image of some user instance
+    :param instance: nova.objects.instance.Instance object
+    :param name: string for name of the snapshot
+    :param extra_properties: dict of extra metadata properties to include
+
+    :returns: the new instance snapshot metadata
+    """
+    image_meta = utils.get_image_from_system_metadata(
+        instance.system_metadata)
+    image_meta['name'] = name
+
+    # If the user creating the snapshot is not in the same project as
+    # the owner of the instance, then the image visibility should be
+    # "shared" so the owner of the instance has access to the image, like
+    # in the case of an admin creating a snapshot of another user's
+    # server, either directly via the createImage API or via shelve.
+    extra_properties = extra_properties or {}
+    if context.project_id != instance.project_id:
+        # The glance API client-side code will use this to add the
+        # instance project as a member of the image for access.
+        image_meta['visibility'] = 'shared'
+        extra_properties['instance_owner'] = instance.project_id
+        # TODO(mriedem): Should owner_project_name and owner_user_name
+        # be removed from image_meta['properties'] here, or added to
+        # [DEFAULT]/non_inheritable_image_properties? It is confusing
+        # otherwise to see the owner project not match those values.
+    else:
+        # The request comes from the owner of the instance so make the
+        # image private.
+        image_meta['visibility'] = 'private'
+
+    # Delete properties that are non-inheritable
+    properties = image_meta['properties']
+    for key in CONF.non_inheritable_image_properties:
+        properties.pop(key, None)
+
+    # The properties in extra_properties have precedence
+    properties.update(extra_properties)
+
+    return image_meta
+
+
+def delete_image(context, instance, image_api, image_id, log_exc_info=False):
+    """Deletes the image if it still exists.
+
+    Ignores ImageNotFound if the image is already gone.
+
+    :param context: the nova auth request context where the context.project_id
+        matches the owner of the image
+    :param instance: the instance for which the snapshot image was created
+    :param image_api: the image API used to delete the image
+    :param image_id: the ID of the image to delete
+    :param log_exc_info: True if this is being called from an exception handler
+        block and traceback should be logged at DEBUG level, False otherwise.
+    """
+    LOG.debug("Cleaning up image %s", image_id, instance=instance,
+              log_exc_info=log_exc_info)
+    try:
+        image_api.delete(context, image_id)
+    except exception.ImageNotFound:
+        # Since we're trying to cleanup an image, we don't care if
+        # if it's already gone.
+        pass
+    except Exception:
+        LOG.exception("Error while trying to clean up image %s",
+                      image_id, instance=instance)
+
+
 def may_have_ports_or_volumes(instance):
     """Checks to see if an instance may have ports or volumes based on vm_state
 
@@ -1179,8 +1386,14 @@ class UnlimitedSemaphore(object):
         return 0
 
 
+# This semaphore is used to enforce a limit on disk-IO-intensive operations
+# (image downloads, image conversions) at any given time.
+# It is initialized at ComputeManager.init_host()
+disk_ops_semaphore = UnlimitedSemaphore()
+
+
 @contextlib.contextmanager
-def notify_about_instance_delete(notifier, context, instance, host,
+def notify_about_instance_delete(notifier, context, instance,
                                  delete_type='delete',
                                  source=fields.NotificationSource.API):
     try:
@@ -1192,7 +1405,7 @@ def notify_about_instance_delete(notifier, context, instance, host,
             notify_about_instance_action(
                 context,
                 instance,
-                host=host,
+                host=CONF.host,
                 source=source,
                 action=delete_type,
                 phase=fields.NotificationPhase.START)
@@ -1205,7 +1418,51 @@ def notify_about_instance_delete(notifier, context, instance, host,
             notify_about_instance_action(
                 context,
                 instance,
-                host=host,
+                host=CONF.host,
                 source=source,
                 action=delete_type,
                 phase=fields.NotificationPhase.END)
+
+
+def compute_node_to_inventory_dict(compute_node):
+    """Given a supplied `objects.ComputeNode` object, return a dict, keyed
+    by resource class, of various inventory information.
+
+    :param compute_node: `objects.ComputeNode` object to translate
+    """
+    result = {}
+
+    # NOTE(jaypipes): Ironic virt driver will return 0 values for vcpus,
+    # memory_mb and disk_gb if the Ironic node is not available/operable
+    if compute_node.vcpus > 0:
+        result[orc.VCPU] = {
+            'total': compute_node.vcpus,
+            'reserved': CONF.reserved_host_cpus,
+            'min_unit': 1,
+            'max_unit': compute_node.vcpus,
+            'step_size': 1,
+            'allocation_ratio': compute_node.cpu_allocation_ratio,
+        }
+    if compute_node.memory_mb > 0:
+        result[orc.MEMORY_MB] = {
+            'total': compute_node.memory_mb,
+            'reserved': CONF.reserved_host_memory_mb,
+            'min_unit': 1,
+            'max_unit': compute_node.memory_mb,
+            'step_size': 1,
+            'allocation_ratio': compute_node.ram_allocation_ratio,
+        }
+    if compute_node.local_gb > 0:
+        # TODO(johngarbutt) We should either move to reserved_host_disk_gb
+        # or start tracking DISK_MB.
+        reserved_disk_gb = convert_mb_to_ceil_gb(
+            CONF.reserved_host_disk_mb)
+        result[orc.DISK_GB] = {
+            'total': compute_node.local_gb,
+            'reserved': reserved_disk_gb,
+            'min_unit': 1,
+            'max_unit': compute_node.local_gb,
+            'step_size': 1,
+            'allocation_ratio': compute_node.disk_allocation_ratio,
+        }
+    return result

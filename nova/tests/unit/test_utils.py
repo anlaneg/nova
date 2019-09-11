@@ -19,17 +19,17 @@ import os.path
 import tempfile
 
 import eventlet
+import fixtures
 from keystoneauth1 import adapter as ks_adapter
 from keystoneauth1 import exceptions as ks_exc
 from keystoneauth1.identity import base as ks_identity
 from keystoneauth1 import session as ks_session
 import mock
 import netaddr
-from oslo_concurrency import processutils
+from openstack import exceptions as sdk_exc
 from oslo_config import cfg
 from oslo_context import context as common_context
 from oslo_context import fixture as context_fixture
-from oslo_log import log as logging
 from oslo_utils import encodeutils
 from oslo_utils import fixture as utils_fixture
 from oslo_utils import units
@@ -40,6 +40,7 @@ from nova import exception
 from nova.objects import base as obj_base
 from nova.objects import instance as instance_obj
 from nova import test
+from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit.objects import test_objects
 from nova.tests.unit import utils as test_utils
 from nova import utils
@@ -218,23 +219,12 @@ class GenericUtilsTestCase(test.NoDBTestCase):
         self.assertIs(six.text_type,
                       type(utils.get_obj_repr_unicode(instance)))
 
-    def test_use_rootwrap(self):
-        self.flags(disable_rootwrap=False, group='workarounds')
-        self.flags(rootwrap_config='foo')
-        cmd = utils.get_root_helper()
-        self.assertEqual('sudo nova-rootwrap foo', cmd)
-
-    def test_use_sudo(self):
-        self.flags(disable_rootwrap=True, group='workarounds')
-        cmd = utils.get_root_helper()
-        self.assertEqual('sudo', cmd)
-
-    def test_ssh_execute(self):
+    @mock.patch('oslo_concurrency.processutils.execute')
+    def test_ssh_execute(self, mock_execute):
         expected_args = ('ssh', '-o', 'BatchMode=yes',
                          'remotehost', 'ls', '-l')
-        with mock.patch('nova.utils.execute') as mock_method:
-            utils.ssh_execute('remotehost', 'ls', '-l')
-        mock_method.assert_called_once_with(*expected_args)
+        utils.ssh_execute('remotehost', 'ls', '-l')
+        mock_execute.assert_called_once_with(*expected_args)
 
     def test_generate_hostid(self):
         host = 'host'
@@ -288,171 +278,6 @@ class TestCachedFile(test.NoDBTestCase):
         self.assertNotIn(filename, utils._FILE_CACHE)
         utils.delete_cached_file(filename)
         self.assertNotIn(filename, utils._FILE_CACHE)
-
-
-class RootwrapDaemonTesetCase(test.NoDBTestCase):
-    @mock.patch('oslo_rootwrap.client.Client')
-    def test_get_client(self, mock_client):
-        mock_conf = mock.MagicMock()
-        utils.RootwrapDaemonHelper(mock_conf)
-        mock_client.assert_called_once_with(
-            ["sudo", "nova-rootwrap-daemon", mock_conf])
-
-    @mock.patch('nova.utils.LOG.info')
-    def test_execute(self, mock_info):
-        mock_conf = mock.MagicMock()
-        daemon = utils.RootwrapDaemonHelper(mock_conf)
-        daemon.client = mock.MagicMock()
-        daemon.client.execute = mock.Mock(return_value=(0, None, None))
-
-        daemon.execute('a', 1, foo='bar', run_as_root=True)
-        daemon.client.execute.assert_called_once_with(['a', '1'], None)
-        mock_info.assert_has_calls([mock.call(
-            u'Executing RootwrapDaemonHelper.execute cmd=[%(cmd)r] '
-            u'kwargs=[%(kwargs)r]',
-            {'cmd': u'a 1', 'kwargs': {'run_as_root': True, 'foo': 'bar'}})])
-
-    def test_execute_with_kwargs(self):
-        mock_conf = mock.MagicMock()
-        daemon = utils.RootwrapDaemonHelper(mock_conf)
-        daemon.client = mock.MagicMock()
-        daemon.client.execute = mock.Mock(return_value=(0, None, None))
-
-        daemon.execute('a', 1, foo='bar', run_as_root=True, process_input=True)
-        daemon.client.execute.assert_called_once_with(['a', '1'], True)
-
-    def test_execute_fail(self):
-        mock_conf = mock.MagicMock()
-        daemon = utils.RootwrapDaemonHelper(mock_conf)
-        daemon.client = mock.MagicMock()
-        daemon.client.execute = mock.Mock(return_value=(-2, None, None))
-
-        self.assertRaises(processutils.ProcessExecutionError,
-                          daemon.execute, 'b', 2)
-
-    def test_execute_pass_with_check_exit_code(self):
-        mock_conf = mock.MagicMock()
-        daemon = utils.RootwrapDaemonHelper(mock_conf)
-        daemon.client = mock.MagicMock()
-        daemon.client.execute = mock.Mock(return_value=(-2, None, None))
-        daemon.execute('b', 2, check_exit_code=[-2])
-
-    def test_execute_fail_with_retry(self):
-        mock_conf = mock.MagicMock()
-        daemon = utils.RootwrapDaemonHelper(mock_conf)
-        daemon.client = mock.MagicMock()
-        daemon.client.execute = mock.Mock(return_value=(-2, None, None))
-
-        self.assertRaises(processutils.ProcessExecutionError,
-                          daemon.execute, 'b', 2, attempts=2)
-        daemon.client.execute.assert_has_calls(
-            [mock.call(['b', '2'], None),
-             mock.call(['b', '2'], None)])
-
-    @mock.patch('nova.utils.LOG.log')
-    def test_execute_fail_and_logging(self, mock_log):
-        mock_conf = mock.MagicMock()
-        daemon = utils.RootwrapDaemonHelper(mock_conf)
-        daemon.client = mock.MagicMock()
-        daemon.client.execute = mock.Mock(return_value=(-2, None, None))
-
-        self.assertRaises(processutils.ProcessExecutionError,
-                          daemon.execute, 'b', 2,
-                          attempts=2,
-                          loglevel=logging.CRITICAL,
-                          log_errors=processutils.LOG_ALL_ERRORS)
-        mock_log.assert_has_calls(
-            [
-                mock.call(logging.CRITICAL, u'Running cmd (subprocess): %s',
-                          u'b 2'),
-                mock.call(logging.CRITICAL,
-                          'CMD "%(sanitized_cmd)s" returned: %(return_code)s '
-                          'in %(end_time)0.3fs',
-                          {'sanitized_cmd': u'b 2', 'return_code': -2,
-                           'end_time': mock.ANY}),
-                mock.call(logging.CRITICAL,
-                          u'%(desc)r\ncommand: %(cmd)r\nexit code: %(code)r'
-                          u'\nstdout: %(stdout)r\nstderr: %(stderr)r',
-                          {'code': -2, 'cmd': u'b 2', 'stdout': u'None',
-                           'stderr': u'None', 'desc': None}),
-                mock.call(logging.CRITICAL, u'%r failed. Retrying.', u'b 2'),
-                mock.call(logging.CRITICAL, u'Running cmd (subprocess): %s',
-                          u'b 2'),
-                mock.call(logging.CRITICAL,
-                          'CMD "%(sanitized_cmd)s" returned: %(return_code)s '
-                          'in %(end_time)0.3fs',
-                          {'sanitized_cmd': u'b 2', 'return_code': -2,
-                           'end_time': mock.ANY}),
-                mock.call(logging.CRITICAL,
-                          u'%(desc)r\ncommand: %(cmd)r\nexit code: %(code)r'
-                          u'\nstdout: %(stdout)r\nstderr: %(stderr)r',
-                          {'code': -2, 'cmd': u'b 2', 'stdout': u'None',
-                           'stderr': u'None', 'desc': None}),
-                mock.call(logging.CRITICAL, u'%r failed. Not Retrying.',
-                          u'b 2')]
-        )
-
-    def test_trycmd(self):
-        mock_conf = mock.MagicMock()
-        daemon = utils.RootwrapDaemonHelper(mock_conf)
-        daemon.client = mock.MagicMock()
-        daemon.client.execute = mock.Mock(return_value=(0, None, None))
-
-        daemon.trycmd('a', 1, foo='bar', run_as_root=True)
-        daemon.client.execute.assert_called_once_with(['a', '1'], None)
-
-    def test_trycmd_with_kwargs(self):
-        mock_conf = mock.MagicMock()
-        daemon = utils.RootwrapDaemonHelper(mock_conf)
-        daemon.execute = mock.Mock(return_value=('out', 'err'))
-
-        daemon.trycmd('a', 1, foo='bar', run_as_root=True,
-                      loglevel=logging.WARN,
-                      log_errors=True,
-                      process_input=True,
-                      delay_on_retry=False,
-                      attempts=5,
-                      check_exit_code=[200])
-        daemon.execute.assert_called_once_with('a', 1, attempts=5,
-                                               check_exit_code=[200],
-                                               delay_on_retry=False, foo='bar',
-                                               log_errors=True, loglevel=30,
-                                               process_input=True,
-                                               run_as_root=True)
-
-    def test_trycmd_fail(self):
-        mock_conf = mock.MagicMock()
-        daemon = utils.RootwrapDaemonHelper(mock_conf)
-        daemon.client = mock.MagicMock()
-        daemon.client.execute = mock.Mock(return_value=(-2, None, None))
-
-        expected_err = six.text_type('''\
-Unexpected error while running command.
-Command: a 1
-Exit code: -2''')
-
-        out, err = daemon.trycmd('a', 1, foo='bar', run_as_root=True)
-        daemon.client.execute.assert_called_once_with(['a', '1'], None)
-        self.assertIn(expected_err, err)
-
-    def test_trycmd_fail_with_rety(self):
-        mock_conf = mock.MagicMock()
-        daemon = utils.RootwrapDaemonHelper(mock_conf)
-        daemon.client = mock.MagicMock()
-        daemon.client.execute = mock.Mock(return_value=(-2, None, None))
-
-        expected_err = six.text_type('''\
-Unexpected error while running command.
-Command: a 1
-Exit code: -2''')
-
-        out, err = daemon.trycmd('a', 1, foo='bar', run_as_root=True,
-                                 attempts=3)
-        self.assertIn(expected_err, err)
-        daemon.client.execute.assert_has_calls(
-            [mock.call(['a', '1'], None),
-             mock.call(['a', '1'], None),
-             mock.call(['a', '1'], None)])
 
 
 class AuditPeriodTest(test.NoDBTestCase):
@@ -954,79 +779,6 @@ class GetImageMetadataFromVolumeTestCase(test.NoDBTestCase):
         self.assertNotEqual({}, properties)
 
 
-class ResourceFilterTestCase(test.NoDBTestCase):
-    def _assert_filtering(self, res_list, filts, expected_tags):
-        actual_tags = utils.filter_and_format_resource_metadata('instance',
-                res_list, filts, 'metadata')
-        self.assertJsonEqual(expected_tags, actual_tags)
-
-    def test_filter_and_format_resource_metadata(self):
-        # Create some tags
-        # One overlapping pair, and one different key value pair
-        # i1 : foo=bar, bax=wibble
-        # i2 : foo=bar, baz=quux
-
-        # resources
-        i1 = {
-                'uuid': '1',
-                'metadata': {'foo': 'bar', 'bax': 'wibble'},
-            }
-        i2 = {
-                'uuid': '2',
-                'metadata': {'foo': 'bar', 'baz': 'quux'},
-            }
-
-        # Resources list
-        rl = [i1, i2]
-
-        # tags
-        i11 = {'instance_id': '1', 'key': 'foo', 'value': 'bar'}
-        i12 = {'instance_id': '1', 'key': 'bax', 'value': 'wibble'}
-        i21 = {'instance_id': '2', 'key': 'foo', 'value': 'bar'}
-        i22 = {'instance_id': '2', 'key': 'baz', 'value': 'quux'}
-
-        # No filter
-        self._assert_filtering(rl, [], [i11, i12, i21, i22])
-        self._assert_filtering(rl, {}, [i11, i12, i21, i22])
-
-        # Key search
-
-        # Both should have tags with key 'foo' and value 'bar'
-        self._assert_filtering(rl, {'key': 'foo', 'value': 'bar'}, [i11, i21])
-
-        # Both should have tags with key 'foo'
-        self._assert_filtering(rl, {'key': 'foo'}, [i11, i21])
-
-        # Only i2 should have tags with key 'baz' and value 'quux'
-        self._assert_filtering(rl, {'key': 'baz', 'value': 'quux'}, [i22])
-
-        # Only i2 should have tags with value 'quux'
-        self._assert_filtering(rl, {'value': 'quux'}, [i22])
-
-        # Empty list should be returned when no tags match
-        self._assert_filtering(rl, {'key': 'split', 'value': 'banana'}, [])
-
-        # Multiple values
-
-        # Only i2 should have tags with key 'baz' and values in the set
-        # ['quux', 'wibble']
-        self._assert_filtering(rl, {'key': 'baz', 'value': ['quux', 'wibble']},
-                [i22])
-
-        # But when specified as two different filters, no tags should be
-        # returned. This is because, the filter will mean "return tags which
-        # have (key=baz AND value=quux) AND (key=baz AND value=wibble)
-        self._assert_filtering(rl, [{'key': 'baz', 'value': 'quux'},
-            {'key': 'baz', 'value': 'wibble'}], [])
-
-        # Test for regex
-        self._assert_filtering(rl, {'value': '\\Aqu..*\\Z(?s)'}, [i22])
-
-        # Make sure bug #1365887 is fixed
-        i1['metadata']['key3'] = 'a'
-        self._assert_filtering(rl, {'value': 'banana'}, [])
-
-
 class SafeTruncateTestCase(test.NoDBTestCase):
     def test_exception_to_dict_with_long_message_3_bytes(self):
         # Generate Chinese byte string whose length is 300. This Chinese UTF-8
@@ -1204,28 +956,24 @@ class GetKSAAdapterTestCase(test.NoDBTestCase):
         self.auth = mock.create_autospec(ks_identity.BaseIdentityPlugin,
                                          instance=True)
 
-        load_sess_p = mock.patch(
-            'keystoneauth1.loading.load_session_from_conf_options')
-        self.addCleanup(load_sess_p.stop)
-        self.load_sess = load_sess_p.start()
-        self.load_sess.return_value = self.sess
-
         load_adap_p = mock.patch(
             'keystoneauth1.loading.load_adapter_from_conf_options')
         self.addCleanup(load_adap_p.stop)
         self.load_adap = load_adap_p.start()
 
-        load_auth_p = mock.patch(
-            'keystoneauth1.loading.load_auth_from_conf_options')
-        self.addCleanup(load_auth_p.stop)
-        self.load_auth = load_auth_p.start()
-        self.load_auth.return_value = self.auth
+        ksa_fixture = self.useFixture(nova_fixtures.KSAFixture())
+        self.mock_ksa_load_auth = ksa_fixture.mock_load_auth
+        self.mock_ksa_load_sess = ksa_fixture.mock_load_sess
+        self.mock_ksa_session = ksa_fixture.mock_session
+
+        self.mock_ksa_load_auth.return_value = self.auth
+        self.mock_ksa_load_sess.return_value = self.sess
 
     def test_bogus_service_type(self):
         self.assertRaises(exception.ConfGroupForServiceTypeNotFound,
                           utils.get_ksa_adapter, 'bogus')
-        self.load_auth.assert_not_called()
-        self.load_sess.assert_not_called()
+        self.mock_ksa_load_auth.assert_not_called()
+        self.mock_ksa_load_sess.assert_not_called()
         self.load_adap.assert_not_called()
 
     def test_all_params(self):
@@ -1235,9 +983,9 @@ class GetKSAAdapterTestCase(test.NoDBTestCase):
         # Returned the result of load_adapter_from_conf_options
         self.assertEqual(self.load_adap.return_value, ret)
         # Because we supplied ksa_auth, load_auth* not called
-        self.load_auth.assert_not_called()
+        self.mock_ksa_load_auth.assert_not_called()
         # Ditto ksa_session/load_session*
-        self.load_sess.assert_not_called()
+        self.mock_ksa_load_sess.assert_not_called()
         # load_adapter* called with what we passed in (and the right group)
         self.load_adap.assert_called_once_with(
             utils.CONF, 'glance', session='sess', auth='auth',
@@ -1249,9 +997,9 @@ class GetKSAAdapterTestCase(test.NoDBTestCase):
         # Returned the result of load_adapter_from_conf_options
         self.assertEqual(self.load_adap.return_value, ret)
         # Because ksa_auth found in ksa_session, load_auth* not called
-        self.load_auth.assert_not_called()
+        self.mock_ksa_load_auth.assert_not_called()
         # Because we supplied ksa_session, load_session* not called
-        self.load_sess.assert_not_called()
+        self.mock_ksa_load_sess.assert_not_called()
         # load_adapter* called with the auth from the session
         self.load_adap.assert_called_once_with(
             utils.CONF, 'ironic', session=self.sess, auth='auth',
@@ -1262,10 +1010,10 @@ class GetKSAAdapterTestCase(test.NoDBTestCase):
         # Returned the result of load_adapter_from_conf_options
         self.assertEqual(self.load_adap.return_value, ret)
         # Had to load the auth
-        self.load_auth.assert_called_once_with(utils.CONF, 'cinder')
+        self.mock_ksa_load_auth.assert_called_once_with(utils.CONF, 'cinder')
         # Had to load the session, passed in the loaded auth
-        self.load_sess.assert_called_once_with(utils.CONF, 'cinder',
-                                               auth=self.auth)
+        self.mock_ksa_load_sess.assert_called_once_with(utils.CONF, 'cinder',
+                                                        auth=self.auth)
         # load_adapter* called with the loaded auth & session
         self.load_adap.assert_called_once_with(
             utils.CONF, 'cinder', session=self.sess, auth=self.auth,
@@ -1321,3 +1069,297 @@ class GetEndpointTestCase(test.NoDBTestCase):
         self.adap.get_endpoint_data.assert_not_called()
         self.assertEqual(3, self.adap.get_endpoint.call_count)
         self.assertEqual('public', self.adap.interface)
+
+
+class RunOnceTests(test.NoDBTestCase):
+
+    fake_logger = mock.MagicMock()
+
+    @utils.run_once("already ran once", fake_logger)
+    def dummy_test_func(self, fail=False):
+        if fail:
+            raise ValueError()
+        return True
+
+    def setUp(self):
+        super(RunOnceTests, self).setUp()
+        self.dummy_test_func.reset()
+        RunOnceTests.fake_logger.reset_mock()
+
+    def test_wrapped_funtions_called_once(self):
+        self.assertFalse(self.dummy_test_func.called)
+        result = self.dummy_test_func()
+        self.assertTrue(result)
+        self.assertTrue(self.dummy_test_func.called)
+
+        # assert that on second invocation no result
+        # is returned and that the logger is invoked.
+        result = self.dummy_test_func()
+        RunOnceTests.fake_logger.assert_called_once()
+        self.assertIsNone(result)
+
+    def test_wrapped_funtions_called_once_raises(self):
+        self.assertFalse(self.dummy_test_func.called)
+        self.assertRaises(ValueError, self.dummy_test_func, fail=True)
+        self.assertTrue(self.dummy_test_func.called)
+
+        # assert that on second invocation no result
+        # is returned and that the logger is invoked.
+        result = self.dummy_test_func()
+        RunOnceTests.fake_logger.assert_called_once()
+        self.assertIsNone(result)
+
+    def test_wrapped_funtions_can_be_reset(self):
+        # assert we start with a clean state
+        self.assertFalse(self.dummy_test_func.called)
+        result = self.dummy_test_func()
+        self.assertTrue(result)
+
+        self.dummy_test_func.reset()
+        # assert we restored a clean state
+        self.assertFalse(self.dummy_test_func.called)
+        result = self.dummy_test_func()
+        self.assertTrue(result)
+
+        # assert that we never called the logger
+        RunOnceTests.fake_logger.assert_not_called()
+
+    def test_reset_calls_cleanup(self):
+        mock_clean = mock.Mock()
+
+        @utils.run_once("already ran once", self.fake_logger,
+                        cleanup=mock_clean)
+        def f():
+            pass
+
+        f()
+        self.assertTrue(f.called)
+
+        f.reset()
+        self.assertFalse(f.called)
+        mock_clean.assert_called_once_with()
+
+    def test_clean_is_not_called_at_reset_if_wrapped_not_called(self):
+        mock_clean = mock.Mock()
+
+        @utils.run_once("already ran once", self.fake_logger,
+                        cleanup=mock_clean)
+        def f():
+            pass
+
+        self.assertFalse(f.called)
+
+        f.reset()
+        self.assertFalse(f.called)
+        self.assertFalse(mock_clean.called)
+
+    def test_reset_works_even_if_cleanup_raises(self):
+        mock_clean = mock.Mock(side_effect=ValueError())
+
+        @utils.run_once("already ran once", self.fake_logger,
+                        cleanup=mock_clean)
+        def f():
+            pass
+
+        f()
+        self.assertTrue(f.called)
+
+        self.assertRaises(ValueError, f.reset)
+        self.assertFalse(f.called)
+        mock_clean.assert_called_once_with()
+
+
+class TestResourceClassNormalize(test.NoDBTestCase):
+
+    def test_normalize_name(self):
+        values = [
+            ("foo", "CUSTOM_FOO"),
+            ("VCPU", "CUSTOM_VCPU"),
+            ("CUSTOM_BOB", "CUSTOM_CUSTOM_BOB"),
+            ("CUSTM_BOB", "CUSTOM_CUSTM_BOB"),
+        ]
+        for test_value, expected in values:
+            result = utils.normalize_rc_name(test_value)
+            self.assertEqual(expected, result)
+
+    def test_normalize_name_bug_1762789(self):
+        """The .upper() builtin treats sharp S (\xdf) differently in py2 vs.
+        py3.  Make sure normalize_name handles it properly.
+        """
+        name = u'Fu\xdfball'
+        self.assertEqual(u'CUSTOM_FU_BALL', utils.normalize_rc_name(name))
+
+
+class TestGetConfGroup(test.NoDBTestCase):
+    """Tests for nova.utils._get_conf_group"""
+    @mock.patch('nova.utils.CONF')
+    @mock.patch('nova.utils._SERVICE_TYPES.get_project_name')
+    def test__get_conf_group(self, mock_get_project_name, mock_conf):
+        test_conf_grp = 'test_confgrp'
+        test_service_type = 'test_service_type'
+        mock_get_project_name.return_value = test_conf_grp
+
+        # happy path
+        mock_conf.test_confgrp = None
+        actual_conf_grp = utils._get_conf_group(test_service_type)
+        self.assertEqual(test_conf_grp, actual_conf_grp)
+        mock_get_project_name.assert_called_once_with(test_service_type)
+
+        # service type as the conf group
+        del mock_conf.test_confgrp
+        mock_conf.test_service_type = None
+        actual_conf_grp = utils._get_conf_group(test_service_type)
+        self.assertEqual(test_service_type, actual_conf_grp)
+
+    @mock.patch('nova.utils._SERVICE_TYPES.get_project_name')
+    def test__get_conf_group_fail(self, mock_get_project_name):
+        test_service_type = 'test_service_type'
+
+        # not confgrp
+        mock_get_project_name.return_value = None
+        self.assertRaises(exception.ConfGroupForServiceTypeNotFound,
+                          utils._get_conf_group, None)
+
+        # not hasattr
+        mock_get_project_name.return_value = 'test_fail'
+        self.assertRaises(exception.ConfGroupForServiceTypeNotFound,
+                          utils._get_conf_group, test_service_type)
+
+
+class TestGetAuthAndSession(test.NoDBTestCase):
+    """Tests for nova.utils._get_auth_and_session"""
+    def setUp(self):
+        super(TestGetAuthAndSession, self).setUp()
+
+        self.test_auth = 'test_auth'
+        self.test_session = 'test_session'
+        self.test_session_auth = 'test_session_auth'
+        self.test_confgrp = 'test_confgrp'
+        self.mock_session = mock.Mock()
+        self.mock_session.auth = self.test_session_auth
+
+    @mock.patch('nova.utils.ks_loading.load_auth_from_conf_options')
+    @mock.patch('nova.utils.ks_loading.load_session_from_conf_options')
+    def test_auth_and_session(self, mock_load_session, mock_load_auth):
+        # yes auth, yes session
+        actual = utils._get_auth_and_session(self.test_confgrp,
+                                             ksa_auth=self.test_auth,
+                                             ksa_session=self.test_session)
+        self.assertEqual(actual, (self.test_auth, self.test_session))
+        mock_load_session.assert_not_called()
+        mock_load_auth.assert_not_called()
+
+    @mock.patch('nova.utils.ks_loading.load_auth_from_conf_options')
+    @mock.patch('nova.utils.ks_loading.load_session_from_conf_options')
+    @mock.patch('nova.utils.CONF')
+    def test_no_session(self, mock_CONF, mock_load_session, mock_load_auth):
+        # yes auth, no session
+        mock_load_session.return_value = self.test_session
+
+        actual = utils._get_auth_and_session(self.test_confgrp,
+                                             ksa_auth=self.test_auth,
+                                             ksa_session=None)
+
+        self.assertEqual(actual, (self.test_auth, self.test_session))
+        mock_load_session.assert_called_once_with(mock_CONF, self.test_confgrp,
+                                                  auth=self.test_auth)
+        mock_load_auth.assert_not_called()
+
+    @mock.patch('nova.utils.ks_loading.load_auth_from_conf_options')
+    @mock.patch('nova.utils.ks_loading.load_session_from_conf_options')
+    def test_no_auth(self, mock_load_session, mock_load_auth):
+        # no auth, yes session, yes session.auth
+        actual = utils._get_auth_and_session(self.test_confgrp, ksa_auth=None,
+                                             ksa_session=self.mock_session)
+        self.assertEqual(actual, (self.test_session_auth, self.mock_session))
+        mock_load_session.assert_not_called()
+        mock_load_auth.assert_not_called()
+
+    @mock.patch('nova.utils.ks_loading.load_auth_from_conf_options')
+    @mock.patch('nova.utils.ks_loading.load_session_from_conf_options')
+    @mock.patch('nova.utils.CONF')
+    def test_no_auth_no_sauth(self, mock_CONF, mock_load_session,
+                              mock_load_auth):
+        # no auth, yes session, no session.auth
+        mock_load_auth.return_value = self.test_auth
+        self.mock_session.auth = None
+        actual = utils._get_auth_and_session(self.test_confgrp, ksa_auth=None,
+                                             ksa_session=self.mock_session)
+        self.assertEqual(actual, (self.test_auth, self.mock_session))
+        mock_load_session.assert_not_called()
+        mock_load_auth.assert_called_once_with(mock_CONF, self.test_confgrp)
+
+    @mock.patch('nova.utils.ks_loading.load_auth_from_conf_options')
+    @mock.patch('nova.utils.ks_loading.load_session_from_conf_options')
+    @mock.patch('nova.utils.CONF')
+    def test__get_auth_and_session(self, mock_CONF, mock_load_session,
+                                   mock_load_auth):
+        # no auth, no session
+        mock_load_auth.return_value = self.test_auth
+        mock_load_session.return_value = self.test_session
+        actual = utils._get_auth_and_session(self.test_confgrp, ksa_auth=None,
+                                             ksa_session=None)
+        self.assertEqual(actual, (self.test_auth, self.test_session))
+        mock_load_session.assert_called_once_with(mock_CONF, self.test_confgrp,
+                                                  auth=self.test_auth)
+        mock_load_auth.assert_called_once_with(mock_CONF, self.test_confgrp)
+
+
+class TestGetSDKAdapter(test.NoDBTestCase):
+    """Tests for nova.utils.get_sdk_adapter"""
+
+    def setUp(self):
+        super(TestGetSDKAdapter, self).setUp()
+
+        self.mock_get_confgrp = self.useFixture(fixtures.MockPatch(
+            'nova.utils._get_conf_group')).mock
+
+        self.mock_get_auth_sess = self.useFixture(fixtures.MockPatch(
+            'nova.utils._get_auth_and_session')).mock
+        self.mock_get_auth_sess.return_value = (None, mock.sentinel.session)
+
+        self.service_type = 'test_service'
+        self.mock_connection = self.useFixture(fixtures.MockPatch(
+            'nova.utils.connection.Connection')).mock
+        self.mock_connection.return_value = mock.Mock(
+            test_service=mock.sentinel.proxy)
+
+        # We need to stub the CONF global in nova.utils to assert that the
+        # Connection constructor picks it up.
+        self.mock_conf = self.useFixture(fixtures.MockPatch(
+            'nova.utils.CONF')).mock
+
+    def _test_get_sdk_adapter(self, strict=False):
+        actual = utils.get_sdk_adapter(self.service_type, check_service=strict)
+
+        self.mock_get_confgrp.assert_called_once_with(self.service_type)
+        self.mock_get_auth_sess.assert_called_once_with(
+            self.mock_get_confgrp.return_value)
+        self.mock_connection.assert_called_once_with(
+            session=mock.sentinel.session, oslo_conf=self.mock_conf,
+            service_types={'test_service'}, strict_proxies=strict)
+
+        return actual
+
+    def test_get_sdk_adapter(self):
+        self.assertEqual(self._test_get_sdk_adapter(), mock.sentinel.proxy)
+
+    def test_get_sdk_adapter_strict(self):
+        self.assertEqual(
+            self._test_get_sdk_adapter(strict=True), mock.sentinel.proxy)
+
+    def test_get_sdk_adapter_strict_fail(self):
+        self.mock_connection.side_effect = sdk_exc.ServiceDiscoveryException()
+        self.assertRaises(
+            exception.ServiceUnavailable,
+            self._test_get_sdk_adapter, strict=True)
+
+    def test_get_sdk_adapter_conf_group_fail(self):
+        self.mock_get_confgrp.side_effect = (
+            exception.ConfGroupForServiceTypeNotFound(stype=self.service_type))
+
+        self.assertRaises(exception.ConfGroupForServiceTypeNotFound,
+                          utils.get_sdk_adapter, self.service_type)
+        self.mock_get_confgrp.assert_called_once_with(self.service_type)
+        self.mock_connection.assert_not_called()
+        self.mock_get_auth_sess.assert_not_called()

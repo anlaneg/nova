@@ -9,10 +9,10 @@ End user guide
    :maxdepth: 1
 
    launch-instances
-   config-drive
-   metadata-service
+   metadata
    certificate-validation
    resize
+   reboot
 
 .. todo:: The rest of this document should probably move to the admin guide.
 
@@ -27,7 +27,8 @@ Architecture Overview
   to connect specific block devices to computes. This deserves its own deep
   dive.
 
-* :doc:`Conductor </user/conductor>`: TODO
+See the :ref:`reference guide <reference-internals>` for details about more
+internal subsystems.
 
 Deployment Considerations
 -------------------------
@@ -52,7 +53,7 @@ the defaults from the :doc:`install guide </install/index>` will be sufficient.
   allows sharding of your compute environment. Upfront planning is key to a
   successful Cells v2 layout.
 
-* :doc:`Placement service </user/placement>`: Overview of the placement
+* :placement-doc:`Placement service <>`: Overview of the placement
   service, including how it fits in with the rest of nova.
 
 * :doc:`Running nova-api on wsgi </user/wsgi>`: Considerations for using a real
@@ -79,6 +80,7 @@ Once you are running nova, the following information is extremely useful.
   environment. If you are seeing unexpected distribution of compute instances
   in your hosts, you'll want to dive into this configuration.
 
-* :doc:`Exposing custom metadata to compute instances </user/vendordata>`: How and
-  when you might want to extend the basic metadata exposed to compute instances
-  (either via metadata server or config drive) for your specific purposes.
+* :doc:`Exposing custom metadata to compute instances </admin/vendordata>`: How
+  and when you might want to extend the basic metadata exposed to compute
+  instances (either via metadata server or config drive) for your specific
+  purposes.

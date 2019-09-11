@@ -18,7 +18,7 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import admin_password
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
 from nova.policies import admin_password as ap_policies
@@ -26,8 +26,8 @@ from nova.policies import admin_password as ap_policies
 
 class AdminPasswordController(wsgi.Controller):
 
-    def __init__(self, *args, **kwargs):
-        super(AdminPasswordController, self).__init__(*args, **kwargs)
+    def __init__(self):
+        super(AdminPasswordController, self).__init__()
         self.compute_api = compute.API()
 
     # TODO(eliqiao): Here should be 204(No content) instead of 202 by v2.1+
@@ -47,8 +47,6 @@ class AdminPasswordController(wsgi.Controller):
         password = body['changePassword']['adminPass']
         try:
             self.compute_api.set_admin_password(context, instance, password)
-        except exception.InstanceUnknownCell as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
         except (exception.InstancePasswordSetFailed,
                 exception.SetAdminPasswdNotSupported,
                 exception.InstanceAgentNotEnabled) as e:

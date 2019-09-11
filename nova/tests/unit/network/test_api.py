@@ -16,13 +16,11 @@
 """Tests for network API."""
 
 import copy
-import itertools
 
 import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 
-from nova.compute import flavors
 from nova import context
 from nova import exception
 from nova import network
@@ -127,30 +125,6 @@ class ApiTestCase(test.TestCase):
         mock_get_by_id.assert_called_once_with(self.context, 123,
                                                project_only='allow_none')
 
-    def test_allocate_for_instance_handles_macs_passed(self):
-        # If a macs argument is supplied to the 'nova-network' API, it is just
-        # ignored. This test checks that the call down to the rpcapi layer
-        # doesn't pass macs down: nova-network doesn't support hypervisor
-        # mac address limits (today anyhow).
-        macs = set(['ab:cd:ef:01:23:34'])
-        with mock.patch.object(self.network_api.network_rpcapi,
-                               "allocate_for_instance") as mock_alloc:
-            kwargs = dict(zip(['host', 'instance_id', 'project_id',
-                               'requested_networks', 'rxtx_factor', 'vpn',
-                                'macs'],
-                              itertools.repeat(mock.ANY)))
-            mock_alloc.return_value = []
-            flavor = flavors.get_default_flavor()
-            flavor['rxtx_factor'] = 0
-            instance = objects.Instance(id=1, uuid=uuids.instance,
-                                        project_id='project_id',
-                                        host='host', system_metadata={},
-                                        flavor=flavor, deleted=False)
-            self.network_api.allocate_for_instance(
-                self.context, instance, 'vpn', requested_networks=None,
-                macs=macs)
-            mock_alloc.assert_called_once_with(self.context, **kwargs)
-
     def _do_test_associate_floating_ip(self, orig_instance_uuid):
         """Test post-association logic."""
 
@@ -184,8 +158,7 @@ class ApiTestCase(test.TestCase):
             return fake_info_cache
 
         def fake_update_instance_cache_with_nw_info(api, context, instance,
-                                                    nw_info=None,
-                                                    update_cells=True):
+                                                    nw_info=None):
             return
 
         with test.nested(
@@ -254,7 +227,7 @@ class ApiTestCase(test.TestCase):
                                          self.context.project_id)
 
     def _stub_migrate_instance_calls(self, method, multi_host, info):
-        fake_flavor = flavors.get_default_flavor()
+        fake_flavor = objects.Flavor.get_by_name(self.context, 'm1.small')
         fake_flavor['rxtx_factor'] = 1.21
         fake_instance = objects.Instance(
             uuid=uuidutils.generate_uuid(dashed=False),
@@ -306,14 +279,14 @@ class ApiTestCase(test.TestCase):
         arg1, arg2, expected = self._stub_migrate_instance_calls(
                 'migrate_instance_finish', True, info)
         expected['host'] = 'fake_compute_dest'
-        self.network_api.migrate_instance_finish(self.context, arg1, arg2)
+        self.network_api.migrate_instance_finish(self.context, arg1, arg2, {})
         self.assertEqual(info['kwargs'], expected)
 
     def test_migrate_instance_finish_without_multihost(self):
         info = {'kwargs': {}}
         arg1, arg2, expected = self._stub_migrate_instance_calls(
                 'migrate_instance_finish', False, info)
-        self.network_api.migrate_instance_finish(self.context, arg1, arg2)
+        self.network_api.migrate_instance_finish(self.context, arg1, arg2, {})
         self.assertEqual(info['kwargs'], expected)
 
     def test_is_multi_host_instance_has_no_fixed_ip(self):
@@ -543,7 +516,8 @@ class ApiTestCase(test.TestCase):
             self.context, instance, 'fake_compute_source')
         fake_migrate_finish.assert_called_once_with(
             self.context, instance,
-            {'source_compute': None, 'dest_compute': 'fake_compute_source'})
+            {'source_compute': None, 'dest_compute': 'fake_compute_source'},
+            None)
 
     @mock.patch('oslo_concurrency.lockutils.lock')
     @mock.patch.object(api.API, '_get_instance_nw_info')
@@ -555,8 +529,7 @@ class ApiTestCase(test.TestCase):
         result = self.network_api.get_instance_nw_info(self.context, instance)
         mock_get.assert_called_once_with(self.context, instance)
         mock_update.assert_called_once_with(self.network_api, self.context,
-                                            instance, nw_info=fake_result,
-                                            update_cells=False)
+                                            instance, nw_info=fake_result)
         self.assertEqual(fake_result, result)
 
 

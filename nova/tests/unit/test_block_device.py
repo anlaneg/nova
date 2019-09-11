@@ -17,6 +17,7 @@
 Tests for Block Device utility functions.
 """
 from oslo_utils.fixture import uuidsentinel as uuids
+import six
 
 from nova import block_device
 from nova import exception
@@ -147,6 +148,20 @@ class BlockDeviceTestCase(test.NoDBTestCase):
         self.assertEqual('c', block_device.get_device_letter('vdc'))
         self.assertEqual('c', block_device.get_device_letter('hdc'))
         self.assertIsNone(block_device.get_device_letter(None))
+
+    def test_generate_device_name(self):
+        expected = (
+                ('vda', ("vd", 0)),
+                ('vdaa', ("vd", 26)),
+                ('vdabc', ("vd", 730)),
+                ('vdidpok', ("vd", 4194304)),
+                ('sdc', ("sd", 2)),
+                ('sdaa', ("sd", 26)),
+                ('sdiw', ("sd", 256)),
+                ('hdzz', ("hd", 701))
+                )
+        for res, args in expected:
+            self.assertEqual(res, block_device.generate_device_name(*args))
 
     def test_volume_in_mapping(self):
         swap = {'device_name': '/dev/sdb',
@@ -598,6 +613,44 @@ class TestBlockDeviceDict(test.NoDBTestCase):
              'boot_index': 0})
         self.assertEqual(retexp,
                          block_device.BlockDeviceDict.from_api(api_dict, True))
+
+    def test_from_api_invalid_image_to_destination_local_mapping(self):
+        api_dict = {'id': 1,
+                    'source_type': 'image',
+                    'destination_type': 'local',
+                    'uuid': 'fake-volume-id-1',
+                    'volume_type': 'fake-lvm-1',
+                    'boot_index': 1}
+        ex = self.assertRaises(exception.InvalidBDMFormat,
+                               block_device.BlockDeviceDict.from_api,
+                               api_dict, False)
+        self.assertIn('Mapping image to local is not supported',
+                      six.text_type(ex))
+
+    def test_from_api_invalid_volume_type_to_destination_local_mapping(self):
+        api_dict = {'id': 1,
+                    'source_type': 'volume',
+                    'destination_type': 'local',
+                    'uuid': 'fake-volume-id-1',
+                    'volume_type': 'fake-lvm-1'}
+        ex = self.assertRaises(exception.InvalidBDMFormat,
+                               block_device.BlockDeviceDict.from_api,
+                               api_dict, False)
+        self.assertIn('Specifying a volume_type with destination_type=local '
+                      'is not supported', six.text_type(ex))
+
+    def test_from_api_invalid_specify_volume_type_with_source_volume_mapping(
+            self):
+        api_dict = {'id': 1,
+                    'source_type': 'volume',
+                    'destination_type': 'volume',
+                    'uuid': 'fake-volume-id-1',
+                    'volume_type': 'fake-lvm-1'}
+        ex = self.assertRaises(exception.InvalidBDMFormat,
+                               block_device.BlockDeviceDict.from_api,
+                               api_dict, False)
+        self.assertIn('Specifying volume type to existing volume is '
+                      'not supported', six.text_type(ex))
 
     def test_legacy(self):
         for legacy, new in zip(self.legacy_mapping, self.new_mapping):

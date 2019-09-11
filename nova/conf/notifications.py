@@ -29,7 +29,15 @@ at https://docs.openstack.org/nova/latest/reference/notifications.html
 ALL_OPTS = [
     cfg.StrOpt(
         'notify_on_state_change',
-        choices=(None, 'vm_state', 'vm_and_task_state'),
+        choices=[
+            (None, 'no notifications'),
+            ('vm_state', 'Notifications are sent with VM state transition '
+             'information in the ``old_state`` and ``state`` fields. The '
+             '``old_task_state`` and ``new_task_state`` fields will be set to '
+             'the current task_state of the instance'),
+            ('vm_and_task_state', 'Notifications are sent with VM and task '
+             'state transition information'),
+        ],
         deprecated_group='DEFAULT',
         help="""
 If set, send compute.instance.update notifications on
@@ -38,16 +46,6 @@ instance state changes.
 Please refer to
 https://docs.openstack.org/nova/latest/reference/notifications.html for
 additional information on notifications.
-
-Possible values:
-
-* None - no notifications
-* "vm_state" - notifications are sent with VM state transition information in
-  the ``old_state`` and ``state`` fields. The ``old_task_state`` and
-  ``new_task_state`` fields will be set to the current task_state of the
-  instance.
-* "vm_and_task_state" - notifications are sent with VM and task state
-  transition information.
 """),
 
     cfg.StrOpt(
@@ -59,26 +57,27 @@ Possible values:
         help="Default notification level for outgoing notifications."),
     cfg.StrOpt(
         'notification_format',
-        choices=['unversioned', 'versioned', 'both'],
-        default='both',
+        default='unversioned',
+        choices=[
+            ('both', 'Both the legacy unversioned and the new versioned '
+             'notifications are emitted'),
+            ('versioned', 'Only the new versioned notifications are emitted'),
+            ('unversioned', 'Only the legacy unversioned notifications are '
+             'emitted'),
+        ],
         deprecated_group='DEFAULT',
         help="""
-Specifies which notification format shall be used by nova.
+Specifies which notification format shall be emitted by nova.
 
-The default value is fine for most deployments and rarely needs to be changed.
-This value can be set to 'versioned' once the infrastructure moves closer to
-consuming the newer format of notifications. After this occurs, this option
-will be removed.
+The versioned notification interface are in feature parity with the legacy
+interface and the versioned interface is actively developed so new consumers
+should used the versioned interface.
+
+However, the legacy interface is heavily used by ceilometer and other mature
+OpenStack components so it remains the default.
 
 Note that notifications can be completely disabled by setting ``driver=noop``
 in the ``[oslo_messaging_notifications]`` group.
-
-Possible values:
-
-* unversioned: Only the legacy unversioned notifications are emitted.
-* versioned: Only the new versioned notifications are emitted.
-* both: Both the legacy unversioned and the new versioned notifications are
-  emitted. (Default)
 
 The list of versioned notifications is visible in
 https://docs.openstack.org/nova/latest/reference/notifications.html

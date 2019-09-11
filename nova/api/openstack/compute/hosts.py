@@ -23,7 +23,7 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import hosts
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import context as nova_context
 from nova import exception
 from nova import objects
@@ -35,8 +35,8 @@ LOG = logging.getLogger(__name__)
 class HostController(wsgi.Controller):
     """The Hosts API controller for the OpenStack API."""
     def __init__(self):
-        self.api = compute.HostAPI()
         super(HostController, self).__init__()
+        self.api = compute.HostAPI()
 
     @wsgi.Controller.api_version("2.1", "2.42")
     @validation.query_schema(hosts.index_query)
@@ -52,9 +52,6 @@ class HostController(wsgi.Controller):
         |     'zone': 'internal'},
         |    {'host_name': 'some.celly.host.name',
         |     'service': 'cells',
-        |     'zone': 'internal'},
-        |    {'host_name': 'console1.host.com',
-        |     'service': 'consoleauth',
         |     'zone': 'internal'},
         |    {'host_name': 'network1.host.com',
         |     'service': 'network',

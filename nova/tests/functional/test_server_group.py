@@ -25,6 +25,7 @@ from nova.db.sqlalchemy import api as db_api
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api import client
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import policy_fixture
 from nova import utils
@@ -46,8 +47,8 @@ class ServerGroupTestBase(test.TestCase,
     api_major_version = 'v2.1'
     microversion = None
 
-    _enabled_filters = (CONF.filter_scheduler.enabled_filters
-                        + ['ServerGroupAntiAffinityFilter',
+    _enabled_filters = (CONF.filter_scheduler.enabled_filters +
+                        ['ServerGroupAntiAffinityFilter',
                            'ServerGroupAffinityFilter'])
 
     # Override servicegroup parameters to make the tests run faster
@@ -75,7 +76,7 @@ class ServerGroupTestBase(test.TestCase,
         self.useFixture(policy_fixture.RealPolicyFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
 
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
 
@@ -143,14 +144,9 @@ class ServerGroupTestV21(ServerGroupTestBase):
         # tree.
         self.stub_out('nova.virt.driver.load_compute_driver',
                       _fake_load_compute_driver)
-        fake.set_nodes(['compute'])
         self.compute = self.start_service('compute', host='compute')
 
         # NOTE(gibi): start a second compute host to be able to test affinity
-        # NOTE(sbauza): Make sure the FakeDriver returns a different nodename
-        # for the second compute node.
-        fake.set_nodes(['host2'])
-        self.addCleanup(fake.restore_nodes)
         self.compute2 = self.start_service('compute', host='host2')
 
     def test_get_no_groups(self):
@@ -370,7 +366,6 @@ class ServerGroupTestV21(ServerGroupTestBase):
 
     def test_migrate_with_anti_affinity(self):
         # Start additional host to test migration with anti-affinity
-        fake.set_nodes(['host3'])
         self.start_service('compute', host='host3')
 
         created_group = self.api.post_server_groups(self.anti_affinity)
@@ -425,7 +420,6 @@ class ServerGroupTestV21(ServerGroupTestBase):
         time.sleep(self._service_down_time)
 
         # Start additional host to test evacuation
-        fake.set_nodes(['host3'])
         self.start_service('compute', host='host3')
 
         post = {'evacuate': {'onSharedStorage': False}}
@@ -622,7 +616,6 @@ class ServerGroupTestV215(ServerGroupTestV21):
         time.sleep(self._service_down_time)
 
         # Start additional host to test evacuation
-        fake.set_nodes(['host3'])
         compute3 = self.start_service('compute', host='host3')
 
         post = {'evacuate': {}}
@@ -905,12 +898,8 @@ class ServerGroupTestMultiCell(ServerGroupTestBase):
     def setUp(self):
         super(ServerGroupTestMultiCell, self).setUp()
         # Start two compute services, one per cell
-        fake.set_nodes(['host1'])
-        self.addCleanup(fake.restore_nodes)
         self.compute1 = self.start_service('compute', host='host1',
                                            cell='cell1')
-        fake.set_nodes(['host2'])
-        self.addCleanup(fake.restore_nodes)
         self.compute2 = self.start_service('compute', host='host2',
                                            cell='cell2')
         # This is needed to find a server that is still booting with multiple
@@ -982,7 +971,7 @@ class TestAntiAffinityLiveMigration(test.TestCase,
         # Setup common fixtures.
         self.useFixture(policy_fixture.RealPolicyFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
         # Setup API.
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -995,8 +984,6 @@ class TestAntiAffinityLiveMigration(test.TestCase,
         self.start_service('conductor')
         self.start_service('scheduler')
         for host in ('host1', 'host2'):
-            fake.set_nodes([host])
-            self.addCleanup(fake.restore_nodes)
             self.start_service('compute', host=host)
 
     def test_serial_no_valid_host_then_pass_with_third_host(self):
@@ -1058,8 +1045,6 @@ class TestAntiAffinityLiveMigration(test.TestCase,
 
         # Now start up a 3rd compute service and retry the live migration which
         # should work this time.
-        fake.set_nodes(['host3'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host3')
         self.admin_api.post_server_action(server['id'], body)
         server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')

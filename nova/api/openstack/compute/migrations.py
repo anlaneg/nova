@@ -18,8 +18,9 @@ from nova.api.openstack.compute.schemas import migrations as schema_migrations
 from nova.api.openstack.compute.views import migrations as migrations_view
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
+from nova.i18n import _
 from nova.objects import base as obj_base
 from nova.policies import migrations as migrations_policies
 
@@ -55,6 +56,7 @@ class MigrationsController(wsgi.Controller):
             del obj['deleted']
             del obj['deleted_at']
             del obj['hidden']
+            del obj['cross_cell_move']
             if not add_uuid:
                 del obj['uuid']
             if 'memory_total' in obj:
@@ -96,6 +98,12 @@ class MigrationsController(wsgi.Controller):
             if allow_changes_before:
                 search_opts['changes-before'] = timeutils.parse_isotime(
                     search_opts['changes-before'])
+                changes_since = search_opts.get('changes-since')
+                if (changes_since and search_opts['changes-before'] <
+                        search_opts['changes-since']):
+                    msg = _('The value of changes-since must be less than '
+                            'or equal to changes-before.')
+                    raise exc.HTTPBadRequest(explanation=msg)
             else:
                 # Before microversion 2.59 the schema allowed
                 # additionalProperties=True, so a user could pass

@@ -10,11 +10,9 @@ in the request body.
 
 You can associate a fixed or floating IP address with a server,
 or disassociate a fixed or floating IP address from a server.
-You can attach a volume to a server.
 
 You can create an image from a server, create a backup of a server,
-evacuate a server from a failed host to a new host, and force-delete a
-server before deferred cleanup.
+and force-delete a server before deferred cleanup.
 You can lock, pause, reboot, rebuild, rescue, resize, resume, confirm
 the resize of, revert a pending resize for, shelve, shelf-offload,
 unshelve, start, stop, unlock, unpause, and unrescue a server. You can
@@ -40,7 +38,7 @@ A pool of floating IP addresses, configured by the cloud administrator,
 is available in OpenStack Compute. The project quota defines the maximum
 number of floating IP addresses that you can allocate to the project.
 After you `create (allocate) a floating IPaddress
-<http://developer.openstack.org/api-ref/compute/#create-allocate-floating-ip-address>`__
+<https://docs.openstack.org/api-ref/compute/#create-allocate-floating-ip-address>`__
 for a project, you can associate that address with the server. Specify
 the ``addFloatingIp`` action in the request body.
 
@@ -164,7 +162,7 @@ Specify the ``confirmResize`` action in the request body.
 After you make this request, you typically must keep polling the server
 status to determine whether the request succeeded. A successfully
 confirming resize operation shows a status of ``ACTIVE`` or ``SHUTOFF``
-and a migration_status of ``confirmed``. You can also see the resized
+and a migration status of ``confirmed``. You can also see the resized
 server in the compute node that OpenStack Compute manages.
 
 **Preconditions**
@@ -177,9 +175,20 @@ to confirm the server.
 
 **Troubleshooting**
 
-If the server status remains ``RESIZED``, the request failed. Ensure you
+If the server status remains ``VERIFY_RESIZE``, the request failed. Ensure you
 meet the preconditions and run the request again. If the request fails
-again, investigate the compute back end or ask your cloud provider.
+again, the server status should be ``ERROR`` and a migration status of
+``error``. Investigate the compute back end or ask your cloud provider.
+There are some options for trying to correct the server status:
+
+* If the server is running and networking works, a user with proper
+  authority could reset the status of the server to ``active`` using the
+  :ref:`os-resetState` API.
+* If the server is not running, you can try hard rebooting the server using
+  the :ref:`reboot` API.
+
+Note that the cloud provider may still need to cleanup any orphaned resources
+on the source hypervisor.
 
 Normal response codes: 204
 
@@ -285,9 +294,28 @@ image in the image back end that OpenStack Image service manages.
 The server must exist.
 
 You can only create a new image from the server when its status is ``ACTIVE``,
-``SHUTOFF``, ``PAUSED``, or ``SUSPENDED``.
+``SHUTOFF``, ``SUSPENDED`` or ``PAUSED``
+(``PAUSED`` is only supported for image-backed servers).
 
-The connection to the Image service is valid.
+The project must have sufficient volume snapshot quota in the block storage
+service when the server has attached volumes.
+If the project does not have sufficient volume snapshot quota,
+the API returns a 403 error.
+
+**Asynchronous Postconditions**
+
+A snapshot image will be created in the Image service.
+
+In the image-backed server case, volume snapshots of attached volumes will not
+be created.
+In the volume-backed server case,
+volume snapshots will be created for all volumes attached to the server and
+then those will be represented with a ``block_device_mapping`` image property
+in the resulting snapshot image in the Image service.
+If that snapshot image is used later to create a new server,
+it will result in a volume-backed server where the root volume is created
+from the snapshot of the original root volume. The volumes created from
+the snapshots of the original other volumes will be attached to the server.
 
 **Troubleshooting**
 
@@ -349,9 +377,31 @@ Locks a server.
 
 Specify the ``lock`` action in the request body.
 
+Most actions by non-admin users are not allowed to the server
+after this operation is successful and the server is locked.
+See the "Lock, Unlock" item in `Server actions
+<https://docs.openstack.org/api-guide/compute/server_concepts.html#server-actions>`_
+for the restricted actions.
+But administrators can perform actions on the server
+even though the server is locked. Note that from microversion 2.73 it is
+possible to specify a reason when locking the server.
+
+The `unlock action
+<https://docs.openstack.org/api-ref/compute/#unlock-server-unlock-action>`_
+will unlock a server in locked state so additional actions can
+be performed on the server by non-admin users.
+
+You can know whether a server is locked or not and the ``locked_reason``
+(if specified, from the 2.73 microversion) by the `List Servers Detailed API
+<https://docs.openstack.org/api-ref/compute/#list-servers-detailed>`_
+or
+the `Show Server Details API
+<https://docs.openstack.org/api-ref/compute/#show-server-details>`_.
+
 Policy defaults enable only users with the administrative role or
 the owner of the server to perform this operation. Cloud providers
 can change these permissions through the ``policy.json`` file.
+Administrators can overwrite owner's lock.
 
 Normal response codes: 202
 
@@ -365,10 +415,16 @@ Request
 
   - server_id: server_id_path
   - lock: lock
+  - locked_reason: locked_reason_req
 
 **Example Lock Server (lock Action)**
 
 .. literalinclude:: ../../doc/api_samples/os-lock-server/lock-server.json
+   :language: javascript
+
+**Example Lock Server (lock Action) (v2.73)**
+
+.. literalinclude:: ../../doc/api_samples/os-lock-server/v2.73/lock-server-with-reason.json
    :language: javascript
 
 Response
@@ -413,6 +469,7 @@ Response
 
 If successful, this method does not return content in the response body.
 
+.. _reboot:
 
 Reboot Server (reboot Action)
 =============================
@@ -575,10 +632,34 @@ Response
   - key_name: key_name_rebuild_resp
   - user_data: user_data_rebuild_resp
   - trusted_image_certificates: server_trusted_image_certificates_resp
+  - server_groups: server_groups_2_71
+  - locked_reason: locked_reason_resp
+  - config_drive: config_drive_resp_update_rebuild
+  - OS-EXT-AZ:availability_zone: OS-EXT-AZ:availability_zone_update_rebuild
+  - OS-EXT-SRV-ATTR:host: OS-EXT-SRV-ATTR:host_update_rebuild
+  - OS-EXT-SRV-ATTR:hypervisor_hostname: OS-EXT-SRV-ATTR:hypervisor_hostname_update_rebuild
+  - OS-EXT-SRV-ATTR:instance_name: OS-EXT-SRV-ATTR:instance_name_update_rebuild
+  - OS-EXT-STS:power_state: OS-EXT-STS:power_state_update_rebuild
+  - OS-EXT-STS:task_state: OS-EXT-STS:task_state_update_rebuild
+  - OS-EXT-STS:vm_state: OS-EXT-STS:vm_state_update_rebuild
+  - OS-EXT-SRV-ATTR:hostname: server_hostname_update_rebuild
+  - OS-EXT-SRV-ATTR:reservation_id: server_reservation_id_update_rebuild
+  - OS-EXT-SRV-ATTR:launch_index: server_launch_index_update_rebuild
+  - OS-EXT-SRV-ATTR:kernel_id: server_kernel_id_update_rebuild
+  - OS-EXT-SRV-ATTR:ramdisk_id: server_ramdisk_id_update_rebuild
+  - OS-EXT-SRV-ATTR:root_device_name: server_root_device_name_update_rebuild
+  - os-extended-volumes:volumes_attached: os-extended-volumes:volumes_attached_update_rebuild
+  - os-extended-volumes:volumes_attached.id: os-extended-volumes:volumes_attached.id_update_rebuild
+  - os-extended-volumes:volumes_attached.delete_on_termination: os-extended-volumes:volumes_attached.delete_on_termination_update_rebuild
+  - OS-SRV-USG:launched_at: OS-SRV-USG:launched_at_update_rebuild
+  - OS-SRV-USG:terminated_at: OS-SRV-USG:terminated_at_update_rebuild
+  - security_groups: security_groups_obj_update_rebuild
+  - security_group.name: name_update_rebuild
+  - host_status: host_status_update_rebuild
 
-**Example Rebuild Server (rebuild Action) (v2.63)**
+**Example Rebuild Server (rebuild Action) (v2.75)**
 
-.. literalinclude:: ../../doc/api_samples/servers/v2.63/server-action-rebuild-resp.json
+.. literalinclude:: ../../doc/api_samples/servers/v2.75/server-action-rebuild-resp.json
    :language: javascript
 
 Remove (Disassociate) Floating Ip (removeFloatingIp Action) (DEPRECATED)

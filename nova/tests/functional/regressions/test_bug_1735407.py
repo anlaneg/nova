@@ -12,12 +12,12 @@
 
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import fake_network
 from nova.tests.unit import fake_notifier
 import nova.tests.unit.image.fake
 from nova.tests.unit import policy_fixture
-from nova.virt import fake
 
 
 class TestParallelEvacuationWithServerGroup(
@@ -39,7 +39,7 @@ class TestParallelEvacuationWithServerGroup(
 
         # We need the computes reporting into placement for the filter
         # scheduler to pick a host.
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -47,6 +47,9 @@ class TestParallelEvacuationWithServerGroup(
         # 2.11 is needed for force_down
         # 2.14 is needed for evacuate without onSharedStorage flag
         self.api.microversion = '2.14'
+
+        fake_notifier.stub_notifier(self)
+        self.addCleanup(fake_notifier.reset)
 
         # the image fake backend needed for image discovery
         nova.tests.unit.image.fake.stub_out_image_service(self)
@@ -57,11 +60,7 @@ class TestParallelEvacuationWithServerGroup(
 
         # We start two compute services because we need two instances with
         # anti-affinity server group policy to be booted
-        fake.set_nodes(['host1'])
-        self.addCleanup(fake.restore_nodes)
         self.compute1 = self.start_service('compute', host='host1')
-        fake.set_nodes(['host2'])
-        self.addCleanup(fake.restore_nodes)
         self.compute2 = self.start_service('compute', host='host2')
 
         self.image_id = self.api.get_images()[0]['id']
@@ -69,8 +68,6 @@ class TestParallelEvacuationWithServerGroup(
 
         manager_class = nova.compute.manager.ComputeManager
         original_rebuild = manager_class._do_rebuild_instance
-
-        self.addCleanup(fake_notifier.reset)
 
         def fake_rebuild(self_, context, instance, *args, **kwargs):
             # Simulate that the rebuild request of one of the instances
@@ -91,6 +88,7 @@ class TestParallelEvacuationWithServerGroup(
                       '_do_rebuild_instance', fake_rebuild)
 
     def test_parallel_evacuate_with_server_group(self):
+        self.skipTest('Skipped until bug 1763181 is fixed')
         group_req = {'name': 'a-name', 'policies': ['anti-affinity']}
         group = self.api.post_server_groups(group_req)
 
@@ -122,8 +120,6 @@ class TestParallelEvacuationWithServerGroup(
         self.api.force_down_service('host2', 'nova-compute', True)
 
         # start a third compute to have place for one of the instances
-        fake.set_nodes(['host3'])
-        self.addCleanup(fake.restore_nodes)
         self.compute3 = self.start_service('compute', host='host3')
 
         # evacuate both instances
@@ -132,8 +128,11 @@ class TestParallelEvacuationWithServerGroup(
         self.api.post_server_action(server2['id'], post)
 
         # make sure that the rebuild is started and then finished
+        # NOTE(mdbooth): We only get 1 rebuild.start notification here because
+        # we validate server group policy (and therefore fail) before emitting
+        # rebuild.start.
         fake_notifier.wait_for_versioned_notifications(
-            'instance.rebuild.start', n_events=2)
+            'instance.rebuild.start', n_events=1)
         server1 = self._wait_for_server_parameter(
             self.api, server1, {'OS-EXT-STS:task_state': None})
         server2 = self._wait_for_server_parameter(

@@ -13,11 +13,11 @@
 from nova.scheduler import weights
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import cast_as_call
 from nova.tests.unit.image import fake as image_fake
 from nova.tests.unit import policy_fixture
-from nova.virt import fake
 
 
 class HostNameWeigher(weights.BaseHostWeigher):
@@ -58,7 +58,7 @@ class SchedulerOnlyChecksTargetTest(test.TestCase,
 
         # We need the computes reporting into placement for the filter
         # scheduler to pick a host.
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -82,10 +82,6 @@ class SchedulerOnlyChecksTargetTest(test.TestCase,
         self.admin_api.microversion = 'latest'
         self.api.microversion = 'latest'
 
-        # The consoleauth service is needed for deleting console tokens when
-        # the server is deleted.
-        self.start_service('consoleauth')
-
         # Define a very basic scheduler that only verifies if host is down.
         self.flags(enabled_filters=['ComputeFilter'],
                    group='filter_scheduler')
@@ -99,20 +95,8 @@ class SchedulerOnlyChecksTargetTest(test.TestCase,
         self.start_service('scheduler')
 
         # Let's now start three compute nodes as we said above.
-        # set_nodes() is needed to have each compute service return a
-        # different nodename, so we get two hosts in the list of candidates
-        # for scheduling. Otherwise both hosts will have the same default
-        # nodename "fake-mini". The host passed to start_service controls the
-        # "host" attribute and set_nodes() sets the "nodename" attribute.
-        # We set_nodes() to make host and nodename the same for each compute.
-        fake.set_nodes(['host1'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host1')
-        fake.set_nodes(['host2'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host2')
-        fake.set_nodes(['host3'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host3')
         self.useFixture(cast_as_call.CastAsCall(self))
 

@@ -48,8 +48,6 @@ class TestProfiler(test.NoDBTestCase):
 
         classes = [
             'nova.api.manager.MetadataManager',
-            'nova.cells.manager.CellsManager',
-            'nova.cells.rpcapi.CellsAPI',
             'nova.compute.api.API',
             'nova.compute.manager.ComputeManager',
             'nova.compute.rpcapi.ComputeAPI',
@@ -59,8 +57,6 @@ class TestProfiler(test.NoDBTestCase):
             'nova.conductor.rpcapi.ConductorAPI',
             'nova.console.manager.ConsoleProxyManager',
             'nova.console.rpcapi.ConsoleAPI',
-            'nova.consoleauth.manager.ConsoleAuthManager',
-            'nova.consoleauth.rpcapi.ConsoleAuthAPI',
             'nova.image.api.API',
             'nova.network.api.API',
             'nova.network.manager.FlatDHCPManager',

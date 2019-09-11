@@ -23,7 +23,7 @@
 
 from __future__ import print_function
 
-import argparse
+import collections
 import functools
 import re
 import sys
@@ -33,6 +33,7 @@ from dateutil import parser as dateutil_parser
 import decorator
 from keystoneauth1 import exceptions as ks_exc
 import netaddr
+from neutronclient.common import exceptions as neutron_client_exc
 from oslo_config import cfg
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
@@ -45,7 +46,6 @@ import six
 import six.moves.urllib.parse as urlparse
 from sqlalchemy.engine import url as sqla_url
 
-from nova.api.openstack.placement.objects import consumer as consumer_obj
 from nova.cmd import common as cmd_common
 from nova.compute import api as compute_api
 import nova.conf
@@ -56,15 +56,16 @@ from nova.db import migration
 from nova.db.sqlalchemy import api as sa_db
 from nova import exception
 from nova.i18n import _
+from nova.network.neutronv2 import api as neutron_api
+from nova.network.neutronv2 import constants
 from nova import objects
 from nova.objects import block_device as block_device_obj
-from nova.objects import build_request as build_request_obj
+from nova.objects import compute_node as compute_node_obj
 from nova.objects import host_mapping as host_mapping_obj
 from nova.objects import instance as instance_obj
 from nova.objects import instance_mapping as instance_mapping_obj
-from nova.objects import keypair as keypair_obj
 from nova.objects import quotas as quotas_obj
-from nova.objects import request_spec
+from nova.objects import virtual_interface as virtual_interface_obj
 from nova import quota
 from nova import rpc
 from nova.scheduler.client import report
@@ -75,6 +76,8 @@ from nova.virt import ironic
 
 CONF = nova.conf.CONF
 
+LOG = logging.getLogger(__name__)
+
 QUOTAS = quota.QUOTAS
 
 # Keep this list sorted and one entry per line for readability.
@@ -82,6 +85,10 @@ _EXTRA_DEFAULT_LOG_LEVELS = ['oslo_concurrency=INFO',
                              'oslo_db=INFO',
                              'oslo_policy=INFO']
 
+# Consts indicating whether allocations need to be healed by creating them or
+# by updating existing allocations.
+_CREATE = 'create'
+_UPDATE = 'update'
 
 # Decorators for actions
 args = cmd_common.args
@@ -96,14 +103,6 @@ def mask_passwd_in_url(url):
         parsed.path, parsed.params,
         parsed.query, parsed.fragment)
     return urlparse.urlunparse(new_parsed)
-
-
-def _db_error(caught_exception):
-    print(caught_exception)
-    print(_("The above error may show that the database has not "
-            "been created.\nPlease create a database using "
-            "'nova-manage db sync' before running this command."))
-    sys.exit(1)
 
 
 class FloatingIpCommands(object):
@@ -375,29 +374,19 @@ class DbCommands(object):
     # count, which is the maximum batch size requested by the
     # user. They must be idempotent. At most $count records should be
     # migrated. The function must return a tuple of (found, done). The
-    # found value indicates how many unmigrated records existed in the
-    # database prior to the migration (either total, or up to the
-    # $count limit provided), and a nonzero found value tells the user
+    # found value indicates how many unmigrated/candidate records existed in
+    # the database prior to the migration (either total, or up to the
+    # $count limit provided), and a nonzero found value may tell the user
     # that there is still work to do. The done value indicates whether
     # or not any records were actually migrated by the function. Thus
     # if both (found, done) are nonzero, work was done and some work
     # remains. If found is nonzero and done is zero, some records are
-    # not migratable, but all migrations that can complete have
-    # finished.
+    # not migratable (or don't need migrating), but all migrations that can
+    # complete have finished.
+    # NOTE(stephenfin): These names must be unique
     online_migrations = (
-        # Added in Newton
-        # TODO(mriedem): Remove this in Stein along with the compatibility
-        # code in the api and conductor services; the nova-status upgrade check
-        # added in Rocky is the tool operators can use to make sure they have
-        # completed this migration.
-        request_spec.migrate_instances_add_request_spec,
-        # Added in Newton
-        keypair_obj.migrate_keypairs_to_api_db,
-        # Added in Ocata
-        # NOTE(mriedem): This online migration is going to be backported to
-        # Newton also since it's an upgrade issue when upgrading from Mitaka.
-        build_request_obj.delete_build_requests_with_no_instance_uuid,
         # Added in Pike
+        # TODO(mriedem): Remove this in the U release.
         db.service_uuids_online_data_migration,
         # Added in Pike
         quotas_obj.migrate_quota_limits_to_api_db,
@@ -413,26 +402,32 @@ class DbCommands(object):
         # need to be populated if it was not specified during boot time.
         instance_obj.populate_missing_availability_zones,
         # Added in Rocky
-        consumer_obj.create_incomplete_consumers,
-        # Added in Rocky
         instance_mapping_obj.populate_queued_for_delete,
+        # Added in Stein
+        compute_node_obj.migrate_empty_ratio,
+        # Added in Stein
+        virtual_interface_obj.fill_virtual_interface_list,
+        # Added in Stein
+        instance_mapping_obj.populate_user_id,
     )
 
     def __init__(self):
         pass
 
     @staticmethod
-    def _print_dict(dct, dict_property="Property", dict_value='Value'):
+    def _print_dict(dct, dict_property="Property", dict_value='Value',
+                    sort_key=None):
         """Print a `dict` as a table of two columns.
 
         :param dct: `dict` to print
         :param dict_property: name of the first column
         :param wrap: wrapping for the second column
         :param dict_value: header label for the value (second) column
+        :param sort_key: key used for sorting the dict
         """
         pt = prettytable.PrettyTable([dict_property, dict_value])
         pt.align = 'l'
-        for k, v in sorted(dct.items()):
+        for k, v in sorted(dct.items(), key=sort_key):
             # convert dict to str to check length
             if isinstance(v, dict):
                 v = six.text_type(v)
@@ -452,20 +447,12 @@ class DbCommands(object):
         else:
             print(encodeutils.safe_encode(pt.get_string()).decode())
 
-    @args('--version', metavar='<version>', help=argparse.SUPPRESS)
     @args('--local_cell', action='store_true',
-          help='Only sync db in the local cell: do not attempt to fan-out'
+          help='Only sync db in the local cell: do not attempt to fan-out '
                'to all cells')
-    @args('version2', metavar='VERSION', nargs='?', help='Database version')
-    def sync(self, version=None, local_cell=False, version2=None):
+    @args('version', metavar='VERSION', nargs='?', help='Database version')
+    def sync(self, version=None, local_cell=False):
         """Sync the database up to the most recent version."""
-        if version and not version2:
-            print(_("DEPRECATED: The '--version' parameter was deprecated in "
-                    "the Pike cycle and will not be supported in future "
-                    "versions of nova. Use the 'VERSION' positional argument "
-                    "instead"))
-            version2 = version
-
         if not local_cell:
             ctxt = context.RequestContext()
             # NOTE(mdoff): Multiple cells not yet implemented. Currently
@@ -474,7 +461,7 @@ class DbCommands(object):
                 cell_mapping = objects.CellMapping.get_by_uuid(ctxt,
                                             objects.CellMapping.CELL0_UUID)
                 with context.target_cell(ctxt, cell_mapping) as cctxt:
-                    migration.db_sync(version2, context=cctxt)
+                    migration.db_sync(version, context=cctxt)
             except exception.CellMappingNotFound:
                 print(_('WARNING: cell0 mapping not found - not'
                         ' syncing cell0.'))
@@ -487,6 +474,7 @@ Has "nova-manage cell_v2 map_cell0" been run?
 Is [api_database]/connection set in nova.conf?
 Is the cell0 database connection URL correct?
 Error: %s""") % six.text_type(e))
+                return 1
         return migration.db_sync(version)
 
     def version(self):
@@ -494,7 +482,14 @@ Error: %s""") % six.text_type(e))
         print(migration.db_version())
 
     @args('--max_rows', type=int, metavar='<number>', dest='max_rows',
-          help='Maximum number of deleted rows to archive. Defaults to 1000.')
+          help='Maximum number of deleted rows to archive. Defaults to 1000. '
+               'Note that this number does not include the corresponding '
+               'rows, if any, that are removed from the API database for '
+               'deleted instances.')
+    @args('--before', metavar='<date>',
+          help=('Archive rows that have been deleted before this date. '
+                'Accepts date strings in the default format output by the '
+                '``date`` command, as well as ``YYYY-MM-DD [HH:mm:ss]``.'))
     @args('--verbose', action='store_true', dest='verbose', default=False,
           help='Print how many rows were archived per table.')
     @args('--until-complete', action='store_true', dest='until_complete',
@@ -503,14 +498,18 @@ Error: %s""") % six.text_type(e))
                 'max_rows as a batch size for each iteration.'))
     @args('--purge', action='store_true', dest='purge', default=False,
           help='Purge all data from shadow tables after archive completes')
+    @args('--all-cells', action='store_true', dest='all_cells',
+          default=False, help='Run command across all cells.')
     def archive_deleted_rows(self, max_rows=1000, verbose=False,
-                             until_complete=False, purge=False):
+                             until_complete=False, purge=False,
+                             before=None, all_cells=False):
         """Move deleted rows from production tables to shadow tables.
 
         Returns 0 if nothing was archived, 1 if some number of rows were
         archived, 2 if max_rows is invalid, 3 if no connection could be
-        established to the API DB. If automating, this should be
-        run continuously while the result is 1, stopping at 0.
+        established to the API DB, 4 if before date is invalid. If automating,
+        this should be run continuously while the result
+        is 1, stopping at 0.
         """
         max_rows = int(max_rows)
         if max_rows < 0:
@@ -525,71 +524,170 @@ Error: %s""") % six.text_type(e))
         try:
             # NOTE(tssurya): This check has been added to validate if the API
             # DB is reachable or not as this is essential for purging the
-            # instance_mappings and request_specs of the deleted instances.
-            objects.CellMappingList.get_all(ctxt)
+            # related API database records of the deleted instances.
+            cell_mappings = objects.CellMappingList.get_all(ctxt)
         except db_exc.CantStartEngineError:
             print(_('Failed to connect to API DB so aborting this archival '
                     'attempt. Please check your config file to make sure that '
-                    'CONF.api_database.connection is set and run this '
+                    '[api_database]/connection is set and run this '
                     'command again.'))
             return 3
 
+        if before:
+            try:
+                before_date = dateutil_parser.parse(before, fuzzy=True)
+            except ValueError as e:
+                print(_('Invalid value for --before: %s') % e)
+                return 4
+        else:
+            before_date = None
+
         table_to_rows_archived = {}
-        deleted_instance_uuids = []
         if until_complete and verbose:
             sys.stdout.write(_('Archiving') + '..')  # noqa
-        while True:
-            try:
-                run, deleted_instance_uuids = db.archive_deleted_rows(max_rows)
-            except KeyboardInterrupt:
-                run = {}
-                if until_complete and verbose:
-                    print('.' + _('stopped'))  # noqa
+
+        interrupt = False
+
+        if all_cells:
+            # Sort first by cell name, then by table:
+            # +--------------------------------+-------------------------+
+            # | Table                          | Number of Rows Archived |
+            # +--------------------------------+-------------------------+
+            # | cell0.block_device_mapping     | 1                       |
+            # | cell1.block_device_mapping     | 1                       |
+            # | cell1.instance_actions         | 2                       |
+            # | cell1.instance_actions_events  | 2                       |
+            # | cell2.block_device_mapping     | 1                       |
+            # | cell2.instance_actions         | 2                       |
+            # | cell2.instance_actions_events  | 2                       |
+            # ...
+            def sort_func(item):
+                cell_name, table = item[0].split('.')
+                return cell_name, table
+            print_sort_func = sort_func
+        else:
+            cell_mappings = [None]
+            print_sort_func = None
+        total_rows_archived = 0
+        for cell_mapping in cell_mappings:
+            # NOTE(Kevin_Zheng): No need to calculate limit for each
+            # cell if until_complete=True.
+            # We need not adjust max rows to avoid exceeding a specified total
+            # limit because with until_complete=True, we have no total limit.
+            if until_complete:
+                max_rows_to_archive = max_rows
+            elif max_rows > total_rows_archived:
+                # We reduce the max rows to archive based on what we've
+                # archived so far to avoid potentially exceeding the specified
+                # total limit.
+                max_rows_to_archive = max_rows - total_rows_archived
+            else:
+                break
+            # If all_cells=False, cell_mapping is None
+            with context.target_cell(ctxt, cell_mapping) as cctxt:
+                cell_name = cell_mapping.name if cell_mapping else None
+                try:
+                    rows_archived = self._do_archive(
+                        table_to_rows_archived,
+                        cctxt,
+                        max_rows_to_archive,
+                        until_complete,
+                        verbose,
+                        before_date,
+                        cell_name)
+                except KeyboardInterrupt:
+                    interrupt = True
                     break
-            for k, v in run.items():
-                table_to_rows_archived.setdefault(k, 0)
-                table_to_rows_archived[k] += v
-            if deleted_instance_uuids:
-                table_to_rows_archived.setdefault('instance_mappings', 0)
-                table_to_rows_archived.setdefault('request_specs', 0)
-                table_to_rows_archived.setdefault('instance_group_member', 0)
-                deleted_mappings = objects.InstanceMappingList.destroy_bulk(
-                                            ctxt, deleted_instance_uuids)
-                table_to_rows_archived['instance_mappings'] += deleted_mappings
-                deleted_specs = objects.RequestSpec.destroy_bulk(
-                                            ctxt, deleted_instance_uuids)
-                table_to_rows_archived['request_specs'] += deleted_specs
-                deleted_group_members = (
-                    objects.InstanceGroup.destroy_members_bulk(
-                        ctxt, deleted_instance_uuids))
-                table_to_rows_archived['instance_group_member'] += (
-                    deleted_group_members)
-            if not until_complete:
-                break
-            elif not run:
-                if verbose:
-                    print('.' + _('complete'))  # noqa
-                break
-            if verbose:
-                sys.stdout.write('.')
+                # TODO(melwitt): Handle skip/warn for unreachable cells. Note
+                # that cell_mappings = [None] if not --all-cells
+                total_rows_archived += rows_archived
+
+        if until_complete and verbose:
+            if interrupt:
+                print('.' + _('stopped'))  # noqa
+            else:
+                print('.' + _('complete'))  # noqa
+
         if verbose:
             if table_to_rows_archived:
                 self._print_dict(table_to_rows_archived, _('Table'),
-                                 dict_value=_('Number of Rows Archived'))
+                                 dict_value=_('Number of Rows Archived'),
+                                 sort_key=print_sort_func)
             else:
                 print(_('Nothing was archived.'))
 
         if table_to_rows_archived and purge:
             if verbose:
                 print(_('Rows were archived, running purge...'))
-            self.purge(purge_all=True, verbose=verbose)
+            self.purge(purge_all=True, verbose=verbose, all_cells=all_cells)
 
         # NOTE(danms): Return nonzero if we archived something
         return int(bool(table_to_rows_archived))
 
-    @args('--before', dest='before',
+    def _do_archive(self, table_to_rows_archived, cctxt, max_rows,
+                    until_complete, verbose, before_date, cell_name):
+        """Helper function for archiving deleted rows for a cell.
+
+        This will archive deleted rows for a cell database and remove the
+        associated API database records for deleted instances.
+
+        :param table_to_rows_archived: Dict tracking the number of rows
+            archived by <cell_name>.<table name>. Example:
+            {'cell0.instances': 2,
+             'cell1.instances': 5}
+        :param cctxt: Cell-targeted nova.context.RequestContext if archiving
+            across all cells
+        :param max_rows: Maximum number of deleted rows to archive
+        :param until_complete: Whether to run continuously until all deleted
+            rows are archived
+        :param verbose: Whether to print how many rows were archived per table
+        :param before_date: Archive rows that were deleted before this date
+        :param cell_name: Name of the cell or None if not archiving across all
+            cells
+        """
+        ctxt = context.get_admin_context()
+        while True:
+            run, deleted_instance_uuids, total_rows_archived = \
+                db.archive_deleted_rows(cctxt, max_rows, before=before_date)
+            for table_name, rows_archived in run.items():
+                if cell_name:
+                    table_name = cell_name + '.' + table_name
+                table_to_rows_archived.setdefault(table_name, 0)
+                table_to_rows_archived[table_name] += rows_archived
+            if deleted_instance_uuids:
+                table_to_rows_archived.setdefault(
+                    'API_DB.instance_mappings', 0)
+                table_to_rows_archived.setdefault(
+                    'API_DB.request_specs', 0)
+                table_to_rows_archived.setdefault(
+                    'API_DB.instance_group_member', 0)
+                deleted_mappings = objects.InstanceMappingList.destroy_bulk(
+                            ctxt, deleted_instance_uuids)
+                table_to_rows_archived[
+                    'API_DB.instance_mappings'] += deleted_mappings
+                deleted_specs = objects.RequestSpec.destroy_bulk(
+                    ctxt, deleted_instance_uuids)
+                table_to_rows_archived[
+                    'API_DB.request_specs'] += deleted_specs
+                deleted_group_members = (
+                    objects.InstanceGroup.destroy_members_bulk(
+                        ctxt, deleted_instance_uuids))
+                table_to_rows_archived[
+                    'API_DB.instance_group_member'] += deleted_group_members
+            # If we're not archiving until there is nothing more to archive, we
+            # have reached max_rows in this cell DB or there was nothing to
+            # archive.
+            if not until_complete or not run:
+                break
+            if verbose:
+                sys.stdout.write('.')
+        return total_rows_archived
+
+    @args('--before', metavar='<before>', dest='before',
           help='If specified, purge rows from shadow tables that are older '
-               'than this. Fuzzy time specs are allowed')
+               'than this. Accepts date strings in the default format output '
+               'by the ``date`` command, as well as ``YYYY-MM-DD '
+               '[HH:mm:ss]``.')
     @args('--all', dest='purge_all', action='store_true',
           help='Purge all rows in the shadow tables')
     @args('--verbose', dest='verbose', action='store_true', default=False,
@@ -670,14 +768,18 @@ Error: %s""") % six.text_type(e))
 
     def _run_migration(self, ctxt, max_count):
         ran = 0
+        exceptions = False
         migrations = {}
         for migration_meth in self.online_migrations:
             count = max_count - ran
             try:
                 found, done = migration_meth(ctxt, count)
             except Exception:
-                print(_("Error attempting to run %(method)s") % dict(
-                      method=migration_meth))
+                msg = (_("Error attempting to run %(method)s") % dict(
+                       method=migration_meth))
+                print(msg)
+                LOG.exception(msg)
+                exceptions = True
                 found = done = 0
 
             name = migration_meth.__name__
@@ -686,12 +788,16 @@ Error: %s""") % six.text_type(e))
                         'migrated') % {'total': found,
                                        'meth': name,
                                        'done': done})
+            # This is the per-migration method result for this batch, and
+            # _run_migration will either continue on to the next migration,
+            # or stop if up to this point we've processed max_count of
+            # records across all migration methods.
             migrations[name] = found, done
             if max_count is not None:
                 ran += done
                 if ran >= max_count:
                     break
-        return migrations
+        return migrations, exceptions
 
     @args('--max-count', metavar='<number>', dest='max_count',
           help='Maximum number of objects to consider')
@@ -713,9 +819,12 @@ Error: %s""") % six.text_type(e))
 
         ran = None
         migration_info = {}
+        exceptions = False
         while ran is None or ran != 0:
-            migrations = self._run_migration(ctxt, max_count)
+            migrations, exceptions = self._run_migration(ctxt, max_count)
             ran = 0
+            # For each batch of migration method results, build the cumulative
+            # set of results.
             for name in migrations:
                 migration_info.setdefault(name, (0, 0))
                 migration_info[name] = (
@@ -727,12 +836,24 @@ Error: %s""") % six.text_type(e))
                 break
 
         t = prettytable.PrettyTable([_('Migration'),
-                                     _('Total Needed'),
+                                     _('Total Needed'),  # Really: Total Found
                                      _('Completed')])
         for name in sorted(migration_info.keys()):
             info = migration_info[name]
             t.add_row([name, info[0], info[1]])
         print(t)
+
+        # NOTE(imacdonn): In the "unlimited" case, the loop above will only
+        # terminate when all possible migrations have been effected. If we're
+        # still getting exceptions, there's a problem that requires
+        # intervention. In the max-count case, exceptions are only considered
+        # fatal if no work was done by any other migrations ("not ran"),
+        # because otherwise work may still remain to be done, and that work
+        # may resolve dependencies for the failing migrations.
+        if exceptions and (unlimited or not ran):
+            print(_("Some migrations failed unexpectedly. Check log for "
+                    "details."))
+            return 2
 
         # TODO(mriedem): Potentially add another return code for
         # "there are more migrations, but not completable right now"
@@ -841,187 +962,14 @@ class ApiDbCommands(object):
     def __init__(self):
         pass
 
-    @args('--version', metavar='<version>', help=argparse.SUPPRESS)
-    @args('version2', metavar='VERSION', nargs='?', help='Database version')
-    def sync(self, version=None, version2=None):
-        """Sync the database up to the most recent version.
-
-        If placement_database.connection is not None, sync that
-        database using the API database migrations.
-        """
-        if version and not version2:
-            print(_("DEPRECATED: The '--version' parameter was deprecated in "
-                    "the Pike cycle and will not be supported in future "
-                    "versions of nova. Use the 'VERSION' positional argument "
-                    "instead"))
-            version2 = version
-
-        # NOTE(cdent): At the moment, the migration code deep in the belly
-        # of the migration package doesn't actually return anything, so
-        # returning the result of db_sync is not particularly meaningful
-        # here. But, in case that changes, we store the result from the
-        # the placement sync to and with the api sync.
-        result = True
-        if CONF.placement_database.connection is not None:
-            result = migration.db_sync(version2, database='placement')
-        return migration.db_sync(version2, database='api') and result
+    @args('version', metavar='VERSION', nargs='?', help='Database version')
+    def sync(self, version=None):
+        """Sync the database up to the most recent version."""
+        return migration.db_sync(version, database='api')
 
     def version(self):
         """Print the current database version."""
         print(migration.db_version(database='api'))
-
-
-class CellCommands(object):
-    """Commands for managing cells v1 functionality."""
-
-    # TODO(stephenfin): Remove this when cells v1 is removed
-    description = ('DEPRECATED: The cell commands, which configure cells v1 '
-                   'functionality, are deprecated as Cells v1 itself has '
-                   'been deprecated. They will be removed in an upcoming '
-                   'release.')
-
-    @staticmethod
-    def _parse_server_string(server_str):
-        """Parses the given server_string and returns a tuple of host and port.
-        If it's not a combination of host part and port, the port element is an
-        empty string. If the input is invalid expression, return a tuple of two
-        empty strings.
-        """
-        try:
-            # First of all, exclude pure IPv6 address (w/o port).
-            if netaddr.valid_ipv6(server_str):
-                return (server_str, '')
-
-            # Next, check if this is IPv6 address with a port number
-            # combination.
-            if server_str.find("]:") != -1:
-                (address, port) = server_str.replace('[', '', 1).split(']:')
-                return (address, port)
-
-            # Third, check if this is a combination of an address and a port
-            if server_str.find(':') == -1:
-                return (server_str, '')
-
-            # This must be a combination of an address and a port
-            (address, port) = server_str.split(':')
-            return (address, port)
-
-        except (ValueError, netaddr.AddrFormatError):
-            print('Invalid server_string: %s' % server_str)
-            return ('', '')
-
-    def _create_transport_hosts(self, username, password,
-                                broker_hosts=None, hostname=None, port=None):
-        """Returns a list of oslo.messaging.TransportHost objects."""
-        transport_hosts = []
-        # Either broker-hosts or hostname should be set
-        if broker_hosts:
-            hosts = broker_hosts.split(',')
-            for host in hosts:
-                host = host.strip()
-                broker_hostname, broker_port = self._parse_server_string(host)
-                if not broker_port:
-                    msg = _('Invalid broker_hosts value: %s. It should be'
-                            ' in hostname:port format') % host
-                    raise ValueError(msg)
-                try:
-                    broker_port = int(broker_port)
-                except ValueError:
-                    msg = _('Invalid port value: %s. It should be '
-                             'an integer') % broker_port
-                    raise ValueError(msg)
-                transport_hosts.append(
-                               messaging.TransportHost(
-                                   hostname=broker_hostname,
-                                   port=broker_port,
-                                   username=username,
-                                   password=password))
-        else:
-            try:
-                port = int(port)
-            except ValueError:
-                msg = _("Invalid port value: %s. Should be an integer") % port
-                raise ValueError(msg)
-            transport_hosts.append(
-                           messaging.TransportHost(
-                               hostname=hostname,
-                               port=port,
-                               username=username,
-                               password=password))
-        return transport_hosts
-
-    @args('--name', metavar='<name>', help='Name for the new cell')
-    @args('--cell_type', metavar='<parent|api|child|compute>',
-         help='Whether the cell is parent/api or child/compute')
-    @args('--username', metavar='<username>',
-         help='Username for the message broker in this cell')
-    @args('--password', metavar='<password>',
-         help='Password for the message broker in this cell')
-    @args('--broker_hosts', metavar='<broker_hosts>',
-         help='Comma separated list of message brokers in this cell. '
-              'Each Broker is specified as hostname:port with both '
-              'mandatory. This option overrides the --hostname '
-              'and --port options (if provided). ')
-    @args('--hostname', metavar='<hostname>',
-         help='Address of the message broker in this cell')
-    @args('--port', metavar='<number>',
-         help='Port number of the message broker in this cell')
-    @args('--virtual_host', metavar='<virtual_host>',
-         help='The virtual host of the message broker in this cell')
-    @args('--woffset', metavar='<float>')
-    @args('--wscale', metavar='<float>')
-    def create(self, name, cell_type='child', username=None, broker_hosts=None,
-               password=None, hostname=None, port=None, virtual_host=None,
-               woffset=None, wscale=None):
-
-        if cell_type not in ['parent', 'child', 'api', 'compute']:
-            print("Error: cell type must be 'parent'/'api' or "
-                "'child'/'compute'")
-            return 2
-
-        # Set up the transport URL
-        transport_hosts = self._create_transport_hosts(
-                                                 username, password,
-                                                 broker_hosts, hostname,
-                                                 port)
-        transport_url = rpc.get_transport_url()
-        transport_url.hosts.extend(transport_hosts)
-        transport_url.virtual_host = virtual_host
-
-        is_parent = False
-        if cell_type in ['api', 'parent']:
-            is_parent = True
-        values = {'name': name,
-                  'is_parent': is_parent,
-                  'transport_url': urlparse.unquote(str(transport_url)),
-                  'weight_offset': float(woffset),
-                  'weight_scale': float(wscale)}
-        ctxt = context.get_admin_context()
-        db.cell_create(ctxt, values)
-
-    @args('--cell_name', metavar='<cell_name>',
-          help='Name of the cell to delete')
-    def delete(self, cell_name):
-        ctxt = context.get_admin_context()
-        db.cell_delete(ctxt, cell_name)
-
-    def list(self):
-        ctxt = context.get_admin_context()
-        cells = db.cell_get_all(ctxt)
-        fmt = "%3s  %-10s  %-6s  %-10s  %-15s  %-5s  %-10s"
-        print(fmt % ('Id', 'Name', 'Type', 'Username', 'Hostname',
-                'Port', 'VHost'))
-        print(fmt % ('-' * 3, '-' * 10, '-' * 6, '-' * 10, '-' * 15,
-                '-' * 5, '-' * 10))
-        for cell in cells:
-            url = rpc.get_transport_url(cell.transport_url)
-            host = url.hosts[0] if url.hosts else messaging.TransportHost()
-            print(fmt % (cell.id, cell.name,
-                    'parent' if cell.is_parent else 'child',
-                    host.username, host.hostname,
-                    host.port, url.virtual_host))
-        print(fmt % ('-' * 3, '-' * 10, '-' * 6, '-' * 10, '-' * 15,
-                '-' * 5, '-' * 10))
 
 
 class CellV2Commands(object):
@@ -1035,7 +983,9 @@ class CellV2Commands(object):
             return None
 
         try:
-            messaging.TransportURL.parse(conf=CONF, url=transport_url)
+            messaging.TransportURL.parse(conf=CONF,
+                                         url=objects.CellMapping.format_mq_url(
+                                             transport_url))
         except (messaging.InvalidTransportURL, ValueError) as e:
             print(_('Invalid transport URL: %s') % six.text_type(e))
             return None
@@ -1063,14 +1013,10 @@ class CellV2Commands(object):
         """Simple cellsv2 setup.
 
         This simplified command is for use by existing non-cells users to
-        configure the default environment. If you are using CellsV1, this
-        will not work for you. Returns 0 if setup is completed (or has
-        already been done), 1 if no hosts are reporting (and this cannot
-        be mapped) and 2 if run in a CellsV1 environment.
+        configure the default environment. Returns 0 if setup is completed (or
+        has already been done) and 1 if no hosts are reporting (and this cannot
+        be mapped).
         """
-        if CONF.cells.enable:
-            print('CellsV1 users cannot use this simplified setup command')
-            return 2
         transport_url = self._validate_transport_url(transport_url)
         if not transport_url:
             return 1
@@ -1168,6 +1114,7 @@ class CellV2Commands(object):
                 mapping.instance_uuid = instance.uuid
                 mapping.cell_mapping = cell_mapping
                 mapping.project_id = instance.project_id
+                mapping.user_id = instance.user_id
                 mapping.create()
             except db_exc.DBDuplicateEntry:
                 continue
@@ -1262,8 +1209,11 @@ class CellV2Commands(object):
             # Don't judge me. There's already an InstanceMapping with this UUID
             # so the marker needs to be non destructively modified.
             next_marker = next_marker.replace('-', ' ')
+            # This is just the marker record, so set user_id to the special
+            # marker name as well.
             objects.InstanceMapping(ctxt, instance_uuid=next_marker,
-                    project_id=marker_project_id).create()
+                    project_id=marker_project_id,
+                    user_id=marker_project_id).create()
             return 1
         return 0
 
@@ -1295,7 +1245,7 @@ class CellV2Commands(object):
                 # we should support.
                 cell_mapping_uuid = host_mapping.cell_mapping.uuid
         if not missing_nodes:
-            print(_('All hosts are already mapped to cell(s), exiting.'))
+            print(_('All hosts are already mapped to cell(s).'))
             return cell_mapping_uuid
         # Create the cell mapping in the API database
         if cell_mapping_uuid is not None:
@@ -1388,9 +1338,10 @@ class CellV2Commands(object):
                         if instance:
                             say('The instance with uuid %s has been deleted.'
                                 % uuid)
-                            say('Execute `nova-manage db archive_deleted_rows`'
-                                'command to archive this deleted instance and'
-                                'remove its instance_mapping.')
+                            say('Execute '
+                                '`nova-manage db archive_deleted_rows` '
+                                'command to archive this deleted '
+                                'instance and remove its instance_mapping.')
                             return 3
                     except exception.InstanceNotFound:
                         # instance is archived
@@ -1413,7 +1364,7 @@ class CellV2Commands(object):
     @args('--strict', action='store_true',
           help=_('Considered successful (exit code 0) only when an unmapped '
                  'host is discovered. Any other outcome will be considered a '
-                 'failure (exit code 1).'))
+                 'failure (non-zero exit code).'))
     @args('--by-service', action='store_true', default=False,
           dest='by_service',
           help=_('Discover hosts by service instead of compute node'))
@@ -1425,14 +1376,28 @@ class CellV2Commands(object):
         to the db it's configured to use. This command will check the db for
         each cell, or a single one if passed in, and map any hosts which are
         not currently mapped. If a host is already mapped nothing will be done.
+
+        This command should be run once after all compute hosts have been
+        deployed and should not be run in parallel. When run in parallel,
+        the commands will collide with each other trying to map the same hosts
+        in the database at the same time.
         """
         def status_fn(msg):
             if verbose:
                 print(msg)
 
         ctxt = context.RequestContext()
-        hosts = host_mapping_obj.discover_hosts(ctxt, cell_uuid, status_fn,
-                                                by_service)
+        try:
+            hosts = host_mapping_obj.discover_hosts(ctxt, cell_uuid, status_fn,
+                                                    by_service)
+        except exception.HostMappingExists as exp:
+            print(_('ERROR: Duplicate host mapping was encountered. This '
+                    'command should be run once after all compute hosts have '
+                    'been deployed and should not be run in parallel. When '
+                    'run in parallel, the commands will collide with each '
+                    'other trying to map the same hosts in the database at '
+                    'the same time. Error: %s') % exp)
+            return 2
         # discover_hosts will return an empty list if no hosts are discovered
         if strict:
             return int(not hosts)
@@ -1650,9 +1615,9 @@ class CellV2Commands(object):
 
         if (self._non_unique_transport_url_database_connection_checker(ctxt,
                 cell_mapping, transport_url, db_connection)):
-                # We use the return code 3 before 2 to avoid changing the
-                # semantic meanings of return codes.
-                return 3
+            # We use the return code 3 before 2 to avoid changing the
+            # semantic meanings of return codes.
+            return 3
 
         if transport_url:
             cell_mapping.transport_url = transport_url
@@ -1727,6 +1692,10 @@ class CellV2Commands(object):
         * The host has instances.
 
         Returns 0 if the host is deleted successfully.
+
+        NOTE: The scheduler caches host-to-cell mapping information so when
+        deleting a host the scheduler may need to be restarted or sent the
+        SIGHUP signal.
         """
         ctxt = context.get_admin_context()
         # Find the CellMapping given the uuid.
@@ -1790,17 +1759,336 @@ class PlacementCommands(object):
         node_cache[instance.node] = node_uuid
         return node_uuid
 
+    @staticmethod
+    def _get_ports(ctxt, instance, neutron):
+        """Return the ports that are bound to the instance
+
+        :param ctxt: nova.context.RequestContext
+        :param instance: the instance to return the ports for
+        :param neutron: nova.network.neutronv2.api.ClientWrapper to
+            communicate with Neutron
+        :return: a list of neutron port dict objects
+        :raise UnableToQueryPorts: If the neutron list ports query fails.
+        """
+        try:
+            return neutron.list_ports(
+                ctxt, device_id=instance.uuid,
+                fields=['id', constants.RESOURCE_REQUEST,
+                        constants.BINDING_PROFILE]
+            )['ports']
+        except neutron_client_exc.NeutronClientException as e:
+            raise exception.UnableToQueryPorts(
+                instance_uuid=instance.uuid, error=six.text_type(e))
+
+    @staticmethod
+    def _has_request_but_no_allocation(port):
+        request = port.get(constants.RESOURCE_REQUEST)
+        binding_profile = neutron_api.get_binding_profile(port)
+        allocation = binding_profile.get(constants.ALLOCATION)
+        # We are defensive here about 'resources' and 'required' in the
+        # 'resource_request' as neutron API is not clear about those fields
+        # being optional.
+        return (request and request.get('resources') and
+                request.get('required') and
+                not allocation)
+
+    @staticmethod
+    def _get_rps_in_tree_with_required_traits(
+            ctxt, rp_uuid, required_traits, placement):
+        """Find the RPs that have all the required traits in the given rp tree.
+
+        :param ctxt: nova.context.RequestContext
+        :param rp_uuid: the RP uuid that will be used to query the tree.
+        :param required_traits: the traits that need to be supported by
+            the returned resource providers.
+        :param placement: nova.scheduler.client.report.SchedulerReportClient
+            to communicate with the Placement service API.
+        :raise PlacementAPIConnectFailure: if placement API cannot be reached
+        :raise ResourceProviderRetrievalFailed: if the resource provider does
+            not exist.
+        :raise ResourceProviderTraitRetrievalFailed: if resource provider
+            trait information cannot be read from placement.
+        :return: A list of RP UUIDs that supports every required traits and
+            in the tree for the provider rp_uuid.
+        """
+        try:
+            rps = placement.get_providers_in_tree(ctxt, rp_uuid)
+            matching_rps = [
+                rp['uuid']
+                for rp in rps
+                if set(required_traits).issubset(
+                    placement.get_provider_traits(ctxt, rp['uuid']).traits)
+            ]
+        except ks_exc.ClientException:
+            raise exception.PlacementAPIConnectFailure()
+
+        return matching_rps
+
+    @staticmethod
+    def _merge_allocations(alloc1, alloc2):
+        """Return a new allocation dict that contains the sum of alloc1 and
+        alloc2.
+
+        :param alloc1: a dict in the form of
+            {
+                <rp_uuid>: {'resources': {<resource class>: amount,
+                                          <resource class>: amount},
+                <rp_uuid>: {'resources': {<resource class>: amount},
+            }
+        :param alloc2: a dict in the same form as alloc1
+        :return: the merged allocation of alloc1 and alloc2 in the same format
+        """
+
+        allocations = collections.defaultdict(
+            lambda: {'resources': collections.defaultdict(int)})
+
+        for alloc in [alloc1, alloc2]:
+            for rp_uuid in alloc:
+                for rc, amount in alloc[rp_uuid]['resources'].items():
+                    allocations[rp_uuid]['resources'][rc] += amount
+        return allocations
+
+    def _get_port_allocation(
+            self, ctxt, node_uuid, port, instance_uuid, placement):
+        """Return the extra allocation the instance needs due to the given
+        port.
+
+        :param ctxt: nova.context.RequestContext
+        :param node_uuid: the ComputeNode uuid the instance is running on.
+        :param port: the port dict returned from neutron
+        :param instance_uuid: The uuid of the instance the port is bound to
+        :param placement: nova.scheduler.client.report.SchedulerReportClient
+            to communicate with the Placement service API.
+        :raise PlacementAPIConnectFailure: if placement API cannot be reached
+        :raise ResourceProviderRetrievalFailed: compute node resource provider
+            does not exist.
+        :raise ResourceProviderTraitRetrievalFailed: if resource provider
+            trait information cannot be read from placement.
+        :raise MoreThanOneResourceProviderToHealFrom: if it cannot be decided
+            unambiguously which resource provider to heal from.
+        :raise NoResourceProviderToHealFrom: if there is no resource provider
+            found to heal from.
+        :return: A dict of resources keyed by RP uuid to be included in the
+            instance allocation dict.
+        """
+        matching_rp_uuids = self._get_rps_in_tree_with_required_traits(
+            ctxt, node_uuid, port[constants.RESOURCE_REQUEST]['required'],
+            placement)
+
+        if len(matching_rp_uuids) > 1:
+            # If there is more than one such RP then it is an ambiguous
+            # situation that we cannot handle here efficiently because that
+            # would require the reimplementation of most of the allocation
+            # candidate query functionality of placement. Also if more
+            # than one such RP exists then selecting the right one might
+            # need extra information from the compute node. For example
+            # which PCI PF the VF is allocated from and which RP represents
+            # that PCI PF in placement. When migration is supported with such
+            # servers then we can ask the admin to migrate these servers
+            # instead to heal their allocation.
+            raise exception.MoreThanOneResourceProviderToHealFrom(
+                rp_uuids=','.join(matching_rp_uuids),
+                port_id=port['id'],
+                instance_uuid=instance_uuid)
+
+        if len(matching_rp_uuids) == 0:
+            raise exception.NoResourceProviderToHealFrom(
+                port_id=port['id'],
+                instance_uuid=instance_uuid,
+                traits=port[constants.RESOURCE_REQUEST]['required'],
+                node_uuid=node_uuid)
+
+        # We found one RP that matches the traits. Assume that we can allocate
+        # the resources from it. If there is not enough inventory left on the
+        # RP then the PUT /allocations placement call will detect that.
+        rp_uuid = matching_rp_uuids[0]
+
+        port_allocation = {
+            rp_uuid: {
+                'resources': port[constants.RESOURCE_REQUEST]['resources']
+            }
+        }
+        return port_allocation
+
+    def _get_port_allocations_to_heal(
+            self, ctxt, instance, node_cache, placement, neutron, output):
+        """Return the needed extra allocation for the ports of the instance.
+
+        :param ctxt: nova.context.RequestContext
+        :param instance: instance to get the port allocations for
+        :param node_cache: dict of Instance.node keys to ComputeNode.uuid
+            values; this cache is updated if a new node is processed.
+        :param placement: nova.scheduler.client.report.SchedulerReportClient
+            to communicate with the Placement service API.
+        :param neutron: nova.network.neutronv2.api.ClientWrapper to
+            communicate with Neutron
+        :param output: function that takes a single message for verbose output
+        :raise UnableToQueryPorts: If the neutron list ports query fails.
+        :raise nova.exception.ComputeHostNotFound: if compute node of the
+            instance not found in the db.
+        :raise PlacementAPIConnectFailure: if placement API cannot be reached
+        :raise ResourceProviderRetrievalFailed: if the resource provider
+            representing the compute node the instance is running on does not
+            exist.
+        :raise ResourceProviderTraitRetrievalFailed: if resource provider
+            trait information cannot be read from placement.
+        :raise MoreThanOneResourceProviderToHealFrom: if it cannot be decided
+            unambiguously which resource provider to heal from.
+        :raise NoResourceProviderToHealFrom: if there is no resource provider
+            found to heal from.
+        :return: A two tuple where the first item is a dict of resources keyed
+            by RP uuid to be included in the instance allocation dict. The
+            second item is a list of port dicts to be updated in Neutron.
+        """
+        # We need to heal port allocations for ports that have resource_request
+        # but do not have an RP uuid in the binding:profile.allocation field.
+        # We cannot use the instance info_cache to check the binding profile
+        # as this code needs to be able to handle ports that were attached
+        # before nova in stein started updating the allocation key in the
+        # binding:profile.
+        # In theory a port can be assigned to an instance without it being
+        # bound to any host (e.g. in case of shelve offload) but
+        # _heal_allocations_for_instance() already filters out instances that
+        # are not on any host.
+        ports_to_heal = [
+            port for port in self._get_ports(ctxt, instance, neutron)
+            if self._has_request_but_no_allocation(port)]
+
+        if not ports_to_heal:
+            # nothing to do, return early
+            return {}, []
+
+        node_uuid = self._get_compute_node_uuid(
+            ctxt, instance, node_cache)
+
+        allocations = {}
+        for port in ports_to_heal:
+            port_allocation = self._get_port_allocation(
+                ctxt, node_uuid, port, instance.uuid, placement)
+            rp_uuid = list(port_allocation)[0]
+            allocations = self._merge_allocations(
+                allocations, port_allocation)
+            # We also need to record the RP we are allocated from in the
+            # port. This will be sent back to Neutron before the allocation
+            # is updated in placement
+            binding_profile = neutron_api.get_binding_profile(port)
+            binding_profile[constants.ALLOCATION] = rp_uuid
+            port[constants.BINDING_PROFILE] = binding_profile
+
+            output(_("Found resource provider %(rp_uuid)s having matching "
+                     "traits for port %(port_uuid)s with resource request "
+                     "%(request)s attached to instance %(instance_uuid)s") %
+                     {"rp_uuid": rp_uuid, "port_uuid": port["id"],
+                      "request": port.get(constants.RESOURCE_REQUEST),
+                      "instance_uuid": instance.uuid})
+
+        return allocations, ports_to_heal
+
+    def _update_ports(self, neutron, ports_to_update, output):
+        succeeded = []
+        try:
+            for port in ports_to_update:
+                profile = neutron_api.get_binding_profile(port)
+                body = {
+                    'port': {
+                        constants.BINDING_PROFILE: profile
+                    }
+                }
+                output(
+                    _('Updating port %(port_uuid)s with attributes '
+                      '%(attributes)s') %
+                      {'port_uuid': port['id'], 'attributes': body['port']})
+                neutron.update_port(port['id'], body=body)
+                succeeded.append(port)
+        except neutron_client_exc.NeutronClientException as e:
+            output(
+                _('Updating port %(port_uuid)s failed: %(error)s') %
+                {'port_uuid': port['id'], 'error': six.text_type(e)})
+            # one of the port updates failed. We need to roll back the updates
+            # that succeeded before
+            self._rollback_port_updates(neutron, succeeded, output)
+            # we failed to heal so we need to stop but we successfully rolled
+            # back the partial updates so the admin can retry the healing.
+            raise exception.UnableToUpdatePorts(error=six.text_type(e))
+
+    @staticmethod
+    def _rollback_port_updates(neutron, ports_to_rollback, output):
+        # _update_ports() added the allocation key to these ports, so we need
+        # to remove them during the rollback.
+        manual_rollback_needed = []
+        last_exc = None
+        for port in ports_to_rollback:
+            profile = neutron_api.get_binding_profile(port)
+            profile.pop(constants.ALLOCATION)
+            body = {
+                'port': {
+                    constants.BINDING_PROFILE: profile
+                }
+            }
+            try:
+                output(_('Rolling back port update for %(port_uuid)s') %
+                       {'port_uuid': port['id']})
+                neutron.update_port(port['id'], body=body)
+            except neutron_client_exc.NeutronClientException as e:
+                output(
+                    _('Rolling back update for port %(port_uuid)s failed: '
+                      '%(error)s') % {'port_uuid': port['id'],
+                                      'error': six.text_type(e)})
+                # TODO(gibi): We could implement a retry mechanism with
+                # back off.
+                manual_rollback_needed.append(port['id'])
+                last_exc = e
+
+        if manual_rollback_needed:
+            # At least one of the port operation failed so we failed to roll
+            # back. There are partial updates in neutron. Human intervention
+            # needed.
+            raise exception.UnableToRollbackPortUpdates(
+                error=six.text_type(last_exc),
+                port_uuids=manual_rollback_needed)
+
+    def _heal_missing_alloc(self, ctxt, instance, node_cache):
+        node_uuid = self._get_compute_node_uuid(
+            ctxt, instance, node_cache)
+
+        # Now get the resource allocations for the instance based
+        # on its embedded flavor.
+        resources = scheduler_utils.resources_from_flavor(
+            instance, instance.flavor)
+
+        payload = {
+            'allocations': {
+                node_uuid: {'resources': resources},
+            },
+            'project_id': instance.project_id,
+            'user_id': instance.user_id,
+            'consumer_generation': None
+        }
+        return payload
+
+    def _heal_missing_project_and_user_id(self, allocations, instance):
+        allocations['project_id'] = instance.project_id
+        allocations['user_id'] = instance.user_id
+        return allocations
+
     def _heal_allocations_for_instance(self, ctxt, instance, node_cache,
-                                       output, placement):
+                                       output, placement, dry_run,
+                                       heal_port_allocations, neutron):
         """Checks the given instance to see if it needs allocation healing
 
         :param ctxt: cell-targeted nova.context.RequestContext
         :param instance: the instance to check for allocation healing
         :param node_cache: dict of Instance.node keys to ComputeNode.uuid
             values; this cache is updated if a new node is processed.
-        :param outout: function that takes a single message for verbose output
+        :param output: function that takes a single message for verbose output
         :param placement: nova.scheduler.client.report.SchedulerReportClient
             to communicate with the Placement service API.
+        :param dry_run: Process instances and print output but do not commit
+            any changes.
+        :param heal_port_allocations: True if healing port allocation is
+            requested, False otherwise.
+        :param neutron: nova.network.neutronv2.api.ClientWrapper to
+            communicate with Neutron
         :return: True if allocations were created or updated for the instance,
             None if nothing needed to be done
         :raises: nova.exception.ComputeHostNotFound if a compute node for a
@@ -1809,6 +2097,21 @@ class PlacementCommands(object):
             a given instance against a given compute node resource provider
         :raises: AllocationUpdateFailed if unable to update allocations for
             a given instance with consumer project/user information
+        :raise UnableToQueryPorts: If the neutron list ports query fails.
+        :raise PlacementAPIConnectFailure: if placement API cannot be reached
+        :raise ResourceProviderRetrievalFailed: if the resource provider
+            representing the compute node the instance is running on does not
+            exist.
+        :raise ResourceProviderTraitRetrievalFailed: if resource provider
+            trait information cannot be read from placement.
+        :raise MoreThanOneResourceProviderToHealFrom: if it cannot be decided
+            unambiguously which resource provider to heal from.
+        :raise NoResourceProviderToHealFrom: if there is no resource provider
+            found to heal from.
+        :raise UnableToUpdatePorts: if a port update failed in neutron but any
+            partial update was rolled back successfully.
+        :raise UnableToRollbackPortUpdates: if a port update failed in neutron
+            and the rollback of the partial updates also failed.
         """
         if instance.task_state is not None:
             output(_('Instance %(instance)s is undergoing a task '
@@ -1824,77 +2127,99 @@ class PlacementCommands(object):
         try:
             allocations = placement.get_allocs_for_consumer(
                 ctxt, instance.uuid)
-        except ks_exc.ClientException as e:
+        except (ks_exc.ClientException,
+                exception.ConsumerAllocationRetrievalFailed) as e:
             raise exception.AllocationUpdateFailed(
                 consumer_uuid=instance.uuid,
                 error=_("Allocation retrieval failed: %s") % e)
-        except exception.ConsumerAllocationRetrievalFailed as e:
-            output(_("Allocation retrieval failed: %s") % e)
-            allocations = None
 
-        # get_allocations_for_consumer uses safe_connect which will
-        # return None if we can't communicate with Placement, and the
-        # response can have an empty {'allocations': {}} response if
-        # there are no allocations for the instance so handle both
-        if allocations and allocations.get('allocations'):
-            # Check to see if the allocation project_id
-            # and user_id matches the instance project and user and
-            # fix the allocation project/user if they don't match.
-            # Allocations created before Placement API version 1.8
-            # did not have a project_id/user_id, and migrated records
-            # could have sentinel values from config.
-            if (allocations.get('project_id') ==
-                    instance.project_id and
-                    allocations.get('user_id') == instance.user_id):
-                output(_('Instance %s already has allocations with '
-                         'matching consumer project/user.') %
-                       instance.uuid)
-                return
+        need_healing = False
+
+        # Placement response can have an empty {'allocations': {}} in it if
+        # there are no allocations for the instance
+        if not allocations.get('allocations'):
+            # This instance doesn't have allocations
+            need_healing = _CREATE
+            allocations = self._heal_missing_alloc(ctxt, instance, node_cache)
+
+        if (allocations.get('project_id') != instance.project_id or
+                allocations.get('user_id') != instance.user_id):
             # We have an instance with allocations but not the correct
             # project_id/user_id, so we want to update the allocations
             # and re-put them. We don't use put_allocations here
             # because we don't want to mess up shared or nested
             # provider allocations.
-            allocations['project_id'] = instance.project_id
-            allocations['user_id'] = instance.user_id
-            # We use CONSUMER_GENERATION_VERSION for PUT
-            # /allocations/{consumer_id} to mirror the body structure from
-            # get_allocs_for_consumer.
-            resp = placement.put(
-                '/allocations/%s' % instance.uuid,
-                allocations, version=report.CONSUMER_GENERATION_VERSION)
-            if resp:
-                output(_('Successfully updated allocations for '
-                         'instance %s.') % instance.uuid)
-                return True
-            else:
-                raise exception.AllocationUpdateFailed(
-                    consumer_uuid=instance.uuid, error=resp.text)
+            need_healing = _UPDATE
+            allocations = self._heal_missing_project_and_user_id(
+                allocations, instance)
 
-        # This instance doesn't have allocations so we need to find
-        # its compute node resource provider.
-        node_uuid = self._get_compute_node_uuid(
-            ctxt, instance, node_cache)
-
-        # Now get the resource allocations for the instance based
-        # on its embedded flavor.
-        resources = scheduler_utils.resources_from_flavor(
-            instance, instance.flavor)
-        if placement.put_allocations(
-                ctxt, node_uuid, instance.uuid, resources,
-                instance.project_id, instance.user_id,
-                consumer_generation=None):
-            output(_('Successfully created allocations for '
-                     'instance %(instance)s against resource '
-                     'provider %(provider)s.') %
-                   {'instance': instance.uuid, 'provider': node_uuid})
-            return True
+        if heal_port_allocations:
+            to_heal = self._get_port_allocations_to_heal(
+                ctxt, instance, node_cache, placement, neutron, output)
+            port_allocations, ports_to_update = to_heal
         else:
-            raise exception.AllocationCreateFailed(
-                instance=instance.uuid, provider=node_uuid)
+            port_allocations, ports_to_update = {}, []
+
+        if port_allocations:
+            need_healing = need_healing or _UPDATE
+            # Merge in any missing port allocations
+            allocations['allocations'] = self._merge_allocations(
+                allocations['allocations'], port_allocations)
+
+        if need_healing:
+            if dry_run:
+                if need_healing == _CREATE:
+                    output(_('[dry-run] Create allocations for instance '
+                             '%(instance)s: %(allocations)s') %
+                           {'instance': instance.uuid,
+                            'allocations': allocations})
+                elif need_healing == _UPDATE:
+                    output(_('[dry-run] Update allocations for instance '
+                             '%(instance)s: %(allocations)s') %
+                           {'instance': instance.uuid,
+                            'allocations': allocations})
+            else:
+                # First update ports in neutron. If any of those operations
+                # fail, then roll back the successful part of it and fail the
+                # healing. We do this first because rolling back the port
+                # updates is more straight-forward than rolling back allocation
+                # changes.
+                self._update_ports(neutron, ports_to_update, output)
+
+                # Now that neutron update succeeded we can try to update
+                # placement. If it fails we need to rollback every neutron port
+                # update done before.
+                resp = placement.put_allocations(ctxt, instance.uuid,
+                                                 allocations)
+                if resp:
+                    if need_healing == _CREATE:
+                        output(_('Successfully created allocations for '
+                                 'instance %(instance)s.') %
+                               {'instance': instance.uuid})
+                    elif need_healing == _UPDATE:
+                        output(_('Successfully updated allocations for '
+                                 'instance %(instance)s.') %
+                               {'instance': instance.uuid})
+                    return True
+                else:
+                    # Rollback every neutron update. If we succeed to
+                    # roll back then it is safe to stop here and let the admin
+                    # retry. If the rollback fails then
+                    # _rollback_port_updates() will raise another exception
+                    # that instructs the operator how to clean up manually
+                    # before the healing can be retried
+                    self._rollback_port_updates(
+                        neutron, ports_to_update, output)
+                    raise exception.AllocationUpdateFailed(
+                        consumer_uuid=instance.uuid, error='')
+        else:
+            output(_('The allocation of instance %s is up-to-date. '
+                     'Nothing to be healed.') % instance.uuid)
+            return
 
     def _heal_instances_in_cell(self, ctxt, max_count, unlimited, output,
-                                placement):
+                                placement, dry_run, instance_uuid,
+                                heal_port_allocations, neutron):
         """Checks for instances to heal in a given cell.
 
         :param ctxt: cell-targeted nova.context.RequestContext
@@ -1904,6 +2229,13 @@ class PlacementCommands(object):
         :param outout: function that takes a single message for verbose output
         :param placement: nova.scheduler.client.report.SchedulerReportClient
             to communicate with the Placement service API.
+        :param dry_run: Process instances and print output but do not commit
+            any changes.
+        :param instance_uuid: UUID of a specific instance to process.
+        :param heal_port_allocations: True if healing port allocation is
+            requested, False otherwise.
+        :param neutron: nova.network.neutronv2.api.ClientWrapper to
+            communicate with Neutron
         :return: Number of instances that had allocations created.
         :raises: nova.exception.ComputeHostNotFound if a compute node for a
             given instance cannot be found
@@ -1911,6 +2243,21 @@ class PlacementCommands(object):
             a given instance against a given compute node resource provider
         :raises: AllocationUpdateFailed if unable to update allocations for
             a given instance with consumer project/user information
+        :raise UnableToQueryPorts: If the neutron list ports query fails.
+        :raise PlacementAPIConnectFailure: if placement API cannot be reached
+        :raise ResourceProviderRetrievalFailed: if the resource provider
+            representing the compute node the instance is running on does not
+            exist.
+        :raise ResourceProviderTraitRetrievalFailed: if resource provider
+            trait information cannot be read from placement.
+        :raise MoreThanOneResourceProviderToHealFrom: if it cannot be decided
+            unambiguously which resource provider to heal from.
+        :raise NoResourceProviderToHealFrom: if there is no resource provider
+            found to heal from.
+        :raise UnableToUpdatePorts: if a port update failed in neutron but any
+            partial update was rolled back successfully.
+        :raise UnableToRollbackPortUpdates: if a port update failed in neutron
+            and the rollback of the partial updates also failed.
         """
         # Keep a cache of instance.node to compute node resource provider UUID.
         # This will save some queries for non-ironic instances to the
@@ -1929,6 +2276,8 @@ class PlacementCommands(object):
         # automatically pick up where we left off without the user having
         # to pass it in (if unlimited is False).
         filters = {'deleted': False}
+        if instance_uuid:
+            filters['uuid'] = instance_uuid
         instances = objects.InstanceList.get_by_filters(
             ctxt, filters=filters, sort_key='created_at', sort_dir='asc',
             limit=max_count, expected_attrs=['flavor'])
@@ -1939,14 +2288,16 @@ class PlacementCommands(object):
             # continue.
             for instance in instances:
                 if self._heal_allocations_for_instance(
-                        ctxt, instance, node_cache, output, placement):
+                        ctxt, instance, node_cache, output, placement,
+                        dry_run, heal_port_allocations, neutron):
                     num_processed += 1
 
             # Make sure we don't go over the max count. Note that we
             # don't include instances that already have allocations in the
             # max_count number, only the number of instances that have
             # successfully created allocations.
-            if not unlimited and num_processed == max_count:
+            # If a specific instance was requested we return here as well.
+            if (not unlimited and num_processed == max_count) or instance_uuid:
                 return num_processed
 
             # Use a marker to get the next page of instances in this cell.
@@ -1961,7 +2312,8 @@ class PlacementCommands(object):
     @action_description(
         _("Iterates over non-cell0 cells looking for instances which do "
           "not have allocations in the Placement service, or have incomplete "
-          "consumer project_id/user_id values in existing allocations, and "
+          "consumer project_id/user_id values in existing allocations or "
+          "missing allocations for ports having resource request, and "
           "which are not undergoing a task state transition. For each "
           "instance found, allocations are created (or updated) against the "
           "compute node resource provider for that instance based on the "
@@ -1976,7 +2328,22 @@ class PlacementCommands(object):
                '0 or 4.')
     @args('--verbose', action='store_true', dest='verbose', default=False,
           help='Provide verbose output during execution.')
-    def heal_allocations(self, max_count=None, verbose=False):
+    @args('--dry-run', action='store_true', dest='dry_run', default=False,
+          help='Runs the command and prints output but does not commit any '
+               'changes. The return code should be 4.')
+    @args('--instance', metavar='<instance_uuid>', dest='instance_uuid',
+          help='UUID of a specific instance to process. If specified '
+               '--max-count has no effect.')
+    @args('--skip-port-allocations', action='store_true',
+          dest='skip_port_allocations', default=False,
+          help='Skip the healing of the resource allocations of bound ports. '
+               'E.g. healing bandwidth resource allocation for ports having '
+               'minimum QoS policy rules attached. If your deployment does '
+               'not use such a feature then the performance impact of '
+               'querying neutron ports for each instance can be avoided with '
+               'this flag.')
+    def heal_allocations(self, max_count=None, verbose=False, dry_run=False,
+                         instance_uuid=None, skip_port_allocations=False):
         """Heals instance allocations in the Placement service
 
         Return codes:
@@ -1987,14 +2354,14 @@ class PlacementCommands(object):
         * 3: Unable to create (or update) allocations for an instance against
              its compute node resource provider.
         * 4: Command completed successfully but no allocations were created.
+        * 5: Unable to query ports from neutron
+        * 6: Unable to update ports in neutron
+        * 7: Cannot roll back neutron port updates. Manual steps needed.
         * 127: Invalid input.
         """
         # NOTE(mriedem): Thoughts on ways to expand this:
-        # - add a --dry-run option to just print which instances would have
-        #   allocations created for them
         # - allow passing a specific cell to heal
         # - allow filtering on enabled/disabled cells
-        # - allow passing a specific instance to heal
         # - add a force option to force allocations for instances which have
         #   task_state is not None (would get complicated during a migration);
         #   for example, this could cleanup ironic instances that have
@@ -2005,6 +2372,8 @@ class PlacementCommands(object):
         #   would probably only be safe with a specific instance.
         # - deal with nested resource providers?
 
+        heal_port_allocations = not skip_port_allocations
+
         output = lambda msg: None
         if verbose:
             output = lambda msg: print(msg)
@@ -2013,7 +2382,10 @@ class PlacementCommands(object):
         # count, should we have separate options to be specific, i.e. --total
         # and --batch-size? Then --batch-size defaults to 50 and --total
         # defaults to None to mean unlimited.
-        if max_count is not None:
+        if instance_uuid:
+            max_count = 1
+            unlimited = False
+        elif max_count is not None:
             try:
                 max_count = int(max_count)
             except ValueError:
@@ -2028,12 +2400,31 @@ class PlacementCommands(object):
             output(_('Running batches of %i until complete') % max_count)
 
         ctxt = context.get_admin_context()
-        cells = objects.CellMappingList.get_all(ctxt)
-        if not cells:
-            output(_('No cells to process.'))
-            return 4
+        # If we are going to process a specific instance, just get the cell
+        # it is in up front.
+        if instance_uuid:
+            try:
+                im = objects.InstanceMapping.get_by_instance_uuid(
+                    ctxt, instance_uuid)
+                cells = objects.CellMappingList(objects=[im.cell_mapping])
+            except exception.InstanceMappingNotFound:
+                print('Unable to find cell for instance %s, is it mapped? Try '
+                      'running "nova-manage cell_v2 verify_instance" or '
+                      '"nova-manage cell_v2 map_instances".' %
+                      instance_uuid)
+                return 127
+        else:
+            cells = objects.CellMappingList.get_all(ctxt)
+            if not cells:
+                output(_('No cells to process.'))
+                return 4
 
         placement = report.SchedulerReportClient()
+
+        neutron = None
+        if heal_port_allocations:
+            neutron = neutron_api.get_client(ctxt, admin=True)
+
         num_processed = 0
         # TODO(mriedem): Use context.scatter_gather_skip_cell0.
         for cell in cells:
@@ -2053,20 +2444,37 @@ class PlacementCommands(object):
             with context.target_cell(ctxt, cell) as cctxt:
                 try:
                     num_processed += self._heal_instances_in_cell(
-                        cctxt, limit_per_cell, unlimited, output, placement)
+                        cctxt, limit_per_cell, unlimited, output, placement,
+                        dry_run, instance_uuid, heal_port_allocations, neutron)
                 except exception.ComputeHostNotFound as e:
                     print(e.format_message())
                     return 2
                 except (exception.AllocationCreateFailed,
-                        exception.AllocationUpdateFailed) as e:
+                        exception.AllocationUpdateFailed,
+                        exception.NoResourceProviderToHealFrom,
+                        exception.MoreThanOneResourceProviderToHealFrom,
+                        exception.PlacementAPIConnectFailure,
+                        exception.ResourceProviderRetrievalFailed,
+                        exception.ResourceProviderTraitRetrievalFailed) as e:
                     print(e.format_message())
                     return 3
+                except exception.UnableToQueryPorts as e:
+                    print(e.format_message())
+                    return 5
+                except exception.UnableToUpdatePorts as e:
+                    print(e.format_message())
+                    return 6
+                except exception.UnableToRollbackPortUpdates as e:
+                    print(e.format_message())
+                    return 7
 
                 # Make sure we don't go over the max count. Note that we
                 # don't include instances that already have allocations in the
                 # max_count number, only the number of instances that have
                 # successfully created allocations.
-                if num_processed == max_count:
+                # If a specific instance was provided then we'll just exit
+                # the loop and process it below (either return 4 or 0).
+                if num_processed == max_count and not instance_uuid:
                     output(_('Max count reached. Processed %s instances.')
                            % num_processed)
                     return 1
@@ -2193,65 +2601,34 @@ class PlacementCommands(object):
                         print(e.format_message())
                         return 1
 
-                # We've got our compute node record, so now we can look to
-                # see if the matching resource provider, found via compute
-                # node uuid, is in the same aggregate in placement, found via
-                # aggregate uuid.
-                # NOTE(mriedem): We could re-use placement.aggregate_add_host
-                # here although that has to do the provider lookup by host as
-                # well, but it does handle generation conflicts.
-                resp = placement.get(  # use 1.19 to get the generation
-                    '/resource_providers/%s/aggregates' % rp_uuid,
-                    version='1.19')
-                if resp:
-                    body = resp.json()
-                    provider_aggregate_uuids = body['aggregates']
-                    # The moment of truth: is the provider in the same host
-                    # aggregate relationship?
-                    aggregate_uuid = aggregate.uuid
-                    if aggregate_uuid not in provider_aggregate_uuids:
-                        # Add the resource provider to this aggregate.
-                        provider_aggregate_uuids.append(aggregate_uuid)
-                        # Now update the provider aggregates using the
-                        # generation to ensure we're conflict-free.
-                        aggregate_update_body = {
-                            'aggregates': provider_aggregate_uuids,
-                            'resource_provider_generation':
-                                body['resource_provider_generation']
-                        }
-                        put_resp = placement.put(
-                            '/resource_providers/%s/aggregates' % rp_uuid,
-                            aggregate_update_body, version='1.19')
-                        if put_resp:
-                            output(_('Successfully added host (%(host)s) and '
-                                     'provider (%(provider)s) to aggregate '
-                                     '(%(aggregate)s).') %
-                                   {'host': host, 'provider': rp_uuid,
-                                    'aggregate': aggregate_uuid})
-                        elif put_resp.status_code == 404:
-                            # We must have raced with a delete on the resource
-                            # provider.
-                            providers_not_found[host] = rp_uuid
-                        else:
-                            # TODO(mriedem): Handle 409 conflicts by retrying
-                            # the operation.
-                            print(_('Failed updating provider aggregates for '
-                                    'host (%(host)s), provider (%(provider)s) '
-                                    'and aggregate (%(aggregate)s). Error: '
-                                    '%(error)s') %
-                                  {'host': host, 'provider': rp_uuid,
-                                   'aggregate': aggregate_uuid,
-                                   'error': put_resp.text})
-                            return 3
-                elif resp.status_code == 404:
+                # We've got our compute node record, so now we can ensure that
+                # the matching resource provider, found via compute node uuid,
+                # is in the same aggregate in placement, found via aggregate
+                # uuid.
+                try:
+                    placement.aggregate_add_host(ctxt, aggregate.uuid,
+                                                 rp_uuid=rp_uuid)
+                    output(_('Successfully added host (%(host)s) and '
+                             'provider (%(provider)s) to aggregate '
+                             '(%(aggregate)s).') %
+                           {'host': host, 'provider': rp_uuid,
+                            'aggregate': aggregate.uuid})
+                except exception.ResourceProviderNotFound:
                     # The resource provider wasn't found. Store this for later.
                     providers_not_found[host] = rp_uuid
-                else:
-                    print(_('An error occurred getting resource provider '
-                            'aggregates from placement for provider '
-                            '%(provider)s. Error: %(error)s') %
-                          {'provider': rp_uuid, 'error': resp.text})
+                except exception.ResourceProviderAggregateRetrievalFailed as e:
+                    print(e.message)
                     return 2
+                except exception.NovaException as e:
+                    # The exception message is too generic in this case
+                    print(_('Failed updating provider aggregates for '
+                            'host (%(host)s), provider (%(provider)s) '
+                            'and aggregate (%(aggregate)s). Error: '
+                            '%(error)s') %
+                          {'host': host, 'provider': rp_uuid,
+                           'aggregate': aggregate.uuid,
+                           'error': e.message})
+                    return 3
 
         # Now do our error handling. Note that there is no real priority on
         # the error code we return. We want to dump all of the issues we hit
@@ -2286,7 +2663,6 @@ class PlacementCommands(object):
 
 CATEGORIES = {
     'api_db': ApiDbCommands,
-    'cell': CellCommands,
     'cell_v2': CellV2Commands,
     'db': DbCommands,
     'floating': FloatingIpCommands,
@@ -2338,4 +2714,4 @@ def main():
             pdb.post_mortem()
         else:
             print(_("An error has occurred:\n%s") % traceback.format_exc())
-        return 1
+        return 255

@@ -20,54 +20,7 @@
 Before reading further, there is a nice overview presentation_ that
 Andrew Laski gave at the Austin (Newton) summit which is worth watching.
 
-.. _presentation: https://www.openstack.org/videos/video/nova-cells-v2-whats-going-on
-
-Cells V1
-========
-
-Historically, Nova has depended on a single logical database and message queue
-that all nodes depend on for communication and data persistence. This becomes
-an issue for deployers as scaling and providing fault tolerance for these
-systems is difficult.
-
-We have an experimental feature in Nova called "cells", hereafter referred to
-as "cells v1", which is used by some large deployments to partition compute
-nodes into smaller groups, coupled with a database and queue. This seems to be
-a well-liked and easy-to-understand arrangement of resources, but the
-implementation of it has issues for maintenance and correctness.
-See `Comparison with Cells V1`_ for more detail.
-
-Status
-~~~~~~
-
-.. deprecated:: 16.0.0
-    Cells v1 is deprecated in favor of Cells v2 as of the 16.0.0 Pike release.
-
-Cells v1 is considered experimental and receives much less testing than the
-rest of Nova. For example, there is no job for testing cells v1 with Neutron.
-
-The priority for the core team is implementation of and migration to cells v2.
-Because of this, there are a few restrictions placed on cells v1:
-
-#. Cells v1 is in feature freeze. This means no new feature proposals for cells
-   v1 will be accepted by the core team, which includes but is not limited to
-   API parity, e.g. supporting virtual interface attach/detach with Neutron.
-#. Latent bugs caused by the cells v1 design will not be fixed, e.g.
-   `bug 1489581 <https://bugs.launchpad.net/nova/+bug/1489581>`_. So if new
-   tests are added to Tempest which trigger a latent bug in cells v1 it may not
-   be fixed. However, regressions in working function should be tracked with
-   bugs and fixed.
-
-**Suffice it to say, new deployments of cells v1 are not encouraged.**
-
-The restrictions above are basically meant to prioritize effort and focus on
-getting cells v2 completed, and feature requests and hard to fix latent bugs
-detract from that effort. Further discussion on this can be found in the
-`2015/11/12 Nova meeting minutes
-<http://eavesdrop.openstack.org/meetings/nova/2015/nova.2015-11-12-14.00.log.html>`_.
-
-There are no plans to remove Cells V1 until V2 is usable by existing
-deployments and there is a migration path.
+.. _presentation: https://www.openstack.org/videos/summits/austin-2016/nova-cells-v2-whats-going-on
 
 .. _cells-v2:
 
@@ -77,6 +30,10 @@ Cells V2
 * `Newton Summit Video - Nova Cells V2: What's Going On? <https://www.openstack.org/videos/austin-2016/nova-cells-v2-whats-going-on>`_
 * `Pike Summit Video - Scaling Nova: How CellsV2 Affects Your Deployment <https://www.openstack.org/videos/boston-2017/scaling-nova-how-cellsv2-affects-your-deployment>`_
 * `Queens Summit Video - Add Cellsv2 to your existing Nova deployment <https://www.openstack.org/videos/sydney-2017/adding-cellsv2-to-your-existing-nova-deployment>`_
+* `Rocky Summit Video - Moving from CellsV1 to CellsV2 at CERN
+  <https://www.openstack.org/videos/summits/vancouver-2018/moving-from-cellsv1-to-cellsv2-at-cern>`_
+* `Stein Summit Video - Scaling Nova with CellsV2: The Nova Developer and the CERN Operator perspective
+  <https://www.openstack.org/videos/summits/berlin-2018/scaling-nova-with-cellsv2-the-nova-developer-and-the-cern-operator-perspective>`_
 
 Manifesto
 ~~~~~~~~~
@@ -111,10 +68,11 @@ always be much smaller than the number of instances.
 
 There are availability implications with this change since something like a
 'nova list' which might query multiple cells could end up with a partial result
-if there is a database failure in a cell.  A database failure within a cell
-would cause larger issues than a partial list result so the expectation is that
-it would be addressed quickly and cellsv2 will handle it by indicating in the
-response that the data may not be complete.
+if there is a database failure in a cell. See :doc:`/admin/cells` for knowing
+more about the recommended practices under such situations. A database failure
+within a cell would cause larger issues than a partial list result so the
+expectation is that it would be addressed quickly and cellsv2 will handle it by
+indicating in the response that the data may not be complete.
 
 Since this is very similar to what we have with current cells, in terms of
 organization of resources, we have decided to call this "cellsv2" for
@@ -154,23 +112,6 @@ The benefits of this new organization are:
 
 * Adding new sets of hosts as a new "cell" allows them to be plugged into a
   deployment and tested before allowing builds to be scheduled to them.
-
-Comparison with Cells V1
-------------------------
-
-In reality, the proposed organization is nearly the same as what we currently
-have in cells today. A cell mostly consists of a database, queue, and set of
-compute nodes. The primary difference is that current cells require a
-nova-cells service that synchronizes information up and down from the top level
-to the child cell. Additionally, there are alternate code paths in
-compute/api.py which handle routing messages to cells instead of directly down
-to a compute host. Both of these differences are relevant to why we have a hard
-time achieving feature and test parity with regular nova (because many things
-take an alternate path with cells) and why it's hard to understand what is
-going on (all the extra synchronization of data). The new proposed cellsv2
-organization avoids both of these problems by letting things live where they
-should, teaching nova to natively find the right db, queue, and compute node to
-handle a given request.
 
 
 Database split
@@ -562,6 +503,9 @@ database. This will set up a single cell Nova deployment.
 Upgrade with Cells V1
 ~~~~~~~~~~~~~~~~~~~~~
 
+.. todo:: This needs to be removed but `Adding a new cell to an existing deployment`_
+          is still using it.
+
 You are upgrading an existing Nova install that has Cells V1 enabled and have
 compute hosts in your databases. This will set up a multiple cell Nova
 deployment. At this time, it is recommended to keep Cells V1 enabled during and
@@ -751,3 +695,65 @@ FAQs
    to restart the scheduler process to refresh the cache, or send a SIGHUP
    signal to the scheduler by which it will automatically refresh the cells
    cache and the changes will take effect.
+
+#. Why was the cells REST API not implemented for CellsV2? Why are
+   there no CRUD operations for cells in the API?
+
+   One of the deployment challenges that CellsV1 had was the
+   requirement for the API and control services to be up before a new
+   cell could be deployed. This was not a problem for large-scale
+   public clouds that never shut down, but is not a reasonable
+   requirement for smaller clouds that do offline upgrades and/or
+   clouds which could be taken completely offline by something like a
+   power outage. Initial devstack and gate testing for CellsV1 was
+   delayed by the need to engineer a solution for bringing the services
+   partially online in order to deploy the rest, and this continues to
+   be a gap for other deployment tools. Consider also the FFU case
+   where the control plane needs to be down for a multi-release
+   upgrade window where changes to cell records have to be made. This
+   would be quite a bit harder if the way those changes are made is
+   via the API, which must remain down during the process.
+
+   Further, there is a long-term goal to move cell configuration
+   (i.e. cell_mappings and the associated URLs and credentials) into
+   config and get away from the need to store and provision those
+   things in the database. Obviously a CRUD interface in the API would
+   prevent us from making that move.
+
+#. Why are cells not exposed as a grouping mechanism in the API for
+   listing services, instances, and other resources?
+
+   Early in the design of CellsV2 we set a goal to not let the cell
+   concept leak out of the API, even for operators. Aggregates are the
+   way nova supports grouping of hosts for a variety of reasons, and
+   aggregates can cut across cells, and/or be aligned with them if
+   desired. If we were to support cells as another grouping mechanism,
+   we would likely end up having to implement many of the same
+   features for them as aggregates, such as scheduler features,
+   metadata, and other searching/filtering operations. Since
+   aggregates are how Nova supports grouping, we expect operators to
+   use aggregates any time they need to refer to a cell as a group of
+   hosts from the API, and leave actual cells as a purely
+   architectural detail.
+
+   The need to filter instances by cell in the API can and should be
+   solved by adding a generic by-aggregate filter, which would allow
+   listing instances on hosts contained within any aggregate,
+   including one that matches the cell boundaries if so desired.
+
+#. Why are the API responses for ``GET /servers``, ``GET /servers/detail``,
+   ``GET /servers/{server_id}`` and ``GET /os-services`` missing some
+   information for certain cells at certain times? Why do I see the status as
+   "UNKNOWN" for the servers in those cells at those times when I run
+   ``openstack server list`` or ``openstack server show``?
+
+   Starting from microversion 2.69 the API responses of ``GET /servers``,
+   ``GET /servers/detail``, ``GET /servers/{server_id}`` and
+   ``GET /os-services`` may contain missing keys during down cell situations.
+   See the `Handling Down Cells
+   <https://docs.openstack.org/api-guide/compute/down_cells.html>`__
+   section of the Compute API guide for more information on the partial
+   constructs.
+
+   For administrative considerations, see
+   :ref:`Handling cell failures <handling-cell-failures>`.

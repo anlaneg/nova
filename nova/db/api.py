@@ -30,7 +30,6 @@ these objects be simple dictionaries.
 from oslo_db import concurrency
 from oslo_log import log as logging
 
-from nova.cells import rpcapi as cells_rpcapi
 import nova.conf
 from nova.db import constants
 
@@ -242,6 +241,21 @@ def compute_node_get_by_host_and_nodename(context, host, nodename):
     Raises ComputeHostNotFound if host with the given name doesn't exist.
     """
     return IMPL.compute_node_get_by_host_and_nodename(context, host, nodename)
+
+
+def compute_node_get_by_nodename(context, hypervisor_hostname):
+    """Get a compute node by hypervisor_hostname.
+
+    :param context: The security context (admin)
+    :param hypervisor_hostname: Name of the node
+
+    :returns: Dictionary-like object containing properties of the compute node,
+              including its statistics
+
+    Raises ComputeHostNotFound if hypervisor_hostname with the given name
+    doesn't exist.
+    """
+    return IMPL.compute_node_get_by_nodename(context, hypervisor_hostname)
 
 
 def compute_node_get_all(context):
@@ -748,9 +762,19 @@ def instance_create(context, values):
     return IMPL.instance_create(context, values)
 
 
-def instance_destroy(context, instance_uuid, constraint=None):
-    """Destroy the instance or raise if it does not exist."""
-    return IMPL.instance_destroy(context, instance_uuid, constraint)
+def instance_destroy(context, instance_uuid, constraint=None,
+                     hard_delete=False):
+    """Destroy the instance or raise if it does not exist.
+
+    :param context: request context object
+    :param instance_uuid: uuid of the instance to delete
+    :param constraint: a constraint object
+    :param hard_delete: when set to True, removes all records related to the
+                        instance
+    """
+    return IMPL.instance_destroy(context, instance_uuid,
+                                 constraint=constraint,
+                                 hard_delete=hard_delete)
 
 
 def instance_get_by_uuid(context, uuid, columns_to_join=None):
@@ -769,9 +793,11 @@ def instance_get_all(context, columns_to_join=None):
     return IMPL.instance_get_all(context, columns_to_join=columns_to_join)
 
 
-def instance_get_all_uuids_by_host(context, host):
-    """Get a list of instance uuids on host."""
-    return IMPL.instance_get_all_uuids_by_host(context, host)
+def instance_get_all_uuids_by_hosts(context, hosts):
+    """Get a dict, keyed by hostname, of a list of instance uuids on one or
+    more hosts.
+    """
+    return IMPL.instance_get_all_uuids_by_hosts(context, hosts)
 
 
 def instance_get_all_by_filters(context, filters, sort_key='created_at',
@@ -1497,33 +1523,6 @@ def pci_device_update(context, node_id, address, value):
     return IMPL.pci_device_update(context, node_id, address, value)
 
 
-###################
-
-def cell_create(context, values):
-    """Create a new child Cell entry."""
-    return IMPL.cell_create(context, values)
-
-
-def cell_update(context, cell_name, values):
-    """Update a child Cell entry."""
-    return IMPL.cell_update(context, cell_name, values)
-
-
-def cell_delete(context, cell_name):
-    """Delete a child Cell."""
-    return IMPL.cell_delete(context, cell_name)
-
-
-def cell_get(context, cell_name):
-    """Get a specific child Cell."""
-    return IMPL.cell_get(context, cell_name)
-
-
-def cell_get_all(context):
-    """Get all child Cells."""
-    return IMPL.cell_get_all(context)
-
-
 ####################
 
 
@@ -1600,20 +1599,12 @@ def bw_usage_get_by_uuids(context, uuids, start_period):
 
 
 def bw_usage_update(context, uuid, mac, start_period, bw_in, bw_out,
-                    last_ctr_in, last_ctr_out, last_refreshed=None,
-                    update_cells=True):
+                    last_ctr_in, last_ctr_out, last_refreshed=None):
     """Update cached bandwidth usage for an instance's network based on mac
     address.  Creates new record if needed.
     """
     rv = IMPL.bw_usage_update(context, uuid, mac, start_period, bw_in,
             bw_out, last_ctr_in, last_ctr_out, last_refreshed=last_refreshed)
-    if update_cells:
-        try:
-            cells_rpcapi.CellsAPI().bw_usage_update_at_top(context,
-                    uuid, mac, start_period, bw_in, bw_out,
-                    last_ctr_in, last_ctr_out, last_refreshed)
-        except Exception:
-            LOG.exception("Failed to notify cells of bw_usage update")
     return rv
 
 
@@ -1783,29 +1774,36 @@ def task_log_get(context, task_name, period_beginning,
 ####################
 
 
-def archive_deleted_rows(max_rows=None):
-    """Move up to max_rows rows from production tables to corresponding shadow
-    tables.
+def archive_deleted_rows(context=None, max_rows=None, before=None):
+    """Move up to max_rows rows from production tables to the corresponding
+    shadow tables.
 
-    :returns: dict that maps table name to number of rows archived from that
-              table, for example:
+    :param context: nova.context.RequestContext for database access
+    :param max_rows: Maximum number of rows to archive (required)
+    :param before: optional datetime which when specified filters the records
+        to only archive those records deleted before the given date
+    :returns: 3-item tuple:
 
-    ::
+        - dict that maps table name to number of rows archived from that table,
+          for example::
 
-        {
-            'instances': 5,
-            'block_device_mapping': 5,
-            'pci_devices': 2,
-        }
-
+            {
+                'instances': 5,
+                'block_device_mapping': 5,
+                'pci_devices': 2,
+            }
+        - list of UUIDs of instances that were archived
+        - total number of rows that were archived
     """
-    return IMPL.archive_deleted_rows(max_rows=max_rows)
+    return IMPL.archive_deleted_rows(context=context, max_rows=max_rows,
+                                     before=before)
 
 
 def pcidevice_online_data_migration(context, max_count):
     return IMPL.pcidevice_online_data_migration(context, max_count)
 
 
+# TODO(mriedem): Remove this in the U release.
 def service_uuids_online_data_migration(context, max_count):
     return IMPL.service_uuids_online_data_migration(context, max_count)
 
@@ -1873,6 +1871,15 @@ def console_auth_token_destroy_all_by_instance(context, instance_uuid):
     """Delete all console authorizations belonging to the instance."""
     return IMPL.console_auth_token_destroy_all_by_instance(context,
                                                            instance_uuid)
+
+
+def console_auth_token_destroy_expired(context):
+    """Delete expired console authorizations.
+
+    The console authorizations expire at the time specified by their
+    'expires' column. This function is used to garbage collect expired tokens.
+    """
+    return IMPL.console_auth_token_destroy_expired(context)
 
 
 def console_auth_token_destroy_expired_by_host(context, host):

@@ -40,8 +40,8 @@ libvirt = None
 def graphics_listen_addrs(migrate_data):
     """Returns listen addresses of vnc/spice from a LibvirtLiveMigrateData"""
     listen_addrs = None
-    if (migrate_data.obj_attr_is_set('graphics_listen_addr_vnc')
-        or migrate_data.obj_attr_is_set('graphics_listen_addr_spice')):
+    if (migrate_data.obj_attr_is_set('graphics_listen_addr_vnc') or
+            migrate_data.obj_attr_is_set('graphics_listen_addr_spice')):
         listen_addrs = {'vnc': None, 'spice': None}
     if migrate_data.obj_attr_is_set('graphics_listen_addr_vnc'):
         listen_addrs['vnc'] = str(migrate_data.graphics_listen_addr_vnc)
@@ -317,9 +317,10 @@ def _update_vif_xml(xml_doc, migrate_data, get_vif_config):
         LOG.debug('Updating guest XML with vif config: %s', conf_xml,
                   instance_uuid=instance_uuid)
         dest_interface_elem = etree.XML(conf_xml, parser)
-        # Save off the hw address presented to the guest since that can't
-        # change during live migration.
+        # Save off the hw address and MTU presented to the guest since that
+        # can't change during live migration.
         address = interface_dev.find('address')
+        mtu = interface_dev.find('mtu')
         # Now clear the interface's current elements and insert everything
         # from the destination vif config xml.
         interface_dev.clear()
@@ -328,6 +329,10 @@ def _update_vif_xml(xml_doc, migrate_data, get_vif_config):
             interface_dev.set(attr_name, attr_value)
         # Insert sub-elements.
         for index, dest_interface_subelem in enumerate(dest_interface_elem):
+            # NOTE(mnaser): If we don't have an MTU, don't define one, else
+            #               the live migration will crash.
+            if dest_interface_subelem.tag == 'mtu' and mtu is None:
+                continue
             interface_dev.insert(index, dest_interface_subelem)
         # And finally re-insert the hw address.
         interface_dev.insert(index + 1, address)
@@ -371,38 +376,31 @@ def find_job_type(guest, instance):
             return libvirt.VIR_DOMAIN_JOB_FAILED
 
 
-def should_abort(instance, now,
-                 progress_time, progress_timeout,
-                 elapsed, completion_timeout,
-                 migration_status):
-    """Determine if the migration should be aborted
+def should_trigger_timeout_action(instance, elapsed, completion_timeout,
+                                  migration_status):
+    """Determine if the migration timeout action should be triggered
 
     :param instance: a nova.objects.Instance
-    :param now: current time in secs since epoch
-    :param progress_time: when progress was last made in secs since epoch
-    :param progress_timeout: time in secs to allow for progress
     :param elapsed: total elapsed time of migration in secs
     :param completion_timeout: time in secs to allow for completion
     :param migration_status: current status of the migration
 
-    Check the progress and completion timeouts to determine if either
-    of them have been hit, and should thus cause migration to be aborted
+    Check the completion timeout to determine if it has been hit,
+    and should thus cause migration timeout action to be triggered.
 
-    Avoid migration to be aborted if it is running in post-copy mode
+    Avoid migration to be aborted or triggered post-copy again if it is
+    running in post-copy mode
 
-    :returns: True if migration should be aborted, False otherwise
+    :returns: True if the migration completion timeout action should be
+              performed, False otherwise
     """
+    if not completion_timeout:
+        return False
+
     if migration_status == 'running (post-copy)':
         return False
 
-    if (progress_timeout != 0 and
-            (now - progress_time) > progress_timeout):
-        LOG.warning("Live migration stuck for %d sec",
-                    (now - progress_time), instance=instance)
-        return True
-
-    if (completion_timeout != 0 and
-            elapsed > completion_timeout):
+    if elapsed > completion_timeout:
         LOG.warning("Live migration not completed after %d sec",
                     completion_timeout, instance=instance)
         return True

@@ -23,12 +23,13 @@ from nova.api.openstack.compute.views import addresses as views_addresses
 from nova.api.openstack.compute.views import flavors as views_flavors
 from nova.api.openstack.compute.views import images as views_images
 from nova import availability_zones as avail_zone
-from nova import compute
+from nova.compute import api as compute
 from nova.compute import vm_states
 from nova import context as nova_context
 from nova import exception
 from nova.network.security_group import openstack_driver
 from nova import objects
+from nova.objects import virtual_interface
 from nova.policies import extended_server_attributes as esa_policies
 from nova.policies import flavor_extra_specs as fes_policies
 from nova.policies import servers as servers_policies
@@ -87,14 +88,31 @@ class ViewBuilder(common.ViewBuilder):
                     'AUTO' if instance.get('auto_disk_config') else 'MANUAL'),
             },
         }
-        self._add_security_grps(request, [server["server"]], [instance])
+        self._add_security_grps(request, [server["server"]], [instance],
+                                create_request=True)
 
         return server
 
     def basic(self, request, instance, show_extra_specs=False,
               show_extended_attr=None, show_host_status=None,
-              show_sec_grp=None, bdms=None):
+              show_sec_grp=None, bdms=None, cell_down_support=False,
+              show_user_data=False):
         """Generic, non-detailed view of an instance."""
+        if cell_down_support and 'display_name' not in instance:
+            # NOTE(tssurya): If the microversion is >= 2.69, this boolean will
+            # be true in which case we check if there are instances from down
+            # cells (by checking if their objects have missing keys like
+            # `display_name`) and return partial constructs based on the
+            # information available from the nova_api database.
+            return {
+                "server": {
+                    "id": instance.uuid,
+                    "status": "UNKNOWN",
+                    "links": self._get_links(request,
+                                             instance.uuid,
+                                             self._collection_name),
+                },
+            }
         return {
             "server": {
                 "id": instance["uuid"],
@@ -125,16 +143,55 @@ class ViewBuilder(common.ViewBuilder):
         # results.
         return sorted(list(set(self._show_expected_attrs + expected_attrs)))
 
+    def _show_from_down_cell(self, request, instance, show_extra_specs,
+                             show_server_groups):
+        """Function that constructs the partial response for the instance."""
+        ret = {
+            "server": {
+                "id": instance.uuid,
+                "status": "UNKNOWN",
+                "tenant_id": instance.project_id,
+                "created": utils.isotime(instance.created_at),
+                "links": self._get_links(
+                    request, instance.uuid, self._collection_name),
+            },
+        }
+        if 'flavor' in instance:
+            # If the key 'flavor' is present for an instance from a down cell
+            # it means that the request is ``GET /servers/{server_id}`` and
+            # thus we include the information from the request_spec of the
+            # instance like its flavor, image, avz, and user_id in addition to
+            # the basic information from its instance_mapping.
+            # If 'flavor' key is not present for an instance from a down cell
+            # down cell it means the request is ``GET /servers/detail`` and we
+            # do not expose the flavor in the response when listing servers
+            # with details for performance reasons of fetching it from the
+            # request specs table for the whole list of instances.
+            ret["server"]["image"] = self._get_image(request, instance)
+            ret["server"]["flavor"] = self._get_flavor(request, instance,
+                                                       show_extra_specs)
+            # in case availability zone was not requested by the user during
+            # boot time, return UNKNOWN.
+            avz = instance.availability_zone or "UNKNOWN"
+            ret["server"]["OS-EXT-AZ:availability_zone"] = avz
+            ret["server"]["OS-EXT-STS:power_state"] = instance.power_state
+            # in case its an old request spec which doesn't have the user_id
+            # data migrated, return UNKNOWN.
+            ret["server"]["user_id"] = instance.user_id or "UNKNOWN"
+            if show_server_groups:
+                context = request.environ['nova.context']
+                ret['server']['server_groups'] = self._get_server_groups(
+                                                             context, instance)
+        return ret
+
     def show(self, request, instance, extend_address=True,
              show_extra_specs=None, show_AZ=True, show_config_drive=True,
              show_extended_attr=None, show_host_status=None,
              show_keypair=True, show_srv_usg=True, show_sec_grp=True,
              show_extended_status=True, show_extended_volumes=True,
-             bdms=None):
+             bdms=None, cell_down_support=False, show_server_groups=False,
+             show_user_data=True):
         """Detailed view of a single instance."""
-        ip_v4 = instance.get('access_ip_v4')
-        ip_v6 = instance.get('access_ip_v6')
-
         if show_extra_specs is None:
             # detail will pre-calculate this for us. If we're doing show,
             # then figure it out here.
@@ -143,6 +200,17 @@ class ViewBuilder(common.ViewBuilder):
                 context = request.environ['nova.context']
                 show_extra_specs = context.can(
                     fes_policies.POLICY_ROOT % 'index', fatal=False)
+
+        if cell_down_support and 'display_name' not in instance:
+            # NOTE(tssurya): If the microversion is >= 2.69, this boolean will
+            # be true in which case we check if there are instances from down
+            # cells (by checking if their objects have missing keys like
+            # `display_name`) and return partial constructs based on the
+            # information available from the nova_api database.
+            return self._show_from_down_cell(
+                request, instance, show_extra_specs, show_server_groups)
+        ip_v4 = instance.get('access_ip_v4')
+        ip_v6 = instance.get('access_ip_v6')
 
         server = {
             "server": {
@@ -210,10 +278,7 @@ class ViewBuilder(common.ViewBuilder):
             show_extended_attr = context.can(
                 esa_policies.BASE_POLICY_NAME, fatal=False)
         if show_extended_attr:
-            server["server"][
-                "OS-EXT-SRV-ATTR:hypervisor_hostname"] = instance.node
-
-            properties = ['host', 'name']
+            properties = ['host', 'name', 'node']
             if api_version_request.is_supported(request, min_version='2.3'):
                 # NOTE(mriedem): These will use the OS-EXT-SRV-ATTR prefix
                 # below and that's OK for microversion 2.3 which is being
@@ -222,15 +287,25 @@ class ViewBuilder(common.ViewBuilder):
                 # the OS-EXT-SRV-ATTR prefix.
                 properties += ['reservation_id', 'launch_index',
                                'hostname', 'kernel_id', 'ramdisk_id',
-                               'root_device_name', 'user_data']
+                               'root_device_name']
+                # NOTE(gmann): Since microversion 2.75, PUT and Rebuild
+                # response include all the server attributes including these
+                # extended attributes also. But microversion 2.57 already
+                # adding the 'user_data' in Rebuild response in API method.
+                # so we will skip adding the user data attribute for rebuild
+                # case. 'show_user_data' is false only in case of rebuild.
+                if show_user_data:
+                    properties += ['user_data']
             for attr in properties:
                 if attr == 'name':
                     key = "OS-EXT-SRV-ATTR:instance_%s" % attr
+                elif attr == 'node':
+                    key = "OS-EXT-SRV-ATTR:hypervisor_hostname"
                 else:
                     # NOTE(mriedem): Nothing after microversion 2.3 should use
                     # the OS-EXT-SRV-ATTR prefix for the attribute key name.
                     key = "OS-EXT-SRV-ATTR:%s" % attr
-                server["server"][key] = instance[attr]
+                server["server"][key] = getattr(instance, attr)
         if show_extended_status:
             # NOTE(gmann): Removed 'locked_by' from extended status
             # to make it same as V2. If needed it can be added with
@@ -266,6 +341,10 @@ class ViewBuilder(common.ViewBuilder):
             server["server"]["locked"] = (True if instance["locked_by"]
                                           else False)
 
+        if api_version_request.is_supported(request, min_version="2.73"):
+            server["server"]["locked_reason"] = (instance.system_metadata.get(
+                                                 "locked_reason"))
+
         if api_version_request.is_supported(request, min_version="2.19"):
             server["server"]["description"] = instance.get(
                                                 "display_description")
@@ -279,33 +358,32 @@ class ViewBuilder(common.ViewBuilder):
                 trusted_certs = instance.trusted_certs.ids
             server["server"]["trusted_image_certificates"] = trusted_certs
 
+        if show_server_groups:
+            server['server']['server_groups'] = self._get_server_groups(
+                                                                   context,
+                                                                   instance)
         return server
 
-    def index(self, request, instances):
+    def index(self, request, instances, cell_down_support=False):
         """Show a list of servers without many details."""
         coll_name = self._collection_name
         return self._list_view(self.basic, request, instances, coll_name,
-                               False)
+                               False, cell_down_support=cell_down_support)
 
-    def detail(self, request, instances):
+    def detail(self, request, instances, cell_down_support=False):
         """Detailed view of a list of instance."""
         coll_name = self._collection_name + '/detail'
+        context = request.environ['nova.context']
 
         if api_version_request.is_supported(request, min_version='2.47'):
             # Determine if we should show extra_specs in the inlined flavor
             # once before we iterate the list of instances
-            context = request.environ['nova.context']
             show_extra_specs = context.can(fes_policies.POLICY_ROOT % 'index',
                                            fatal=False)
         else:
             show_extra_specs = False
-        context = request.environ['nova.context']
         show_extended_attr = context.can(
             esa_policies.BASE_POLICY_NAME, fatal=False)
-        show_host_status = False
-        if (api_version_request.is_supported(request, min_version='2.16')):
-            show_host_status = context.can(
-                servers_policies.SERVERS % 'show:host_status', fatal=False)
 
         instance_uuids = [inst['uuid'] for inst in instances]
         bdms = self._get_instance_bdms_in_multiple_cells(context,
@@ -318,9 +396,16 @@ class ViewBuilder(common.ViewBuilder):
         servers_dict = self._list_view(self.show, request, instances,
                                        coll_name, show_extra_specs,
                                        show_extended_attr=show_extended_attr,
-                                       show_host_status=show_host_status,
+                                       # We process host_status in aggregate.
+                                       show_host_status=False,
                                        show_sec_grp=False,
-                                       bdms=bdms)
+                                       bdms=bdms,
+                                       cell_down_support=cell_down_support)
+
+        if (api_version_request.is_supported(request, min_version='2.16') and
+                context.can(servers_policies.SERVERS % 'show:host_status',
+                            fatal=False)):
+            self._add_host_status(list(servers_dict["servers"]), instances)
 
         self._add_security_grps(request, list(servers_dict["servers"]),
                                 instances)
@@ -328,7 +413,7 @@ class ViewBuilder(common.ViewBuilder):
 
     def _list_view(self, func, request, servers, coll_name, show_extra_specs,
                    show_extended_attr=None, show_host_status=None,
-                   show_sec_grp=False, bdms=None):
+                   show_sec_grp=False, bdms=None, cell_down_support=False):
         """Provide a view for a list of servers.
 
         :param func: Function used to format the server data
@@ -343,14 +428,22 @@ class ViewBuilder(common.ViewBuilder):
         :param show_sec_grp: If the security group should be included in
                         the response dict.
         :param bdms: Instances bdms info from multiple cells.
+        :param cell_down_support: True if the API (and caller) support
+                                  returning a minimal instance
+                                  construct if the relevant cell is
+                                  down.
         :returns: Server data in dictionary format
         """
         server_list = [func(request, server,
                             show_extra_specs=show_extra_specs,
                             show_extended_attr=show_extended_attr,
                             show_host_status=show_host_status,
-                            show_sec_grp=show_sec_grp, bdms=bdms)["server"]
-                       for server in servers]
+                            show_sec_grp=show_sec_grp, bdms=bdms,
+                            cell_down_support=cell_down_support)["server"]
+                       for server in servers
+                       # Filter out the fake marker instance created by the
+                       # fill_virtual_interface_list online data migration.
+                       if server.uuid != virtual_interface.FAKE_UUID]
         servers_links = self._get_collection_links(request,
                                                    servers,
                                                    coll_name)
@@ -482,9 +575,29 @@ class ViewBuilder(common.ViewBuilder):
 
         return fault_dict
 
-    def _add_security_grps(self, req, servers, instances):
-        # TODO(arosen) this function should be refactored to reduce duplicate
-        # code and use get_instance_security_groups instead of get_db_instance.
+    def _add_host_status(self, servers, instances):
+        """Adds the ``host_status`` field to the list of servers
+
+        This method takes care to filter instances from down cells since they
+        do not have a host set and as such we cannot determine the host status.
+
+        :param servers: list of detailed server dicts for the API response
+            body; this list is modified by reference by updating the server
+            dicts within the list
+        :param instances: list of Instance objects
+        """
+        # Filter out instances from down cells which do not have a host field.
+        instances = [instance for instance in instances if 'host' in instance]
+        # Get the dict, keyed by instance.uuid, of host status values.
+        host_statuses = self.compute_api.get_instances_host_statuses(instances)
+        for server in servers:
+            # Filter out anything that is not in the resulting dict because
+            # we had to filter the list of instances above for down cells.
+            if server['id'] in host_statuses:
+                server['host_status'] = host_statuses[server['id']]
+
+    def _add_security_grps(self, req, servers, instances,
+                           create_request=False):
         if not len(servers):
             return
         if not openstack_driver.is_neutron_security_groups():
@@ -496,11 +609,14 @@ class ViewBuilder(common.ViewBuilder):
                     server['security_groups'] = [{"name": group.name}
                                                  for group in groups]
         else:
-            # If method is a POST we get the security groups intended for an
-            # instance from the request. The reason for this is if using
-            # neutron security groups the requested security groups for the
-            # instance are not in the db and have not been sent to neutron yet.
-            if req.method != 'POST':
+            # If request is a POST create server we get the security groups
+            # intended for an instance from the request. The reason for this
+            # is if using neutron security groups the requested security
+            # groups for the instance are not in the db and have not been
+            # sent to neutron yet.
+            # Starting from microversion 2.75, security groups is returned in
+            # PUT and POST Rebuild response also.
+            if not create_request:
                 context = req.environ['nova.context']
                 sg_instance_bindings = (
                     self.security_group_api
@@ -511,8 +627,8 @@ class ViewBuilder(common.ViewBuilder):
                     if groups:
                         server['security_groups'] = groups
 
-            # This section is for POST request. There can be only one security
-            # group for POST request.
+            # This section is for POST create server request. There can be
+            # only one security group for POST create server request.
             else:
                 # try converting to json
                 req_obj = jsonutils.loads(req.body)
@@ -540,7 +656,7 @@ class ViewBuilder(common.ViewBuilder):
                         objects.BlockDeviceMappingList.bdms_by_instance_uuid,
                         instance_uuids)
         for cell_uuid, result in results.items():
-            if result is nova_context.raised_exception_sentinel:
+            if isinstance(result, Exception):
                 LOG.warning('Failed to get block device mappings for cell %s',
                             cell_uuid)
             elif result is nova_context.did_not_respond_sentinel:
@@ -570,3 +686,12 @@ class ViewBuilder(common.ViewBuilder):
         # with v2.0.
         key = "os-extended-volumes:volumes_attached"
         server[key] = volumes_attached
+
+    @staticmethod
+    def _get_server_groups(context, instance):
+        try:
+            sg = objects.InstanceGroup.get_by_instance_uuid(context,
+                                                            instance.uuid)
+            return [sg.uuid]
+        except exception.InstanceGroupNotFound:
+            return []

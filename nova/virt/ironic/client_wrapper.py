@@ -32,14 +32,14 @@ ironic = None
 IRONIC_GROUP = nova.conf.ironic.ironic_group
 
 # The API version required by the Ironic driver
-IRONIC_API_VERSION = (1, 38)
+IRONIC_API_VERSION = (1, 46)
 # NOTE(TheJulia): This version should ALWAYS be the _last_ release
 # supported version of the API version used by nova. If a feature
-# needs 1.38 to be negotiated to operate properly, then the version
+# needs a higher version to be negotiated to operate properly, then the version
 # above should be updated, and this version should only be changed
 # once a cycle to the API version desired for features merging in
 # that cycle.
-PRIOR_IRONIC_API_VERSION = (1, 37)
+PRIOR_IRONIC_API_VERSION = (1, 38)
 
 
 class IronicClientWrapper(object):
@@ -99,30 +99,40 @@ class IronicClientWrapper(object):
         kwargs['os_ironic_api_version'] = [
             '%d.%d' % IRONIC_API_VERSION, '%d.%d' % PRIOR_IRONIC_API_VERSION]
 
+        ironic_conf = CONF[IRONIC_GROUP.name]
+        # valid_interfaces is a list. ironicclient passes this kwarg through to
+        # ksa, which is set up to handle 'interface' as either a list or a
+        # single value.
+        kwargs['interface'] = ironic_conf.valid_interfaces
+
         # NOTE(clenimar/efried): by default, the endpoint is taken from the
         # service catalog. Use `endpoint_override` if you want to override it.
-        if CONF.ironic.api_endpoint:
-            # NOTE(efried): `api_endpoint` still overrides service catalog and
-            # `endpoint_override` conf options. This will be removed in a
-            # future release.
-            ironic_url = CONF.ironic.api_endpoint
-        else:
-            try:
-                ksa_adap = utils.get_ksa_adapter(
-                    nova.conf.ironic.DEFAULT_SERVICE_TYPE,
-                    ksa_auth=auth_plugin, ksa_session=sess,
-                    min_version=IRONIC_API_VERSION,
-                    max_version=(IRONIC_API_VERSION[0], ks_disc.LATEST))
-                ironic_url = ksa_adap.get_endpoint()
-            except exception.ServiceNotFound:
-                # NOTE(efried): No reason to believe service catalog lookup
-                # won't also fail in ironic client init, but this way will
-                # yield the expected exception/behavior.
-                ironic_url = None
+        try:
+            ksa_adap = utils.get_ksa_adapter(
+                nova.conf.ironic.DEFAULT_SERVICE_TYPE,
+                ksa_auth=auth_plugin, ksa_session=sess,
+                min_version=(IRONIC_API_VERSION[0], 0),
+                max_version=(IRONIC_API_VERSION[0], ks_disc.LATEST))
+            ironic_url = ksa_adap.get_endpoint()
+            ironic_url_none_reason = 'returned None'
+        except exception.ServiceNotFound:
+            # NOTE(efried): No reason to believe service catalog lookup
+            # won't also fail in ironic client init, but this way will
+            # yield the expected exception/behavior.
+            ironic_url = None
+            ironic_url_none_reason = 'raised ServiceNotFound'
+
+        if ironic_url is None:
+            LOG.warning("Could not discover ironic_url via keystoneauth1: "
+                        "Adapter.get_endpoint %s", ironic_url_none_reason)
+            # NOTE(eandersson): We pass in region here to make sure
+            # that the Ironic client can make an educated decision when
+            # we don't have a valid endpoint to pass on.
+            kwargs['region_name'] = ironic_conf.region_name
 
         try:
             cli = ironic.client.get_client(IRONIC_API_VERSION[0],
-                                           ironic_url=ironic_url,
+                                           endpoint=ironic_url,
                                            session=sess, **kwargs)
             # Cache the client so we don't have to reconstruct and
             # reauthenticate it every time we need it.

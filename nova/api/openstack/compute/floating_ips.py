@@ -26,7 +26,7 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import floating_ips
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
 from nova import network
@@ -106,9 +106,9 @@ class FloatingIPController(wsgi.Controller):
     """The Floating IPs API controller for the OpenStack API."""
 
     def __init__(self):
+        super(FloatingIPController, self).__init__()
         self.compute_api = compute.API()
         self.network_api = network.API()
-        super(FloatingIPController, self).__init__()
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors((400, 404))
@@ -204,8 +204,8 @@ class FloatingIPController(wsgi.Controller):
 class FloatingIPActionController(wsgi.Controller):
     """This API is deprecated from the Microversion '2.44'."""
 
-    def __init__(self, *args, **kwargs):
-        super(FloatingIPActionController, self).__init__(*args, **kwargs)
+    def __init__(self):
+        super(FloatingIPActionController, self).__init__()
         self.compute_api = compute.API()
         self.network_api = network.API()
 
@@ -272,8 +272,6 @@ class FloatingIPActionController(wsgi.Controller):
         except exception.NoFloatingIpInterface:
             msg = _('l3driver call to add floating IP failed')
             raise webob.exc.HTTPBadRequest(explanation=msg)
-        except exception.InstanceUnknownCell as e:
-            raise webob.exc.HTTPNotFound(explanation=e.format_message())
         except exception.FloatingIpNotFoundForAddress:
             msg = _('floating IP not found')
             raise webob.exc.HTTPNotFound(explanation=msg)

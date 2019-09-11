@@ -25,7 +25,14 @@ class InstancePCIRequest(base.NovaObject,
     # Version 1.0: Initial version
     # Version 1.1: Add request_id
     # Version 1.2: Add PCI NUMA affinity policy
-    VERSION = '1.2'
+    # Version 1.3: Add requester_id
+    VERSION = '1.3'
+
+    # Possible sources for a PCI request:
+    # FLAVOR_ALIAS : Request originated from a flavor alias.
+    # NEUTRON_PORT : Request originated from a neutron port.
+    FLAVOR_ALIAS = 0
+    NEUTRON_PORT = 1
 
     fields = {
         'count': fields.IntegerField(),
@@ -35,8 +42,17 @@ class InstancePCIRequest(base.NovaObject,
         # on major version bump
         'is_new': fields.BooleanField(default=False),
         'request_id': fields.UUIDField(nullable=True),
+        'requester_id': fields.StringField(nullable=True),
         'numa_policy': fields.PCINUMAAffinityPolicyField(nullable=True),
     }
+
+    @property
+    def source(self):
+        # PCI requests originate from two sources: instance flavor alias and
+        # neutron SR-IOV ports.
+        # SR-IOV ports pci_request don't have an alias_name.
+        return (InstancePCIRequest.NEUTRON_PORT if self.alias_name is None
+                else InstancePCIRequest.FLAVOR_ALIAS)
 
     def obj_load_attr(self, attr):
         setattr(self, attr, None)
@@ -45,6 +61,8 @@ class InstancePCIRequest(base.NovaObject,
         super(InstancePCIRequest, self).obj_make_compatible(primitive,
                                                             target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 3) and 'requester_id' in primitive:
+            del primitive['requester_id']
         if target_version < (1, 2) and 'numa_policy' in primitive:
             del primitive['numa_policy']
         if target_version < (1, 1) and 'request_id' in primitive:
@@ -86,7 +104,10 @@ class InstancePCIRequests(base.NovaObject,
             request_obj = InstancePCIRequest(
                 count=request['count'], spec=request['spec'],
                 alias_name=request['alias_name'], is_new=False,
-                request_id=request['request_id'])
+                numa_policy=request.get('numa_policy',
+                                        fields.PCINUMAAffinityPolicy.LEGACY),
+                request_id=request['request_id'],
+                requester_id=request.get('requester_id'))
             request_obj.obj_reset_changes()
             self.requests.append(request_obj)
         self.obj_reset_changes()
@@ -137,7 +158,9 @@ class InstancePCIRequests(base.NovaObject,
                  'spec': x.spec,
                  'alias_name': x.alias_name,
                  'is_new': x.is_new,
-                 'request_id': x.request_id} for x in self.requests]
+                 'numa_policy': x.numa_policy,
+                 'request_id': x.request_id,
+                 'requester_id': x.requester_id} for x in self.requests]
         return jsonutils.dumps(blob)
 
     @classmethod

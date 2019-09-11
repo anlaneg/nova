@@ -83,6 +83,7 @@ class SoftAffinityWeigherTestCase(SoftWeigherTestBase):
     def setUp(self):
         super(SoftAffinityWeigherTestCase, self).setUp()
         self.weighers = [affinity.ServerGroupSoftAffinityWeigher()]
+        self.softaffin_weigher = affinity.ServerGroupSoftAffinityWeigher()
 
     def test_soft_affinity_weight_multiplier_by_default(self):
         self._do_test(policy='soft-affinity',
@@ -104,18 +105,59 @@ class SoftAffinityWeigherTestCase(SoftWeigherTestBase):
                       expected_weight=2.0,
                       expected_host='host2')
 
-    @mock.patch.object(affinity, 'LOG')
-    def test_soft_affinity_weight_multiplier_negative_value(self, mock_log):
-        self.flags(soft_affinity_weight_multiplier=-1.0,
+    def test_soft_affinity_weight_multiplier(self):
+        self.flags(soft_affinity_weight_multiplier=0.0,
                    group='filter_scheduler')
-        self._do_test(policy='soft-affinity',
-                      expected_weight=0.0,
-                      expected_host='host3')
-        # call twice and assert that only one warning is emitted
-        self._do_test(policy='soft-affinity',
-                      expected_weight=0.0,
-                      expected_host='host3')
-        self.assertEqual(1, mock_log.warning.call_count)
+        host_attr = {'instances': {'instance1': mock.sentinel}}
+        host1 = fakes.FakeHostState('fake-host', 'node', host_attr)
+        # By default, return the weight_multiplier configuration directly
+        self.assertEqual(0.0, self.softaffin_weigher.weight_multiplier(host1))
+
+        host1.aggregates = [
+            objects.Aggregate(
+                id=1,
+                name='foo',
+                hosts=['fake-host'],
+                metadata={'soft_affinity_weight_multiplier': '2'},
+            )]
+        # read the weight multiplier from metadata to override the config
+        self.assertEqual(2.0, self.softaffin_weigher.weight_multiplier(host1))
+
+        host1.aggregates = [
+            objects.Aggregate(
+                id=1,
+                name='foo',
+                hosts=['fake-host'],
+                metadata={'soft_affinity_weight_multiplier': '2'},
+            ),
+            objects.Aggregate(
+                id=2,
+                name='foo',
+                hosts=['fake-host'],
+                metadata={'soft_affinity_weight_multiplier': '1.5'},
+            )]
+        # If the host is in multiple aggs and there are conflict weight values
+        # in the metadata, we will use the min value among them
+        self.assertEqual(1.5, self.softaffin_weigher.weight_multiplier(host1))
+
+    def test_host_with_agg(self):
+        self.flags(soft_affinity_weight_multiplier=0.0,
+                   group='filter_scheduler')
+        hostinfo_list = self._get_all_hosts()
+        aggs = [
+            objects.Aggregate(
+                id=1,
+                name='foo',
+                hosts=['fake-host'],
+                metadata={'soft_affinity_weight_multiplier': '1.5'},
+            )]
+        for h in hostinfo_list:
+            h.aggregates = aggs
+
+        weighed_host = self._get_weighed_host(hostinfo_list,
+                                              'soft-affinity')
+        self.assertEqual(1.5, weighed_host.weight)
+        self.assertEqual('host2', weighed_host.obj.host)
 
 
 class SoftAntiAffinityWeigherTestCase(SoftWeigherTestBase):
@@ -123,6 +165,7 @@ class SoftAntiAffinityWeigherTestCase(SoftWeigherTestBase):
     def setUp(self):
         super(SoftAntiAffinityWeigherTestCase, self).setUp()
         self.weighers = [affinity.ServerGroupSoftAntiAffinityWeigher()]
+        self.antiaffin_weigher = affinity.ServerGroupSoftAntiAffinityWeigher()
 
     def test_soft_anti_affinity_weight_multiplier_by_default(self):
         self._do_test(policy='soft-anti-affinity',
@@ -144,16 +187,56 @@ class SoftAntiAffinityWeigherTestCase(SoftWeigherTestBase):
                       expected_weight=2.0,
                       expected_host='host3')
 
-    @mock.patch.object(affinity, 'LOG')
-    def test_soft_anti_affinity_weight_multiplier_negative_value(self,
-                                                                 mock_log):
-        self.flags(soft_anti_affinity_weight_multiplier=-1.0,
+    def test_soft_anti_affinity_weight_multiplier(self):
+        self.flags(soft_anti_affinity_weight_multiplier=0.0,
                    group='filter_scheduler')
-        self._do_test(policy='soft-anti-affinity',
-                      expected_weight=0.0,
-                      expected_host='host2')
-        # call twice and assert that only one warning is emitted
-        self._do_test(policy='soft-anti-affinity',
-                      expected_weight=0.0,
-                      expected_host='host2')
-        self.assertEqual(1, mock_log.warning.call_count)
+        host_attr = {'instances': {'instance1': mock.sentinel}}
+        host1 = fakes.FakeHostState('fake-host', 'node', host_attr)
+        # By default, return the weight_multiplier configuration directly
+        self.assertEqual(0.0, self.antiaffin_weigher.weight_multiplier(host1))
+
+        host1.aggregates = [
+            objects.Aggregate(
+                id=1,
+                name='foo',
+                hosts=['fake-host'],
+                metadata={'soft_anti_affinity_weight_multiplier': '2'},
+            )]
+        # read the weight multiplier from metadata to override the config
+        self.assertEqual(2.0, self.antiaffin_weigher.weight_multiplier(host1))
+
+        host1.aggregates = [
+            objects.Aggregate(
+                id=1,
+                name='foo',
+                hosts=['fake-host'],
+                metadata={'soft_anti_affinity_weight_multiplier': '2'},
+            ),
+            objects.Aggregate(
+                id=2,
+                name='foo',
+                hosts=['fake-host'],
+                metadata={'soft_anti_affinity_weight_multiplier': '1.5'},
+            )]
+        # If the host is in multiple aggs and there are conflict weight values
+        # in the metadata, we will use the min value among them
+        self.assertEqual(1.5, self.antiaffin_weigher.weight_multiplier(host1))
+
+    def test_host_with_agg(self):
+        self.flags(soft_anti_affinity_weight_multiplier=0.0,
+                   group='filter_scheduler')
+        hostinfo_list = self._get_all_hosts()
+        aggs = [
+            objects.Aggregate(
+                id=1,
+                name='foo',
+                hosts=['host1', 'host2', 'host3', 'host4'],
+                metadata={'soft_anti_affinity_weight_multiplier': '1.5'},
+            )]
+        for h in hostinfo_list:
+            h.aggregates = aggs
+
+        weighed_host = self._get_weighed_host(hostinfo_list,
+                                              'soft-anti-affinity')
+        self.assertEqual(1.5, weighed_host.weight)
+        self.assertEqual('host3', weighed_host.obj.host)

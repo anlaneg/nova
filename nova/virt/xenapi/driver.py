@@ -23,8 +23,7 @@ A driver for XenServer or Xen Cloud Platform.
 - suffix "_rec" for record objects
 """
 
-import math
-
+import os_resource_classes as orc
 from os_xenapi.client import session
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
@@ -36,7 +35,6 @@ import six.moves.urllib.parse as urlparse
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova import rc_fields as fields
 from nova.virt import driver
 from nova.virt.xenapi import host
 from nova.virt.xenapi import pool
@@ -47,10 +45,6 @@ from nova.virt.xenapi import volumeops
 LOG = logging.getLogger(__name__)
 
 CONF = nova.conf.CONF
-
-OVERHEAD_BASE = 3
-OVERHEAD_PER_MB = 0.00781
-OVERHEAD_PER_VCPU = 1.5
 
 
 def invalid_option(option_name, recommended_value):
@@ -75,6 +69,18 @@ class XenAPIDriver(driver.ComputeDriver):
         "supports_device_tagging": True,
         "supports_multiattach": False,
         "supports_trusted_certs": False,
+
+        # Image type support flags
+        "supports_image_type_aki": False,
+        "supports_image_type_ami": False,
+        "supports_image_type_ari": False,
+        "supports_image_type_iso": False,
+        "supports_image_type_qcow2": False,
+        "supports_image_type_raw": True,
+        "supports_image_type_vdi": True,
+        "supports_image_type_vhd": True,
+        "supports_image_type_vhdx": False,
+        "supports_image_type_vmdk": False,
     }
 
     def __init__(self, virtapi, read_only=False):
@@ -106,6 +112,12 @@ class XenAPIDriver(driver.ComputeDriver):
         return self._host_state
 
     def init_host(self, host):
+        # TODO(mriedem): Consider deprecating the driver if there is still no
+        # working 3rd party CI by the end of the Train release.
+        LOG.warning('The xenapi driver is not tested by the OpenStack '
+                    'project and thus its quality can not be ensured. The '
+                    'driver may be deprecated in the future.')
+
         if CONF.xenserver.independent_compute:
             # Check various options are in the correct state:
             if CONF.xenserver.check_host:
@@ -137,29 +149,6 @@ class XenAPIDriver(driver.ComputeDriver):
         """
         return self._vmops.instance_exists(instance.name)
 
-    def estimate_instance_overhead(self, instance_info):
-        """Get virtualization overhead required to build an instance of the
-        given flavor.
-
-        :param instance_info: Instance/flavor to calculate overhead for.
-        :returns: Overhead memory in MB.
-        """
-
-        # XenServer memory overhead is proportional to the size of the
-        # VM.  Larger flavor VMs become more efficient with respect to
-        # overhead.
-
-        # interpolated formula to predict overhead required per vm.
-        # based on data from:
-        # https://wiki.openstack.org/wiki/XenServer/Overhead
-        # Some padding is done to each value to fit all available VM data
-        memory_mb = instance_info['memory_mb']
-        vcpus = instance_info.get('vcpus', 1)
-        overhead = ((memory_mb * OVERHEAD_PER_MB) + (vcpus * OVERHEAD_PER_VCPU)
-                        + OVERHEAD_BASE)
-        overhead = math.ceil(overhead)
-        return {'memory_mb': overhead}
-
     def list_instances(self):
         """List VM instances."""
         return self._vmops.list_instances()
@@ -175,7 +164,7 @@ class XenAPIDriver(driver.ComputeDriver):
         if not allocations:
             # If no allocations, there is no vGPU request.
             return False
-        RC_VGPU = fields.ResourceClass.VGPU
+        RC_VGPU = orc.VGPU
         for rp in allocations:
             res = allocations[rp]['resources']
             if res and RC_VGPU in res and res[RC_VGPU] > 0:
@@ -223,7 +212,7 @@ class XenAPIDriver(driver.ComputeDriver):
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
         """Create VM instance."""
         vgpu_info = self._get_vgpu_info(allocations)
         self._vmops.spawn(context, instance, image_meta, injected_files,
@@ -235,7 +224,8 @@ class XenAPIDriver(driver.ComputeDriver):
         self._vmops.confirm_migration(migration, instance, network_info)
 
     def finish_revert_migration(self, context, instance, network_info,
-                                block_device_info=None, power_on=True):
+                                migration, block_device_info=None,
+                                power_on=True):
         """Finish reverting a resize."""
         # NOTE(vish): Xen currently does not use network info.
         self._vmops.finish_revert_migration(context, instance,
@@ -369,7 +359,7 @@ class XenAPIDriver(driver.ComputeDriver):
         """Unplug VIFs from networks."""
         self._vmops.unplug_vifs(instance, network_info)
 
-    def get_info(self, instance):
+    def get_info(self, instance, use_cache=True):
         """Return data about VM instance."""
         return self._vmops.get_info(instance)
 
@@ -469,9 +459,67 @@ class XenAPIDriver(driver.ComputeDriver):
             total += vgpu_stats[grp_id]['total']
         return total
 
-    def get_inventory(self, nodename):
-        """Return a dict, keyed by resource class, of inventory information for
-        the supplied node.
+    def update_provider_tree(self, provider_tree, nodename, allocations=None):
+        """Update a ProviderTree object with current resource provider and
+        inventory information.
+
+        :param nova.compute.provider_tree.ProviderTree provider_tree:
+            A nova.compute.provider_tree.ProviderTree object representing all
+            the providers in the tree associated with the compute node, and any
+            sharing providers (those with the ``MISC_SHARES_VIA_AGGREGATE``
+            trait) associated via aggregate with any of those providers (but
+            not *their* tree- or aggregate-associated providers), as currently
+            known by placement. This object is fully owned by the
+            update_provider_tree method, and can therefore be modified without
+            locking/concurrency considerations. In other words, the parameter
+            is passed *by reference* with the expectation that the virt driver
+            will modify the object. Note, however, that it may contain
+            providers not directly owned/controlled by the compute host. Care
+            must be taken not to remove or modify such providers inadvertently.
+            In addition, providers may be associated with traits and/or
+            aggregates maintained by outside agents. The
+            `update_provider_tree`` method must therefore also be careful only
+            to add/remove traits/aggregates it explicitly controls.
+        :param nodename:
+            String name of the compute node (i.e.
+            ComputeNode.hypervisor_hostname) for which the caller is requesting
+            updated provider information. Drivers may use this to help identify
+            the compute node provider in the ProviderTree. Drivers managing
+            more than one node (e.g. ironic) may also use it as a cue to
+            indicate which node is being processed by the caller.
+        :param allocations:
+            Dict of allocation data of the form:
+              { $CONSUMER_UUID: {
+                    # The shape of each "allocations" dict below is identical
+                    # to the return from GET /allocations/{consumer_uuid}
+                    "allocations": {
+                        $RP_UUID: {
+                            "generation": $RP_GEN,
+                            "resources": {
+                                $RESOURCE_CLASS: $AMOUNT,
+                                ...
+                            },
+                        },
+                        ...
+                    },
+                    "project_id": $PROJ_ID,
+                    "user_id": $USER_ID,
+                    "consumer_generation": $CONSUMER_GEN,
+                },
+                ...
+              }
+            If None, and the method determines that any inventory needs to be
+            moved (from one provider to another and/or to a different resource
+            class), the ReshapeNeeded exception must be raised. Otherwise, this
+            dict must be edited in place to indicate the desired final state of
+            allocations. Drivers should *only* edit allocation records for
+            providers whose inventories are being affected by the reshape
+            operation.
+        :raises ReshapeNeeded: If allocations is None and any inventory needs
+            to be moved from one provider to another and/or to a different
+            resource class.
+        :raises: ReshapeFailed if the requested tree reshape fails for
+            whatever reason.
         """
         host_stats = self.host_state.get_host_stats(refresh=True)
 
@@ -479,25 +527,36 @@ class XenAPIDriver(driver.ComputeDriver):
         memory_mb = int(host_stats['host_memory_total'] / units.Mi)
         disk_gb = int(host_stats['disk_total'] / units.Gi)
         vgpus = self._get_vgpu_total(host_stats['vgpu_stats'])
-
+        # If the inventory record does not exist, the allocation_ratio
+        # will use the CONF.xxx_allocation_ratio value if xxx_allocation_ratio
+        # is set, and fallback to use the initial_xxx_allocation_ratio
+        # otherwise.
+        inv = provider_tree.data(nodename).inventory
+        ratios = self._get_allocation_ratios(inv)
         result = {
-            fields.ResourceClass.VCPU: {
+            orc.VCPU: {
                 'total': vcpus,
                 'min_unit': 1,
                 'max_unit': vcpus,
                 'step_size': 1,
+                'allocation_ratio': ratios[orc.VCPU],
+                'reserved': CONF.reserved_host_cpus,
             },
-            fields.ResourceClass.MEMORY_MB: {
+            orc.MEMORY_MB: {
                 'total': memory_mb,
                 'min_unit': 1,
                 'max_unit': memory_mb,
                 'step_size': 1,
+                'allocation_ratio': ratios[orc.MEMORY_MB],
+                'reserved': CONF.reserved_host_memory_mb,
             },
-            fields.ResourceClass.DISK_GB: {
+            orc.DISK_GB: {
                 'total': disk_gb,
                 'min_unit': 1,
                 'max_unit': disk_gb,
                 'step_size': 1,
+                'allocation_ratio': ratios[orc.DISK_GB],
+                'reserved': self._get_reserved_host_disk_gb_from_config(),
             },
         }
         if vgpus > 0:
@@ -506,7 +565,7 @@ class XenAPIDriver(driver.ComputeDriver):
             # so max_unit is 1.
             result.update(
                 {
-                    fields.ResourceClass.VGPU: {
+                    orc.VGPU: {
                         'total': vgpus,
                         'min_unit': 1,
                         'max_unit': 1,
@@ -514,7 +573,7 @@ class XenAPIDriver(driver.ComputeDriver):
                     }
                 }
             )
-        return result
+        provider_tree.update_inventory(nodename, result)
 
     def get_available_resource(self, nodename):
         """Retrieve resource information.

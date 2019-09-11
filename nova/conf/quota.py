@@ -255,53 +255,19 @@ Possible values:
 * A positive integer or 0.
 * -1 to disable the quota.
 """),
-    # TODO(stephenfin): This should have a min parameter
-    cfg.IntOpt('reservation_expire',
-        default=86400,
-        deprecated_group='DEFAULT',
-        help="""
-The number of seconds until a reservation expires.
-
-This quota represents the time period for invalidating quota reservations.
-"""),
-    cfg.IntOpt('until_refresh',
-        min=0,
-        default=0,
-        deprecated_group='DEFAULT',
-        help="""
-The count of reservations until usage is refreshed.
-
-This defaults to 0 (off) to avoid additional load but it is useful to turn on
-to help keep quota usage up-to-date and reduce the impact of out of sync usage
-issues.
-"""),
-    cfg.IntOpt('max_age',
-        min=0,
-        default=0,
-        deprecated_group='DEFAULT',
-        help="""
-The number of seconds between subsequent usage refreshes.
-
-This defaults to 0 (off) to avoid additional load but it is useful to turn on
-to help keep quota usage up-to-date and reduce the impact of out of sync usage
-issues. Note that quotas are not updated on a periodic task, they will update
-on a new reservation if max_age has passed since the last reservation.
-"""),
     cfg.StrOpt('driver',
-               default='nova.quota.DbQuotaDriver',
-               choices=('nova.quota.DbQuotaDriver',
-                        'nova.quota.NoopQuotaDriver'),
-               help="""
+        default='nova.quota.DbQuotaDriver',
+        choices=[
+            ('nova.quota.DbQuotaDriver', 'Stores quota limit information '
+             'in the database and relies on the ``quota_*`` configuration '
+             'options for default quota limit values. Counts quota usage '
+             'on-demand.'),
+            ('nova.quota.NoopQuotaDriver', 'Ignores quota and treats all '
+             'resources as unlimited.'),
+        ],
+        help="""
 Provides abstraction for quota checks. Users can configure a specific
 driver to use for quota checks.
-
-Possible values:
-
-* nova.quota.DbQuotaDriver: Stores quota limit information
-  in the database and relies on the quota_* configuration options for default
-  quota limit values. Counts quota usage on-demand.
-* nova.quota.NoopQuotaDriver: Ignores quota and treats all resources as
-  unlimited.
 """),
     cfg.BoolOpt('recheck_quota',
         default=True,
@@ -327,6 +293,54 @@ impossible for a user to exceed their quota with the caveat that it will,
 however, be possible for a REST API user to be rejected with a 403 response in
 the event of a collision close to reaching their quota limit, even if the user
 has enough quota available when they made the request.
+"""),
+    cfg.BoolOpt(
+        'count_usage_from_placement',
+        default=False,
+        help="""
+Enable the counting of quota usage from the placement service.
+
+Starting in Train, it is possible to count quota usage for cores and ram from
+the placement service and instances from the API database instead of counting
+from cell databases.
+
+This works well if there is only one Nova deployment running per placement
+deployment. However, if an operator is running more than one Nova deployment
+sharing a placement deployment, they should not set this option to True because
+currently the placement service has no way to partition resource providers per
+Nova deployment. When this option is left as the default or set to False, Nova
+will use the legacy counting method to count quota usage for instances, cores,
+and ram from its cell databases.
+
+Note that quota usage behavior related to resizes will be affected if this
+option is set to True. Placement resource allocations are claimed on the
+destination while holding allocations on the source during a resize, until the
+resize is confirmed or reverted. During this time, when the server is in
+VERIFY_RESIZE state, quota usage will reflect resource consumption on both the
+source and the destination. This can be beneficial as it reserves space for a
+revert of a downsize, but it also means quota usage will be inflated until a
+resize is confirmed or reverted.
+
+Behavior will also be different for unscheduled servers in ERROR state. A
+server in ERROR state that has never been scheduled to a compute host will
+not have placement allocations, so it will not consume quota usage for cores
+and ram.
+
+Behavior will be different for servers in SHELVED_OFFLOADED state. A server in
+SHELVED_OFFLOADED state will not have placement allocations, so it will not
+consume quota usage for cores and ram. Note that because of this, it will be
+possible for a request to unshelve a server to be rejected if the user does not
+have enough quota available to support the cores and ram needed by the server
+to be unshelved.
+
+The ``populate_queued_for_delete`` and ``populate_user_id`` online data
+migrations must be completed before usage can be counted from placement. Until
+the data migration is complete, the system will fall back to legacy quota usage
+counting from cell databases depending on the result of an EXISTS database
+query during each quota check, if this configuration option is set to True.
+Operators who want to avoid the performance hit from the EXISTS queries should
+wait to set this configuration option to True until after they have completed
+their online data migrations via ``nova-manage db online_data_migrations``.
 """),
 ]
 

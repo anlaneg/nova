@@ -203,7 +203,7 @@ def stub_out_nw_api(test, cls=None, private=None, publics=None):
 
         def create_resource_requests(self, context, requested_networks,
                                      pci_requests):
-            pass
+            return None, []
 
     if cls is None:
         cls = Fake
@@ -364,7 +364,7 @@ def fake_instance_get(**kwargs):
 
 
 def fake_compute_get(**kwargs):
-    def _return_server_obj(context, uuid, expected_attrs=None):
+    def _return_server_obj(context, *a, **kw):
         return stub_instance_obj(context, **kwargs)
     return _return_server_obj
 
@@ -418,7 +418,8 @@ def fake_instance_get_all_by_filters(num_servers=5, **kwargs):
 def fake_compute_get_all(num_servers=5, **kwargs):
     def _return_servers_objs(context, search_opts=None, limit=None,
                              marker=None, expected_attrs=None, sort_keys=None,
-                             sort_dirs=None):
+                             sort_dirs=None, cell_down_support=False,
+                             all_tenants=False):
         db_insts = fake_instance_get_all_by_filters()(None,
                                                       limit=limit,
                                                       marker=marker)
@@ -447,7 +448,7 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
                   memory_mb=0, vcpus=0, root_gb=0, ephemeral_gb=0,
                   instance_type=None, launch_index=0, kernel_id="",
                   ramdisk_id="", user_data=None, system_metadata=None,
-                  services=None, trusted_certs=None):
+                  services=None, trusted_certs=None, hidden=False):
     if user_id is None:
         user_id = 'fake_user'
     if project_id is None:
@@ -486,7 +487,8 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
     info_cache = create_info_cache(nw_cache)
 
     if instance_type is None:
-        instance_type = flavors.get_default_flavor()
+        instance_type = objects.Flavor.get_by_name(
+            context.get_admin_context(), 'm1.small')
     flavorinfo = jsonutils.dumps({
         'cur': instance_type.obj_to_primitive(),
         'old': None,
@@ -559,6 +561,7 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
         "cleaned": cleaned,
         "services": services,
         "tags": [],
+        "hidden": hidden,
     }
 
     instance.update(info_cache)

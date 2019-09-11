@@ -14,19 +14,24 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import os
+
 import eventlet
 from eventlet import greenthread
 import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 import six
+from six.moves import builtins
 import testtools
+
 
 from nova.compute import vm_states
 from nova import exception
 from nova import objects
 from nova.objects import fields as obj_fields
 from nova import test
+from nova.tests.unit.virt.libvirt import fake_libvirt_data
 from nova.tests.unit.virt.libvirt import fakelibvirt
 from nova.virt import event
 from nova.virt.libvirt import config as vconfig
@@ -192,25 +197,6 @@ class HostTestCase(test.NoDBTestCase):
         self.assertEqual(got_events[0].transition,
                          event.EVENT_LIFECYCLE_STOPPED)
 
-    def test_event_lifecycle_callback_suspended_old_libvirt(self):
-        """Tests the suspended lifecycle event with libvirt before post-copy
-        """
-        hostimpl = mock.MagicMock()
-        conn = mock.MagicMock()
-        fake_dom_xml = """
-                <domain type='kvm'>
-                  <uuid>cef19ce0-0ca2-11df-855d-b19fbce37686</uuid>
-                </domain>
-            """
-        dom = fakelibvirt.Domain(conn, fake_dom_xml, running=True)
-        VIR_DOMAIN_EVENT_SUSPENDED_PAUSED = 0
-        host.Host._event_lifecycle_callback(
-            conn, dom, fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED,
-            detail=VIR_DOMAIN_EVENT_SUSPENDED_PAUSED, opaque=hostimpl)
-        expected_event = hostimpl._queue_event.call_args[0][0]
-        self.assertEqual(event.EVENT_LIFECYCLE_PAUSED,
-                         expected_event.transition)
-
     def test_event_lifecycle_callback_suspended_postcopy(self):
         """Tests the suspended lifecycle event with libvirt with post-copy"""
         hostimpl = mock.MagicMock()
@@ -221,13 +207,10 @@ class HostTestCase(test.NoDBTestCase):
                 </domain>
             """
         dom = fakelibvirt.Domain(conn, fake_dom_xml, running=True)
-        VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY = 7
-        with mock.patch.object(host.libvirt,
-                               'VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY', new=7,
-                               create=True):
-            host.Host._event_lifecycle_callback(
-                conn, dom, fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED,
-                detail=VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY, opaque=hostimpl)
+        host.Host._event_lifecycle_callback(
+            conn, dom, fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED,
+            detail=fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY,
+            opaque=hostimpl)
         expected_event = hostimpl._queue_event.call_args[0][0]
         self.assertEqual(event.EVENT_LIFECYCLE_POSTCOPY_STARTED,
                          expected_event.transition)
@@ -659,6 +642,202 @@ class HostTestCase(test.NoDBTestCase):
             self.assertIsNone(caps.host.cpu.model)
             self.assertEqual(0, len(caps.host.cpu.features))
 
+    def test__get_machine_types(self):
+        expected = [
+            # NOTE(aspiers): in the real world, i686 would probably
+            # have q35 too, but our fixtures are manipulated to
+            # exclude it to allow more thorough testing the our
+            # canonical machine types logic is correct.
+            ('i686', 'qemu', ['pc']),
+            ('i686', 'kvm', ['pc']),
+            ('x86_64', 'qemu', ['pc', 'q35']),
+            ('x86_64', 'kvm', ['pc', 'q35']),
+            ('armv7l', 'qemu', ['virt']),
+            # NOTE(aspiers): we're currently missing default machine
+            # types for the other architectures for which we have fake
+            # capabilities.
+        ]
+        for arch, domain, expected_mach_types in expected:
+            guest_xml = fake_libvirt_data.CAPABILITIES_GUEST[arch]
+            guest = vconfig.LibvirtConfigCapsGuest()
+            guest.parse_str(guest_xml)
+            domain = guest.domains[domain]
+            self.assertEqual(set(expected_mach_types),
+                             self.host._get_machine_types(arch, domain),
+                             "for arch %s domain %s" %
+                             (arch, domain.domtype))
+
+    def _test_get_domain_capabilities(self):
+        caps = self.host.get_domain_capabilities()
+        for arch, mtypes in caps.items():
+            for mtype, dom_cap in mtypes.items():
+                self.assertIsInstance(dom_cap, vconfig.LibvirtConfigDomainCaps)
+                # NOTE(sean-k-mooney): this should always be true since we are
+                # mapping from an arch and machine_type to a domain cap object
+                # for that pair. We use 'in' to allow libvirt to expand the
+                # unversioned alias such as 'pc' or 'q35' to its versioned
+                # form e.g. pc-i440fx-2.11
+                self.assertIn(mtype, dom_cap.machine_type)
+                self.assertIn(dom_cap.machine_type_alias, mtype)
+
+        # We assume we are testing with x86_64 in other parts of the code
+        # so we just assert it's in the test data and return it.
+        expected = [
+            ('i686', ['pc', 'pc-i440fx-2.11']),
+            ('x86_64', ['pc', 'pc-i440fx-2.11', 'q35', 'pc-q35-2.11']),
+        ]
+        for arch, expected_mtypes in expected:
+            self.assertIn(arch, caps)
+            for mach_type in expected_mtypes:
+                self.assertIn(mach_type, caps[arch], "for arch %s" % arch)
+
+        return caps['x86_64']['pc']
+
+    def test_get_domain_capabilities(self):
+        caps = self._test_get_domain_capabilities()
+        self.assertEqual(vconfig.LibvirtConfigDomainCaps, type(caps))
+        # There is a <gic supported='no'/> feature in the fixture but
+        # we don't parse that because nothing currently cares about it.
+        self.assertEqual(0, len(caps.features))
+
+    def test_get_domain_capabilities_non_native_kvm(self):
+        # This test assumes that we are on a x86 host and the
+        # virt-type is set to kvm. In that case we would expect
+        # libvirt to raise an error if you try to get the domain
+        # capabilities for non-native archs specifying the kvm virt
+        # type.
+        archs = {
+            'sparc': 'SS-5',
+            'mips': 'malta',
+            'mipsel': 'malta',
+            'ppc': 'g3beige',
+            'armv7l': 'virt-2.11',
+        }
+
+        # Because we are mocking out the libvirt connection and
+        # supplying fake data, no exception will be raised, so we
+        # first store a reference to the original
+        # _get_domain_capabilities function
+        local__get_domain_caps = self.host._get_domain_capabilities
+
+        # We then define our own version that will raise for
+        # non-native archs and otherwise delegates to the private
+        # function.
+        def _get_domain_capabilities(**kwargs):
+            arch = kwargs['arch']
+            if arch not in archs:
+                return local__get_domain_caps(**kwargs)
+            else:
+                exc = fakelibvirt.make_libvirtError(
+                    fakelibvirt.libvirtError,
+                    "invalid argument: KVM is not supported by "
+                    "'/usr/bin/qemu-system-%s' on this host" % arch,
+                    error_code=fakelibvirt.VIR_ERR_INVALID_ARG)
+                raise exc
+
+        # Finally we patch to use our own version
+        with test.nested(
+            mock.patch.object(host.LOG, 'debug'),
+            mock.patch.object(self.host, "_get_domain_capabilities"),
+        ) as (mock_log, mock_caps):
+            mock_caps.side_effect = _get_domain_capabilities
+            self.flags(virt_type='kvm', group='libvirt')
+            # and call self.host.get_domain_capabilities() directly as
+            # the exception should be caught internally
+            caps = self.host.get_domain_capabilities()
+            # We don't really care what mock_caps is called with,
+            # as we assert the behavior we expect below. However we
+            # can at least check for the expected debug messages.
+            mock_caps.assert_called()
+            warnings = []
+            for call in mock_log.mock_calls:
+                name, args, kwargs = call
+                if "Error from libvirt when retrieving domain capabilities" \
+                        in args[0]:
+                    warnings.append(call)
+            self.assertTrue(len(warnings) > 0)
+
+        # The resulting capabilities object should be non-empty
+        # as the x86 archs won't raise a libvirtError exception
+        self.assertTrue(len(caps) > 0)
+        # but all of the archs we mocked out should be skipped and
+        # not included in the result set
+        for arch in archs:
+            self.assertNotIn(arch, caps)
+
+    def test_get_domain_capabilities_other_archs(self):
+        # NOTE(aspiers): only architectures which are returned by
+        # fakelibvirt's getCapabilities() can be tested here, since
+        # Host.get_domain_capabilities() iterates over those
+        # architectures.
+        archs = {
+            'sparc': 'SS-5',
+            'mips': 'malta',
+            'mipsel': 'malta',
+            'ppc': 'g3beige',
+            'armv7l': 'virt-2.11',
+        }
+
+        caps = self.host.get_domain_capabilities()
+
+        for arch, mtype in archs.items():
+            self.assertIn(arch, caps)
+            self.assertNotIn('pc', caps[arch])
+            self.assertIn(mtype, caps[arch])
+            self.assertEqual(mtype, caps[arch][mtype].machine_type)
+
+    def test_get_domain_capabilities_with_versioned_machine_type(self):
+        caps = self.host.get_domain_capabilities()
+
+        # i686 supports both an unversioned pc alias and
+        # a versioned form.
+        i686 = caps['i686']
+        self.assertIn('pc', i686)
+        self.assertIn('pc-i440fx-2.11', i686)
+        # both the versioned and unversioned forms
+        # have the unversioned name available as a machine_type_alias
+        unversioned_caps = i686['pc']
+        self.assertEqual('pc', unversioned_caps.machine_type_alias)
+        versioned_caps = i686['pc-i440fx-2.11']
+        self.assertEqual('pc', versioned_caps.machine_type_alias)
+        # the unversioned_caps and versioned_caps
+        # are equal and are actually the same object.
+        self.assertEqual(unversioned_caps, versioned_caps)
+        self.assertIs(unversioned_caps, versioned_caps)
+
+    @mock.patch.object(fakelibvirt.virConnect, '_domain_capability_features',
+                       new='')
+    def test_get_domain_capabilities_no_features(self):
+        caps = self._test_get_domain_capabilities()
+        self.assertEqual(vconfig.LibvirtConfigDomainCaps, type(caps))
+        features = caps.features
+        self.assertEqual([], features)
+
+    def _test_get_domain_capabilities_sev(self, supported):
+        caps = self._test_get_domain_capabilities()
+        self.assertEqual(vconfig.LibvirtConfigDomainCaps, type(caps))
+        features = caps.features
+        self.assertEqual(1, len(features))
+        sev = features[0]
+        self.assertEqual(vconfig.LibvirtConfigDomainCapsFeatureSev, type(sev))
+        self.assertEqual(supported, sev.supported)
+        if supported:
+            self.assertEqual(47, sev.cbitpos)
+            self.assertEqual(1, sev.reduced_phys_bits)
+
+    @mock.patch.object(
+        fakelibvirt.virConnect, '_domain_capability_features', new=
+        fakelibvirt.virConnect._domain_capability_features_with_SEV_unsupported
+    )
+    def test_get_domain_capabilities_sev_unsupported(self):
+        self._test_get_domain_capabilities_sev(False)
+
+    @mock.patch.object(
+        fakelibvirt.virConnect, '_domain_capability_features',
+        new=fakelibvirt.virConnect._domain_capability_features_with_SEV)
+    def test_get_domain_capabilities_sev_supported(self):
+        self._test_get_domain_capabilities_sev(True)
+
     @mock.patch.object(fakelibvirt.virConnect, "getHostname")
     def test_get_hostname_caching(self, mock_hostname):
         mock_hostname.return_value = "foo"
@@ -990,3 +1169,61 @@ cg /cgroup/memory cg opt1,opt2 0 0
     @mock.patch('six.moves.builtins.open', side_effect=IOError)
     def test_is_cpu_control_policy_capable_ioerror(self, mock_open):
         self.assertFalse(self.host.is_cpu_control_policy_capable())
+
+
+vc = fakelibvirt.virConnect
+
+
+class TestLibvirtSEV(test.NoDBTestCase):
+    """Libvirt host tests for AMD SEV support."""
+
+    def setUp(self):
+        super(TestLibvirtSEV, self).setUp()
+
+        self.useFixture(fakelibvirt.FakeLibvirtFixture())
+        self.host = host.Host("qemu:///system")
+
+
+class TestLibvirtSEVUnsupported(TestLibvirtSEV):
+    @mock.patch.object(os.path, 'exists', return_value=False)
+    def test_kernel_parameter_missing(self, fake_exists):
+        self.assertFalse(self.host._kernel_supports_amd_sev())
+        fake_exists.assert_called_once_with(
+            '/sys/module/kvm_amd/parameters/sev')
+
+    @mock.patch.object(os.path, 'exists', return_value=True)
+    @mock.patch.object(builtins, 'open', mock.mock_open(read_data="0\n"))
+    def test_kernel_parameter_zero(self, fake_exists):
+        self.assertFalse(self.host._kernel_supports_amd_sev())
+        fake_exists.assert_called_once_with(
+            '/sys/module/kvm_amd/parameters/sev')
+
+    @mock.patch.object(os.path, 'exists', return_value=True)
+    @mock.patch.object(builtins, 'open', mock.mock_open(read_data="1\n"))
+    def test_kernel_parameter_one(self, fake_exists):
+        self.assertTrue(self.host._kernel_supports_amd_sev())
+        fake_exists.assert_called_once_with(
+            '/sys/module/kvm_amd/parameters/sev')
+
+    @mock.patch.object(os.path, 'exists', return_value=True)
+    @mock.patch.object(builtins, 'open', mock.mock_open(read_data="1\n"))
+    def test_unsupported_without_feature(self, fake_exists):
+        self.assertFalse(self.host.supports_amd_sev)
+
+    @mock.patch.object(os.path, 'exists', return_value=True)
+    @mock.patch.object(builtins, 'open', mock.mock_open(read_data="1\n"))
+    @mock.patch.object(vc, '_domain_capability_features',
+        new=vc._domain_capability_features_with_SEV_unsupported)
+    def test_unsupported_with_feature(self, fake_exists):
+        self.assertFalse(self.host.supports_amd_sev)
+
+
+class TestLibvirtSEVSupported(TestLibvirtSEV):
+    """Libvirt driver tests for when AMD SEV support is present."""
+
+    @mock.patch.object(os.path, 'exists', return_value=True)
+    @mock.patch.object(builtins, 'open', mock.mock_open(read_data="1\n"))
+    @mock.patch.object(vc, '_domain_capability_features',
+                       new=vc._domain_capability_features_with_SEV)
+    def test_supported_with_feature(self, fake_exists):
+        self.assertTrue(self.host.supports_amd_sev)

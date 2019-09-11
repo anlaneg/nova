@@ -15,20 +15,12 @@
 
 import mock
 
-from os_brick.initiator import connector
-
 from nova.tests.unit.virt.libvirt.volume import test_volume
 from nova.virt.libvirt.volume import scaleio
 
 
 class LibvirtScaleIOVolumeDriverTestCase(
         test_volume.LibvirtVolumeBaseTestCase):
-
-    def test_libvirt_scaleio_driver(self):
-        libvirt_driver = scaleio.LibvirtScaleIOVolumeDriver(
-            self.fake_host)
-        self.assertIsInstance(libvirt_driver.connector,
-                              connector.ScaleIOConnector)
 
     def test_libvirt_scaleio_driver_connect(self):
         def brick_conn_vol(data):
@@ -44,10 +36,8 @@ class LibvirtScaleIOVolumeDriverTestCase(
 
     def test_libvirt_scaleio_driver_get_config(self):
         sio = scaleio.LibvirtScaleIOVolumeDriver(self.fake_host)
-        disk_info = {'path': '/dev/vol01', 'name': 'vol01', 'type': 'raw',
-                     'dev': 'vda1', 'bus': 'pci0', 'device_path': '/dev/vol01'}
-        conn = {'data': disk_info}
-        conf = sio.get_config(conn, disk_info)
+        conn = {'data': {'device_path': '/dev/vol01'}}
+        conf = sio.get_config(conn, self.disk_info)
         self.assertEqual('block', conf.source_type)
         self.assertEqual('/dev/vol01', conf.source_path)
 
@@ -73,4 +63,5 @@ class LibvirtScaleIOVolumeDriverTestCase(
                                'extend_volume',
                                side_effect=brick_extend_vol):
             self.assertEqual(extended_vol_size,
-                             sio.extend_volume(conn, mock.sentinel.instance))
+                             sio.extend_volume(conn, mock.sentinel.instance,
+                                               extended_vol_size))

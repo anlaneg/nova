@@ -14,18 +14,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import copy
-
 import fixtures
 import mock
-from oslo_serialization import jsonutils
+import oslo_messaging as messaging
 from oslo_utils.fixture import uuidsentinel as uuids
-import testtools
 
 from nova.api.openstack.compute import services
-from nova.cells import utils as cells_utils
-from nova import compute
-from nova.compute import api as compute_api
+from nova.compute import api as compute
 from nova import context
 from nova import exception
 from nova import objects
@@ -41,7 +36,7 @@ class ComputeHostAPITestCase(test.TestCase):
     def setUp(self):
         super(ComputeHostAPITestCase, self).setUp()
         self.host_api = compute.HostAPI()
-        self.aggregate_api = compute_api.AggregateAPI()
+        self.aggregate_api = compute.AggregateAPI()
         self.ctxt = context.get_admin_context()
         fake_notifier.stub_notifier(self)
         self.addCleanup(fake_notifier.reset)
@@ -192,12 +187,48 @@ class ComputeHostAPITestCase(test.TestCase):
                                   host='host-%s' % uuids.cell1)
         mock_sg.return_value = {
             uuids.cell1: [service],
-            uuids.cell2: context.raised_exception_sentinel
+            uuids.cell2: context.did_not_respond_sentinel
         }
         services = self.host_api.service_get_all(self.ctxt, all_cells=True)
         # returns the results from cell1 and ignores cell2.
         self.assertEqual(['host-%s' % uuids.cell1],
                          [svc.host for svc in services])
+
+    @mock.patch('nova.objects.CellMappingList.get_all')
+    @mock.patch.object(objects.HostMappingList, 'get_by_cell_id')
+    @mock.patch('nova.context.scatter_gather_all_cells')
+    def test_service_get_all_cells_with_minimal_constructs(self, mock_sg,
+                                                           mock_get_hm,
+                                                           mock_cm_list):
+        service = objects.Service(binary='nova-compute',
+                                  host='host-%s' % uuids.cell0)
+        cells = [
+            objects.CellMapping(uuid=uuids.cell1, id=1),
+            objects.CellMapping(uuid=uuids.cell2, id=2),
+        ]
+        mock_cm_list.return_value = cells
+        context.load_cells()
+        # create two hms in cell1, which is the down cell in this test.
+        hm1 = objects.HostMapping(self.ctxt, host='host1-unavailable',
+            cell_mapping=cells[0])
+        hm1.create()
+        hm2 = objects.HostMapping(self.ctxt, host='host2-unavailable',
+            cell_mapping=cells[0])
+        hm2.create()
+        mock_sg.return_value = {
+            cells[0].uuid: [service],
+            cells[1].uuid: context.did_not_respond_sentinel,
+        }
+        mock_get_hm.return_value = [hm1, hm2]
+        services = self.host_api.service_get_all(self.ctxt, all_cells=True,
+            cell_down_support=True)
+        # returns the results from cell0 and minimal construct from cell1.
+        self.assertEqual(sorted(['host-%s' % uuids.cell0, 'host1-unavailable',
+                         'host2-unavailable']),
+                         sorted([svc.host for svc in services]))
+        mock_sg.assert_called_once_with(self.ctxt, objects.ServiceList.get_all,
+                                        None, set_zones=False)
+        mock_get_hm.assert_called_once_with(self.ctxt, cells[1].id)
 
     def test_service_get_all_no_zones(self):
         services = [dict(test_service.fake_service,
@@ -290,24 +321,80 @@ class ComputeHostAPITestCase(test.TestCase):
 
         _do_test()
 
-    def test_service_update(self):
+    def test_service_update_by_host_and_binary(self):
         host_name = 'fake-host'
         binary = 'nova-compute'
         params_to_update = dict(disabled=True)
         service_id = 42
         expected_result = dict(test_service.fake_service, id=service_id)
 
+        @mock.patch.object(self.host_api, '_update_compute_provider_status')
         @mock.patch.object(self.host_api.db, 'service_get_by_host_and_binary')
         @mock.patch.object(self.host_api.db, 'service_update')
-        def _do_test(mock_service_update, mock_service_get_by_host_and_binary):
+        def _do_test(mock_service_update, mock_service_get_by_host_and_binary,
+                     mock_update_compute_provider_status):
             mock_service_get_by_host_and_binary.return_value = expected_result
             mock_service_update.return_value = expected_result
 
-            result = self.host_api.service_update(
+            result = self.host_api.service_update_by_host_and_binary(
                 self.ctxt, host_name, binary, params_to_update)
             self._compare_obj(result, expected_result)
+            mock_update_compute_provider_status.assert_called_once_with(
+                self.ctxt, test.MatchType(objects.Service))
 
         _do_test()
+
+    @mock.patch('nova.compute.api.HostAPI._update_compute_provider_status',
+                new_callable=mock.NonCallableMock)
+    def test_service_update_no_update_provider_status(self, mock_ucps):
+        """Tests the scenario that the service is updated but the disabled
+        field is not changed, for example the forced_down field is only
+        updated. In this case _update_compute_provider_status should not be
+        called.
+        """
+        service = objects.Service(forced_down=True)
+        self.assertIn('forced_down', service.obj_what_changed())
+        with mock.patch.object(service, 'save') as mock_save:
+            retval = self.host_api.service_update(self.ctxt, service)
+            self.assertIs(retval, service)
+            mock_save.assert_called_once_with()
+
+    @mock.patch('nova.compute.rpcapi.ComputeAPI.set_host_enabled',
+                new_callable=mock.NonCallableMock)
+    def test_update_compute_provider_status_service_too_old(self, mock_she):
+        """Tests the scenario that the service is up but is too old to sync the
+        COMPUTE_STATUS_DISABLED trait.
+        """
+        service = objects.Service(host='fake-host')
+        service.version = compute.MIN_COMPUTE_SYNC_COMPUTE_STATUS_DISABLED - 1
+        with mock.patch.object(
+                self.host_api.servicegroup_api, 'service_is_up',
+                return_value=True) as service_is_up:
+            self.host_api._update_compute_provider_status(self.ctxt, service)
+            service_is_up.assert_called_once_with(service)
+        self.assertIn('Compute service on host fake-host is too old to sync '
+                      'the COMPUTE_STATUS_DISABLED trait in Placement.',
+                      self.stdlog.logger.output)
+
+    @mock.patch('nova.compute.rpcapi.ComputeAPI.set_host_enabled',
+                side_effect=messaging.MessagingTimeout)
+    def test_update_compute_provider_status_service_rpc_error(self, mock_she):
+        """Tests the scenario that the RPC call to the compute service raised
+        some exception.
+        """
+        service = objects.Service(host='fake-host', disabled=True)
+        with mock.patch.object(
+                self.host_api.servicegroup_api, 'service_is_up',
+                return_value=True) as service_is_up:
+            self.host_api._update_compute_provider_status(self.ctxt, service)
+            service_is_up.assert_called_once_with(service)
+        mock_she.assert_called_once_with(self.ctxt, 'fake-host', False)
+        log_output = self.stdlog.logger.output
+        self.assertIn('An error occurred while updating the '
+                      'COMPUTE_STATUS_DISABLED trait on compute node '
+                      'resource providers managed by host fake-host.',
+                      log_output)
+        self.assertIn('MessagingTimeout', log_output)
 
     @mock.patch.object(objects.InstanceList, 'get_by_host',
                        return_value = ['fake-responses'])
@@ -380,7 +467,7 @@ class ComputeHostAPITestCase(test.TestCase):
     @mock.patch('nova.compute.api.load_cells')
     @mock.patch('nova.objects.Service.get_by_id')
     def test_service_delete(self, get_by_id, load_cells, set_target):
-        compute_api.CELLS = [
+        compute.CELLS = [
             objects.CellMapping(),
             objects.CellMapping(),
             objects.CellMapping(),
@@ -395,13 +482,13 @@ class ComputeHostAPITestCase(test.TestCase):
                                     mock.call(self.ctxt, 1),
                                     mock.call(self.ctxt, 1)])
         service.destroy.assert_called_once_with()
-        set_target.assert_called_once_with(self.ctxt, compute_api.CELLS[1])
+        set_target.assert_called_once_with(self.ctxt, compute.CELLS[1])
 
     @mock.patch('nova.context.set_target_cell')
     @mock.patch('nova.compute.api.load_cells')
     @mock.patch('nova.objects.Service.get_by_id')
     def test_service_delete_ambiguous(self, get_by_id, load_cells, set_target):
-        compute_api.CELLS = [
+        compute.CELLS = [
             objects.CellMapping(),
             objects.CellMapping(),
             objects.CellMapping(),
@@ -442,7 +529,7 @@ class ComputeHostAPITestCase(test.TestCase):
                                                  aggregate.id,
                                                  'fake-compute-host')
         mock_add_host.assert_called_once_with(
-            mock.ANY, aggregate.uuid, 'fake-compute-host')
+            mock.ANY, aggregate.uuid, host_name='fake-compute-host')
         self.controller.delete(self.req, compute.id)
         result = self.aggregate_api.get_aggregate(self.ctxt,
                                                   aggregate.id).hosts
@@ -458,10 +545,10 @@ class ComputeHostAPITestCase(test.TestCase):
             {'stat1': 1, 'stat2': 4.0},
             {'stat1': 5, 'stat2': 1.2},
         ]
-        compute_api.CELLS = [objects.CellMapping(uuid=uuids.cell1),
-                             objects.CellMapping(
+        compute.CELLS = [objects.CellMapping(uuid=uuids.cell1),
+                         objects.CellMapping(
                                  uuid=objects.CellMapping.CELL0_UUID),
-                             objects.CellMapping(uuid=uuids.cell2)]
+                         objects.CellMapping(uuid=uuids.cell2)]
         stats = self.host_api.compute_node_statistics(self.ctxt)
         self.assertEqual({'stat1': 6, 'stat2': 5.2}, stats)
 
@@ -527,192 +614,10 @@ class ComputeHostAPITestCase(test.TestCase):
             [mock.call(self.ctxt, uuids.cn_uuid)] * 2)
 
 
-class ComputeHostAPICellsTestCase(ComputeHostAPITestCase):
-    def setUp(self):
-        self.flags(enable=True, group='cells')
-        self.flags(cell_type='api', group='cells')
-        super(ComputeHostAPICellsTestCase, self).setUp()
-
-    @testtools.skip('cellsv1 does not use this')
-    def test_service_get_all_cells(self):
-        pass
-
-    @testtools.skip('cellsv1 does not use this')
-    def test_service_get_all_cells_with_failures(self):
-        pass
-
-    @testtools.skip('cellsv1 does not use this')
-    def test_service_delete_ambiguous(self):
-        pass
-
-    def test_service_get_all_no_zones(self):
-        services = [
-            cells_utils.ServiceProxy(
-                objects.Service(id=1, topic='compute', host='host1'),
-                'cell1'),
-            cells_utils.ServiceProxy(
-                objects.Service(id=2, topic='compute', host='host2'),
-                'cell1')]
-
-        fake_filters = {'host': 'host1'}
-
-        @mock.patch.object(self.host_api.cells_rpcapi, 'service_get_all')
-        def _do_test(mock_service_get_all):
-            mock_service_get_all.return_value = services
-            result = self.host_api.service_get_all(self.ctxt,
-                                                   filters=fake_filters)
-            self.assertEqual(services, result)
-
-        _do_test()
-
-    def _test_service_get_all(self, fake_filters, **kwargs):
-        service_attrs = dict(test_service.fake_service)
-        del service_attrs['version']
-        services = [
-            cells_utils.ServiceProxy(
-                objects.Service(**dict(service_attrs, id=1,
-                                topic='compute', host='host1')),
-                'cell1'),
-            cells_utils.ServiceProxy(
-                objects.Service(**dict(service_attrs, id=2,
-                                topic='compute', host='host2')),
-                'cell1')]
-        exp_services = []
-        for service in services:
-            exp_service = copy.copy(service)
-            exp_service.update({'availability_zone': 'nova'})
-            exp_services.append(exp_service)
-
-        @mock.patch.object(self.host_api.cells_rpcapi, 'service_get_all')
-        def _do_test(mock_service_get_all):
-            mock_service_get_all.return_value = services
-            result = self.host_api.service_get_all(self.ctxt,
-                                                   filters=fake_filters,
-                                                   **kwargs)
-            mock_service_get_all.assert_called_once_with(self.ctxt,
-                                                         filters=fake_filters)
-            self.assertEqual(jsonutils.to_primitive(exp_services),
-                             jsonutils.to_primitive(result))
-
-        _do_test()
-
-    def test_service_get_all(self):
-        fake_filters = {'availability_zone': 'nova'}
-        self._test_service_get_all(fake_filters)
-
-    def test_service_get_all_set_zones(self):
-        fake_filters = {'key1': 'val1'}
-        self._test_service_get_all(fake_filters, set_zones=True)
-
-    def test_service_get_by_compute_host(self):
-        obj = objects.Service(id=1, host='fake')
-        fake_service = cells_utils.ServiceProxy(obj, 'cell1')
-
-        @mock.patch.object(self.host_api.cells_rpcapi,
-                           'service_get_by_compute_host')
-        def _do_test(mock_service_get_by_compute_host):
-            mock_service_get_by_compute_host.return_value = fake_service
-            result = self.host_api.service_get_by_compute_host(self.ctxt,
-                                                               'fake-host')
-            self.assertEqual(fake_service, result)
-
-        _do_test()
-
-    def test_service_update(self):
-        host_name = 'fake-host'
-        binary = 'nova-compute'
-        params_to_update = dict(disabled=True)
-
-        obj = objects.Service(id=42, host='fake')
-        fake_service = cells_utils.ServiceProxy(obj, 'cell1')
-
-        @mock.patch.object(self.host_api.cells_rpcapi, 'service_update')
-        def _do_test(mock_service_update):
-            mock_service_update.return_value = fake_service
-
-            result = self.host_api.service_update(
-                self.ctxt, host_name, binary, params_to_update)
-            self.assertEqual(fake_service, result)
-
-        _do_test()
-
-    def test_service_delete(self):
-        cell_service_id = cells_utils.cell_with_item('cell1', 1)
-        with mock.patch.object(self.host_api.cells_rpcapi,
-                               'service_delete') as service_delete:
-            self.host_api.service_delete(self.ctxt, cell_service_id)
-            service_delete.assert_called_once_with(
-                self.ctxt, cell_service_id)
-
-    @testtools.skip('cells do not support host aggregates')
-    def test_service_delete_compute_in_aggregate(self):
-        # this test is not valid for cell
-        pass
-
-    @mock.patch.object(objects.InstanceList, 'get_by_host')
-    def test_instance_get_all_by_host(self, mock_get):
-        instances = [dict(id=1, cell_name='cell1', host='host1'),
-                     dict(id=2, cell_name='cell2', host='host1'),
-                     dict(id=3, cell_name='cell1', host='host2')]
-
-        mock_get.return_value = instances
-        expected_result = [instances[0], instances[2]]
-        cell_and_host = cells_utils.cell_with_item('cell1', 'fake-host')
-        result = self.host_api.instance_get_all_by_host(self.ctxt,
-                cell_and_host)
-        self.assertEqual(expected_result, result)
-
-    def test_task_log_get_all(self):
-        @mock.patch.object(self.host_api.cells_rpcapi, 'task_log_get_all',
-                           return_value='fake-response')
-        def _do_test(mock_task_log_get_all):
-            result = self.host_api.task_log_get_all(self.ctxt, 'fake-name',
-                                                    'fake-begin', 'fake-end',
-                                                    host='fake-host',
-                                                    state='fake-state')
-            self.assertEqual('fake-response', result)
-
-        _do_test()
-
-    def test_get_host_uptime_service_down(self):
-        # The corresponding Compute test case depends on the
-        # _assert_host_exists which is a no-op in the cells api
-        pass
-
-    def test_get_host_uptime(self):
-        @mock.patch.object(self.host_api.cells_rpcapi, 'get_host_uptime',
-                           return_value='fake-response')
-        def _do_test(mock_get_host_uptime):
-            result = self.host_api.get_host_uptime(self.ctxt, 'fake-host')
-            self.assertEqual('fake-response', result)
-
-        _do_test()
-
-    def test_compute_node_statistics(self):
-        # Not implementing cross-cellsv2 for cellsv1
-        pass
-
-    def test_compute_node_get_using_uuid(self):
-        cell_compute_uuid = cells_utils.cell_with_item('cell1', uuids.cn_uuid)
-        with mock.patch.object(self.host_api.cells_rpcapi,
-                               'compute_node_get') as compute_node_get:
-            self.host_api.compute_node_get(self.ctxt, cell_compute_uuid)
-        compute_node_get.assert_called_once_with(self.ctxt, cell_compute_uuid)
-
-    def test_compute_node_get_not_found(self):
-        cell_compute_uuid = cells_utils.cell_with_item('cell1', uuids.cn_uuid)
-        with mock.patch.object(self.host_api.cells_rpcapi, 'compute_node_get',
-                               side_effect=exception.CellRoutingInconsistency(
-                                   reason='because_cells_v1')):
-            self.assertRaises(exception.ComputeHostNotFound,
-                              self.host_api.compute_node_get,
-                              self.ctxt, cell_compute_uuid)
-
-
 class ComputeAggregateAPITestCase(test.TestCase):
     def setUp(self):
         super(ComputeAggregateAPITestCase, self).setUp()
-        self.aggregate_api = compute_api.AggregateAPI()
+        self.aggregate_api = compute.AggregateAPI()
         self.ctxt = context.get_admin_context()
         # NOTE(jaypipes): We just mock out the HostNapping and Service object
         # lookups in order to bypass the code that does cell lookup stuff,
@@ -730,7 +635,7 @@ class ComputeAggregateAPITestCase(test.TestCase):
 
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'aggregate_add_host')
-    @mock.patch.object(compute_api.LOG, 'warning')
+    @mock.patch.object(compute.LOG, 'warning')
     def test_aggregate_add_host_placement_missing_provider(
             self, mock_log, mock_pc_add_host):
         hostname = 'fake-host'
@@ -748,7 +653,7 @@ class ComputeAggregateAPITestCase(test.TestCase):
 
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'aggregate_add_host')
-    @mock.patch.object(compute_api.LOG, 'warning')
+    @mock.patch.object(compute.LOG, 'warning')
     def test_aggregate_add_host_bad_placement(
             self, mock_log, mock_pc_add_host):
         hostname = 'fake-host'
@@ -768,7 +673,7 @@ class ComputeAggregateAPITestCase(test.TestCase):
     @mock.patch('nova.objects.Aggregate.delete_host')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'aggregate_remove_host')
-    @mock.patch.object(compute_api.LOG, 'warning')
+    @mock.patch.object(compute.LOG, 'warning')
     def test_aggregate_remove_host_bad_placement(
             self, mock_log, mock_pc_remove_host, mock_agg_obj_delete_host):
         hostname = 'fake-host'
@@ -788,7 +693,7 @@ class ComputeAggregateAPITestCase(test.TestCase):
     @mock.patch('nova.objects.Aggregate.delete_host')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'aggregate_remove_host')
-    @mock.patch.object(compute_api.LOG, 'warning')
+    @mock.patch.object(compute.LOG, 'warning')
     def test_aggregate_remove_host_placement_missing_provider(
             self, mock_log, mock_pc_remove_host, mock_agg_obj_delete_host):
         hostname = 'fake-host'

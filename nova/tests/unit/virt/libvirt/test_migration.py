@@ -25,7 +25,6 @@ from nova import exception
 from nova.network import model as network_model
 from nova import objects
 from nova import test
-from nova.tests.unit import matchers
 from nova.tests.unit.virt.libvirt import fakelibvirt
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt import guest as libvirt_guest
@@ -132,7 +131,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
                              encoding='unicode')
         new_xml = xml.replace("127.0.0.1", "127.0.0.100").replace(
             "2000", "2001")
-        self.assertThat(res, matchers.XMLMatches(new_xml))
+        self.assertXmlEqual(res, new_xml)
 
     def test_update_serial_xml_console(self):
         data = objects.LibvirtLiveMigrateData(
@@ -156,7 +155,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         new_xml = xml.replace("127.0.0.1", "127.0.0.100").replace(
             "2001", "299").replace("2002", "300")
 
-        self.assertThat(res, matchers.XMLMatches(new_xml))
+        self.assertXmlEqual(res, new_xml)
 
     def test_update_serial_xml_without_ports(self):
         # This test is for backwards compatibility when we don't
@@ -180,7 +179,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         res = etree.tostring(migration._update_serial_xml(doc, data),
                              encoding='unicode')
         new_xml = xml.replace("127.0.0.1", "127.0.0.100")
-        self.assertThat(res, matchers.XMLMatches(new_xml))
+        self.assertXmlEqual(res, new_xml)
 
     def test_update_graphics(self):
         data = objects.LibvirtLiveMigrateData(
@@ -201,7 +200,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
                              encoding='unicode')
         new_xml = xml.replace("127.0.0.1", "127.0.0.100")
         new_xml = new_xml.replace("127.0.0.2", "127.0.0.200")
-        self.assertThat(res, matchers.XMLMatches(new_xml))
+        self.assertXmlEqual(res, new_xml)
 
     def test_update_volume_xml(self):
         connection_info = {
@@ -250,7 +249,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
             doc, data, get_volume_config), encoding='unicode')
         new_xml = xml.replace('ip-1.2.3.4:3260-iqn.abc.12345.opst-lun-X',
                               'ip-1.2.3.4:3260-iqn.cde.67890.opst-lun-Z')
-        self.assertThat(res, matchers.XMLMatches(new_xml))
+        self.assertXmlEqual(res, new_xml)
 
     def test_update_volume_xml_keeps_address(self):
         # Now test to make sure address isn't altered for virtio-scsi and rbd
@@ -317,7 +316,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
             doc, data, get_volume_config), encoding='unicode')
         new_xml = xml.replace('sdb',
                               'sdc')
-        self.assertThat(res, matchers.XMLMatches(new_xml))
+        self.assertXmlEqual(res, new_xml)
 
     def test_update_volume_xml_add_encryption(self):
         connection_info = {
@@ -404,7 +403,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         doc = etree.fromstring(xml)
         res = etree.tostring(migration._update_volume_xml(
             doc, data, get_volume_config), encoding='unicode')
-        self.assertThat(res, matchers.XMLMatches(new_xml))
+        self.assertXmlEqual(res, new_xml)
 
     def test_update_volume_xml_update_encryption(self):
         connection_info = {
@@ -474,7 +473,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
             doc, data, get_volume_config), encoding='unicode')
         new_xml = xml.replace(uuids.encryption_secret_uuid_old,
                               uuids.encryption_secret_uuid_new)
-        self.assertThat(res, matchers.XMLMatches(new_xml))
+        self.assertXmlEqual(res, new_xml)
 
     def test_update_perf_events_xml(self):
         data = objects.LibvirtLiveMigrateData(
@@ -489,10 +488,10 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         res = etree.tostring(migration._update_perf_events_xml(doc, data),
                              encoding='unicode')
 
-        self.assertThat(res, matchers.XMLMatches("""<domain>
+        self.assertXmlEqual(res, """<domain>
   <perf>
     <event enabled="yes" name="cmt"/></perf>
-</domain>"""))
+</domain>""")
 
     def test_update_perf_events_xml_add_new_events(self):
         data = objects.LibvirtLiveMigrateData(
@@ -503,8 +502,8 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         res = etree.tostring(migration._update_perf_events_xml(doc, data),
                              encoding='unicode')
 
-        self.assertThat(res, matchers.XMLMatches("""<domain>
-<perf><event enabled="yes" name="cmt"/></perf></domain>"""))
+        self.assertXmlEqual(res, """<domain>
+<perf><event enabled="yes" name="cmt"/></perf></domain>""")
 
     def test_update_perf_events_xml_add_new_events1(self):
         data = objects.LibvirtLiveMigrateData(
@@ -518,10 +517,10 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         res = etree.tostring(migration._update_perf_events_xml(doc, data),
                              encoding='unicode')
 
-        self.assertThat(res, matchers.XMLMatches("""<domain>
+        self.assertXmlEqual(res, """<domain>
   <perf>
     <event enabled="yes" name="cmt"/><event enabled="yes" name="mbml"/></perf>
-</domain>"""))
+</domain>""")
 
     def test_update_perf_events_xml_remove_all_events(self):
         data = objects.LibvirtLiveMigrateData(
@@ -535,10 +534,10 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         res = etree.tostring(migration._update_perf_events_xml(doc, data),
                              encoding='unicode')
 
-        self.assertThat(res, matchers.XMLMatches("""<domain>
+        self.assertXmlEqual(res, """<domain>
   <perf>
     </perf>
-</domain>"""))
+</domain>""")
 
     def test_update_memory_backing_xml_remove(self):
         data = objects.LibvirtLiveMigrateData(
@@ -554,9 +553,9 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         res = etree.tostring(migration._update_memory_backing_xml(doc, data),
                              encoding='unicode')
 
-        self.assertThat(res, matchers.XMLMatches("""<domain>
+        self.assertXmlEqual(res, """<domain>
   <memoryBacking/>
-</domain>"""))
+</domain>""")
 
     def test_update_memory_backing_xml_add(self):
         data = objects.LibvirtLiveMigrateData(
@@ -566,13 +565,13 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         res = etree.tostring(migration._update_memory_backing_xml(doc, data),
                              encoding='unicode')
 
-        self.assertThat(res, matchers.XMLMatches("""<domain>
+        self.assertXmlEqual(res, """<domain>
   <memoryBacking>
     <source type="file"/>
     <access mode="shared"/>
     <allocation mode="immediate"/>
   </memoryBacking>
-</domain>"""))
+</domain>""")
 
     def test_update_memory_backing_xml_keep(self):
         data = objects.LibvirtLiveMigrateData(
@@ -589,13 +588,13 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         res = etree.tostring(migration._update_memory_backing_xml(doc, data),
                              encoding='unicode')
 
-        self.assertThat(res, matchers.XMLMatches("""<domain>
+        self.assertXmlEqual(res, """<domain>
   <memoryBacking>
     <source type="file"/>
     <access mode="shared"/>
     <allocation mode="immediate"/>
   </memoryBacking>
-</domain>"""))
+</domain>""")
 
     def test_update_memory_backing_discard_add(self):
         data = objects.LibvirtLiveMigrateData(
@@ -612,14 +611,14 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         res = etree.tostring(migration._update_memory_backing_xml(doc, data),
                              encoding='unicode')
 
-        self.assertThat(res, matchers.XMLMatches("""<domain>
+        self.assertXmlEqual(res, """<domain>
   <memoryBacking>
     <source type="file"/>
     <access mode="shared"/>
     <allocation mode="immediate"/>
     <discard />
   </memoryBacking>
-</domain>"""))
+</domain>""")
 
     def test_update_memory_backing_discard_remove(self):
         data = objects.LibvirtLiveMigrateData(
@@ -638,13 +637,13 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         res = etree.tostring(migration._update_memory_backing_xml(doc, data),
                              encoding='unicode')
 
-        self.assertThat(res, matchers.XMLMatches("""<domain>
+        self.assertXmlEqual(res, """<domain>
   <memoryBacking>
     <source type="file"/>
     <access mode="shared"/>
     <allocation mode="immediate"/>
   </memoryBacking>
-</domain>"""))
+</domain>""")
 
     def test_update_memory_backing_discard_keep(self):
         data = objects.LibvirtLiveMigrateData(
@@ -662,16 +661,16 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         res = etree.tostring(migration._update_memory_backing_xml(doc, data),
                              encoding='unicode')
 
-        self.assertThat(res, matchers.XMLMatches("""<domain>
+        self.assertXmlEqual(res, """<domain>
   <memoryBacking>
     <source type="file"/>
     <access mode="shared"/>
     <allocation mode="immediate"/>
     <discard />
   </memoryBacking>
-</domain>"""))
+</domain>""")
 
-    def test_update_vif_xml(self):
+    def _test_update_vif_xml(self, conf, original_xml, expected_xml):
         """Simulates updating the guest xml for live migrating from a host
         using OVS to a host using vhostuser as the networking backend.
         """
@@ -695,6 +694,22 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         ]
         data = objects.LibvirtLiveMigrateData(vifs=migrate_vifs)
 
+        get_vif_config = mock.MagicMock(return_value=conf)
+        doc = etree.fromstring(original_xml)
+        updated_xml = etree.tostring(
+            migration._update_vif_xml(doc, data, get_vif_config),
+            encoding='unicode')
+        self.assertXmlEqual(updated_xml, expected_xml)
+
+    def test_update_vif_xml_to_vhostuser(self):
+        conf = vconfig.LibvirtConfigGuestInterface()
+        conf.net_type = "vhostuser"
+        conf.vhostuser_type = "unix"
+        conf.vhostuser_mode = "server"
+        conf.mac_addr = "DE:AD:BE:EF:CA:FE"
+        conf.vhostuser_path = "/vhost-user/test.sock"
+        conf.model = "virtio"
+
         original_xml = """<domain>
  <uuid>3de6550a-8596-4937-8046-9d862036bca5</uuid>
  <devices>
@@ -711,21 +726,6 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
     </interface>
  </devices>
 </domain>""" % uuids.ovs
-
-        conf = vconfig.LibvirtConfigGuestInterface()
-        conf.net_type = "vhostuser"
-        conf.vhostuser_type = "unix"
-        conf.vhostuser_mode = "server"
-        conf.mac_addr = "DE:AD:BE:EF:CA:FE"
-        conf.vhostuser_path = "/vhost-user/test.sock"
-        conf.model = "virtio"
-
-        get_vif_config = mock.MagicMock(return_value=conf)
-        doc = etree.fromstring(original_xml)
-        updated_xml = etree.tostring(
-            migration._update_vif_xml(doc, data, get_vif_config),
-            encoding='unicode')
-
         # Note that <target> and <virtualport> are dropped from the ovs source
         # interface xml since they aren't applicable to the vhostuser
         # destination interface xml. The type attribute value changes and the
@@ -742,7 +742,97 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
     </interface>
  </devices>
 </domain>"""
-        self.assertThat(updated_xml, matchers.XMLMatches(expected_xml))
+        self._test_update_vif_xml(conf, original_xml, expected_xml)
+
+    def test_update_vif_xml_to_bridge_without_mtu(self):
+        """This test validates _update_vif_xml to make sure it does not add
+        MTU to the interface if it does not exist in the source XML.
+        """
+        conf = vconfig.LibvirtConfigGuestInterface()
+        conf.net_type = "bridge"
+        conf.source_dev = "qbra188171c-ea"
+        conf.target_dev = "tapa188171c-ea"
+        conf.mac_addr = "DE:AD:BE:EF:CA:FE"
+        conf.vhostuser_path = "/vhost-user/test.sock"
+        conf.model = "virtio"
+        conf.mtu = 9000
+
+        original_xml = """<domain>
+ <uuid>3de6550a-8596-4937-8046-9d862036bca5</uuid>
+ <devices>
+    <interface type="bridge">
+        <mac address="DE:AD:BE:EF:CA:FE"/>
+        <model type="virtio"/>
+        <source bridge="qbra188171c-ea"/>
+        <target dev="tapa188171c-ea"/>
+        <virtualport type="openvswitch">
+            <parameters interfaceid="%s"/>
+        </virtualport>
+        <address type='pci' domain='0x0000' bus='0x00' slot='0x04'
+                 function='0x0'/>
+    </interface>
+ </devices>
+</domain>""" % uuids.ovs
+        expected_xml = """<domain>
+ <uuid>3de6550a-8596-4937-8046-9d862036bca5</uuid>
+ <devices>
+    <interface type="bridge">
+        <mac address="DE:AD:BE:EF:CA:FE"/>
+        <model type="virtio"/>
+        <source bridge="qbra188171c-ea"/>
+        <target dev="tapa188171c-ea"/>
+        <address type='pci' domain='0x0000' bus='0x00' slot='0x04'
+                 function='0x0'/>
+    </interface>
+ </devices>
+</domain>"""
+        self._test_update_vif_xml(conf, original_xml, expected_xml)
+
+    def test_update_vif_xml_to_bridge_with_mtu(self):
+        """This test validates _update_vif_xml to make sure it maintains the
+        interface MTU if it exists in the source XML
+        """
+        conf = vconfig.LibvirtConfigGuestInterface()
+        conf.net_type = "bridge"
+        conf.source_dev = "qbra188171c-ea"
+        conf.target_dev = "tapa188171c-ea"
+        conf.mac_addr = "DE:AD:BE:EF:CA:FE"
+        conf.vhostuser_path = "/vhost-user/test.sock"
+        conf.model = "virtio"
+        conf.mtu = 9000
+
+        original_xml = """<domain>
+ <uuid>3de6550a-8596-4937-8046-9d862036bca5</uuid>
+ <devices>
+    <interface type="bridge">
+        <mac address="DE:AD:BE:EF:CA:FE"/>
+        <model type="virtio"/>
+        <source bridge="qbra188171c-ea"/>
+        <target dev="tapa188171c-ea"/>
+        <mtu size="9000"/>
+        <virtualport type="openvswitch">
+            <parameters interfaceid="%s"/>
+        </virtualport>
+        <address type='pci' domain='0x0000' bus='0x00' slot='0x04'
+                 function='0x0'/>
+    </interface>
+ </devices>
+</domain>""" % uuids.ovs
+        expected_xml = """<domain>
+ <uuid>3de6550a-8596-4937-8046-9d862036bca5</uuid>
+ <devices>
+    <interface type="bridge">
+        <mac address="DE:AD:BE:EF:CA:FE"/>
+        <model type="virtio"/>
+        <source bridge="qbra188171c-ea"/>
+        <mtu size="9000"/>
+        <target dev="tapa188171c-ea"/>
+        <address type='pci' domain='0x0000' bus='0x00' slot='0x04'
+                 function='0x0'/>
+    </interface>
+ </devices>
+</domain>"""
+        self._test_update_vif_xml(conf, original_xml, expected_xml)
 
     def test_update_vif_xml_no_mac_address_in_xml(self):
         """Tests that the <mac address> is not found in the <interface> XML
@@ -883,53 +973,20 @@ class MigrationMonitorTestCase(test.NoDBTestCase):
         self.assertEqual(migration.find_job_type(self.guest, self.instance),
                          fakelibvirt.VIR_DOMAIN_JOB_FAILED)
 
-    def test_live_migration_abort_stuck(self):
-        # Progress time exceeds progress timeout
-        self.assertTrue(migration.should_abort(self.instance,
-                                               5000,
-                                               1000, 2000,
-                                               4500, 9000,
-                                               "running"))
-
-    def test_live_migration_abort_no_prog_timeout(self):
-        # Progress timeout is disabled
-        self.assertFalse(migration.should_abort(self.instance,
-                                                5000,
-                                                1000, 0,
-                                                4500, 9000,
-                                                "running"))
-
-    def test_live_migration_abort_not_stuck(self):
-        # Progress time is less than progress timeout
-        self.assertFalse(migration.should_abort(self.instance,
-                                                5000,
-                                                4500, 2000,
-                                                4500, 9000,
-                                                "running"))
-
     def test_live_migration_abort_too_long(self):
         # Elapsed time is over completion timeout
-        self.assertTrue(migration.should_abort(self.instance,
-                                               5000,
-                                               4500, 2000,
-                                               4500, 2000,
-                                               "running"))
+        self.assertTrue(migration.should_trigger_timeout_action(
+            self.instance, 4500, 2000, "running"))
 
     def test_live_migration_abort_no_comp_timeout(self):
         # Completion timeout is disabled
-        self.assertFalse(migration.should_abort(self.instance,
-                                                5000,
-                                                4500, 2000,
-                                                4500, 0,
-                                                "running"))
+        self.assertFalse(migration.should_trigger_timeout_action(
+            self.instance, 4500, 0, "running"))
 
     def test_live_migration_abort_still_working(self):
         # Elapsed time is less than completion timeout
-        self.assertFalse(migration.should_abort(self.instance,
-                                                5000,
-                                                4500, 2000,
-                                                4500, 9000,
-                                                "running"))
+        self.assertFalse(migration.should_trigger_timeout_action(
+            self.instance, 4500, 9000, "running"))
 
     def test_live_migration_postcopy_switch(self):
         # Migration progress is not fast enough

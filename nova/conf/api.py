@@ -24,13 +24,15 @@ Options under this group are used to define Nova API.
 auth_opts = [
     cfg.StrOpt("auth_strategy",
         default="keystone",
-        choices=("keystone", "noauth2"),
+        choices=[
+            ("keystone", "Use keystone for authentication."),
+            ("noauth2", "Designed for testing only, as it does no actual "
+             "credential checking. 'noauth2' provides administrative "
+             "credentials only if 'admin' is specified as the username."),
+        ],
         deprecated_group="DEFAULT",
         help="""
-This determines the strategy to use for authentication: keystone or noauth2.
-'noauth2' is designed for testing only, as it does no actual credential
-checking. 'noauth2' provides administrative credentials only if 'admin' is
-specified as the username.
+Determine the strategy to use for authentication.
 """),
     cfg.BoolOpt("use_forwarded_for",
         default=False,
@@ -71,47 +73,40 @@ Possible values:
 * Any string that represents zero or more versions, separated by spaces.
 """),
     cfg.ListOpt('vendordata_providers',
-        item_type=cfg.types.String(choices=['StaticJSON', 'DynamicJSON']),
+        item_type=cfg.types.String(choices=[
+            ('StaticJSON', 'Load a JSON file from the path configured by '
+             '``vendordata_jsonfile_path`` and use this as the source for '
+             '``vendor_data.json`` and ``vendor_data2.json``.'),
+            ('DynamicJSON', 'Build a JSON file using values defined in '
+             '``vendordata_dynamic_targets`` and use this as the source '
+             'for ``vendor_data2.json``.'),
+        ]),
         default=['StaticJSON'],
         deprecated_group="DEFAULT",
         help="""
 A list of vendordata providers.
 
 vendordata providers are how deployers can provide metadata via configdrive
-and metadata that is specific to their deployment. There are currently two
-supported providers: StaticJSON and DynamicJSON.
-
-StaticJSON reads a JSON file configured by the flag vendordata_jsonfile_path
-and places the JSON from that file into vendor_data.json and
-vendor_data2.json.
-
-DynamicJSON is configured via the vendordata_dynamic_targets flag, which is
-documented separately. For each of the endpoints specified in that flag, a
-section is added to the vendor_data2.json.
+and metadata that is specific to their deployment.
 
 For more information on the requirements for implementing a vendordata
 dynamic endpoint, please see the vendordata.rst file in the nova developer
 reference.
 
-Possible values:
-
-* A list of vendordata providers, with StaticJSON and DynamicJSON being
-  current options.
-
 Related options:
 
-* vendordata_dynamic_targets
-* vendordata_dynamic_ssl_certfile
-* vendordata_dynamic_connect_timeout
-* vendordata_dynamic_read_timeout
-* vendordata_dynamic_failure_fatal
+* ``vendordata_dynamic_targets``
+* ``vendordata_dynamic_ssl_certfile``
+* ``vendordata_dynamic_connect_timeout``
+* ``vendordata_dynamic_read_timeout``
+* ``vendordata_dynamic_failure_fatal``
 """),
     cfg.ListOpt('vendordata_dynamic_targets',
         default=[],
         deprecated_group="DEFAULT",
         help="""
 A list of targets for the dynamic vendordata provider. These targets are of
-the form <name>@<url>.
+the form ``<name>@<url>``.
 
 The dynamic vendordata provider collects metadata by contacting external REST
 services and querying them for information about the instance. This behaviour
@@ -201,6 +196,43 @@ performance reasons. Increasing this setting should improve response times
 of the metadata API when under heavy load. Higher values may increase memory
 usage, and result in longer times for host metadata changes to take effect.
 """),
+    cfg.BoolOpt("local_metadata_per_cell",
+                default=False,
+                help="""
+Indicates that the nova-metadata API service has been deployed per-cell, so
+that we can have better performance and data isolation in a multi-cell
+deployment. Users should consider the use of this configuration depending on
+how neutron is setup. If you have networks that span cells, you might need to
+run nova-metadata API service globally. If your networks are segmented along
+cell boundaries, then you can run nova-metadata API service per cell. When
+running nova-metadata API service per cell, you should also configure each
+Neutron metadata-agent to point to the corresponding nova-metadata API
+service.
+"""),
+    cfg.StrOpt("dhcp_domain",
+        deprecated_group="DEFAULT",
+        default="novalocal",
+        help="""
+Domain name used to configure FQDN for instances.
+
+This option has two purposes:
+
+#. For *neutron* and *nova-network* users, it is used to configure a
+   fully-qualified domain name for instance hostnames. If unset, only the
+   hostname without a domain will be configured.
+#. (Deprecated) For *nova-network* users, this option configures the DNS
+   domains used for the DHCP server. Refer to the ``--domain`` option of the
+   ``dnsmasq`` utility for more information. Like *nova-network* itself, this
+   purpose is deprecated.
+
+Possible values:
+
+* Any string that is a valid domain name.
+
+Related options:
+
+* ``use_neutron``
+"""),
 ]
 
 file_opts = [
@@ -213,10 +245,14 @@ config-drive. The default class for this, JsonFileVendorData, loads this
 information from a JSON file, whose path is configured by this option. If
 there is no path set by this option, the class returns an empty dictionary.
 
+Note that when using this to provide static vendor data to a configuration
+drive, the nova-compute service must be configured with this option and the
+file must be accessible from the nova-compute host.
+
 Possible values:
 
 * Any string representing the path to the data file, or an empty string
-    (default).
+  (default).
 """)
 ]
 
@@ -267,8 +303,22 @@ False. If you have many cells, especially if you confine tenants to a
 small subset of those cells, this should be True.
 """),
     cfg.StrOpt("instance_list_cells_batch_strategy",
-        choices=("fixed", "distributed"),
         default="distributed",
+        choices=[
+            ("distributed", "Divide the "
+             "limit requested by the user by the number of cells in the "
+             "system. This requires counting the cells in the system "
+             "initially, which will not be refreshed until service restart "
+             "or SIGHUP. The actual batch size will be increased by 10% "
+             "over the result of ($limit / $num_cells)."),
+            ("fixed", "Request fixed-size batches from each cell, as defined "
+             "by ``instance_list_cells_batch_fixed_size``. "
+             "If the limit is smaller than the batch size, the limit "
+             "will be used instead. If you do not wish batching to be used "
+             "at all, setting the fixed size equal to the ``max_limit`` "
+             "value will cause only one request per cell database to be "
+             "issued."),
+        ],
         help="""
 This controls the method by which the API queries cell databases in
 smaller batches during large instance list operations. If batching is
@@ -280,24 +330,6 @@ between the API and the database, but potentially more wasted effort
 processing the results from the database which will not be returned to
 the user. Any strategy will yield a batch size of at least 100 records,
 to avoid a user causing many tiny database queries in their request.
-
-``distributed`` (the default) will attempt to divide the limit
-requested by the user by the number of cells in the system. This
-requires counting the cells in the system initially, which will not be
-refreshed until service restart or SIGHUP. The actual batch size will
-be increased by 10% over the result of ($limit / $num_cells).
-
-``fixed`` will simply request fixed-size batches from each cell, as
-defined by ``instance_list_cells_batch_fixed_size``. If the limit is
-smaller than the batch size, the limit will be used instead. If you do
-not wish batching to be used at all, setting the fixed size equal to
-the ``max_limit`` value will cause only one request per cell database
-to be issued.
-
-Possible values:
-
-* distributed (default)
-* fixed
 
 Related options:
 
@@ -328,6 +360,13 @@ When set to False, this will cause the API to return a 500 error if there is an
 infrastructure failure like non-responsive cells. If you want the API to skip
 the down cells and return the results from the up cells set this option to
 True.
+
+Note that from API microversion 2.69 there could be transient conditions in the
+deployment where certain records are not available and the results could be
+partial for certain requests containing those records. In those cases this
+option will be ignored. See "Handling Down Cells" section of the Compute API
+guide (https://docs.openstack.org/api-guide/compute/down_cells.html) for
+more information.
 """),
 ]
 

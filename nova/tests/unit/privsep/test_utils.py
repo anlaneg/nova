@@ -18,6 +18,7 @@ import os
 
 import nova.privsep.utils
 from nova import test
+from nova.tests import fixtures
 
 
 class SupportDirectIOTestCase(test.NoDBTestCase):
@@ -36,21 +37,25 @@ class SupportDirectIOTestCase(test.NoDBTestCase):
         self.einval.errno = errno.EINVAL
         self.enoent = OSError()
         self.enoent.errno = errno.ENOENT
-        self.test_path = os.path.join('.', '.directio.test')
+        self.test_path = os.path.join('.', '.directio.test.123')
         self.io_flags = os.O_CREAT | os.O_WRONLY | os.O_DIRECT
 
         open_patcher = mock.patch('os.open')
         write_patcher = mock.patch('os.write')
         close_patcher = mock.patch('os.close')
         unlink_patcher = mock.patch('os.unlink')
+        random_string_patcher = mock.patch(
+            'nova.privsep.utils.generate_random_string', return_value='123')
         self.addCleanup(open_patcher.stop)
         self.addCleanup(write_patcher.stop)
         self.addCleanup(close_patcher.stop)
         self.addCleanup(unlink_patcher.stop)
+        self.addCleanup(random_string_patcher.stop)
         self.mock_open = open_patcher.start()
         self.mock_write = write_patcher.start()
         self.mock_close = close_patcher.start()
         self.mock_unlink = unlink_patcher.start()
+        random_string_patcher.start()
 
     def test_supports_direct_io(self):
         self.mock_open.return_value = 3
@@ -121,3 +126,14 @@ class SupportDirectIOTestCase(test.NoDBTestCase):
         self.mock_write.assert_not_called()
         self.mock_close.assert_not_called()
         self.mock_unlink.assert_called_once_with(self.test_path)
+
+
+class UtilsTestCase(test.NoDBTestCase):
+    def setUp(self):
+        super(UtilsTestCase, self).setUp()
+        self.useFixture(fixtures.PrivsepFixture())
+
+    @mock.patch('os.kill')
+    def test_kill(self, mock_kill):
+        nova.privsep.utils.kill(42, -9)
+        mock_kill.assert_called_with(42, -9)

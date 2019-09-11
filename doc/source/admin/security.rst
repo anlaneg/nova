@@ -38,3 +38,23 @@ encryption in the ``metadata_agent.ini`` file.
    .. code-block:: ini
 
       nova_client_priv_key = PATH_TO_KEY
+
+
+Securing live migration streams with QEMU-native TLS
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It is strongly recommended to secure all the different live migration
+streams of a nova instance—i.e. guest RAM, device state, and disks (via
+NBD) when using non-shared storage.  For further details on how to set
+this up, refer to the
+:doc:`secure-live-migration-with-qemu-native-tls` document.
+
+
+Mitigation for MDS (Microarchitectural Data Sampling) security flaws
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+It is strongly recommended to patch all compute nodes and nova instances
+against the processor-related security flaws, such as MDS (and other
+previous vulnerabilities).  For details on applying mitigation for the
+MDS flaws, refer to the :doc:`mitigation-for-Intel-MDS-security-flaws`
+document.

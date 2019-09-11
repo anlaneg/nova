@@ -13,12 +13,27 @@
           set -x
           cat > clonemap.yaml << EOF
           clonemap:
-            - name: openstack-infra/devstack-gate
+            - name: openstack/devstack-gate
               dest: devstack-gate
           EOF
           /usr/zuul-env/bin/zuul-cloner -m clonemap.yaml --cache-dir /opt/git \
-              git://git.openstack.org \
-              openstack-infra/devstack-gate
+              https://opendev.org \
+              openstack/devstack-gate
+        executable: /bin/bash
+        chdir: '{{ ansible_user_dir }}/workspace'
+      environment: '{{ zuul | zuul_legacy_vars }}'
+
+    - name: Configure devstack
+      shell:
+        # Force config drive.
+        cmd: |
+          set -e
+          set -x
+          cat << 'EOF' >>"/tmp/dg-local.conf"
+          [[local|localrc]]
+          FORCE_CONFIG_DRIVE=True
+
+          EOF
         executable: /bin/bash
         chdir: '{{ ansible_user_dir }}/workspace'
       environment: '{{ zuul | zuul_legacy_vars }}'
@@ -33,7 +48,8 @@
           export DEVSTACK_GATE_TEMPEST_NOTESTS=1
           export DEVSTACK_GATE_TOPOLOGY="multinode"
           function post_test_hook {
-              /opt/stack/new/nova/nova/tests/live_migration/hooks/run_tests.sh
+              /opt/stack/new/nova/gate/live_migration/hooks/run_tests.sh
+              $BASE/new/nova/gate/test_evacuate.sh
           }
           export -f post_test_hook
           cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh

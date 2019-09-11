@@ -48,6 +48,7 @@ class tzinfo(datetime.tzinfo):
     def utcoffset(*args, **kwargs):
         return datetime.timedelta()
 
+
 NOW_DATETIME = datetime.datetime(2010, 10, 11, 10, 30, 22, tzinfo=tzinfo())
 
 
@@ -66,6 +67,7 @@ class FakeSchema(object):
 
     def raw(self):
         return copy.deepcopy(self.raw_schema)
+
 
 image_fixtures = {
     'active_image_v1': {
@@ -410,13 +412,13 @@ class TestGlanceClientWrapperRetries(test.NoDBTestCase):
         self.flags(api_servers=api_servers, group='glance')
 
     def assert_retry_attempted(self, sleep_mock, client, expected_url):
-        client.call(self.ctx, 1, 'get', 'meow')
+        client.call(self.ctx, 1, 'get', args=('meow',))
         sleep_mock.assert_called_once_with(1)
         self.assertEqual(str(client.api_server), expected_url)
 
     def assert_retry_not_attempted(self, sleep_mock, client):
         self.assertRaises(exception.GlanceConnectionFailed,
-                client.call, self.ctx, 1, 'get', 'meow')
+                client.call, self.ctx, 1, 'get', args=('meow',))
         self.assertFalse(sleep_mock.called)
 
     @mock.patch('time.sleep')
@@ -490,12 +492,12 @@ class TestGlanceClientWrapperRetries(test.NoDBTestCase):
         # sleep (which would be an indication of a retry)
 
         self.assertRaises(exception.GlanceConnectionFailed,
-                client.call, self.ctx, 1, 'get', 'meow')
+                client.call, self.ctx, 1, 'get', args=('meow',))
         self.assertEqual(str(client.api_server), 'http://host1:9292')
         self.assertFalse(sleep_mock.called)
 
         self.assertRaises(exception.GlanceConnectionFailed,
-                client.call, self.ctx, 1, 'get', 'meow')
+                client.call, self.ctx, 1, 'get', args=('meow',))
         self.assertEqual(str(client.api_server), 'https://host2:9293')
         self.assertFalse(sleep_mock.called)
 
@@ -512,6 +514,33 @@ class TestGlanceClientWrapperRetries(test.NoDBTestCase):
         images_mock.get.side_effect = side_effect
         type(client_mock).images = mock.PropertyMock(return_value=images_mock)
         create_client_mock.return_value = client_mock
+
+
+class TestCommonPropertyNameConflicts(test.NoDBTestCase):
+
+    """Tests that images that have common property names like "version" don't
+    cause an exception to be raised from the wacky GlanceClientWrapper magic
+    call() method.
+
+    :see https://bugs.launchpad.net/nova/+bug/1717547
+    """
+
+    @mock.patch('nova.image.glance.GlanceClientWrapper._create_onetime_client')
+    def test_version_property_conflicts(self, mock_glance_client):
+        client = mock.MagicMock()
+        mock_glance_client.return_value = client
+        ctx = mock.sentinel.ctx
+        service = glance.GlanceImageServiceV2()
+
+        # Simulate the process of snapshotting a server that was launched with
+        # an image with the properties collection containing a (very
+        # commonly-named) "version" property.
+        image_meta = {
+            'id': 1,
+            'version': 'blows up',
+        }
+        # This call would blow up before the fix for 1717547
+        service.create(ctx, image_meta)
 
 
 class TestDownloadNoDirectUri(test.NoDBTestCase):
@@ -532,8 +561,8 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
 
         self.assertFalse(show_mock.called)
         self.assertFalse(open_mock.called)
-        client.call.assert_called_once_with(ctx, 2, 'data',
-                                            mock.sentinel.image_id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'data', args=(mock.sentinel.image_id,))
         self.assertEqual(mock.sentinel.image_chunks, res)
 
     @mock.patch.object(six.moves.builtins, 'open')
@@ -548,8 +577,8 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
 
         self.assertFalse(show_mock.called)
         self.assertFalse(open_mock.called)
-        client.call.assert_called_once_with(ctx, 2, 'data',
-                                            mock.sentinel.image_id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'data', args=(mock.sentinel.image_id,))
         self.assertIsNone(res)
         data.write.assert_has_calls(
                 [
@@ -575,8 +604,8 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
                                dst_path=mock.sentinel.dst_path)
 
         self.assertFalse(show_mock.called)
-        client.call.assert_called_once_with(ctx, 2, 'data',
-                                            mock.sentinel.image_id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'data', args=(mock.sentinel.image_id,))
         open_mock.assert_called_once_with(mock.sentinel.dst_path, 'wb')
         fsync_mock.assert_called_once_with(writer)
         self.assertIsNone(res)
@@ -606,8 +635,8 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
 
         self.assertFalse(show_mock.called)
         self.assertFalse(open_mock.called)
-        client.call.assert_called_once_with(ctx, 2, 'data',
-                                            mock.sentinel.image_id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'data', args=(mock.sentinel.image_id,))
         self.assertIsNone(res)
         data.write.assert_has_calls(
                 [
@@ -721,8 +750,8 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
         tran_mod.download.assert_called_once_with(ctx, mock.ANY,
                                                   mock.sentinel.dst_path,
                                                   mock.sentinel.loc_meta)
-        client.call.assert_called_once_with(ctx, 2, 'data',
-                                            mock.sentinel.image_id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'data', args=(mock.sentinel.image_id,))
         fsync_mock.assert_called_once_with(writer)
         # NOTE(jaypipes): log messages call open() in part of the
         # download path, so here, we just check that the last open()
@@ -771,8 +800,8 @@ class TestDownloadNoDirectUri(test.NoDBTestCase):
                                           mock.sentinel.image_id,
                                           include_locations=True)
         get_tran_mock.assert_called_once_with('file')
-        client.call.assert_called_once_with(ctx, 2, 'data',
-                                            mock.sentinel.image_id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'data', args=(mock.sentinel.image_id,))
         fsync_mock.assert_called_once_with(writer)
         # NOTE(jaypipes): log messages call open() in part of the
         # download path, so here, we just check that the last open()
@@ -1229,8 +1258,8 @@ class TestShow(test.NoDBTestCase):
         service = glance.GlanceImageServiceV2(client)
         info = service.show(ctx, mock.sentinel.image_id)
 
-        client.call.assert_called_once_with(ctx, 2, 'get',
-                                            mock.sentinel.image_id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'get', args=(mock.sentinel.image_id,))
         is_avail_mock.assert_called_once_with(ctx, {})
         trans_from_mock.assert_called_once_with({}, include_locations=False)
         self.assertIn('mock', info)
@@ -1248,8 +1277,8 @@ class TestShow(test.NoDBTestCase):
         with testtools.ExpectedException(exception.ImageNotFound):
             service.show(ctx, mock.sentinel.image_id)
 
-        client.call.assert_called_once_with(ctx, 2, 'get',
-                                            mock.sentinel.image_id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'get', args=(mock.sentinel.image_id,))
         is_avail_mock.assert_called_once_with(ctx, mock.sentinel.images_0)
         self.assertFalse(trans_from_mock.called)
 
@@ -1267,8 +1296,8 @@ class TestShow(test.NoDBTestCase):
 
         with testtools.ExpectedException(exception.ImageNotAuthorized):
             service.show(ctx, mock.sentinel.image_id)
-            client.call.assert_called_once_with(ctx, 2, 'get',
-                                                mock.sentinel.image_id)
+            client.call.assert_called_once_with(
+                ctx, 2, 'get', args=(mock.sentinel.image_id,))
             self.assertFalse(is_avail_mock.called)
             self.assertFalse(trans_from_mock.called)
             reraise_mock.assert_called_once_with(mock.sentinel.image_id)
@@ -1303,8 +1332,8 @@ class TestShow(test.NoDBTestCase):
         ctx = mock.sentinel.ctx
         service = glance.GlanceImageServiceV2(client)
         image_info = service.show(ctx, glance_image.id)
-        client.call.assert_called_once_with(ctx, 2, 'get',
-                                            glance_image.id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'get', args=(glance_image.id,))
         NOVA_IMAGE_ATTRIBUTES = set(['size', 'disk_format', 'owner',
                                      'container_format', 'status', 'id',
                                      'name', 'created_at', 'updated_at',
@@ -1328,7 +1357,8 @@ class TestShow(test.NoDBTestCase):
         image_id = mock.sentinel.image_id
         info = service.show(ctx, image_id, include_locations=True)
 
-        client.call.assert_called_once_with(ctx, 2, 'get', image_id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'get', args=(image_id,))
         avail_mock.assert_called_once_with(ctx, mock.sentinel.image)
         trans_from_mock.assert_called_once_with(mock.sentinel.image,
                                                 include_locations=True)
@@ -1350,7 +1380,8 @@ class TestShow(test.NoDBTestCase):
         image_id = mock.sentinel.image_id
         info = service.show(ctx, image_id, include_locations=True)
 
-        client.call.assert_called_once_with(ctx, 2, 'get', image_id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'get', args=(image_id,))
         expected = locations
         expected.append({'url': mock.sentinel.duri, 'metadata': {}})
         self.assertIn('locations', info)
@@ -1374,8 +1405,8 @@ class TestShow(test.NoDBTestCase):
         with testtools.ExpectedException(exception.ImageNotFound):
             service.show(ctx, glance_image.id, show_deleted=False)
 
-        client.call.assert_called_once_with(ctx, 2, 'get',
-                                            glance_image.id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'get', args=(glance_image.id,))
         self.assertFalse(is_avail_mock.called)
         self.assertFalse(trans_from_mock.called)
 
@@ -1399,7 +1430,7 @@ class TestDetail(test.NoDBTestCase):
         service = glance.GlanceImageServiceV2(client)
         images = service.detail(ctx, **params)
 
-        client.call.assert_called_once_with(ctx, 2, 'list')
+        client.call.assert_called_once_with(ctx, 2, 'list', kwargs={})
         is_avail_mock.assert_called_once_with(ctx, mock.sentinel.images_0)
         trans_from_mock.assert_called_once_with(mock.sentinel.images_0)
         self.assertEqual([mock.sentinel.trans_from], images)
@@ -1419,7 +1450,7 @@ class TestDetail(test.NoDBTestCase):
         service = glance.GlanceImageServiceV2(client)
         images = service.detail(ctx, **params)
 
-        client.call.assert_called_once_with(ctx, 2, 'list')
+        client.call.assert_called_once_with(ctx, 2, 'list', kwargs={})
         is_avail_mock.assert_called_once_with(ctx, mock.sentinel.images_0)
         self.assertFalse(trans_from_mock.called)
         self.assertEqual([], images)
@@ -1433,10 +1464,8 @@ class TestDetail(test.NoDBTestCase):
         service = glance.GlanceImageServiceV2(client)
         service.detail(ctx, page_size=5, limit=10)
 
-        client.call.assert_called_once_with(ctx, 2, 'list',
-                                            filters={},
-                                            page_size=5,
-                                            limit=10)
+        client.call.assert_called_once_with(
+            ctx, 2, 'list', kwargs=dict(filters={}, page_size=5, limit=10))
 
     @mock.patch('nova.image.glance._reraise_translated_exception')
     @mock.patch('nova.image.glance._extract_query_params_v2')
@@ -1456,7 +1485,7 @@ class TestDetail(test.NoDBTestCase):
         with testtools.ExpectedException(exception.Forbidden):
             service.detail(ctx, **params)
 
-        client.call.assert_called_once_with(ctx, 2, 'list')
+        client.call.assert_called_once_with(ctx, 2, 'list', kwargs={})
         self.assertFalse(is_avail_mock.called)
         self.assertFalse(trans_from_mock.called)
         reraise_mock.assert_called_once_with()
@@ -1475,7 +1504,7 @@ class TestCreate(test.NoDBTestCase):
         }
         trans_to_mock.return_value = translated
         trans_from_mock.return_value = mock.sentinel.trans_from
-        image_mock = mock.MagicMock(spec=dict)
+        image_mock = {}
         client = mock.MagicMock()
         client.call.return_value = {'id': '123'}
         ctx = mock.sentinel.ctx
@@ -1486,8 +1515,8 @@ class TestCreate(test.NoDBTestCase):
         # the call to glanceclient's update (since the image ID is
         # supplied as a positional arg), and that the
         # purge_props default is True.
-        client.call.assert_called_once_with(ctx, 2, 'create',
-                                            name=mock.sentinel.name)
+        client.call.assert_called_once_with(
+            ctx, 2, 'create', kwargs=dict(name=mock.sentinel.name))
         trans_from_mock.assert_called_once_with({'id': '123'})
         self.assertEqual(mock.sentinel.trans_from, image_meta)
 
@@ -1523,7 +1552,7 @@ class TestCreate(test.NoDBTestCase):
             image_meta = service.create(ctx, image_mock)
         trans_to_mock.assert_called_once_with(image_mock)
         # Verify that the disk_format and container_format kwargs are passed.
-        create_call_kwargs = client.call.call_args_list[0][1]
+        create_call_kwargs = client.call.call_args_list[0][1]['kwargs']
         self.assertEqual('vdi', create_call_kwargs['disk_format'])
         self.assertEqual('bare', create_call_kwargs['container_format'])
         trans_from_mock.assert_called_once_with({'id': '123'})
@@ -1540,7 +1569,7 @@ class TestCreate(test.NoDBTestCase):
         }
         trans_to_mock.return_value = translated
         trans_from_mock.return_value = mock.sentinel.trans_from
-        image_mock = mock.MagicMock(spec=dict)
+        image_mock = {}
         client = mock.MagicMock()
         client.call.return_value = translated
         ctx = mock.sentinel.ctx
@@ -1550,6 +1579,62 @@ class TestCreate(test.NoDBTestCase):
         self.assertEqual(2, client.call.call_count)
         trans_from_mock.assert_called_once_with(translated)
         self.assertEqual(mock.sentinel.trans_from, image_meta)
+
+    @mock.patch('nova.image.glance._translate_from_glance')
+    @mock.patch('nova.image.glance._translate_to_glance')
+    def test_create_success_v2_with_sharing(
+            self, trans_to_mock, trans_from_mock):
+        """Tests creating a snapshot image by one tenant that is shared with
+        the owner of the instance.
+        """
+        translated = {
+            'name': mock.sentinel.name,
+            'visibility': 'shared'
+        }
+        trans_to_mock.return_value = translated
+        trans_from_mock.return_value = mock.sentinel.trans_from
+        image_meta = {
+            'name': mock.sentinel.name,
+            'visibility': 'shared',
+            'properties': {
+                # This triggers the image_members.create call to glance.
+                'instance_owner': uuids.instance_uuid
+            }
+        }
+        client = mock.MagicMock()
+
+        def fake_call(_ctxt, _version, method, controller=None, args=None,
+                      kwargs=None):
+            if method == 'create':
+                if controller is None:
+                    # Call to create the image.
+                    translated['id'] = uuids.image_id
+                    return translated
+                if controller == 'image_members':
+                    self.assertIsNotNone(args)
+                    self.assertEqual(
+                        (uuids.image_id, uuids.instance_uuid), args)
+                    # Call to share the image with the instance owner.
+                    return mock.sentinel.member
+            self.fail('Unexpected glanceclient call %s.%s' %
+                      (controller or 'images', method))
+
+        client.call.side_effect = fake_call
+        ctx = mock.sentinel.ctx
+        service = glance.GlanceImageServiceV2(client)
+        ret_image = service.create(ctx, image_meta)
+
+        translated_image_meta = copy.copy(image_meta)
+        # The instance_owner property should have been popped off and not sent
+        # to glance during the create() call.
+        translated_image_meta['properties'].pop('instance_owner', None)
+        trans_to_mock.assert_called_once_with(translated_image_meta)
+        # glanceclient should be called twice:
+        # - once for the image create
+        # - once for sharing the image with the instance owner
+        self.assertEqual(2, client.call.call_count)
+        trans_from_mock.assert_called_once_with(translated)
+        self.assertEqual(mock.sentinel.trans_from, ret_image)
 
     @mock.patch('nova.image.glance._reraise_translated_exception')
     @mock.patch('nova.image.glance._translate_from_glance')
@@ -1580,7 +1665,7 @@ class TestCreate(test.NoDBTestCase):
             mock.sentinel.ctx)
         self.assertEqual(expected_disk_format, disk_format)
         mock_client.call.assert_called_once_with(
-            mock.sentinel.ctx, 2, 'get', 'image', controller='schemas')
+            mock.sentinel.ctx, 2, 'get', args=('image',), controller='schemas')
 
     def test_get_image_create_disk_format_default_no_schema(self):
         """Tests that if there is no disk_format schema we default to qcow2.
@@ -1671,11 +1756,11 @@ class TestUpdate(test.NoDBTestCase):
         # the call to glanceclient's update (since the image ID is
         # supplied as a positional arg), and that the
         # purge_props default is True.
-        client.call.assert_called_once_with(ctx, 2, 'update',
-                                            image_id=mock.sentinel.image_id,
-                                            name=mock.sentinel.name,
-                                            prop_to_keep='4',
-                                            remove_props=['prop_to_remove'])
+        client.call.assert_called_once_with(
+            ctx, 2, 'update', kwargs=dict(
+                image_id=mock.sentinel.image_id, name=mock.sentinel.name,
+                prop_to_keep='4', remove_props=['prop_to_remove'],
+            ))
         trans_from_mock.assert_called_once_with(mock.sentinel.image_meta)
         self.assertEqual(mock.sentinel.trans_from, image_meta)
 
@@ -1747,11 +1832,13 @@ class TestUpdate(test.NoDBTestCase):
         self.assertRaises(exception.ImageNotAuthorized,
                           service.update, ctx, mock.sentinel.image_id,
                           image)
-        client.call.assert_called_once_with(ctx, 2, 'update',
-                                            image_id=mock.sentinel.image_id,
-                                            name=mock.sentinel.name,
-                                            prop_to_keep='4',
-                                            remove_props=['prop_to_remove'])
+        client.call.assert_called_once_with(
+            ctx, 2, 'update', kwargs=dict(
+                image_id=mock.sentinel.image_id,
+                name=mock.sentinel.name,
+                prop_to_keep='4',
+                remove_props=['prop_to_remove'],
+            ))
         reraise_mock.assert_called_once_with(mock.sentinel.image_id)
 
 
@@ -1765,8 +1852,8 @@ class TestDelete(test.NoDBTestCase):
         ctx = mock.sentinel.ctx
         service = glance.GlanceImageServiceV2(client)
         service.delete(ctx, mock.sentinel.image_id)
-        client.call.assert_called_once_with(ctx, 2, 'delete',
-                                            mock.sentinel.image_id)
+        client.call.assert_called_once_with(
+            ctx, 2, 'delete', args=(mock.sentinel.image_id,))
 
     def test_delete_client_failure_v2(self):
         client = mock.MagicMock()
@@ -1895,10 +1982,12 @@ class TestExtractQueryParams(test.NoDBTestCase):
                                'kernel-id': 'some-id',
                                'updated_at': 'gte:some-date'}
 
-        client.call.assert_called_once_with(ctx, 2, 'list',
-                                            filters=expected_filters_v1,
-                                            page_size=5,
-                                            limit=10)
+        client.call.assert_called_once_with(
+            ctx, 2, 'list', kwargs=dict(
+                filters=expected_filters_v1,
+                page_size=5,
+                limit=10,
+            ))
 
 
 class TestTranslateToGlance(test.NoDBTestCase):

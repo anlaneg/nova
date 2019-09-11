@@ -19,7 +19,7 @@ import datetime
 import webob.exc
 
 from nova.api.openstack import wsgi
-from nova import compute
+from nova.compute import api as compute
 from nova.compute import rpcapi as compute_rpcapi
 from nova.i18n import _
 from nova.policies import instance_usage_audit_log as iual_policies
@@ -27,7 +27,9 @@ from nova import utils
 
 
 class InstanceUsageAuditLogController(wsgi.Controller):
+
     def __init__(self):
+        super(InstanceUsageAuditLogController, self).__init__()
         self.host_api = compute.HostAPI()
 
     @wsgi.expected_errors(())

@@ -30,8 +30,6 @@ from nova.api.metadata import password
 from nova.api.metadata import vendordata_dynamic
 from nova.api.metadata import vendordata_json
 from nova import block_device
-from nova.cells import opts as cells_opts
-from nova.cells import rpcapi as cells_rpcapi
 import nova.conf
 from nova import context
 from nova import exception
@@ -63,8 +61,8 @@ VERSIONS = [
 # hidden from the listing, but can still be requested explicitly, which is
 # required for testing purposes. We know this isn't great, but its inherited
 # from EC2, which this needs to be compatible with.
-# NOTE(jichen): please update doc/source/user/metadata-service.rst on the
-# metadata output when new version is created in order to make doc up-to-date.
+# NOTE(jichen): please update doc/source/user/metadata.rst on the metadata
+# output when new version is created in order to make doc up-to-date.
 FOLSOM = '2012-08-10'
 GRIZZLY = '2013-04-04'
 HAVANA = '2013-10-17'
@@ -281,17 +279,9 @@ class InstanceMetadata(object):
             meta_data['public-hostname'] = hostname
             meta_data['public-ipv4'] = floating_ip
 
-        if False and self._check_version('2007-03-01', version):
-            # TODO(vish): store product codes
-            meta_data['product-codes'] = []
-
         if self._check_version('2007-08-29', version):
             instance_type = self.instance.get_flavor()
             meta_data['instance-type'] = instance_type['name']
-
-        if False and self._check_version('2007-10-10', version):
-            # TODO(vish): store ancestor ids
-            meta_data['ancestor-ami-ids'] = []
 
         if self._check_version('2007-12-15', version):
             meta_data['block-device-mapping'] = self.mappings
@@ -335,23 +325,12 @@ class InstanceMetadata(object):
             metadata['network_config'] = self.network_config
 
         if self.instance.key_name:
-            if cells_opts.get_cell_type() == 'compute':
-                cells_api = cells_rpcapi.CellsAPI()
-                try:
-                    keypair = cells_api.get_keypair_at_top(
-                      context.get_admin_context(), self.instance.user_id,
-                      self.instance.key_name)
-                except exception.KeypairNotFound:
-                    # NOTE(lpigueir): If keypair was deleted, treat
-                    # it like it never had any
-                    keypair = None
-            else:
-                keypairs = self.instance.keypairs
-                # NOTE(mriedem): It's possible for the keypair to be deleted
-                # before it was migrated to the instance_extra table, in which
-                # case lazy-loading instance.keypairs will handle the 404 and
-                # just set an empty KeyPairList object on the instance.
-                keypair = keypairs[0] if keypairs else None
+            keypairs = self.instance.keypairs
+            # NOTE(mriedem): It's possible for the keypair to be deleted
+            # before it was migrated to the instance_extra table, in which
+            # case lazy-loading instance.keypairs will handle the 404 and
+            # just set an empty KeyPairList object on the instance.
+            keypair = keypairs[0] if keypairs else None
 
             if keypair:
                 metadata['public_keys'] = {
@@ -435,8 +414,8 @@ class InstanceMetadata(object):
                     device_metadata['mac'] = device.mac
                     # NOTE(artom) If a device has neither tags, vlan or
                     # vf_trusted, don't expose it
-                    if not ('tags' in device or 'vlan' in device_metadata
-                            or 'vf_trusted' in device_metadata):
+                    if not ('tags' in device or 'vlan' in device_metadata or
+                            'vf_trusted' in device_metadata):
                         continue
                 elif isinstance(device, metadata_obj.DiskMetadata):
                     device_metadata['type'] = 'disk'
@@ -536,9 +515,12 @@ class InstanceMetadata(object):
         return self._check_version(required, requested, OPENSTACK_VERSIONS)
 
     def _get_hostname(self):
-        return "%s%s%s" % (self.instance.hostname,
-                           '.' if CONF.dhcp_domain else '',
-                           CONF.dhcp_domain)
+        # TODO(stephenfin): At some point in the future, we may wish to
+        # retrieve this information from neutron.
+        if CONF.api.dhcp_domain:
+            return '.'.join([self.instance.hostname, CONF.api.dhcp_domain])
+
+        return self.instance.hostname
 
     def lookup(self, path):
         if path == "" or path[0] != "/":
@@ -680,6 +662,12 @@ def get_metadata_by_instance_id(instance_id, address, ctxt=None):
              'metadata', 'system_metadata',
              'security_groups', 'keypairs',
              'device_metadata']
+
+    if CONF.api.local_metadata_per_cell:
+        instance = objects.Instance.get_by_uuid(ctxt, instance_id,
+                                                expected_attrs=attrs)
+        return InstanceMetadata(instance, address)
+
     try:
         im = objects.InstanceMapping.get_by_instance_uuid(ctxt, instance_id)
     except exception.InstanceMappingNotFound:

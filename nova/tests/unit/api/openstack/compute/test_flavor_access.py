@@ -75,9 +75,9 @@ def fake_get_flavor_by_flavor_id(context, flavorid):
 
 def _has_flavor_access(flavorid, projectid):
     for access in ACCESS_LIST:
-        if access['flavor_id'] == flavorid and \
-           access['project_id'] == projectid:
-                return True
+        if (access['flavor_id'] == flavorid and
+                access['project_id'] == projectid):
+            return True
     return False
 
 
@@ -102,9 +102,6 @@ def fake_get_all_flavors_sorted_list(context, inactive=False,
 class FakeRequest(object):
     environ = {"nova.context": context.get_admin_context()}
     api_version_request = api_version.APIVersionRequest("2.1")
-
-    def get_db_flavor(self, flavor_id):
-        return INSTANCE_TYPES[flavor_id]
 
     def is_legacy_v2(self):
         return False

@@ -20,6 +20,8 @@ from nova.tests.unit.virt.libvirt import fakelibvirt
 
 class RealTimeServersTest(base.ServersTestBase):
 
+    ADDITIONAL_FILTERS = ['NUMATopologyFilter']
+
     def setUp(self):
         super(RealTimeServersTest, self).setUp()
         self.flags(sysinfo_serial='none', group='libvirt')
@@ -44,9 +46,9 @@ class RealTimeServersTest(base.ServersTestBase):
             self.api.post_server, {'server': server})
 
     def test_success(self):
-        host_info = fakelibvirt.NUMAHostInfo(cpu_nodes=2, cpu_sockets=1,
-                                             cpu_cores=2, cpu_threads=2,
-                                             kB_mem=15740000)
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
         fake_connection = self._get_connection(host_info=host_info)
         self.mock_conn.return_value = fake_connection
 

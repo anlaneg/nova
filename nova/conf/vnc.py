@@ -88,7 +88,7 @@ The VNC proxy is an OpenStack component that enables compute service
 users to access their instances through VNC clients.
 
 This option sets the private address to which proxy clients, such as
-``nova-xvpvncproxy``, should connect to.
+``nova-novncproxy``, should connect to.
 """),
 
     cfg.URIOpt(
@@ -119,6 +119,12 @@ Related options:
         'xvpvncproxy_host',
         default='0.0.0.0',
         deprecated_group='DEFAULT',
+        deprecated_for_removal=True,
+        deprecated_since='19.0.0',
+        deprecated_reason="""
+The ``nova-xvpvnxproxy`` service is deprecated and will be removed in an
+upcoming release.
+""",
         help="""
 IP address or hostname that the XVP VNC console proxy should bind to.
 
@@ -141,6 +147,12 @@ Related options:
         'xvpvncproxy_port',
         default=6081,
         deprecated_group='DEFAULT',
+        deprecated_for_removal=True,
+        deprecated_since='19.0.0',
+        deprecated_reason="""
+The ``nova-xvpvnxproxy`` service is deprecated and will be removed in an
+upcoming release.
+""",
         help="""
 Port that the XVP VNC console proxy should bind to.
 
@@ -163,6 +175,12 @@ Related options:
         'xvpvncproxy_base_url',
         default='http://127.0.0.1:6081/console',
         deprecated_group='DEFAULT',
+        deprecated_for_removal=True,
+        deprecated_since='19.0.0',
+        deprecated_reason="""
+The ``nova-xvpvnxproxy`` service is deprecated and will be removed in an
+upcoming release.
+""",
         help="""
 Public URL address of XVP VNC console proxy.
 
@@ -225,9 +243,10 @@ Related options:
 """),
     cfg.ListOpt(
         'auth_schemes',
-        item_type=types.String(
-            choices=['none', 'vencrypt']
-        ),
+        item_type=types.String(choices=(
+            ('none', 'Allow connection without authentication'),
+            ('vencrypt', 'Use VeNCrypt authentication scheme'),
+        )),
         default=['none'],
         help="""
 The authentication schemes to use with the compute node.
@@ -236,11 +255,6 @@ Control what RFB authentication schemes are permitted for connections between
 the proxy and the compute host. If multiple schemes are enabled, the first
 matching scheme will be used, thus the strongest schemes should be listed
 first.
-
-Possible values:
-
-* ``none``: allow connection without authentication
-* ``vencrypt``: use VeNCrypt authentication scheme
 
 Related options:
 

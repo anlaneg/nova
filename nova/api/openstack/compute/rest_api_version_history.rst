@@ -84,22 +84,23 @@ Example response::
     "remote_console": {
       "protocol": "vnc",
       "type": "novnc",
-      "url": "http://example.com:6080/vnc_auto.html?token=XYZ"
+      "url": "http://example.com:6080/vnc_auto.html?path=%3Ftoken%3DXYZ"
     }
   }
 
-The old APIs 'os-getVNCConsole', 'os-getSPICEConsole', 'os-getSerialConsole'
-and 'os-getRDPConsole' are removed.
+The old APIs ``os-getVNCConsole``, ``os-getSPICEConsole``,
+``os-getSerialConsole`` and ``os-getRDPConsole`` are removed.
 
 2.7
 ---
 
 Check the ``is_public`` attribute of a flavor before adding tenant access
-to it. Reject the request with HTTPConflict error.
+to it. Reject the request with ``HTTPConflict`` error.
 
 2.8
 ---
-Add 'mks' protocol and 'webmks' type for remote consoles.
+
+Add ``mks`` protocol and ``webmks`` type for remote consoles.
 
 2.9
 ---
@@ -111,7 +112,7 @@ a lock on the server, ``false`` otherwise.
 2.10
 ----
 
-Added user_id parameter to os-keypairs plugin, as well as a new property
+Added ``user_id`` parameter to ``os-keypairs`` plugin, as well as a new property
 in the request body, for the create operation.
 
 Administrators will be able to list, get details and delete keypairs owned by
@@ -142,8 +143,9 @@ API response data.
 
 Remove ``onSharedStorage`` parameter from server's evacuate action. Nova will
 automatically detect if the instance is on shared storage.
-Also adminPass is removed from the response body. The user can get the
-password with the server's os-server-password action.
+
+``adminPass`` is removed from the response body. The user can get the
+password with the server's ``os-server-password`` action.
 
 2.15
 ----
@@ -154,7 +156,7 @@ From this version of the API users can choose 'soft-affinity' and
 2.16
 ----
 
-Exposes new host_status attribute for servers/detail and servers/{server_id}.
+Exposes new ``host_status`` attribute for servers/detail and servers/{server_id}.
 Ability to get nova-compute status when querying servers. By default, this is
 only exposed to cloud administrators.
 
@@ -166,18 +168,21 @@ systems in instance may need different configurations to trigger crash dump.
 
 2.18
 ----
+
 Establishes a set of routes that makes project_id an optional construct in v2.1.
 
 2.19
 ----
+
 Allow the user to set and get the server description.
 The user will be able to set the description when creating, rebuilding,
 or updating a server, and get the description as part of the server details.
 
 2.20
 ----
+
 From this version of the API user can call detach and attach volumes for
-instances which are in shelved and shelved_offloaded state.
+instances which are in ``shelved`` and ``shelved_offloaded`` state.
 
 2.21
 ----
@@ -188,8 +193,8 @@ instances.
 2.22
 ----
 
-A new resource servers:migrations added. A new API to force live migration
-to complete added::
+A new resource, ``servers:migrations``, is added. A new API to force live
+migration to complete added::
 
   POST /servers/<uuid>/migrations/<id>/action
   {
@@ -201,10 +206,10 @@ to complete added::
 
 From this version of the API users can get the migration summary list by
 index API or the information of a specific migration by get API.
-And the old top-level resource `/os-migrations` won't be extended anymore.
-Add migration_type for old /os-migrations API, also add ref link to the
-/servers/{uuid}/migrations/{id} for it when the migration is an in-progress
-live-migration.
+And the old top-level resource ``/os-migrations`` won't be extended anymore.
+Add ``migration_type`` for old ``/os-migrations`` API, also add ``ref`` link to
+the ``/servers/{uuid}/migrations/{id}`` for it when the migration is an
+in-progress live-migration.
 
 2.24
 ----
@@ -216,8 +221,8 @@ A new API call to cancel a running live migration::
 2.25 (Maximum in Mitaka)
 ------------------------
 
-Modify input parameter for ``os-migrateLive``. The block_migration will
-support 'auto' value, and disk_over_commit flag will be removed.
+Modify input parameter for ``os-migrateLive``. The ``block_migration`` field now
+supports an ``auto`` value and the ``disk_over_commit`` flag is removed.
 
 2.26
 ----
@@ -225,7 +230,7 @@ support 'auto' value, and disk_over_commit flag will be removed.
 Added support of server tags.
 
 A user can create, update, delete or check existence of simple string tags
-for servers by the os-server-tags plugin.
+for servers by the ``os-server-tags`` plugin.
 
 Tags have the following schema restrictions:
 
@@ -237,30 +242,30 @@ Tags have the following schema restrictions:
 * All other characters are allowed to be in a tag name
 * Each server can have up to 50 tags.
 
-The resource point for these operations is /servers/<server_id>/tags
+The resource point for these operations is ``/servers/<server_id>/tags``.
 
-A user can add a single tag to the server by sending PUT request to the
-/servers/<server_id>/tags/<tag>
+A user can add a single tag to the server by making a ``PUT`` request to
+``/servers/<server_id>/tags/<tag>``.
 
-where <tag> is any valid tag name.
+where ``<tag>`` is any valid tag name.
 
-A user can replace **all** current server tags to the new set of tags
-by sending PUT request to the /servers/<server_id>/tags. New set of tags
-must be specified in request body. This set must be in list 'tags'.
+A user can replace **all** current server tags to the new set of tags by making
+a ``PUT`` request to the ``/servers/<server_id>/tags``. The new set of tags must
+be specified in request body. This set must be in list ``tags``.
 
-A user can remove specified tag from the server by sending DELETE request
-to the /servers/<server_id>/tags/<tag>
+A user can remove specified tag from the server by making a ``DELETE`` request
+to ``/servers/<server_id>/tags/<tag>``.
 
-where <tag> is tag name which user wants to remove.
+where ``<tag>`` is tag name which user wants to remove.
 
-A user can remove **all** tags from the server by sending DELETE request
-to the /servers/<server_id>/tags
+A user can remove **all** tags from the server by making a ``DELETE`` request to
+the ``/servers/<server_id>/tags``.
 
-A user can get a set of server tags with information about server by sending
-GET request to the /servers/<server_id>
+A user can get a set of server tags with information about server by making a
+``GET`` request to ``/servers/<server_id>``.
 
 Request returns dictionary with information about specified server, including
-list 'tags' ::
+list ``tags``::
 
     {
         'id': {server_id},
@@ -268,8 +273,8 @@ list 'tags' ::
         'tags': ['foo', 'bar', 'baz']
     }
 
-A user can get **only** a set of server tags by sending GET request to the
-/servers/<server_id>/tags
+A user can get **only** a set of server tags by making a ``GET`` request to
+``/servers/<server_id>/tags``.
 
 Response ::
 
@@ -277,22 +282,24 @@ Response ::
        'tags': ['foo', 'bar', 'baz']
     }
 
-A user can check if a tag exists or not on a server by sending
-GET /servers/{server_id}/tags/{tag}
+A user can check if a tag exists or not on a server by making a ``GET`` request
+to ``/servers/{server_id}/tags/{tag}``.
 
-Request returns `204 No Content` if tag exist on a server or `404 Not Found`
+Request returns ``204 No Content`` if tag exist on a server or ``404 Not Found``
 if tag doesn't exist on a server.
 
-A user can filter servers in GET /servers request by new filters:
+A user can filter servers in ``GET /servers`` request by new filters:
 
-* tags
-* tags-any
-* not-tags
-* not-tags-any
+* ``tags``
+* ``tags-any``
+* ``not-tags``
+* ``not-tags-any``
 
 These filters can be combined. Also user can use more than one string tags
 for each filter. In this case string tags for each filter must be separated
-by comma: GET /servers?tags=red&tags-any=green,orange
+by comma. For example::
+
+    GET /servers?tags=red&tags-any=green,orange
 
 2.27
 ----
@@ -305,11 +312,11 @@ Both the original form of header and the new form is supported.
 2.28
 ----
 
-Nova API hypervisor.cpu_info change from string to JSON object.
+Nova API ``hypervisor.cpu_info`` change from string to JSON object.
 
-From this version of the API the hypervisor's 'cpu_info' field will be
+From this version of the API the hypervisor's ``cpu_info`` field will be
 returned as JSON object (not string) by sending GET request
-to the /v2.1/os-hypervisors/{hypervisor_id}.
+to the ``/v2.1/os-hypervisors/{hypervisor_id}``.
 
 2.29
 ----
@@ -332,8 +339,8 @@ the ``force`` attribute is set.
 2.31
 ----
 
-Fix os-console-auth-tokens to return connection info for all types of tokens,
-not just RDP.
+Fix ``os-console-auth-tokens`` to return connection info for all types of
+tokens, not just RDP.
 
 2.32
 ----
@@ -854,3 +861,168 @@ following APIs to filter by changes before or equal to the resource
 * ``GET /servers/detail``
 * ``GET /servers/{server_id}/os-instance-actions``
 * ``GET /os-migrations``
+
+2.67
+----
+
+Adds the ``volume_type`` parameter to ``block_device_mapping_v2``, which can
+be used to specify cinder ``volume_type`` when creating a server.
+
+2.68
+----
+
+Remove support for forced live migration and evacuate server actions.
+
+2.69
+----
+
+Add support for returning minimal constructs for ``GET /servers``,
+``GET /servers/detail``, ``GET /servers/{server_id}`` and ``GET /os-services``
+when there is a transient unavailability condition in the deployment like an
+infrastructure failure. Starting from this microversion, the responses from the
+down part of the infrastructure for the above four requests will have missing
+key values to make it more resilient. The response body will only have a
+minimal set of information obtained from the available information in the API
+database for the down cells. See `handling down cells
+<https://docs.openstack.org/api-guide/compute/down_cells.html>`__ for
+more information.
+
+2.70
+----
+
+Exposes virtual device tags for volume attachments and virtual interfaces
+(ports). A ``tag`` parameter is added to the response body for the following
+APIs:
+
+**Volumes**
+
+* GET /servers/{server_id}/os-volume_attachments (list)
+* GET /servers/{server_id}/os-volume_attachments/{volume_id} (show)
+* POST /servers/{server_id}/os-volume_attachments (attach)
+
+**Ports**
+
+* GET /servers/{server_id}/os-interface (list)
+* GET /servers/{server_id}/os-interface/{port_id} (show)
+* POST /servers/{server_id}/os-interface (attach)
+
+2.71
+----
+
+The ``server_groups`` parameter will be in the response body of the following
+APIs to list the server groups to which the server belongs:
+
+* ``GET /servers/{server_id}``
+* ``PUT /servers/{server_id}``
+* ``POST /servers/{server_id}/action (rebuild)``
+
+2.72 (Maximum in Stein)
+-----------------------
+
+API microversion 2.72 adds support for creating servers with neutron ports
+that has resource request, e.g. neutron ports with
+`QoS minimum bandwidth rule`_. Deleting servers with such ports have
+already been handled properly as well as detaching these type of ports.
+
+API limitations:
+
+* Creating servers with Neutron networks having QoS minimum bandwidth rule
+  is not supported.
+
+* Attaching Neutron ports and networks having QoS minimum bandwidth rule
+  is not supported.
+
+* Moving (resizing, migrating, live-migrating, evacuating,
+  unshelving after shelve offload) servers with ports having resource
+  request is not yet supported.
+
+.. _QoS minimum bandwidth rule: https://docs.openstack.org/neutron/latest/admin/config-qos-min-bw.html
+
+2.73
+----
+
+API microversion 2.73 adds support for specifying a reason when locking the
+server and exposes this information via ``GET /servers/detail``,
+``GET /servers/{server_id}``, ``PUT servers/{server_id}`` and
+``POST /servers/{server_id}/action`` where the action is rebuild. It also
+supports ``locked`` as a filter/sort parameter for ``GET /servers/detail``
+and ``GET /servers``.
+
+2.74
+----
+
+API microversion 2.74 adds support for specifying optional ``host``
+and/or ``hypervisor_hostname`` parameters in the request body of
+``POST /servers``. These request a specific destination host/node
+to boot the requested server. These parameters are mutually exclusive
+with the special ``availability_zone`` format of ``zone:host:node``.
+Unlike ``zone:host:node``, the ``host`` and/or ``hypervisor_hostname``
+parameters still allow scheduler filters to be run. If the requested
+host/node is unavailable or otherwise unsuitable, earlier failure will
+be raised.
+There will be also a new policy named
+``compute:servers:create:requested_destination``. By default,
+it can be specified by administrators only.
+
+2.75
+----
+
+Multiple API cleanups are done in API microversion 2.75:
+
+* 400 error response for an unknown parameter in the querystring or request
+  body.
+
+* Make the server representation consistent among GET, PUT
+  and rebuild server API responses. ``PUT /servers/{server_id}``
+  and ``POST /servers/{server_id}/action {rebuild}`` API responses are
+  modified to add all the missing fields which are returned
+  by ``GET /servers/{server_id}``.
+
+* Change the default return value of the ``swap`` field from the empty
+  string to 0 (integer) in flavor APIs.
+
+* Always return the ``servers`` field in the response of the
+  ``GET /os-hypervisors``, ``GET /os-hypervisors/detail`` and
+  ``GET /os-hypervisors/{hypervisor_id}`` APIs even when there are no servers
+  on a hypervisor.
+
+2.76
+----
+
+Adds ``power-update`` event name to ``os-server-external-events`` API. The
+changes to the power state of an instance caused by this event can be viewed
+through ``GET /servers/{server_id}/os-instance-actions`` and
+``GET /servers/{server_id}/os-instance-actions/{request_id}``.
+
+2.77
+----
+
+API microversion 2.77 adds support for specifying availability zone when
+unshelving a shelved offloaded server.
+
+2.78
+----
+
+Add server sub-resource ``topology`` to show server NUMA information.
+
+* ``GET /servers/{server_id}/topology``
+
+The default behavior is configurable using two new policies:
+
+* ``compute:server:topology:index``
+* ``compute:server:topology:host:index``
+
+2.79
+----
+
+API microversion 2.79 adds support for specifying the ``delete_on_termination``
+field in the request body when attaching a volume to a server, to support
+configuring whether to delete the data volume when the server is destroyed.
+Also, ``delete_on_termination`` is added to the GET responses when showing
+attached volumes.
+
+The affected APIs are as follows:
+
+* ``POST /servers/{server_id}/os-volume_attachments``
+* ``GET /servers/{server_id}/os-volume_attachments``
+* ``GET /servers/{server_id}/os-volume_attachments/{volume_id}``

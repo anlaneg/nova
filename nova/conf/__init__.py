@@ -23,7 +23,6 @@ from nova.conf import api
 from nova.conf import availability_zone
 from nova.conf import base
 from nova.conf import cache
-from nova.conf import cells
 from nova.conf import cinder
 from nova.conf import compute
 from nova.conf import conductor
@@ -33,7 +32,6 @@ from nova.conf import consoleauth
 from nova.conf import database
 from nova.conf import devices
 from nova.conf import ephemeral_storage
-from nova.conf import flavors
 from nova.conf import glance
 from nova.conf import guestfs
 from nova.conf import hyperv
@@ -78,7 +76,6 @@ api.register_opts(CONF)
 availability_zone.register_opts(CONF)
 base.register_opts(CONF)
 cache.register_opts(CONF)
-cells.register_opts(CONF)
 cinder.register_opts(CONF)
 compute.register_opts(CONF)
 conductor.register_opts(CONF)
@@ -88,7 +85,6 @@ consoleauth.register_opts(CONF)
 database.register_opts(CONF)
 devices.register_opts(CONF)
 ephemeral_storage.register_opts(CONF)
-flavors.register_opts(CONF)
 glance.register_opts(CONF)
 guestfs.register_opts(CONF)
 hyperv.register_opts(CONF)

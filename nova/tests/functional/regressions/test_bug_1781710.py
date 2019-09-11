@@ -14,10 +14,10 @@ from nova.scheduler import filter_scheduler
 from nova.scheduler import weights
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit.image import fake as image_fake
 from nova.tests.unit import policy_fixture
-from nova.virt import fake
 
 
 class HostNameWeigher(weights.BaseHostWeigher):
@@ -49,7 +49,7 @@ class AntiAffinityMultiCreateRequest(test.TestCase,
         super(AntiAffinityMultiCreateRequest, self).setUp()
         self.useFixture(policy_fixture.RealPolicyFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -76,11 +76,7 @@ class AntiAffinityMultiCreateRequest(test.TestCase,
                    group='workarounds')
         self.start_service('scheduler')
 
-        fake.set_nodes(['host1'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host1')
-        fake.set_nodes(['host2'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host2')
 
     def test_anti_affinity_multi_create(self):

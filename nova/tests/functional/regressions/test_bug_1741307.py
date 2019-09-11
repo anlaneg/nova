@@ -12,29 +12,30 @@
 
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 import nova.tests.unit.image.fake
 from nova.tests.unit import policy_fixture
-from nova.virt import fake
 
 
-class TestResizeWithCachingScheduler(test.TestCase,
-                                     integrated_helpers.InstanceHelperMixin):
+class TestResizeWithNoAllocationScheduler(
+        test.TestCase, integrated_helpers.InstanceHelperMixin):
     """Regression tests for bug #1741307
 
-    The CachingScheduler does not use Placement to make claims (allocations)
-    against compute nodes during scheduling like the FilterScheduler does.
+    Some scheduler drivers, like the old CachingScheduler driver, do not use
+    Placement to make claims (allocations) against compute nodes during
+    scheduling like the FilterScheduler does.
     During a cold migrate / resize, the FilterScheduler will "double up" the
     instance allocations so the instance has resource allocations made against
     both the source node and the chosen destination node. Conductor will then
     attempt to "swap" the source node allocation to the migration record. If
-    using the CachingScheduler, there are no allocations for the instance on
+    using a non-Placement driver, there are no allocations for the instance on
     the source node and conductor fails. Note that if the compute running the
     instance was running Ocata code or older, then the compute itself would
     create the allocations in Placement via the ResourceTracker, but once all
     computes are upgraded to Pike or newer, the compute no longer creates
     allocations in Placement because it assumes the scheduler is doing that,
-    which is not the case with the CachingScheduler.
+    which is not the case with these outlier scheduler drivers.
 
     This is a regression test to show the failure before it's fixed and then
     can be used to confirm the fix.
@@ -43,11 +44,11 @@ class TestResizeWithCachingScheduler(test.TestCase,
     microversion = 'latest'
 
     def setUp(self):
-        super(TestResizeWithCachingScheduler, self).setUp()
+        super(TestResizeWithNoAllocationScheduler, self).setUp()
 
         self.useFixture(policy_fixture.RealPolicyFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -62,14 +63,12 @@ class TestResizeWithCachingScheduler(test.TestCase,
 
         # Create two compute nodes/services.
         for host in ('host1', 'host2'):
-            fake.set_nodes([host])
-            self.addCleanup(fake.restore_nodes)
             self.start_service('compute', host=host)
 
-        # Start the scheduler after the compute nodes are created in the DB
-        # in the case of using the CachingScheduler.
-        self.flags(driver='caching_scheduler', group='scheduler')
-        self.start_service('scheduler')
+        scheduler_service = self.start_service('scheduler')
+        # We need to mock the FilterScheduler to not use Placement so that
+        # allocations won't be created during scheduling.
+        scheduler_service.manager.driver.USES_ALLOCATION_CANDIDATES = False
 
         flavors = self.api.get_flavors()
         self.old_flavor = flavors[0]

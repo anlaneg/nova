@@ -13,11 +13,11 @@
 from nova import config
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit.image import fake as image_fakes
 from nova.tests.unit import policy_fixture
 from nova import utils
-from nova.virt import fake
 
 CONF = config.CONF
 
@@ -39,8 +39,8 @@ class TestBootFromVolumeIsolatedHostsFilter(
 
         self.useFixture(policy_fixture.RealPolicyFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
-        self.useFixture(nova_fixtures.CinderFixtureNewAttachFlow(self))
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(nova_fixtures.CinderFixture(self))
+        self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -67,13 +67,11 @@ class TestBootFromVolumeIsolatedHostsFilter(
         # Create two compute nodes/services so we can restrict the image
         # we'll use to one of the hosts.
         for host in ('host1', 'host2'):
-            fake.set_nodes([host])
-            self.addCleanup(fake.restore_nodes)
             self.start_service('compute', host=host)
 
     def test_boot_from_volume_with_isolated_image(self):
         # Create our server without networking just to keep things simple.
-        image_id = nova_fixtures.CinderFixtureNewAttachFlow.IMAGE_BACKED_VOL
+        image_id = nova_fixtures.CinderFixture.IMAGE_BACKED_VOL
         server_req_body = {
             # There is no imageRef because this is boot from volume.
             'server': {

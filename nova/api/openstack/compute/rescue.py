@@ -20,7 +20,7 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import rescue
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 import nova.conf
 from nova import exception
 from nova.policies import rescue as rescue_policies
@@ -30,8 +30,8 @@ CONF = nova.conf.CONF
 
 
 class RescueController(wsgi.Controller):
-    def __init__(self, *args, **kwargs):
-        super(RescueController, self).__init__(*args, **kwargs)
+    def __init__(self):
+        super(RescueController, self).__init__()
         self.compute_api = compute.API()
 
     # TODO(cyeoh): Should be responding here with 202 Accept
@@ -61,8 +61,6 @@ class RescueController(wsgi.Controller):
             self.compute_api.rescue(context, instance,
                                     rescue_password=password,
                                     rescue_image_ref=rescue_image_ref)
-        except exception.InstanceUnknownCell as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceIsLocked as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
@@ -89,8 +87,6 @@ class RescueController(wsgi.Controller):
         instance = common.get_instance(self.compute_api, context, id)
         try:
             self.compute_api.unrescue(context, instance)
-        except exception.InstanceUnknownCell as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceIsLocked as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:

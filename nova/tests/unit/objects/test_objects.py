@@ -27,7 +27,6 @@ from oslo_versionedobjects import fixture
 import six
 
 from nova import context
-from nova import exception
 from nova import objects
 from nova.objects import base
 from nova.objects import fields
@@ -578,27 +577,6 @@ class _TestObject(object):
         self.assertEqual(set(myobj_fields) | set(myobj3_fields),
                          set(SubclassedObject.fields.keys()))
 
-    def test_obj_as_admin(self):
-        obj = MyObj(context=self.context)
-
-        def fake(*args, **kwargs):
-            self.assertTrue(obj._context.is_admin)
-
-        with mock.patch.object(obj, 'obj_reset_changes') as mock_fn:
-            mock_fn.side_effect = fake
-            with obj.obj_as_admin():
-                obj.save()
-            self.assertTrue(mock_fn.called)
-
-        self.assertFalse(obj._context.is_admin)
-
-    def test_obj_as_admin_orphaned(self):
-        def testme():
-            obj = MyObj()
-            with obj.obj_as_admin():
-                pass
-        self.assertRaises(exception.OrphanedObjectError, testme)
-
     def test_obj_alternate_context(self):
         obj = MyObj(context=self.context)
         with obj.obj_alternate_context(mock.sentinel.alt_ctx):
@@ -1059,19 +1037,19 @@ object_data = {
     'AggregateList': '1.3-3ea55a050354e72ef3306adefa553957',
     'BandwidthUsage': '1.2-c6e4c779c7f40f2407e3d70022e3cd1c',
     'BandwidthUsageList': '1.2-5fe7475ada6fe62413cbfcc06ec70746',
-    'BlockDeviceMapping': '1.19-407e75274f48e60a76e56283333c9dbc',
+    'BlockDeviceMapping': '1.20-45a6ad666ddf14bbbedece2293af77e2',
     'BlockDeviceMappingList': '1.17-1e568eecb91d06d4112db9fd656de235',
     'BuildRequest': '1.3-077dee42bed93f8a5b62be77657b7152',
     'BuildRequestList': '1.0-cd95608eccb89fbc702c8b52f38ec738',
     'CellMapping': '1.1-5d652928000a5bc369d79d5bde7e497d',
     'CellMappingList': '1.1-496ef79bb2ab41041fff8bcb57996352',
-    'ComputeNode': '1.18-431fafd8ac4a5f3559bd9b1f1332cc22',
+    'ComputeNode': '1.19-af6bd29a6c3b225da436a0d8487096f2',
     'ComputeNodeList': '1.17-52f3b0962b1c86b98590144463ebb192',
+    'ConsoleAuthToken': '1.1-8da320fb065080eb4d3c2e5c59f8bf52',
     'CpuDiagnostics': '1.0-d256f2e442d1b837735fd17dfe8e3d47',
-    'ConsoleAuthToken': '1.0-a61bf7b54517c4013a12289c5a5268ea',
     'DNSDomain': '1.0-7b0b2dab778454b6a7b6c66afe163a1a',
     'DNSDomainList': '1.0-4ee0d9efdfd681fed822da88376e04d2',
-    'Destination': '1.2-74854e8cfe7fe616294d93a5d189d885',
+    'Destination': '1.3-07240d223a95c8b9399f7af21091ccfd',
     'DeviceBus': '1.0-77509ea1ea0dd750d5864b9bd87d3f9d',
     'DeviceMetadata': '1.0-04eb8fd218a49cbc3b1e54b774d179f7',
     'Diagnostics': '1.0-38ad3e9b1a59306253fc03f97936db95',
@@ -1079,51 +1057,48 @@ object_data = {
     'DiskMetadata': '1.0-e7a0f1ccccf10d26a76b28e7492f3788',
     'EC2Ids': '1.0-474ee1094c7ec16f8ce657595d8c49d9',
     'EC2InstanceMapping': '1.0-a4556eb5c5e94c045fe84f49cf71644f',
-    'EC2SnapshotMapping': '1.0-47e7ddabe1af966dce0cfd0ed6cd7cd1',
-    'EC2VolumeMapping': '1.0-5b713751d6f97bad620f3378a521020d',
     'FixedIP': '1.14-53e1c10b539f1a82fe83b1af4720efae',
     'FixedIPList': '1.15-07b6261cef836cb09d2d8673f68ece15',
     'Flavor': '1.2-4ce99b41327bb230262e5a8f45ff0ce3',
     'FlavorList': '1.1-52b5928600e7ca973aa4fc1e46f3934c',
     'FloatingIP': '1.10-52a67d52d85eb8b3f324a5b7935a335b',
     'FloatingIPList': '1.12-e4debd21fddb12cf40d36f737225fa9d',
+    'HVSpec': '1.2-de06bcec472a2f04966b855a49c46b41',
     'HostMapping': '1.0-1a3390a696792a552ab7bd31a77ba9ac',
     'HostMappingList': '1.1-18ac2bfb8c1eb5545bed856da58a79bc',
     'HyperVLiveMigrateData': '1.4-e265780e6acfa631476c8170e8d6fce0',
-    'HVSpec': '1.2-de06bcec472a2f04966b855a49c46b41',
     'IDEDeviceBus': '1.0-29d4c9f27ac44197f01b6ac1b7e16502',
     'ImageMeta': '1.8-642d1b2eb3e880a367f37d72dd76162d',
-    'ImageMetaProps': '1.20-ffd686cde289814695d5f89522aa5aef',
-    'Instance': '2.4-4437eb8b2737c3054ea579b8efe31dc5',
-    'InstanceAction': '1.1-f9f293e526b66fca0d05c3b3a2d13914',
-    'InstanceActionEvent': '1.2-b2f368b8a29d8d872b1f6ea841e820a0',
+    'ImageMetaProps': '1.24-f92fa09d54185499da98f5430524964e',
+    'Instance': '2.6-5fefbcb483703c85e4d328b887c8af33',
+    'InstanceAction': '1.2-9a5abc87fdd3af46f45731960651efb5',
+    'InstanceActionEvent': '1.3-c749e1b3589e7117c81cb2aa6ac438d5',
     'InstanceActionEventList': '1.1-13d92fb953030cdbfee56481756e02be',
     'InstanceActionList': '1.1-a2b2fb6006b47c27076d3a1d48baa759',
     'InstanceDeviceMetadata': '1.0-74d78dd36aa32d26d2769a1b57caf186',
-    'InstanceExternalEvent': '1.2-23eb6ba79cde5cd06d3445f845ba4589',
+    'InstanceExternalEvent': '1.3-e47782874cca95bb96e566286e9d1e23',
     'InstanceFault': '1.2-7ef01f16f1084ad1304a513d6d410a38',
     'InstanceFaultList': '1.2-6bb72de2872fe49ded5eb937a93f2451',
     'InstanceGroup': '1.11-852ac511d30913ee88f3c3a869a8f30a',
     'InstanceGroupList': '1.8-90f8f1a445552bb3bbc9fa1ae7da27d4',
     'InstanceInfoCache': '1.5-cd8b96fefe0fc8d4d337243ba0bf0e1e',
-    'InstanceList': '2.4-d2c5723da8c1d08e07cb00160edfd292',
-    'InstanceMapping': '1.1-808df83f25987578ed3b187e16b47405',
-    'InstanceMappingList': '1.2-ee638619aa3d8a82a59c0c83bfa64d78',
+    'InstanceList': '2.6-238f125650c25d6d12722340d726f723',
+    'InstanceMapping': '1.2-3bd375e65c8eb9c45498d2f87b882e03',
+    'InstanceMappingList': '1.3-d34b6ebb076d542ae0f8b440534118da',
     'InstanceNUMACell': '1.4-7c1eb9a198dee076b4de0840e45f4f55',
     'InstanceNUMATopology': '1.3-ec0030cb0402a49c96da7051c037082a',
-    'InstancePCIRequest': '1.2-6344dd8bd1bf873e7325c07afe47f774',
+    'InstancePCIRequest': '1.3-f6d324f1c337fad4f34892ed5f484c9a',
     'InstancePCIRequests': '1.1-65e38083177726d806684cb1cc0136d2',
-    'LibvirtLiveMigrateBDMInfo': '1.1-5f4a68873560b6f834b74e7861d71aaf',
-    'LibvirtLiveMigrateData': '1.9-7082cc7dd48ca49df71fe3846521b2f3',
     'KeyPair': '1.4-1244e8d1b103cc69d038ed78ab3a8cc6',
     'KeyPairList': '1.3-94aad3ac5c938eef4b5e83da0212f506',
+    'LibvirtLiveMigrateBDMInfo': '1.1-5f4a68873560b6f834b74e7861d71aaf',
+    'LibvirtLiveMigrateData': '1.9-7082cc7dd48ca49df71fe3846521b2f3',
     'MemoryDiagnostics': '1.0-2c995ae0f2223bb0f8e523c5cc0b83da',
-    'Migration': '1.5-48bebaada664ee15bc23b35b2b814d75',
+    'Migration': '1.6-fd6b1abfd8e3ce945348e7b5f04baa28',
     'MigrationContext': '1.1-9fb17b0b521370957a884636499df52d',
     'MigrationList': '1.4-983a9c29d4f1e747ce719dc9063b729b',
     'MonitorMetric': '1.1-53b1db7c4ae2c531db79761e7acc52ba',
     'MonitorMetricList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
-    'NicDiagnostics': '1.0-895e9ad50e0f56d5258585e3e066aea5',
     'NUMACell': '1.3-64b5fec7c51c0a85760c56b42dd307a5',
     'NUMAPagesTopology': '1.1-edab9fa2dc43c117a38d600be54b4542',
     'NUMATopology': '1.2-c63fad38be73b6afd04715c9c1b29220',
@@ -1134,19 +1109,21 @@ object_data = {
     'NetworkMetadata': '1.0-2cb8d21b34f87b0261d3e1d1ae5cf218',
     'NetworkRequest': '1.2-af1ff2d986999fbb79377712794d82aa',
     'NetworkRequestList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
-    'PciDevice': '1.6-2a2612baaa1786679e52084e82ca7e66',
+    'NicDiagnostics': '1.0-895e9ad50e0f56d5258585e3e066aea5',
     'PCIDeviceBus': '1.0-2b891cb77e42961044689f3dc2718995',
+    'PciDevice': '1.6-2a2612baaa1786679e52084e82ca7e66',
     'PciDeviceList': '1.3-52ff14355491c8c580bdc0ba34c26210',
     'PciDevicePool': '1.1-3f5ddc3ff7bfa14da7f6c7e9904cc000',
     'PciDevicePoolList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'PowerVMLiveMigrateData': '1.4-a745f4eda16b45e1bc5686a0c498f27e',
     'Quotas': '1.3-40fcefe522111dddd3e5e6155702cf4e',
     'QuotasNoOp': '1.3-347a039fc7cfee7b225b68b5181e0733',
-    'RequestSpec': '1.11-851a690dbf116fb5165cc94ea6c85629',
+    'RequestGroup': '1.2-b9f9db748fe8cde0573af69db771c5ce',
+    'RequestSpec': '1.12-25010470f219af9b6163f2a457a513f5',
     'S3ImageMapping': '1.0-7dd7366a890d82660ed121de9092276e',
+    'SCSIDeviceBus': '1.0-61c1e89a00901069ab1cf2991681533b',
     'SchedulerLimits': '1.0-249c4bd8e62a9b327b7026b7f19cc641',
     'SchedulerRetries': '1.1-3c9c8b16143ebbb6ad7030e999d14cc0',
-    'SCSIDeviceBus': '1.0-61c1e89a00901069ab1cf2991681533b',
     'SecurityGroup': '1.2-86d67d8d3ab0c971e1dc86e02f9524a8',
     'SecurityGroupList': '1.1-c655ed13298e630f4d398152f7d08d71',
     'SecurityGroupRule': '1.1-ae1da17b79970012e8536f88cb3c6b29',
@@ -1154,13 +1131,14 @@ object_data = {
     'Selection': '1.0-7f5c065097371fe527dd1245f1530653',
     'Service': '1.22-8a740459ab9bf258a19c8fcb875c2d9a',
     'ServiceList': '1.19-5325bce13eebcbf22edc9678285270cc',
-    'TaskLog': '1.0-78b0534366f29aa3eebb01860fbe18fe',
-    'TaskLogList': '1.0-cc8cce1af8a283b9d28b55fcd682e777',
     'Tag': '1.1-8b8d7d5b48887651a0e01241672e2963',
     'TagList': '1.1-55231bdb671ecf7641d6a2e9109b5d8e',
+    'TaskLog': '1.0-78b0534366f29aa3eebb01860fbe18fe',
+    'TaskLogList': '1.0-cc8cce1af8a283b9d28b55fcd682e777',
     'TrustedCerts': '1.0-dcf528851e0f868c77ee47e90563cda7',
     'USBDeviceBus': '1.0-e4c7dd6032e46cd74b027df5eb2d4750',
     'VIFMigrateData': '1.0-cb15282b25a039ab35046ed705eb931d',
+    'VMwareLiveMigrateData': '1.0-a3cc858a2bf1d3806d6f57cfaa1fb98a',
     'VirtCPUFeature': '1.0-ea2464bdd09084bd388e5f61d5d4fc86',
     'VirtCPUModel': '1.0-5e1864af9227f698326203d7249796b5',
     'VirtCPUTopology': '1.0-fc694de72e20298f7c6bab1083fd4563',
@@ -1168,7 +1146,7 @@ object_data = {
     'VirtualInterfaceList': '1.0-9750e2074437b3077e46359102779fc6',
     'VolumeUsage': '1.0-6c8190c46ce1469bb3286a1f21c2e475',
     'XenDeviceBus': '1.0-272a4f899b24e31e42b2b9a7ed7e9194',
-    'XenapiLiveMigrateData': '1.4-7dc9417e921b2953faa6751f18785f3f',
+    'XenapiLiveMigrateData': '1.4-7dc9417e921b2953faa6751f18785f3f'
 }
 
 

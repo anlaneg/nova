@@ -15,6 +15,7 @@ from oslo_utils import fixture as utils_fixture
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
+from nova.compute import api as compute_api
 from nova.compute import claims
 from nova.compute import instance_actions
 from nova.compute import power_state
@@ -225,16 +226,24 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         fake_bdms = objects.BlockDeviceMappingList()
         mock_get_bdms.return_value = fake_bdms
 
-        with mock.patch.object(instance, 'save'):
-            self.compute.shelve_offload_instance(self.context, instance,
-                                                 clean_shutdown=clean_shutdown)
-            mock_notify.assert_has_calls([
-                mock.call(self.context, instance, 'fake-mini',
-                          action='shelve_offload', phase='start',
-                          bdms=fake_bdms),
-                mock.call(self.context, instance, 'fake-mini',
-                          action='shelve_offload', phase='end',
-                          bdms=fake_bdms)])
+        def stub_instance_save(inst, *args, **kwargs):
+            # If the vm_state is changed to SHELVED_OFFLOADED make sure we
+            # have already freed up allocations in placement.
+            if inst.vm_state == vm_states.SHELVED_OFFLOADED:
+                self.assertTrue(mock_delete_alloc.called,
+                                'Allocations must be deleted before the '
+                                'vm_status can change to shelved_offloaded.')
+
+        self.stub_out('nova.objects.Instance.save', stub_instance_save)
+        self.compute.shelve_offload_instance(self.context, instance,
+                                             clean_shutdown=clean_shutdown)
+        mock_notify.assert_has_calls([
+            mock.call(self.context, instance, 'fake-mini',
+                      action='shelve_offload', phase='start',
+                      bdms=fake_bdms),
+            mock.call(self.context, instance, 'fake-mini',
+                      action='shelve_offload', phase='end',
+                      bdms=fake_bdms)])
 
         self.assertEqual(vm_states.SHELVED_OFFLOADED, instance.vm_state)
         self.assertIsNone(instance.task_state)
@@ -338,7 +347,7 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             self.compute.unshelve_instance(
                 self.context, instance, image=image,
                 filter_properties=filter_properties,
-                node=node)
+                node=node, request_spec=objects.RequestSpec())
 
         mock_notify_instance_action.assert_has_calls([
             mock.call(self.context, instance, 'fake-mini',
@@ -437,7 +446,8 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         with mock.patch.object(instance, 'save') as mock_save:
             mock_save.side_effect = check_save
             self.compute.unshelve_instance(self.context, instance, image=None,
-                    filter_properties=filter_properties, node=node)
+                    filter_properties=filter_properties, node=node,
+                    request_spec=objects.RequestSpec())
 
         mock_notify_instance_action.assert_has_calls([
             mock.call(self.context, instance, 'fake-mini',
@@ -531,7 +541,8 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             self.assertRaises(test.TestingException,
                               self.compute.unshelve_instance,
                               self.context, instance, image=None,
-                              filter_properties=filter_properties, node=node)
+                              filter_properties=filter_properties, node=node,
+                              request_spec=objects.RequestSpec())
 
         mock_notify_instance_action.assert_called_once_with(
             self.context, instance, 'fake-mini', action='unshelve',
@@ -688,7 +699,7 @@ class ShelveComputeAPITestCase(test_compute.BaseTestCase):
         with test.nested(
             mock.patch.object(compute_utils, 'is_volume_backed_instance',
                               return_value=boot_from_volume),
-            mock.patch.object(self.compute_api, '_create_image',
+            mock.patch.object(compute_utils, 'create_image',
                               return_value=dict(id='fake-image-id')),
             mock.patch.object(instance, 'save'),
             mock.patch.object(self.compute_api, '_record_action_start'),
@@ -801,8 +812,7 @@ class ShelveComputeAPITestCase(test_compute.BaseTestCase):
         for state in invalid_vm_states:
             self._test_shelve_offload_invalid_state(state)
 
-    @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
-    def test_unshelve(self, get_by_instance_uuid):
+    def _get_specify_state_instance(self, vm_state):
         # Ensure instance can be unshelved.
         instance = self._create_fake_instance_obj()
 
@@ -811,8 +821,15 @@ class ShelveComputeAPITestCase(test_compute.BaseTestCase):
         self.compute_api.shelve(self.context, instance)
 
         instance.task_state = None
-        instance.vm_state = vm_states.SHELVED
+        instance.vm_state = vm_state
         instance.save()
+
+        return instance
+
+    @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
+    def test_unshelve(self, get_by_instance_uuid):
+        # Ensure instance can be unshelved.
+        instance = self._get_specify_state_instance(vm_states.SHELVED)
 
         fake_spec = objects.RequestSpec()
         get_by_instance_uuid.return_value = fake_spec
@@ -826,3 +843,116 @@ class ShelveComputeAPITestCase(test_compute.BaseTestCase):
         self.assertEqual(instance.task_state, task_states.UNSHELVING)
 
         db.instance_destroy(self.context, instance['uuid'])
+
+    @mock.patch('nova.availability_zones.get_availability_zones',
+                return_value=['az1', 'az2'])
+    @mock.patch.object(objects.RequestSpec, 'save')
+    @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
+    def test_specified_az_ushelve_invalid_request(self,
+                                                  get_by_instance_uuid,
+                                                  mock_save,
+                                                  mock_availability_zones):
+        # Ensure instance can be unshelved.
+        instance = self._get_specify_state_instance(
+            vm_states.SHELVED_OFFLOADED)
+
+        new_az = "fake-new-az"
+        fake_spec = objects.RequestSpec()
+        fake_spec.availability_zone = "fake-old-az"
+        get_by_instance_uuid.return_value = fake_spec
+
+        exc = self.assertRaises(exception.InvalidRequest,
+                                self.compute_api.unshelve,
+                                self.context, instance, new_az=new_az)
+        self.assertEqual("The requested availability zone is not available",
+                         exc.format_message())
+
+    @mock.patch('nova.availability_zones.get_availability_zones',
+                return_value=['az1', 'az2'])
+    @mock.patch.object(objects.RequestSpec, 'save')
+    @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
+    def test_specified_az_unshelve_invalid_state(self, get_by_instance_uuid,
+                                                 mock_save,
+                                                 mock_availability_zones):
+        # Ensure instance can be unshelved.
+        instance = self._get_specify_state_instance(vm_states.SHELVED)
+
+        new_az = "az1"
+        fake_spec = objects.RequestSpec()
+        fake_spec.availability_zone = "fake-old-az"
+        get_by_instance_uuid.return_value = fake_spec
+
+        self.assertRaises(exception.UnshelveInstanceInvalidState,
+                          self.compute_api.unshelve,
+                          self.context, instance, new_az=new_az)
+
+    @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid',
+                new_callable=mock.NonCallableMock)
+    @mock.patch('nova.availability_zones.get_availability_zones')
+    def test_validate_unshelve_az_cross_az_attach_true(
+            self, mock_get_azs, mock_get_bdms):
+        """Tests a case where the new AZ to unshelve does not match the volume
+        attached to the server but cross_az_attach=True so it's not an error.
+        """
+        # Ensure instance can be unshelved.
+        instance = self._create_fake_instance_obj(
+            params=dict(vm_state=vm_states.SHELVED_OFFLOADED))
+
+        new_az = "west_az"
+        mock_get_azs.return_value = ["west_az", "east_az"]
+        self.flags(cross_az_attach=True, group='cinder')
+        self.compute_api._validate_unshelve_az(self.context, instance, new_az)
+        mock_get_azs.assert_called_once_with(
+            self.context, self.compute_api.host_api, get_only_available=True)
+
+    @mock.patch('nova.volume.cinder.API.get')
+    @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid')
+    @mock.patch('nova.availability_zones.get_availability_zones')
+    def test_validate_unshelve_az_cross_az_attach_false(
+            self, mock_get_azs, mock_get_bdms, mock_get):
+        """Tests a case where the new AZ to unshelve does not match the volume
+        attached to the server and cross_az_attach=False so it's an error.
+        """
+        # Ensure instance can be unshelved.
+        instance = self._create_fake_instance_obj(
+            params=dict(vm_state=vm_states.SHELVED_OFFLOADED))
+
+        new_az = "west_az"
+        mock_get_azs.return_value = ["west_az", "east_az"]
+
+        bdms = [objects.BlockDeviceMapping(destination_type='volume',
+                                           volume_id=uuids.volume_id)]
+        mock_get_bdms.return_value = bdms
+        volume = {'id': uuids.volume_id, 'availability_zone': 'east_az'}
+        mock_get.return_value = volume
+
+        self.flags(cross_az_attach=False, group='cinder')
+        self.assertRaises(exception.MismatchVolumeAZException,
+                          self.compute_api._validate_unshelve_az,
+                          self.context, instance, new_az)
+        mock_get_azs.assert_called_once_with(
+            self.context, self.compute_api.host_api, get_only_available=True)
+        mock_get_bdms.assert_called_once_with(self.context, instance.uuid)
+        mock_get.assert_called_once_with(self.context, uuids.volume_id)
+
+    @mock.patch.object(compute_api.API, '_validate_unshelve_az')
+    @mock.patch.object(objects.RequestSpec, 'save')
+    @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
+    def test_specified_az_unshelve(self, get_by_instance_uuid,
+                                   mock_save, mock_validate_unshelve_az):
+        # Ensure instance can be unshelved.
+        instance = self._get_specify_state_instance(
+            vm_states.SHELVED_OFFLOADED)
+
+        new_az = "west_az"
+        fake_spec = objects.RequestSpec()
+        fake_spec.availability_zone = "fake-old-az"
+        get_by_instance_uuid.return_value = fake_spec
+
+        self.compute_api.unshelve(self.context, instance, new_az=new_az)
+
+        mock_save.assert_called_once_with()
+        self.assertEqual(new_az, fake_spec.availability_zone)
+
+        mock_validate_unshelve_az.assert_called_once_with(
+            self.context, instance, new_az)

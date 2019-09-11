@@ -153,13 +153,16 @@ def get_dev_count_for_disk_bus(disk_bus):
        Determine how many disks can be supported in
        a single VM for a particular disk bus.
 
-       Returns the number of disks supported.
+       Returns the number of disks supported or None
+       if there is no limit.
     """
 
     if disk_bus == "ide":
         return 4
     else:
-        return 26
+        if CONF.compute.max_disk_devices_to_attach < 0:
+            return None
+        return CONF.compute.max_disk_devices_to_attach
 
 
 def find_disk_dev_for_disk_bus(mapping, bus,
@@ -183,16 +186,18 @@ def find_disk_dev_for_disk_bus(mapping, bus,
         assigned_devices = []
 
     max_dev = get_dev_count_for_disk_bus(bus)
-    devs = range(max_dev)
 
-    for idx in devs:
-        disk_dev = dev_prefix + chr(ord('a') + idx)
+    idx = 0
+    while True:
+        if max_dev is not None and idx >= max_dev:
+            raise exception.TooManyDiskDevices(maximum=max_dev)
+        disk_dev = block_device.generate_device_name(dev_prefix, idx)
         if not has_disk_dev(mapping, disk_dev):
             if disk_dev not in assigned_devices:
                 return disk_dev
+        idx += 1
 
-    msg = _("No free disk device names for prefix '%s'") % dev_prefix
-    raise exception.InternalError(msg)
+    raise exception.TooManyDiskDevices(maximum=max_dev)
 
 
 def is_disk_bus_valid_for_virt(virt_type, disk_bus):
@@ -217,14 +222,14 @@ def get_disk_bus_for_device_type(instance,
                                  device_type="disk"):
     """Determine the best disk bus to use for a device type.
 
-       Considering the currently configured virtualization
-       type, return the optimal disk_bus to use for a given
-       device type. For example, for a disk on KVM it will
-       return 'virtio', while for a CDROM it will return 'ide'
-       on x86_64 and 'scsi' on ppc64.
+    Considering the currently configured virtualization type, return the
+    optimal disk_bus to use for a given device type. For example, for a disk
+    on KVM it will return 'virtio', while for a CDROM, it will return 'ide'
+    for the 'pc' machine type on x86_64, 'sata' for the 'q35' machine type on
+    x86_64 and 'scsi' on ppc64.
 
-       Returns the disk_bus, or returns None if the device
-       type is not supported for this virtualization
+    Returns the disk_bus, or returns None if the device type is not supported
+    for this virtualization
     """
 
     # Prefer a disk bus set against the image first of all
@@ -263,6 +268,14 @@ def get_disk_bus_for_device_type(instance,
                     obj_fields.Architecture.S390X,
                     obj_fields.Architecture.AARCH64):
                 return "scsi"
+            machine_type = libvirt_utils.get_machine_type(image_meta)
+            # NOTE(lyarwood): We can't be any more explicit here as QEMU
+            # provides a version of the Q35 machine type per release.
+            # Additionally downstream distributions can also provide their own.
+            if machine_type and 'q35' in machine_type:
+                # NOTE(lyarwood): The Q35 machine type does not provide an IDE
+                # bus and as such we must use a SATA bus for cdroms.
+                return "sata"
             else:
                 return "ide"
         elif device_type == "disk":
@@ -438,10 +451,7 @@ def get_root_info(instance, virt_type, image_meta, root_bdm,
         else:
             root_device_bus = disk_bus
             root_device_type = 'disk'
-        if root_device_name:
-            root_device_bus = get_disk_bus_for_disk_dev(virt_type,
-                                                        root_device_name)
-        else:
+        if not root_device_name:
             root_device_name = find_disk_dev_for_disk_bus({}, root_device_bus)
 
         return {'bus': root_device_bus,

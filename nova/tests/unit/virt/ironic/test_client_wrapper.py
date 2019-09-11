@@ -42,6 +42,7 @@ class IronicClientWrapperTestCase(test.NoDBTestCase):
         self.ironicclient = client_wrapper.IronicClientWrapper()
         # Do not waste time sleeping
         cfg.CONF.set_override('api_retry_interval', 0, 'ironic')
+        cfg.CONF.set_override('region_name', 'RegionOne', 'ironic')
         get_ksa_adapter_p = mock.patch('nova.utils.get_ksa_adapter')
         self.addCleanup(get_ksa_adapter_p.stop)
         self.get_ksa_adapter = get_ksa_adapter_p.start()
@@ -77,18 +78,17 @@ class IronicClientWrapperTestCase(test.NoDBTestCase):
         ironicclient = client_wrapper.IronicClientWrapper()
         # dummy call to have _get_client() called
         ironicclient.call("node.list")
-        # With no api_endpoint in the conf, ironic_url is retrieved from
-        # nova.utils.get_ksa_adapter().get_endpoint()
         self.get_ksa_adapter.assert_called_once_with(
             'baremetal', ksa_auth=self.get_auth_plugin.return_value,
-            ksa_session='session', min_version=(1, 38),
+            ksa_session='session', min_version=(1, 0),
             max_version=(1, ksa_disc.LATEST))
         expected = {'session': 'session',
             'max_retries': CONF.ironic.api_max_retries,
             'retry_interval': CONF.ironic.api_retry_interval,
-            'os_ironic_api_version': ['1.38', '1.37'],
-            'ironic_url':
-                self.get_ksa_adapter.return_value.get_endpoint.return_value}
+            'os_ironic_api_version': ['1.46', '1.38'],
+            'endpoint':
+                self.get_ksa_adapter.return_value.get_endpoint.return_value,
+            'interface': ['internal', 'public']}
         mock_ir_cli.assert_called_once_with(1, **expected)
 
     @mock.patch.object(keystoneauth1.session, 'Session')
@@ -102,36 +102,38 @@ class IronicClientWrapperTestCase(test.NoDBTestCase):
         ironicclient = client_wrapper.IronicClientWrapper()
         # dummy call to have _get_client() called
         ironicclient.call("node.list")
-        # With no api_endpoint in the conf, ironic_url is retrieved from
-        # nova.utils.get_endpoint_data
         self.get_ksa_adapter.assert_called_once_with(
             'baremetal', ksa_auth=self.get_auth_plugin.return_value,
-            ksa_session='session', min_version=(1, 38),
+            ksa_session='session', min_version=(1, 0),
             max_version=(1, ksa_disc.LATEST))
         # When get_endpoint_data raises any ServiceNotFound, None is returned.
         expected = {'session': 'session',
                     'max_retries': CONF.ironic.api_max_retries,
                     'retry_interval': CONF.ironic.api_retry_interval,
-                    'os_ironic_api_version': ['1.38', '1.37'],
-                    'ironic_url': None}
+                    'os_ironic_api_version': ['1.46', '1.38'],
+                    'endpoint': None,
+                    'region_name': CONF.ironic.region_name,
+                    'interface': ['internal', 'public']}
         mock_ir_cli.assert_called_once_with(1, **expected)
 
     @mock.patch.object(keystoneauth1.session, 'Session')
     @mock.patch.object(ironic_client, 'get_client')
-    def test__get_client_session_legacy(self, mock_ir_cli, mock_session):
-        """Endpoint discovery via legacy api_endpoint conf option."""
+    def test__get_client_and_valid_interfaces(self, mock_ir_cli, mock_session):
+        """Confirm explicit setting of valid_interfaces."""
         mock_session.return_value = 'session'
         endpoint = 'https://baremetal.example.com/endpoint'
-        self.flags(api_endpoint=endpoint, group='ironic')
+        self.get_ksa_adapter.return_value.get_endpoint.return_value = endpoint
+        self.flags(endpoint_override=endpoint, group='ironic')
+        self.flags(valid_interfaces='admin', group='ironic')
         ironicclient = client_wrapper.IronicClientWrapper()
         # dummy call to have _get_client() called
         ironicclient.call("node.list")
-        self.get_ksa_adapter.assert_not_called()
         expected = {'session': 'session',
                     'max_retries': CONF.ironic.api_max_retries,
                     'retry_interval': CONF.ironic.api_retry_interval,
-                    'os_ironic_api_version': ['1.38', '1.37'],
-                    'ironic_url': endpoint}
+                    'os_ironic_api_version': ['1.46', '1.38'],
+                    'endpoint': endpoint,
+                    'interface': ['admin']}
         mock_ir_cli.assert_called_once_with(1, **expected)
 
     @mock.patch.object(client_wrapper.IronicClientWrapper, '_multi_getattr')

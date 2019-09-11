@@ -18,10 +18,7 @@ nova.network.model data structure, to the new os-vif based
 versioned object model os_vif.objects.*
 '''
 
-import sys
-
 from os_vif import objects
-from os_vif.objects import fields as os_vif_fields
 from oslo_config import cfg
 from oslo_log import log as logging
 
@@ -32,6 +29,13 @@ from nova.network import model
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+
+LEGACY_VIFS = {
+    model.VIF_TYPE_DVS, model.VIF_TYPE_IOVISOR, model.VIF_TYPE_802_QBG,
+    model.VIF_TYPE_802_QBH, model.VIF_TYPE_HW_VEB, model.VIF_TYPE_HOSTDEV,
+    model.VIF_TYPE_IB_HOSTDEV, model.VIF_TYPE_MIDONET, model.VIF_TYPE_TAP,
+    model.VIF_TYPE_MACVTAP
+}
 
 
 def _get_vif_name(vif):
@@ -233,8 +237,7 @@ def _nova_to_osvif_network(network):
     if network.get_meta("multi_host") is not None:
         netobj.multi_host = network.get_meta("multi_host")
     if network.get_meta("should_create_bridge") is not None:
-        netobj.should_provide_bridge = \
-            network.get_meta("should_create_bridge")
+        netobj.should_provide_bridge = network.get_meta("should_create_bridge")
     if network.get_meta("should_create_vlan") is not None:
         netobj.should_provide_vlan = network.get_meta("should_create_vlan")
         if network.get_meta("vlan") is None:
@@ -245,7 +248,7 @@ def _nova_to_osvif_network(network):
     return netobj
 
 
-def _get_vif_instance(vif, cls, **kwargs):
+def _get_vif_instance(vif, cls, plugin, **kwargs):
     """Instantiate an os-vif VIF instance
 
     :param vif: the nova.network.model.VIF instance
@@ -261,7 +264,67 @@ def _get_vif_instance(vif, cls, **kwargs):
         has_traffic_filtering=vif.is_neutron_filtering_enabled(),
         preserve_on_delete=vif['preserve_on_delete'],
         active=vif['active'],
+        plugin=plugin,
         **kwargs)
+
+
+def _set_representor_datapath_offload_settings(vif, obj):
+    """Populate the representor datapath offload metadata in the port profile.
+
+    This function should only be called if the VIF's ``vnic_type`` is in the
+    VNIC_TYPES_SRIOV list, and the ``port_profile`` field of ``obj`` has been
+    populated.
+
+    :param vif: the nova.network.model.VIF instance
+    :param obj: an os_vif.objects.vif.VIFBase instance
+    """
+
+    datapath_offload = objects.vif.DatapathOffloadRepresentor(
+        representor_name=_get_vif_name(vif),
+        representor_address=vif["profile"]["pci_slot"])
+    obj.port_profile.datapath_offload = datapath_offload
+
+
+def _get_vnic_direct_vif_instance(vif, port_profile, plugin, set_bridge=True):
+    """Instantiate an os-vif VIF instance for ``vnic_type`` = VNIC_TYPE_DIRECT
+
+    :param vif: the nova.network.model.VIF instance
+    :param port_profile: an os_vif.objects.vif.VIFPortProfileBase instance
+    :param plugin: the os-vif plugin name
+    :param set_bridge: if True, populate obj.network.bridge
+
+    :returns: an os_vif.objects.vif.VIFHostDevice instance
+    """
+
+    obj = _get_vif_instance(
+        vif,
+        objects.vif.VIFHostDevice,
+        port_profile=port_profile,
+        plugin=plugin,
+        dev_address=vif["profile"]["pci_slot"],
+        dev_type=objects.fields.VIFHostDeviceDevType.ETHERNET
+    )
+    if set_bridge and vif["network"]["bridge"] is not None:
+        obj.network.bridge = vif["network"]["bridge"]
+    return obj
+
+
+def _get_ovs_representor_port_profile(vif):
+    """Instantiate an os-vif port_profile object.
+
+    :param vif: the nova.network.model.VIF instance
+
+    :returns: an os_vif.objects.vif.VIFPortProfileOVSRepresentor instance
+    """
+
+    # TODO(jangutter): in accordance with the generic-os-vif-offloads spec,
+    # the datapath offload info is duplicated in both interfaces for Stein.
+    # The port profile should be transitioned to VIFPortProfileOpenVSwitch
+    # during Train.
+    return objects.vif.VIFPortProfileOVSRepresentor(
+        interface_id=vif.get('ovs_interfaceid') or vif['id'],
+        representor_name=_get_vif_name(vif),
+        representor_address=vif["profile"]['pci_slot'])
 
 
 # VIF_TYPE_BRIDGE = 'bridge'
@@ -278,32 +341,25 @@ def _nova_to_osvif_vif_bridge(vif):
 
 # VIF_TYPE_OVS = 'ovs'
 def _nova_to_osvif_vif_ovs(vif):
+    vif_name = _get_vif_name(vif)
     vnic_type = vif.get('vnic_type', model.VNIC_TYPE_NORMAL)
     profile = objects.vif.VIFPortProfileOpenVSwitch(
         interface_id=vif.get('ovs_interfaceid') or vif['id'],
         datapath_type=vif['details'].get(
             model.VIF_DETAILS_OVS_DATAPATH_TYPE))
     if vnic_type == model.VNIC_TYPE_DIRECT:
-        profile = objects.vif.VIFPortProfileOVSRepresentor(
-            interface_id=vif.get('ovs_interfaceid') or vif['id'],
-            representor_name=_get_vif_name(vif),
-            representor_address=vif["profile"]['pci_slot'])
-        obj = _get_vif_instance(
+        obj = _get_vnic_direct_vif_instance(
             vif,
-            objects.vif.VIFHostDevice,
-            port_profile=profile,
-            plugin="ovs",
-            dev_address=vif["profile"]['pci_slot'],
-            dev_type=os_vif_fields.VIFHostDeviceDevType.ETHERNET)
-        if vif["network"]["bridge"] is not None:
-            obj.network.bridge = vif["network"]["bridge"]
+            port_profile=_get_ovs_representor_port_profile(vif),
+            plugin="ovs")
+        _set_representor_datapath_offload_settings(vif, obj)
     elif _is_firewall_required(vif) or vif.is_hybrid_plug_enabled():
         obj = _get_vif_instance(
             vif,
             objects.vif.VIFBridge,
             port_profile=profile,
             plugin="ovs",
-            vif_name=_get_vif_name(vif),
+            vif_name=vif_name,
             bridge_name=_get_hybrid_bridge_name(vif))
     else:
         obj = _get_vif_instance(
@@ -311,7 +367,7 @@ def _nova_to_osvif_vif_ovs(vif):
             objects.vif.VIFOpenVSwitch,
             port_profile=profile,
             plugin="ovs",
-            vif_name=_get_vif_name(vif))
+            vif_name=vif_name)
         if vif["network"]["bridge"] is not None:
             obj.bridge_name = vif["network"]["bridge"]
     return obj
@@ -320,37 +376,20 @@ def _nova_to_osvif_vif_ovs(vif):
 # VIF_TYPE_AGILIO_OVS = 'agilio_ovs'
 def _nova_to_osvif_vif_agilio_ovs(vif):
     vnic_type = vif.get('vnic_type', model.VNIC_TYPE_NORMAL)
-    # In practice, vif_name gets its value from vif["devname"], passed by
-    # the mechanism driver.
-    vif_name = _get_vif_name(vif)
-    agilio_vnic_types = [model.VNIC_TYPE_DIRECT,
-                         model.VNIC_TYPE_VIRTIO_FORWARDER]
-    if vnic_type in agilio_vnic_types:
-        # Note: passing representor_name asks os-vif to rename the
-        # representor, setting this to vif_name is helpful for tracing.
-        # VIF.port_profile.representor_address is used by the os-vif plugin's
-        # plug/unplug, this should be the same as VIF.dev_address in the
-        # VNIC_TYPE_DIRECT case.
-        profile = objects.vif.VIFPortProfileOVSRepresentor(
-            interface_id=vif.get('ovs_interfaceid') or vif['id'],
-            representor_name=vif_name,
-            representor_address=vif["profile"]["pci_slot"])
     if vnic_type == model.VNIC_TYPE_DIRECT:
-        # VIF.dev_address is used by the hypervisor to plug the instance into
-        # the PCI device.
+        obj = _get_vnic_direct_vif_instance(
+            vif,
+            plugin="agilio_ovs",
+            port_profile=_get_ovs_representor_port_profile(vif))
+        _set_representor_datapath_offload_settings(vif, obj)
+    elif vnic_type == model.VNIC_TYPE_VIRTIO_FORWARDER:
         obj = _get_vif_instance(
             vif,
-            objects.vif.VIFHostDevice,
-            port_profile=profile,
+            objects.vif.VIFVHostUser,
+            port_profile=_get_ovs_representor_port_profile(vif),
             plugin="agilio_ovs",
-            dev_address=vif["profile"]["pci_slot"],
-            dev_type=objects.fields.VIFHostDeviceDevType.ETHERNET)
-        if vif["network"]["bridge"] is not None:
-            obj.network.bridge = vif["network"]["bridge"]
-    elif vnic_type == model.VNIC_TYPE_VIRTIO_FORWARDER:
-        obj = _get_vif_instance(vif, objects.vif.VIFVHostUser,
-                                port_profile=profile, plugin="agilio_ovs",
-                                vif_name=vif_name)
+            vif_name=_get_vif_name(vif))
+        _set_representor_datapath_offload_settings(vif, obj)
         _set_vhostuser_settings(vif, obj)
         if vif["network"]["bridge"] is not None:
             obj.network.bridge = vif["network"]["bridge"]
@@ -405,7 +444,11 @@ def _nova_to_osvif_vif_vhostuser(vif):
         _set_vhostuser_settings(vif, obj)
         return obj
     else:
-        raise NotImplementedError()
+        obj = _get_vif_instance(vif, objects.vif.VIFVHostUser,
+                                plugin="noop",
+                                vif_name=_get_vif_name(vif))
+        _set_vhostuser_settings(vif, obj)
+        return obj
 
 
 # VIF_TYPE_IVS = 'ivs'
@@ -426,73 +469,35 @@ def _nova_to_osvif_vif_ivs(vif):
     return obj
 
 
-# VIF_TYPE_DVS = 'dvs'
-def _nova_to_osvif_vif_dvs(vif):
-    raise NotImplementedError()
-
-
-# VIF_TYPE_IOVISOR = 'iovisor'
-def _nova_to_osvif_vif_iovisor(vif):
-    raise NotImplementedError()
-
-
-# VIF_TYPE_802_QBG = '802.1qbg'
-def _nova_to_osvif_vif_802_1qbg(vif):
-    raise NotImplementedError()
-
-
-# VIF_TYPE_802_QBH = '802.1qbh'
-def _nova_to_osvif_vif_802_1qbh(vif):
-    raise NotImplementedError()
-
-
-# VIF_TYPE_HW_VEB = 'hw_veb'
-def _nova_to_osvif_vif_hw_veb(vif):
-    raise NotImplementedError()
-
-
-# VIF_TYPE_IB_HOSTDEV = 'ib_hostdev'
-def _nova_to_osvif_vif_ib_hostdev(vif):
-    raise NotImplementedError()
-
-
-# VIF_TYPE_MIDONET = 'midonet'
-def _nova_to_osvif_vif_midonet(vif):
-    raise NotImplementedError()
-
-
 # VIF_TYPE_VROUTER = 'vrouter'
 def _nova_to_osvif_vif_vrouter(vif):
-    raise NotImplementedError()
-
-
-# VIF_TYPE_TAP = 'tap'
-def _nova_to_osvif_vif_tap(vif):
-    raise NotImplementedError()
-
-
-# VIF_TYPE_MACVTAP = 'macvtap'
-def _nova_to_osvif_vif_macvtap(vif):
-    raise NotImplementedError()
-
-
-# VIF_TYPE_HOSTDEV = 'hostdev_physical'
-def _nova_to_osvif_vif_hostdev_physical(vif):
-    raise NotImplementedError()
-
-
-# VIF_TYPE_BINDING_FAILED = 'binding_failed'
-def _nova_to_osvif_vif_binding_failed(vif):
-    """Special handler for the "binding_failed" vif type.
-
-    The "binding_failed" vif type indicates port binding to a host failed
-    and we are trying to plug the vifs again, which will fail because we
-    do not know the actual real vif type, like ovs, bridge, etc. We raise
-    NotImplementedError to indicate to the caller that we cannot handle
-    this type of vif rather than the generic "Unsupported VIF type" error
-    in nova_to_osvif_vif.
-    """
-    raise NotImplementedError()
+    vif_name = _get_vif_name(vif)
+    vnic_type = vif.get('vnic_type', model.VNIC_TYPE_NORMAL)
+    if vnic_type == model.VNIC_TYPE_NORMAL:
+        obj = _get_vif_instance(
+            vif,
+            objects.vif.VIFGeneric,
+            plugin="vrouter",
+            vif_name=vif_name)
+    elif vnic_type == model.VNIC_TYPE_DIRECT:
+        obj = _get_vnic_direct_vif_instance(
+            vif,
+            port_profile=objects.vif.VIFPortProfileBase(),
+            plugin="vrouter",
+            set_bridge=False)
+        _set_representor_datapath_offload_settings(vif, obj)
+    elif vnic_type == model.VNIC_TYPE_VIRTIO_FORWARDER:
+        obj = _get_vif_instance(
+            vif,
+            objects.vif.VIFVHostUser,
+            port_profile=objects.vif.VIFPortProfileBase(),
+            plugin="vrouter",
+            vif_name=vif_name)
+        _set_representor_datapath_offload_settings(vif, obj)
+        _set_vhostuser_settings(vif, obj)
+    else:
+        raise NotImplementedError()
+    return obj
 
 
 def nova_to_osvif_vif(vif):
@@ -510,23 +515,40 @@ def nova_to_osvif_vif(vif):
 
     LOG.debug("Converting VIF %s", vif)
 
-    #根据vif的类型，拼出函数名称，例如 "_nova_to_osvif_vif_bridge", "_nova_to_osvif_vif_vhostuser"
-    # "_nova_to_osvif_vif_ovs"
-    funcname = "_nova_to_osvif_vif_" + vif['type'].replace(".", "_")
-    func = getattr(sys.modules[__name__], funcname, None)
+    vif_type = vif['type']
 
-    if not func:
-        #不存在此函数名称,丢异常
-        raise exception.NovaException(
-            "Unsupported VIF type %(type)s convert '%(func)s'" %
-            {'type': vif['type'], 'func': funcname})
-
-    try:
-        #调用此函数，将vif转换为vifobj
-        vifobj = func(vif)
-        LOG.debug("Converted object %s", vifobj)
-        return vifobj
-    except NotImplementedError:
-        LOG.debug("No conversion for VIF type %s yet",
-                  vif['type'])
+    if vif_type in LEGACY_VIFS:
+        # We want to explicitly fall back to the legacy path for these VIF
+        # types
+        LOG.debug('No conversion for VIF type %s yet', vif_type)
         return None
+
+    if vif_type in {model.VIF_TYPE_BINDING_FAILED, model.VIF_TYPE_UNBOUND}:
+        # These aren't real VIF types. VIF_TYPE_BINDING_FAILED indicates port
+        # binding to a host failed and we are trying to plug the VIFs again,
+        # which will fail because we do not know the actual real VIF type, like
+        # VIF_TYPE_OVS, VIF_TYPE_BRIDGE, etc. VIF_TYPE_UNBOUND, by comparison,
+        # is the default VIF type of a driver when it is not bound to any host,
+        # i.e. we have not set the host ID in the binding driver. This should
+        # also only happen in error cases.
+        # TODO(stephenfin): We probably want a more meaningful log here
+        LOG.debug('No conversion for VIF type %s yet', vif_type)
+        return None
+
+    if vif_type == model.VIF_TYPE_OVS:
+        vif_obj = _nova_to_osvif_vif_ovs(vif)
+    elif vif_type == model.VIF_TYPE_IVS:
+        vif_obj = _nova_to_osvif_vif_ivs(vif)
+    elif vif_type == model.VIF_TYPE_BRIDGE:
+        vif_obj = _nova_to_osvif_vif_bridge(vif)
+    elif vif_type == model.VIF_TYPE_AGILIO_OVS:
+        vif_obj = _nova_to_osvif_vif_agilio_ovs(vif)
+    elif vif_type == model.VIF_TYPE_VHOSTUSER:
+        vif_obj = _nova_to_osvif_vif_vhostuser(vif)
+    elif vif_type == model.VIF_TYPE_VROUTER:
+        vif_obj = _nova_to_osvif_vif_vrouter(vif)
+    else:
+        raise exception.NovaException('Unsupported VIF type %s' % vif_type)
+
+    LOG.debug('Converted object %s', vif_obj)
+    return vif_obj

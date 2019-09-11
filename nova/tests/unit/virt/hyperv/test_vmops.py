@@ -82,16 +82,6 @@ class VMOpsTestCase(test_base.HyperVBaseTestCase):
         self._vmops._vmutils.list_instances.assert_called_once_with()
         self.assertEqual(response, [mock_instance])
 
-    def test_estimate_instance_overhead(self):
-        instance_info = {'memory_mb': 512}
-        overhead = self._vmops.estimate_instance_overhead(instance_info)
-        self.assertEqual(0, overhead['memory_mb'])
-        self.assertEqual(1, overhead['disk_gb'])
-
-        instance_info = {'memory_mb': 500}
-        overhead = self._vmops.estimate_instance_overhead(instance_info)
-        self.assertEqual(0, overhead['disk_gb'])
-
     def _test_get_info(self, vm_exists):
         mock_instance = fake_instance.fake_instance_obj(self.context)
         mock_info = mock.MagicMock(spec_set=dict)
@@ -935,7 +925,7 @@ class VMOpsTestCase(test_base.HyperVBaseTestCase):
 
     @mock.patch('nova.api.metadata.base.InstanceMetadata')
     @mock.patch('nova.virt.configdrive.ConfigDriveBuilder')
-    @mock.patch('nova.utils.execute')
+    @mock.patch('oslo_concurrency.processutils.execute')
     def _test_create_config_drive(self, mock_execute, mock_ConfigDriveBuilder,
                                   mock_InstanceMetadata, config_drive_format,
                                   config_drive_cdrom, side_effect,
@@ -999,7 +989,7 @@ class VMOpsTestCase(test_base.HyperVBaseTestCase):
             mock_get_configdrive_path.assert_has_calls(
                 expected_get_configdrive_path_calls)
             mock_ConfigDriveBuilder.assert_called_with(
-                instance_md=mock_InstanceMetadata())
+                instance_md=mock_InstanceMetadata.return_value)
             mock_make_drive = mock_ConfigDriveBuilder().__enter__().make_drive
             mock_make_drive.assert_called_once_with(path_iso)
             if not CONF.hyperv.config_drive_cdrom:
@@ -1449,10 +1439,11 @@ class VMOpsTestCase(test_base.HyperVBaseTestCase):
         self._vmops._pathutils.get_instance_dir.assert_called_once_with(
             mock.sentinel.FAKE_VM_NAME,
             remote_server=mock.sentinel.FAKE_DEST_HOST)
-        mock_copy.has_calls(mock.call(mock.sentinel.FAKE_DVD_PATH1,
-                                      mock.sentinel.FAKE_DEST_PATH),
-                            mock.call(mock.sentinel.FAKE_DVD_PATH2,
-                                      mock.sentinel.FAKE_DEST_PATH))
+        self.assertEqual(2, mock_copy.call_count)
+        mock_copy.assert_has_calls([mock.call(mock.sentinel.FAKE_DVD_PATH1,
+                                              mock.sentinel.FAKE_DEST_PATH),
+                                    mock.call(mock.sentinel.FAKE_DVD_PATH2,
+                                              mock.sentinel.FAKE_DEST_PATH)])
 
     def test_plug_vifs(self):
         mock_instance = fake_instance.fake_instance_obj(self.context)

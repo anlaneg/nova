@@ -11,25 +11,27 @@
 #    under the License.
 
 import mock
+import os_resource_classes as orc
 from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.compute import power_state
 from nova.compute import resource_tracker
 from nova.compute import task_states
+from nova.compute import utils as compute_utils
 from nova.compute import vm_states
 from nova import conf
 from nova import context
 from nova import objects
-from nova import rc_fields as fields
-from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
+from nova.tests.functional import integrated_helpers
 from nova.tests.functional import test_report_client as test_base
 from nova.virt import driver as virt_driver
 
 
 CONF = conf.CONF
-VCPU = fields.ResourceClass.VCPU
-MEMORY_MB = fields.ResourceClass.MEMORY_MB
-DISK_GB = fields.ResourceClass.DISK_GB
+VCPU = orc.VCPU
+MEMORY_MB = orc.MEMORY_MB
+DISK_GB = orc.DISK_GB
 COMPUTE_HOST = 'compute-host'
 
 
@@ -134,7 +136,6 @@ class IronicResourceTrackerTest(test_base.SchedulerReportClientTestBase):
         interceptor.
         """
         self.report_client = client
-        self.rt.scheduler_client.reportclient = client
         self.rt.reportclient = client
 
     def setUp(self):
@@ -198,7 +199,7 @@ class IronicResourceTrackerTest(test_base.SchedulerReportClientTestBase):
         usage for an instance, the nodes still have their unique stats and
         nothing is leaked from node to node.
         """
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
         # Before the resource tracker is "initialized", we shouldn't have
         # any compute nodes or stats in the RT's cache...
         self.assertEqual(0, len(self.rt.compute_nodes))
@@ -263,3 +264,204 @@ class IronicResourceTrackerTest(test_base.SchedulerReportClientTestBase):
         inst = self.instances[uuids.instance1]
         with self.rt.instance_claim(self.ctx, inst, cn1_nodename):
             _assert_stats()
+
+
+class TestUpdateComputeNodeReservedAndAllocationRatio(
+        integrated_helpers.ProviderUsageBaseTestCase):
+    """Tests reflecting reserved and allocation ratio inventory from
+    nova-compute to placement
+    """
+
+    compute_driver = 'fake.FakeDriver'
+
+    @staticmethod
+    def _get_reserved_host_values_from_config():
+        return {
+            'VCPU': CONF.reserved_host_cpus,
+            'MEMORY_MB': CONF.reserved_host_memory_mb,
+            'DISK_GB': compute_utils.convert_mb_to_ceil_gb(
+                CONF.reserved_host_disk_mb)
+        }
+
+    def _assert_reserved_inventory(self, inventories):
+        reserved = self._get_reserved_host_values_from_config()
+        for rc, res in reserved.items():
+            self.assertIn('reserved', inventories[rc])
+            self.assertEqual(res, inventories[rc]['reserved'],
+                             'Unexpected resource provider inventory '
+                             'reserved value for %s' % rc)
+
+    def test_update_inventory_reserved_and_allocation_ratio_from_conf(self):
+        # Start a compute service which should create a corresponding resource
+        # provider in the placement service.
+        compute_service = self._start_compute('fake-host')
+        # Assert the compute node resource provider exists in placement with
+        # the default reserved and allocation ratio values from config.
+        rp_uuid = self._get_provider_uuid_by_host('fake-host')
+        inventories = self._get_provider_inventory(rp_uuid)
+        # The default allocation ratio config values are all 0.0 and get
+        # defaulted to real values in the ComputeNode object, so we need to
+        # check our defaults against what is in the ComputeNode object.
+        ctxt = context.get_admin_context()
+        # Note that the CellDatabases fixture usage means we don't need to
+        # target the context to cell1 even though the compute_nodes table is
+        # in the cell1 database.
+        cn = objects.ComputeNode.get_by_uuid(ctxt, rp_uuid)
+        ratios = {
+            'VCPU': cn.cpu_allocation_ratio,
+            'MEMORY_MB': cn.ram_allocation_ratio,
+            'DISK_GB': cn.disk_allocation_ratio
+        }
+        for rc, ratio in ratios.items():
+            self.assertIn(rc, inventories)
+            self.assertIn('allocation_ratio', inventories[rc])
+            self.assertEqual(ratio, inventories[rc]['allocation_ratio'],
+                             'Unexpected allocation ratio for %s' % rc)
+        self._assert_reserved_inventory(inventories)
+
+        # Now change the configuration values, restart the compute service,
+        # and ensure the changes are reflected in the resource provider
+        # inventory records. We use 2.0 since disk_allocation_ratio defaults
+        # to 1.0.
+        self.flags(cpu_allocation_ratio=2.0)
+        self.flags(ram_allocation_ratio=2.0)
+        self.flags(disk_allocation_ratio=2.0)
+        self.flags(reserved_host_cpus=2)
+        self.flags(reserved_host_memory_mb=1024)
+        self.flags(reserved_host_disk_mb=8192)
+
+        self.restart_compute_service(compute_service)
+
+        # The ratios should now come from config overrides rather than the
+        # defaults in the ComputeNode object.
+        ratios = {
+            'VCPU': CONF.cpu_allocation_ratio,
+            'MEMORY_MB': CONF.ram_allocation_ratio,
+            'DISK_GB': CONF.disk_allocation_ratio
+        }
+        attr_map = {
+            'VCPU': 'cpu',
+            'MEMORY_MB': 'ram',
+            'DISK_GB': 'disk',
+        }
+        cn = objects.ComputeNode.get_by_uuid(ctxt, rp_uuid)
+        inventories = self._get_provider_inventory(rp_uuid)
+        for rc, ratio in ratios.items():
+            # Make sure the config is what we expect.
+            self.assertEqual(2.0, ratio,
+                             'Unexpected config allocation ratio for %s' % rc)
+            # Make sure the values in the DB are updated.
+            self.assertEqual(
+                ratio, getattr(cn, '%s_allocation_ratio' % attr_map[rc]),
+                'Unexpected ComputeNode allocation ratio for %s' % rc)
+            # Make sure the values in placement are updated.
+            self.assertEqual(ratio, inventories[rc]['allocation_ratio'],
+                             'Unexpected resource provider inventory '
+                             'allocation ratio for %s' % rc)
+
+        # The reserved host values should also come from config.
+        self._assert_reserved_inventory(inventories)
+
+    def test_allocation_ratio_create_with_initial_allocation_ratio(self):
+        # The xxx_allocation_ratio is set to None by default, and we use
+        # 16.1/1.6/1.1 since disk_allocation_ratio defaults to 16.0/1.5/1.0.
+        self.flags(initial_cpu_allocation_ratio=16.1)
+        self.flags(initial_ram_allocation_ratio=1.6)
+        self.flags(initial_disk_allocation_ratio=1.1)
+        # Start a compute service which should create a corresponding resource
+        # provider in the placement service.
+        self._start_compute('fake-host')
+        # Assert the compute node resource provider exists in placement with
+        # the default reserved and allocation ratio values from config.
+        rp_uuid = self._get_provider_uuid_by_host('fake-host')
+        inventories = self._get_provider_inventory(rp_uuid)
+        ctxt = context.get_admin_context()
+        # Note that the CellDatabases fixture usage means we don't need to
+        # target the context to cell1 even though the compute_nodes table is
+        # in the cell1 database.
+        cn = objects.ComputeNode.get_by_uuid(ctxt, rp_uuid)
+        ratios = {
+            'VCPU': cn.cpu_allocation_ratio,
+            'MEMORY_MB': cn.ram_allocation_ratio,
+            'DISK_GB': cn.disk_allocation_ratio
+        }
+        initial_ratio_conf = {
+            'VCPU': CONF.initial_cpu_allocation_ratio,
+            'MEMORY_MB': CONF.initial_ram_allocation_ratio,
+            'DISK_GB': CONF.initial_disk_allocation_ratio
+        }
+        for rc, ratio in ratios.items():
+            self.assertIn(rc, inventories)
+            self.assertIn('allocation_ratio', inventories[rc])
+            # Check the allocation_ratio values come from the new
+            # CONF.initial_xxx_allocation_ratio
+            self.assertEqual(initial_ratio_conf[rc], ratio,
+                             'Unexpected allocation ratio for %s' % rc)
+            # Check the initial allocation ratio is updated to inventories
+            self.assertEqual(ratio, inventories[rc]['allocation_ratio'],
+                             'Unexpected allocation ratio for %s' % rc)
+
+    def test_allocation_ratio_overwritten_from_config(self):
+        # NOTE(yikun): This test case includes below step:
+        # 1. Overwrite the allocation_ratio via the placement API directly -
+        #    run the RT.update_available_resource periodic and assert the
+        #    allocation ratios are not overwritten from config.
+        #
+        # 2. Set the CONF.*_allocation_ratio, run the periodic, and assert
+        #    that the config overwrites what was set via the placement API.
+        compute_service = self._start_compute('fake-host')
+        rp_uuid = self._get_provider_uuid_by_host('fake-host')
+        ctxt = context.get_admin_context()
+
+        rt = compute_service.manager.rt
+
+        inv = self.placement_api.get(
+            '/resource_providers/%s/inventories' % rp_uuid).body
+        ratios = {'VCPU': 16.1, 'MEMORY_MB': 1.6, 'DISK_GB': 1.1}
+
+        for rc, ratio in ratios.items():
+            inv['inventories'][rc]['allocation_ratio'] = ratio
+
+        # Overwrite the allocation_ratio via the placement API directly
+        self._update_inventory(rp_uuid, inv)
+        inv = self._get_provider_inventory(rp_uuid)
+        # Check inventories is updated to ratios
+        for rc, ratio in ratios.items():
+            self.assertIn(rc, inv)
+            self.assertIn('allocation_ratio', inv[rc])
+            self.assertEqual(ratio, inv[rc]['allocation_ratio'],
+                             'Unexpected allocation ratio for %s' % rc)
+
+        # Make sure xxx_allocation_ratio is None by default
+        self.assertIsNone(CONF.cpu_allocation_ratio)
+        self.assertIsNone(CONF.ram_allocation_ratio)
+        self.assertIsNone(CONF.disk_allocation_ratio)
+        # run the RT.update_available_resource periodic
+        rt.update_available_resource(ctxt, 'fake-host')
+        # assert the allocation ratios are not overwritten from config
+        inv = self._get_provider_inventory(rp_uuid)
+        for rc, ratio in ratios.items():
+            self.assertIn(rc, inv)
+            self.assertIn('allocation_ratio', inv[rc])
+            self.assertEqual(ratio, inv[rc]['allocation_ratio'],
+                             'Unexpected allocation ratio for %s' % rc)
+
+        # set the CONF.*_allocation_ratio
+        self.flags(cpu_allocation_ratio=15.9)
+        self.flags(ram_allocation_ratio=1.4)
+        self.flags(disk_allocation_ratio=0.9)
+
+        # run the RT.update_available_resource periodic
+        rt.update_available_resource(ctxt, 'fake-host')
+        inv = self._get_provider_inventory(rp_uuid)
+        ratios = {
+            'VCPU': CONF.cpu_allocation_ratio,
+            'MEMORY_MB': CONF.ram_allocation_ratio,
+            'DISK_GB': CONF.disk_allocation_ratio
+        }
+        # assert that the config overwrites what was set via the placement API.
+        for rc, ratio in ratios.items():
+            self.assertIn(rc, inv)
+            self.assertIn('allocation_ratio', inv[rc])
+            self.assertEqual(ratio, inv[rc]['allocation_ratio'],
+                             'Unexpected allocation ratio for %s' % rc)

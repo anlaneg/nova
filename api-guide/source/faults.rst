@@ -67,11 +67,13 @@ Response header example::
 Server Actions
 --------------
 
-There is an API for end users to list the outcome of Server Actions,
+There is an API for end users to list the outcome of `Server Actions`_,
 referencing the requested action by request id.
 
 For more details, please see:
-https://developer.openstack.org/api-ref/compute/#servers-run-an-action-servers-action
+https://docs.openstack.org/api-ref/compute/#servers-actions-servers-os-instance-actions
+
+.. _Server Actions: https://docs.openstack.org/api-ref/compute/#servers-run-an-action-servers-action
 
 Logs
 ----
@@ -167,7 +169,7 @@ depending on the type of error. The following link contains a list of possible
 elements along with their associated error codes.
 
 For more information on possible error code, please see:
-http://specs.openstack.org/openstack/api-wg/guidelines/http.html#http-response-codes
+http://specs.openstack.org/openstack/api-wg/guidelines/http/response-codes.html
 
 Asynchronous faults
 ===================

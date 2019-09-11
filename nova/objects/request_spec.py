@@ -12,9 +12,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import copy
+import itertools
+
+from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import versionutils
-
+import six
 
 from nova.db.sqlalchemy import api as db
 from nova.db.sqlalchemy import api_models
@@ -23,12 +27,13 @@ from nova import objects
 from nova.objects import base
 from nova.objects import fields
 from nova.objects import instance as obj_instance
-from nova.scheduler import utils as scheduler_utils
-from nova.virt import hardware
+
+LOG = logging.getLogger(__name__)
 
 REQUEST_SPEC_OPTIONAL_ATTRS = ['requested_destination',
                                'security_groups',
-                               'network_metadata']
+                               'network_metadata',
+                               'requested_resources']
 
 
 @base.NovaObjectRegistry.register
@@ -45,7 +50,8 @@ class RequestSpec(base.NovaObject):
     # Version 1.9: Added user_id
     # Version 1.10: Added network_metadata
     # Version 1.11: Added is_bfv
-    VERSION = '1.11'
+    # Version 1.12: Added requested_resources
+    VERSION = '1.12'
 
     fields = {
         'id': fields.IntegerField(),
@@ -61,6 +67,7 @@ class RequestSpec(base.NovaObject):
         'availability_zone': fields.StringField(nullable=True),
         'flavor': fields.ObjectField('Flavor', nullable=False),
         'num_instances': fields.IntegerField(default=1),
+        # NOTE(alex_xu): This field won't be persisted.
         'ignore_hosts': fields.ListOfStringsField(nullable=True),
         # NOTE(mriedem): In reality, you can only ever have one
         # host in the force_hosts list. The fact this is a list
@@ -70,9 +77,11 @@ class RequestSpec(base.NovaObject):
         # node in the force_nodes list. The fact this is a list
         # is a mistake perpetuated over time.
         'force_nodes': fields.ListOfStringsField(nullable=True),
+        # NOTE(alex_xu): This field won't be persisted.
         'requested_destination': fields.ObjectField('Destination',
                                                     nullable=True,
                                                     default=None),
+        # NOTE(alex_xu): This field won't be persisted.
         'retry': fields.ObjectField('SchedulerRetries', nullable=True),
         'limits': fields.ObjectField('SchedulerLimits', nullable=True),
         'instance_group': fields.ObjectField('InstanceGroup', nullable=True),
@@ -82,13 +91,26 @@ class RequestSpec(base.NovaObject):
         'scheduler_hints': fields.DictOfListOfStringsField(nullable=True),
         'instance_uuid': fields.UUIDField(),
         'security_groups': fields.ObjectField('SecurityGroupList'),
+        # NOTE(alex_xu): This field won't be persisted.
         'network_metadata': fields.ObjectField('NetworkMetadata'),
         'is_bfv': fields.BooleanField(),
+        # NOTE(gibi): Eventually we want to store every resource request as
+        # RequestGroup objects here. However currently the flavor based
+        # resources like vcpu, ram, disk, and flavor.extra_spec based resources
+        # are not handled this way. See the Todo in from_components() where
+        # requested_resources are set.
+        # NOTE(alex_xu): This field won't be persisted.
+        'requested_resources': fields.ListOfObjectsField('RequestGroup',
+                                                         nullable=True,
+                                                         default=None)
     }
 
     def obj_make_compatible(self, primitive, target_version):
         super(RequestSpec, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 12):
+            if 'requested_resources' in primitive:
+                del primitive['requested_resources']
         if target_version < (1, 11) and 'is_bfv' in primitive:
             del primitive['is_bfv']
         if target_version < (1, 10):
@@ -193,11 +215,11 @@ class RequestSpec(base.NovaObject):
             self.pci_requests = pci_requests
 
     def _from_instance_numa_topology(self, numa_topology):
-        if isinstance(numa_topology, dict):
-            self.numa_topology = hardware.instance_topology_from_instance(
-                dict(numa_topology=numa_topology))
-        else:
-            self.numa_topology = numa_topology
+        if isinstance(numa_topology, six.string_types):
+            numa_topology = objects.InstanceNUMATopology.obj_from_primitive(
+                jsonutils.loads(numa_topology))
+
+        self.numa_topology = numa_topology
 
     def _from_flavor(self, flavor):
         if isinstance(flavor, objects.Flavor):
@@ -228,6 +250,10 @@ class RequestSpec(base.NovaObject):
             self.instance_group = objects.InstanceGroup(policy=policies[0],
                                                         hosts=hosts,
                                                         members=members)
+            # InstanceGroup.uuid is not nullable so only set it if we got it.
+            group_uuid = filter_properties.get('group_uuid')
+            if group_uuid:
+                self.instance_group.uuid = group_uuid
             # hosts has to be not part of the updates for saving the object
             self.instance_group.obj_reset_changes(['hosts'])
         else:
@@ -311,12 +337,12 @@ class RequestSpec(base.NovaObject):
         :param hint_name: name of the hint
         :param default: the default value if the hint is not there
         """
-        if (not self.obj_attr_is_set('scheduler_hints')
-                or self.scheduler_hints is None):
+        if (not self.obj_attr_is_set('scheduler_hints') or
+                self.scheduler_hints is None):
             return default
         hint_val = self.scheduler_hints.get(hint_name, default)
-        return (hint_val[0] if isinstance(hint_val, list)
-                and len(hint_val) == 1 else hint_val)
+        return (hint_val[0] if isinstance(hint_val, list) and
+                len(hint_val) == 1 else hint_val)
 
     def _to_legacy_image(self):
         return base.obj_to_primitive(self.image) if (
@@ -350,7 +376,8 @@ class RequestSpec(base.NovaObject):
         return {'group_updated': True,
                 'group_hosts': set(self.instance_group.hosts),
                 'group_policies': set([self.instance_group.policy]),
-                'group_members': set(self.instance_group.members)}
+                'group_members': set(self.instance_group.members),
+                'group_uuid': self.instance_group.uuid}
 
     def to_legacy_request_spec_dict(self):
         """Returns a legacy request_spec dict from the RequestSpec object.
@@ -410,7 +437,7 @@ class RequestSpec(base.NovaObject):
     def from_components(cls, context, instance_uuid, image, flavor,
             numa_topology, pci_requests, filter_properties, instance_group,
             availability_zone, security_groups=None, project_id=None,
-            user_id=None):
+            user_id=None, port_resource_requests=None):
         """Returns a new RequestSpec object hydrated by various components.
 
         This helper is useful in creating the RequestSpec from the various
@@ -433,6 +460,9 @@ class RequestSpec(base.NovaObject):
                            the instance project_id).
         :param user_id: The user_id for the requestspec (should match
                            the instance user_id).
+        :param port_resource_requests: a list of RequestGroup objects
+                                       representing the resource needs of the
+                                       neutron ports
         """
         spec_obj = cls(context)
         spec_obj.num_instances = 1
@@ -457,6 +487,14 @@ class RequestSpec(base.NovaObject):
             spec_obj.security_groups = security_groups
         spec_obj.requested_destination = filter_properties.get(
             'requested_destination')
+
+        # TODO(gibi): do the creation of the unnumbered group and any
+        # numbered group from the flavor by moving the logic from
+        # nova.scheduler.utils.resources_from_request_spec() here. See also
+        # the comment in the definition of requested_resources field.
+        spec_obj.requested_resources = []
+        if port_resource_requests:
+            spec_obj.requested_resources.extend(port_resource_requests)
 
         # NOTE(sbauza): Default the other fields that are not part of the
         # original contract
@@ -497,11 +535,32 @@ class RequestSpec(base.NovaObject):
             # though they should match.
             if key in ['id', 'instance_uuid']:
                 setattr(spec, key, db_spec[key])
+            elif key in ('requested_destination', 'requested_resources',
+                         'network_metadata'):
+                # Do not override what we already have in the object as this
+                # field is not persisted. If save() is called after
+                # requested_resources, requested_destination or
+                # network_metadata is populated, it will reset the field to
+                # None and we'll lose what is set (but not persisted) on the
+                # object.
+                continue
+            elif key in ('retry', 'ignore_hosts'):
+                # NOTE(takashin): Do not override the 'retry' or 'ignore_hosts'
+                # fields which are not persisted. They are not lazy-loadable
+                # fields. If they are not set, set None.
+                if not spec.obj_attr_is_set(key):
+                    setattr(spec, key, None)
             elif key in spec_obj:
                 setattr(spec, key, getattr(spec_obj, key))
         spec._context = context
 
         if 'instance_group' in spec and spec.instance_group:
+            # NOTE(mriedem): We could have a half-baked instance group with no
+            # uuid if some legacy translation was performed on this spec in the
+            # past. In that case, try to workaround the issue by getting the
+            # group uuid from the scheduler hint.
+            if 'uuid' not in spec.instance_group:
+                spec.instance_group.uuid = spec.get_scheduler_hint('group')
             # NOTE(danms): We don't store the full instance group in
             # the reqspec since it would be stale almost immediately.
             # Instead, load it by uuid here so it's up-to-date.
@@ -558,9 +617,12 @@ class RequestSpec(base.NovaObject):
             if 'instance_group' in spec and spec.instance_group:
                 spec.instance_group.members = None
                 spec.instance_group.hosts = None
-            # NOTE(mriedem): Don't persist retries since those are per-request
-            if 'retry' in spec and spec.retry:
-                spec.retry = None
+            # NOTE(mriedem): Don't persist retries, requested_destination,
+            # requested_resources or ignored hosts since those are per-request
+            for excluded in ('retry', 'requested_destination',
+                             'requested_resources', 'ignore_hosts'):
+                if excluded in spec and getattr(spec, excluded):
+                    setattr(spec, excluded, None)
             # NOTE(stephenfin): Don't persist network metadata since we have
             # no need for it after scheduling
             if 'network_metadata' in spec and spec.network_metadata:
@@ -639,86 +701,176 @@ class RequestSpec(base.NovaObject):
         # original request for the forced hosts
         self.obj_reset_changes(['force_hosts', 'force_nodes'])
 
+    @property
+    def maps_requested_resources(self):
+        """Returns True if this RequestSpec needs to map requested_resources
+        to resource providers, False otherwise.
+        """
+        return 'requested_resources' in self and self.requested_resources
 
-# NOTE(sbauza): Since verifying a huge list of instances can be a performance
-# impact, we need to use a marker for only checking a set of them.
-# As the current model doesn't expose a way to persist that marker, we propose
-# here to use the request_specs table with a fake (and impossible) instance
-# UUID where the related spec field (which is Text) would be the marker, ie.
-# the last instance UUID we checked.
-# TODO(sbauza): Remove the CRUD helpers and the migration script in Ocata.
+    def _is_valid_group_rp_mapping(
+            self, group_rp_mapping, placement_allocations, provider_traits):
+        """Decides if the mapping is valid from resources and traits
+        perspective.
 
-# NOTE(sbauza): RFC4122 (4.1.7) allows a Nil UUID to be semantically accepted.
-FAKE_UUID = '00000000-0000-0000-0000-000000000000'
+        :param group_rp_mapping: A list of RequestGroup - RP UUID two tuples
+                                representing a mapping between request groups
+                                in this RequestSpec and RPs from the
+                                allocation. It contains every RequestGroup in
+                                this RequestSpec but the mapping might not be
+                                valid from resources and traits perspective.
+        :param placement_allocations: The overall allocation made by the
+                                      scheduler for this RequestSpec
+        :param provider_traits: A dict keyed by resource provider uuids
+                                containing the list of traits the given RP has.
+                                This dict contains info only about RPs
+                                appearing in the placement_allocations param.
+        :return: True if each group's resource and trait request can be
+                 fulfilled from the RP it is mapped to. False otherwise.
+        """
 
+        # Check that traits are matching for each group - rp pair in
+        # this mapping
+        for group, rp_uuid in group_rp_mapping:
+            if not group.required_traits.issubset(provider_traits[rp_uuid]):
+                return False
 
-@db.api_context_manager.reader
-def _get_marker_for_migrate_instances(context):
-    req_spec = (context.session.query(api_models.RequestSpec).filter_by(
-                instance_uuid=FAKE_UUID)).first()
-    marker = req_spec['spec'] if req_spec else None
-    return marker
+        # TODO(gibi): add support for groups with forbidden_traits and
+        # aggregates
 
+        # Check that each group can consume the requested resources from the rp
+        # that it is mapped to in the current mapping. Consume each group's
+        # request from the allocation, if anything drops below zero, then this
+        # is not a solution
+        rcs = set()
+        allocs = copy.deepcopy(placement_allocations)
+        for group, rp_uuid in group_rp_mapping:
+            rp_allocs = allocs[rp_uuid]['resources']
+            for rc, amount in group.resources.items():
+                rcs.add(rc)
+                if rc in rp_allocs:
+                    rp_allocs[rc] -= amount
+                    if rp_allocs[rc] < 0:
+                        return False
+                else:
+                    return False
 
-@db.api_context_manager.writer
-def _set_or_delete_marker_for_migrate_instances(context, marker=None):
-    # We need to delete the old marker anyway, which no longer corresponds to
-    # the last instance we checked (if there was a marker)...
-    # NOTE(sbauza): delete() deletes rows that match the query and if none
-    # are found, returns 0 hits.
-    context.session.query(api_models.RequestSpec).filter_by(
-        instance_uuid=FAKE_UUID).delete()
-    if marker is not None:
-        # ... but there can be a new marker to set
-        db_mapping = api_models.RequestSpec()
-        db_mapping.update({'instance_uuid': FAKE_UUID, 'spec': marker})
-        db_mapping.save(context.session)
+        # Check that all the allocations are consumed from the resource
+        # classes that appear in the request groups. It should never happen
+        # that we have a match but also have some leftover if placement returns
+        # valid allocation candidates. Except if the leftover in the allocation
+        # are due to the RC requested in the unnumbered group.
+        for rp_uuid in allocs:
+            rp_allocs = allocs[rp_uuid]['resources']
+            for rc, amount in group.resources.items():
+                if rc in rcs and rc in rp_allocs:
+                    if rp_allocs[rc] != 0:
+                        LOG.debug(
+                            'Found valid group - RP mapping %s but there are '
+                            'allocations leftover in %s from resource class '
+                            '%s', group_rp_mapping, allocs, rc)
+                        return False
 
+        # If both the traits and the allocations are OK then mapping is valid
+        return True
 
-def _create_minimal_request_spec(context, instance):
-    image = instance.image_meta
-    # This is an old instance. Let's try to populate a RequestSpec
-    # object using the existing information we have previously saved.
-    request_spec = objects.RequestSpec.from_components(
-        context, instance.uuid, image,
-        instance.flavor, instance.numa_topology,
-        instance.pci_requests,
-        {}, None, instance.availability_zone,
-        project_id=instance.project_id,
-        user_id=instance.user_id
-    )
-    scheduler_utils.setup_instance_group(context, request_spec)
-    request_spec.create()
+    def map_requested_resources_to_providers(
+            self, placement_allocations, provider_traits):
+        """Fill the provider_uuids field in each RequestGroup objects in the
+        requested_resources field.
 
+        The mapping is generated based on the overall allocation made for this
+        RequestSpec, the request in each RequestGroup, and the traits of the
+        RPs in the allocation.
 
-def migrate_instances_add_request_spec(context, max_count):
-    """Creates and persists a RequestSpec per instance not yet having it."""
-    marker = _get_marker_for_migrate_instances(context)
-    # Prevent lazy-load of those fields for every instance later.
-    attrs = ['system_metadata', 'flavor', 'pci_requests', 'numa_topology',
-             'availability_zone']
-    instances = objects.InstanceList.get_by_filters(context,
-                                                    filters={'deleted': False},
-                                                    sort_key='created_at',
-                                                    sort_dir='asc',
-                                                    limit=max_count,
-                                                    marker=marker,
-                                                    expected_attrs=attrs)
-    count_all = len(instances)
-    count_hit = 0
-    for instance in instances:
-        try:
-            RequestSpec.get_by_instance_uuid(context, instance.uuid)
-        except exception.RequestSpecNotFound:
-            _create_minimal_request_spec(context, instance)
-            count_hit += 1
-    if count_all > 0:
-        # We want to persist which last instance was checked in order to make
-        # sure we don't review it again in a next call.
-        marker = instances[-1].uuid
+        Limitations:
+        * only groups with use_same_provider = True is mapped, the un-numbered
+          group are not supported.
+        * mapping is generated only based on the resource request and the
+          required traits, aggregate membership and forbidden traits are not
+          supported.
+        * requesting the same resource class in numbered and un-numbered group
+          is not supported
 
-    _set_or_delete_marker_for_migrate_instances(context, marker)
-    return count_all, count_hit
+        We can live with these limitations today as Neutron does not use
+        forbidden traits and aggregates in the request and each Neutron port is
+        mapped to a numbered group and the resources class used by neutron
+        ports are never requested through the flavor extra_spec.
+
+        This is a workaround as placement does not return which RP fulfills
+        which granular request group in the allocation candidate request. There
+        is a spec proposing a solution in placement:
+        https://review.opendev.org/#/c/597601/
+
+        :param placement_allocations: The overall allocation made by the
+                                      scheduler for this RequestSpec
+        :param provider_traits: A dict keyed by resource provider uuids
+                                containing the list of traits the given RP has.
+                                This dict contains info only about RPs
+                                appearing in the placement_allocations param.
+        """
+        if not self.maps_requested_resources:
+            # Nothing to do, so let's return early
+            return
+
+        for group in self.requested_resources:
+            # See the limitations in the func doc above
+            if (not group.use_same_provider or
+                    group.aggregates or
+                    group.forbidden_traits):
+                raise NotImplementedError()
+
+        # Iterate through every possible group - RP mappings and try to find a
+        # valid one. If there are more than one possible solution then it is
+        # enough to find one as these solutions are interchangeable from
+        # backend (e.g. Neutron) perspective.
+        LOG.debug('Trying to find a valid group - RP mapping for groups %s to '
+                  'allocations %s with traits %s', self.requested_resources,
+                  placement_allocations, provider_traits)
+
+        # This generator first creates permutations with repetition of the RPs
+        # with length of the number of groups we have. So if there is
+        #   2 RPs (rp1, rp2) and
+        #   3 groups (g1, g2, g3).
+        # Then the itertools.product(('rp1', 'rp2'), repeat=3)) will be:
+        #  (rp1, rp1, rp1)
+        #  (rp1, rp1, rp2)
+        #  (rp1, rp2, rp1)
+        #  ...
+        #  (rp2, rp2, rp2)
+        # Then we zip each of this permutations to our group list resulting in
+        # a list of list of group - rp pairs:
+        # [[('g1', 'rp1'), ('g2', 'rp1'), ('g3', 'rp1')],
+        #  [('g1', 'rp1'), ('g2', 'rp1'), ('g3', 'rp2')],
+        #  [('g1', 'rp1'), ('g2', 'rp2'), ('g3', 'rp1')],
+        #  ...
+        #  [('g1', 'rp2'), ('g2', 'rp2'), ('g3', 'rp2')]]
+        # NOTE(gibi): the list() around the zip() below is needed as the
+        # algorithm looks into the mapping more than once and zip returns an
+        # iterator in py3.x. Still we need to generate a mapping once hence the
+        # generator expression.
+        every_possible_mapping = (list(zip(self.requested_resources, rps))
+                                  for rps in itertools.product(
+                                      placement_allocations.keys(),
+                                      repeat=len(self.requested_resources)))
+        for mapping in every_possible_mapping:
+            if self._is_valid_group_rp_mapping(
+                    mapping, placement_allocations, provider_traits):
+                for group, rp in mapping:
+                    # NOTE(gibi): un-numbered group might be mapped to more
+                    # than one RP but we do not support that yet here.
+                    group.provider_uuids = [rp]
+                LOG.debug('Found valid group - RP mapping %s', mapping)
+                return
+
+        # if we reached this point then none of the possible mappings was
+        # valid. This should never happen as Placement returns allocation
+        # candidates based on the overall resource request of the server
+        # including the request of the groups.
+        raise ValueError('No valid group - RP mapping is found for '
+                         'groups %s, allocation %s and provider traits %s' %
+                         (self.requested_resources, placement_allocations,
+                          provider_traits))
 
 
 @base.NovaObjectRegistry.register
@@ -726,7 +878,8 @@ class Destination(base.NovaObject):
     # Version 1.0: Initial version
     # Version 1.1: Add cell field
     # Version 1.2: Add aggregates field
-    VERSION = '1.2'
+    # Version 1.3: Add allow_cross_cell_move field.
+    VERSION = '1.3'
 
     fields = {
         'host': fields.StringField(),
@@ -740,11 +893,17 @@ class Destination(base.NovaObject):
         # are passed to placement.  See require_aggregates() below.
         'aggregates': fields.ListOfStringsField(nullable=True,
                                                 default=None),
+        # NOTE(mriedem): allow_cross_cell_move defaults to False so that the
+        # scheduler by default selects hosts from the cell specified in the
+        # cell field.
+        'allow_cross_cell_move': fields.BooleanField(default=False),
     }
 
     def obj_make_compatible(self, primitive, target_version):
         super(Destination, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 3) and 'allow_cross_cell_move' in primitive:
+            del primitive['allow_cross_cell_move']
         if target_version < (1, 2):
             if 'aggregates' in primitive:
                 del primitive['aggregates']
@@ -844,3 +1003,87 @@ class SchedulerLimits(base.NovaObject):
             if getattr(self, field) is not None:
                 limits[field] = getattr(self, field)
         return limits
+
+
+@base.NovaObjectRegistry.register
+class RequestGroup(base.NovaObject):
+    """Versioned object based on the unversioned
+    nova.api.openstack.placement.lib.RequestGroup object.
+    """
+    # Version 1.0: Initial version
+    # Version 1.1: add requester_id and provider_uuids fields
+    # Version 1.2: add in_tree field
+    VERSION = '1.2'
+
+    fields = {
+        'use_same_provider': fields.BooleanField(default=True),
+        'resources': fields.DictOfIntegersField(default={}),
+        'required_traits': fields.SetOfStringsField(default=set()),
+        'forbidden_traits': fields.SetOfStringsField(default=set()),
+        # The aggregates field has a form of
+        #     [[aggregate_UUID1],
+        #      [aggregate_UUID2, aggregate_UUID3]]
+        # meaning that the request should be fulfilled from an RP that is a
+        # member of the aggregate aggregate_UUID1 and member of the aggregate
+        # aggregate_UUID2 or aggregate_UUID3 .
+        'aggregates': fields.ListOfListsOfStringsField(default=[]),
+        # The entity the request is coming from (e.g. the Neutron port uuid)
+        # which may not always be a UUID.
+        'requester_id': fields.StringField(nullable=True, default=None),
+        # The resource provider UUIDs that together fulfill the request
+        # NOTE(gibi): this can be more than one if this is the unnumbered
+        # request group (i.e. use_same_provider=False)
+        'provider_uuids': fields.ListOfUUIDField(default=[]),
+        'in_tree': fields.UUIDField(nullable=True, default=None),
+    }
+
+    def __init__(self, context=None, **kwargs):
+        super(RequestGroup, self).__init__(context=context, **kwargs)
+        self.obj_set_defaults()
+
+    @classmethod
+    def from_port_request(cls, context, port_uuid, port_resource_request):
+        """Init the group from the resource request of a neutron port
+
+        :param context: the request context
+        :param port_uuid: the port requesting the resources
+        :param port_resource_request: the resource_request attribute of the
+                                      neutron port
+        For example:
+
+            port_resource_request = {
+                "resources": {
+                    "NET_BW_IGR_KILOBIT_PER_SEC": 1000,
+                    "NET_BW_EGR_KILOBIT_PER_SEC": 1000},
+                "required": ["CUSTOM_PHYSNET_2",
+                             "CUSTOM_VNIC_TYPE_NORMAL"]
+            }
+        """
+
+        # NOTE(gibi): Assumptions:
+        # * a port requests resource from a single provider.
+        # * a port only specifies resources and required traits
+        # NOTE(gibi): Placement rejects allocation candidates where a request
+        # group has traits but no resources specified. This is why resources
+        # are handled as mandatory below but not traits.
+        obj = cls(context=context,
+                  use_same_provider=True,
+                  resources=port_resource_request['resources'],
+                  required_traits=set(port_resource_request.get(
+                      'required', [])),
+                  requester_id=port_uuid)
+        obj.obj_set_defaults()
+        return obj
+
+    def obj_make_compatible(self, primitive, target_version):
+        super(RequestGroup, self).obj_make_compatible(
+            primitive, target_version)
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 2):
+            if 'in_tree' in primitive:
+                del primitive['in_tree']
+        if target_version < (1, 1):
+            if 'requester_id' in primitive:
+                del primitive['requester_id']
+            if 'provider_uuids' in primitive:
+                del primitive['provider_uuids']

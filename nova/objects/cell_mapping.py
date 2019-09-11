@@ -13,7 +13,6 @@
 from oslo_log import log as logging
 from oslo_utils import versionutils
 import six.moves.urllib.parse as urlparse
-from sqlalchemy.orm import joinedload
 from sqlalchemy.sql.expression import asc
 from sqlalchemy.sql import false
 from sqlalchemy.sql import true
@@ -128,10 +127,11 @@ class CellMapping(base.NovaTimestampObject, base.NovaObject):
         return url.format(**subs)
 
     @staticmethod
-    def _format_db_url(url):
-        if CONF.database.connection is None and '{' in url:
-            LOG.error('Cell mapping database_connection is a template, but '
-                      '[database]/connection is not set')
+    def format_db_url(url):
+        if CONF.database.connection is None:
+            if '{' in url:
+                LOG.error('Cell mapping database_connection is a template, '
+                          'but [database]/connection is not set')
             return url
         try:
             return CellMapping._format_url(url, CONF.database.connection)
@@ -141,10 +141,11 @@ class CellMapping(base.NovaTimestampObject, base.NovaObject):
             return url
 
     @staticmethod
-    def _format_mq_url(url):
-        if CONF.transport_url is None and '{' in url:
-            LOG.error('Cell mapping transport_url is a template, but '
-                      '[DEFAULT]/transport_url is not set')
+    def format_mq_url(url):
+        if CONF.transport_url is None:
+            if '{' in url:
+                LOG.error('Cell mapping transport_url is a template, but '
+                          '[DEFAULT]/transport_url is not set')
             return url
         try:
             return CellMapping._format_url(url, CONF.transport_url)
@@ -158,9 +159,9 @@ class CellMapping(base.NovaTimestampObject, base.NovaObject):
         for key in cell_mapping.fields:
             val = db_cell_mapping[key]
             if key == 'database_connection':
-                val = cell_mapping._format_db_url(val)
+                val = cell_mapping.format_db_url(val)
             elif key == 'transport_url':
-                val = cell_mapping._format_mq_url(val)
+                val = cell_mapping.format_mq_url(val)
             setattr(cell_mapping, key, val)
         cell_mapping.obj_reset_changes()
         cell_mapping._context = context
@@ -274,13 +275,14 @@ class CellMappingList(base.ObjectListBase, base.NovaObject):
     @staticmethod
     @db_api.api_context_manager.reader
     def _get_by_project_id_from_db(context, project_id):
-        mappings = context.session.query(
-            api_models.InstanceMapping).\
-            filter_by(project_id=project_id).\
-            group_by(api_models.InstanceMapping.cell_id).\
-            options(joinedload('cell_mapping', innerjoin=True)).\
-            all()
-        return (mapping.cell_mapping for mapping in mappings)
+        # SELECT DISTINCT cell_id FROM instance_mappings \
+        #   WHERE project_id = $project_id;
+        cell_ids = context.session.query(
+            api_models.InstanceMapping.cell_id).filter_by(
+            project_id=project_id).distinct().subquery()
+        # SELECT cell_mappings WHERE cell_id IN ($cell_ids);
+        return context.session.query(api_models.CellMapping).filter(
+            api_models.CellMapping.id.in_(cell_ids)).all()
 
     @classmethod
     def get_by_project_id(cls, context, project_id):

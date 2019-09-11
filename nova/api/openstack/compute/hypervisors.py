@@ -27,8 +27,7 @@ from nova.api.openstack.compute.schemas import hypervisors as hyper_schema
 from nova.api.openstack.compute.views import hypervisors as hyper_view
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova.cells import utils as cells_utils
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
 from nova.policies import hypervisors as hv_policies
@@ -46,12 +45,12 @@ class HypervisorsController(wsgi.Controller):
     _view_builder_class = hyper_view.ViewBuilder
 
     def __init__(self):
+        super(HypervisorsController, self).__init__()
         self.host_api = compute.HostAPI()
         self.servicegroup_api = servicegroup.API()
-        super(HypervisorsController, self).__init__()
 
     def _view_hypervisor(self, hypervisor, service, detail, req, servers=None,
-                         **kwargs):
+                         with_servers=False, **kwargs):
         alive = self.servicegroup_api.service_is_up(service)
         # The 2.53 microversion returns the compute node uuid rather than id.
         uuid_for_id = api_version_request.is_supported(
@@ -90,6 +89,12 @@ class HypervisorsController(wsgi.Controller):
         if servers:
             hyp_dict['servers'] = [dict(name=serv['name'], uuid=serv['uuid'])
                                    for serv in servers]
+        # The 2.75 microversion adds 'servers' field always in response.
+        # Empty list if there are no servers on hypervisors and it is
+        # requested in request.
+        elif with_servers and api_version_request.is_supported(
+                req, min_version='2.75'):
+            hyp_dict['servers'] = []
 
         # Add any additional info
         if kwargs:
@@ -171,7 +176,8 @@ class HypervisorsController(wsgi.Controller):
                     context, hyp.host)
                 hypervisors_list.append(
                     self._view_hypervisor(
-                        hyp, service, detail, req, servers=instances))
+                        hyp, service, detail, req, servers=instances,
+                        with_servers=with_servers))
             except (exception.ComputeHostNotFound,
                     exception.HostMappingNotFound):
                 # The compute service could be deleted which doesn't delete
@@ -268,11 +274,6 @@ class HypervisorsController(wsgi.Controller):
                 msg = _('Invalid uuid %s') % hypervisor_id
                 raise webob.exc.HTTPBadRequest(explanation=msg)
         else:
-            # This API is supported for cells v1 and as such the id can be
-            # a cell v1 delimited string, so we have to parse it first.
-            if cells_utils.CELL_ITEM_SEP in str(hypervisor_id):
-                hypervisor_id = cells_utils.split_cell_and_item(
-                    hypervisor_id)[1]
             try:
                 utils.validate_integer(hypervisor_id, 'id')
             except exception.InvalidInput:
@@ -319,7 +320,7 @@ class HypervisorsController(wsgi.Controller):
             msg = _("Hypervisor with ID '%s' could not be found.") % id
             raise webob.exc.HTTPNotFound(explanation=msg)
         return dict(hypervisor=self._view_hypervisor(
-            hyp, service, True, req, instances))
+            hyp, service, True, req, instances, with_servers))
 
     @wsgi.expected_errors((400, 404, 501))
     def uptime(self, req, id):

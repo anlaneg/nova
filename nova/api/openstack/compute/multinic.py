@@ -21,7 +21,7 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import multinic
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.policies import multinic as multinic_policies
 
@@ -29,8 +29,8 @@ from nova.policies import multinic as multinic_policies
 class MultinicController(wsgi.Controller):
     """This API is deprecated from Microversion '2.44'."""
 
-    def __init__(self, *args, **kwargs):
-        super(MultinicController, self).__init__(*args, **kwargs)
+    def __init__(self):
+        super(MultinicController, self).__init__()
         self.compute_api = compute.API()
 
     @wsgi.Controller.api_version("2.1", "2.43")
@@ -47,8 +47,6 @@ class MultinicController(wsgi.Controller):
         network_id = body['addFixedIp']['networkId']
         try:
             self.compute_api.add_fixed_ip(context, instance, network_id)
-        except exception.InstanceUnknownCell as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
         except exception.NoMoreFixedIps as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
 
@@ -67,7 +65,5 @@ class MultinicController(wsgi.Controller):
 
         try:
             self.compute_api.remove_fixed_ip(context, instance, address)
-        except exception.InstanceUnknownCell as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
         except exception.FixedIpNotFoundForSpecificInstance as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())

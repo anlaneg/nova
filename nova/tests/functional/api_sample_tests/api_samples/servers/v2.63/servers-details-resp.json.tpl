@@ -22,8 +22,7 @@
                 "disk": 1,
                 "ephemeral": 0,
                 "extra_specs": {
-                    "hw:mem_page_size": "2048",
-                    "hw:cpu_policy": "dedicated"
+                    "hw:numa_nodes": "1"
                 },
                 "original_name": "m1.tiny.specs",
                 "ram": 512,
@@ -58,7 +57,7 @@
             "name": "new-server-test",
             "config_drive": "%(cdrive)s",
             "OS-DCF:diskConfig": "AUTO",
-            "OS-EXT-AZ:availability_zone": "nova",
+            "OS-EXT-AZ:availability_zone": "us-west",
             "OS-EXT-SRV-ATTR:host": "%(compute_host)s",
             "OS-EXT-SRV-ATTR:hostname": "%(hostname)s",
             "OS-EXT-SRV-ATTR:hypervisor_hostname": "%(hypervisor_hostname)s",

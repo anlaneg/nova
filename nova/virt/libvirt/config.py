@@ -25,7 +25,9 @@ helpers for populating up config object instances.
 
 import time
 
+from collections import OrderedDict
 from lxml import etree
+from oslo_utils import strutils
 from oslo_utils import units
 import six
 
@@ -91,7 +93,7 @@ class LibvirtConfigCaps(LibvirtConfigObject):
     def parse_dom(self, xmldoc):
         super(LibvirtConfigCaps, self).parse_dom(xmldoc)
 
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == "host":
                 host = LibvirtConfigCapsHost()
                 host.parse_dom(c)
@@ -112,6 +114,102 @@ class LibvirtConfigCaps(LibvirtConfigObject):
         return caps
 
 
+class LibvirtConfigDomainCaps(LibvirtConfigObject):
+
+    def __init__(self, **kwargs):
+        super(LibvirtConfigDomainCaps, self).__init__(
+            root_name="domainCapabilities", **kwargs)
+        self._features = None
+        self._machine = None
+        self._alias = None
+
+    def parse_dom(self, xmldoc):
+        super(LibvirtConfigDomainCaps, self).parse_dom(xmldoc)
+
+        for c in xmldoc:
+            if c.tag == "features":
+                features = LibvirtConfigDomainCapsFeatures()
+                features.parse_dom(c)
+                self._features = features
+            elif c.tag == "machine":
+                self._machine = c.text
+
+    @property
+    def features(self):
+        if self._features is None:
+            return []
+        return self._features.features
+
+    @property
+    def machine_type(self):
+        if self._machine is None:
+            return ""
+        return self._machine
+
+    @property
+    def machine_type_alias(self):
+        if self._alias is None:
+            return self._machine
+        return self._alias
+
+    @machine_type_alias.setter
+    def machine_type_alias(self, alias):
+        self._alias = alias
+
+
+class LibvirtConfigDomainCapsFeatures(LibvirtConfigObject):
+
+    def __init__(self, **kwargs):
+        super(LibvirtConfigDomainCapsFeatures, self).__init__(
+            root_name="features", **kwargs)
+        self.features = []
+
+    def parse_dom(self, xmldoc):
+        super(LibvirtConfigDomainCapsFeatures, self).parse_dom(xmldoc)
+
+        for c in xmldoc:
+            feature = None
+            if c.tag == "sev":
+                feature = LibvirtConfigDomainCapsFeatureSev()
+            if feature:
+                feature.parse_dom(c)
+                self.features.append(feature)
+
+            # There are many other features and domain capabilities,
+            # but we don't need to regenerate the XML (it's read-only
+            # data provided by libvirtd), so there's no point parsing
+            # them until we actually need their values.
+
+    # For the same reason, we do not need a format_dom() method, but
+    # it's a bug if this ever gets called and we inherited one from
+    # the base class, so override that to watch out for accidental
+    # calls.
+    def format_dom(self):
+        raise RuntimeError(_('BUG: tried to generate domainCapabilities XML'))
+
+
+class LibvirtConfigDomainCapsFeatureSev(LibvirtConfigObject):
+
+    def __init__(self, **kwargs):
+        super(LibvirtConfigDomainCapsFeatureSev, self).__init__(
+            root_name='sev', **kwargs)
+        self.supported = False
+        self.cbitpos = None
+        self.reduced_phys_bits = None
+
+    def parse_dom(self, xmldoc):
+        super(LibvirtConfigDomainCapsFeatureSev, self).parse_dom(xmldoc)
+
+        if xmldoc.get('supported') == 'yes':
+            self.supported = True
+
+        for c in xmldoc.getchildren():
+            if c.tag == 'reducedPhysBits':
+                self.reduced_phys_bits = int(c.text)
+            elif c.tag == 'cbitpos':
+                self.cbitpos = int(c.text)
+
+
 class LibvirtConfigCapsNUMATopology(LibvirtConfigObject):
 
     def __init__(self, **kwargs):
@@ -124,8 +222,8 @@ class LibvirtConfigCapsNUMATopology(LibvirtConfigObject):
     def parse_dom(self, xmldoc):
         super(LibvirtConfigCapsNUMATopology, self).parse_dom(xmldoc)
 
-        xmlcells = xmldoc.getchildren()[0]
-        for xmlcell in xmlcells.getchildren():
+        xmlcells = xmldoc[0]
+        for xmlcell in xmlcells:
             cell = LibvirtConfigCapsNUMACell()
             cell.parse_dom(xmlcell)
             self.cells.append(cell)
@@ -158,7 +256,7 @@ class LibvirtConfigCapsNUMACell(LibvirtConfigObject):
         super(LibvirtConfigCapsNUMACell, self).parse_dom(xmldoc)
 
         self.id = int(xmldoc.get("id"))
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == "memory":
                 self.memory = int(c.text)
             elif c.tag == "pages":
@@ -166,7 +264,7 @@ class LibvirtConfigCapsNUMACell(LibvirtConfigObject):
                 pages.parse_dom(c)
                 self.mempages.append(pages)
             elif c.tag == "cpus":
-                for c2 in c.getchildren():
+                for c2 in c:
                     cpu = LibvirtConfigCapsNUMACPU()
                     cpu.parse_dom(c2)
                     self.cpus.append(cpu)
@@ -270,7 +368,7 @@ class LibvirtConfigCapsHost(LibvirtConfigObject):
     def parse_dom(self, xmldoc):
         super(LibvirtConfigCapsHost, self).parse_dom(xmldoc)
 
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == "cpu":
                 cpu = LibvirtConfigCPU()
                 cpu.parse_dom(c)
@@ -302,19 +400,54 @@ class LibvirtConfigCapsGuest(LibvirtConfigObject):
 
         self.arch = None
         self.ostype = None
-        self.domtype = list()
+        # Map domain types such as 'qemu' and 'kvm' to
+        # LibvirtConfigCapsGuestDomain instances.
+        self.domains = OrderedDict()
+        self.default_domain = None
 
     def parse_dom(self, xmldoc):
         super(LibvirtConfigCapsGuest, self).parse_dom(xmldoc)
 
-        for c in xmldoc.getchildren():
-            if c.tag == "os_type":
-                self.ostype = c.text
-            elif c.tag == "arch":
-                self.arch = c.get("name")
-                for sc in c.getchildren():
-                    if sc.tag == "domain":
-                        self.domtype.append(sc.get("type"))
+        for child in xmldoc:
+            if child.tag == "os_type":
+                self.ostype = child.text
+            elif child.tag == "arch":
+                self.parse_arch(child)
+
+    def parse_arch(self, xmldoc):
+        self.arch = xmldoc.get("name")
+        # NOTE(aspiers): The data relating to each <domain> element
+        # under <arch> (such as <emulator> and many <machine>
+        # elements) is structured in a slightly odd way.  There is one
+        # "default" domain such as
+        #
+        #   <domain type='qemu'/>
+        #
+        # which has no child elements, and all its data is provided in
+        # sibling elements.  Then others such as
+        #
+        #   <domain type='kvm'>
+        #
+        # will have their <emulator> and <machine> elements as
+        # children.  So we need to handle the two cases separately.
+        self.default_domain = LibvirtConfigCapsGuestDomain()
+        for child in xmldoc:
+            if child.tag == "domain":
+                if list(child):
+                    # This domain has children, so create a new instance,
+                    # parse it, and register it in the dict of domains.
+                    domain = LibvirtConfigCapsGuestDomain()
+                    domain.parse_dom(child)
+                    self.domains[domain.domtype] = domain
+                else:
+                    # This is the childless <domain/> element for the
+                    # default domain
+                    self.default_domain.parse_domain(child)
+                    self.domains[self.default_domain.domtype] = \
+                        self.default_domain
+            else:
+                # Sibling element of the default domain
+                self.default_domain.parse_child(child)
 
     def format_dom(self):
         caps = super(LibvirtConfigCapsGuest, self).format_dom()
@@ -322,14 +455,81 @@ class LibvirtConfigCapsGuest(LibvirtConfigObject):
         if self.ostype is not None:
             caps.append(self._text_node("os_type", self.ostype))
         if self.arch:
-            arch = etree.Element("arch", name=self.arch)
-            for dt in self.domtype:
-                dte = etree.Element("domain")
-                dte.set("type", dt)
-                arch.append(dte)
+            arch = self.format_arch()
             caps.append(arch)
 
         return caps
+
+    def format_arch(self):
+        arch = etree.Element("arch", name=self.arch)
+
+        for c in self.default_domain.format_dom():
+            arch.append(c)
+        arch.append(self._new_node("domain", type=self.default_domain.domtype))
+
+        for domtype, domain in self.domains.items():
+            if domtype == self.default_domain.domtype:
+                # We've already added this domain at the top level
+                continue
+            arch.append(domain.format_dom())
+
+        return arch
+
+
+class LibvirtConfigCapsGuestDomain(LibvirtConfigObject):
+    def __init__(self, **kwargs):
+        super(LibvirtConfigCapsGuestDomain, self).__init__(
+            root_name="domain", **kwargs)
+
+        self.domtype = None
+
+        # Track <emulator> values, which we need in order to be able
+        # to call virConnectGetDomainCapabilities() - typically
+        # something like '/usr/bin/qemu-system-i386'.
+        self.emulator = None
+
+        self.machines = {}
+        self.aliases = {}
+
+    def parse_dom(self, xmldoc):
+        super(LibvirtConfigCapsGuestDomain, self).parse_dom(xmldoc)
+
+        self.parse_domain(xmldoc)
+
+        for c in xmldoc:
+            self.parse_child(c)
+
+    def parse_child(self, xmldoc):
+        if xmldoc.tag == "emulator":
+            self.emulator = xmldoc.text
+        elif xmldoc.tag == "machine":
+            self.parse_machine(xmldoc)
+
+    def parse_domain(self, xmldoc):
+        self.domtype = xmldoc.get("type")
+        if self.domtype is None:
+            raise exception.InvalidInput(
+                "Didn't find domain type in %s", xmldoc)
+
+    def parse_machine(self, xmldoc):
+        if 'canonical' in xmldoc.attrib:
+            self.aliases[xmldoc.text] = xmldoc.attrib
+        else:
+            self.machines[xmldoc.text] = xmldoc.attrib
+
+    def format_dom(self):
+        domain = super(LibvirtConfigCapsGuestDomain, self).format_dom()
+
+        if self.domtype is not None:
+            domain.set("type", self.domtype)
+        if self.emulator is not None:
+            domain.append(self._text_node("emulator", self.emulator))
+        for mach_type, machine in self.machines.items():
+            domain.append(self._text_node("machine", mach_type, **machine))
+        for alias, machine in self.aliases.items():
+            domain.append(self._text_node("machine", alias, **machine))
+
+        return domain
 
 
 class LibvirtConfigGuestTimer(LibvirtConfigObject):
@@ -438,7 +638,7 @@ class LibvirtConfigCPU(LibvirtConfigObject):
     def parse_dom(self, xmldoc):
         super(LibvirtConfigCPU, self).parse_dom(xmldoc)
 
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == "arch":
                 self.arch = c.text
             elif c.tag == "model":
@@ -544,7 +744,7 @@ class LibvirtConfigGuestCPUNUMA(LibvirtConfigObject):
     def parse_dom(self, xmldoc):
         super(LibvirtConfigGuestCPUNUMA, self).parse_dom(xmldoc)
 
-        for child in xmldoc.getchildren():
+        for child in xmldoc:
             if child.tag == "cell":
                 cell = LibvirtConfigGuestCPUNUMACell()
                 cell.parse_dom(child)
@@ -572,7 +772,7 @@ class LibvirtConfigGuestCPU(LibvirtConfigCPU):
         super(LibvirtConfigGuestCPU, self).parse_dom(xmldoc)
         self.mode = xmldoc.get('mode')
         self.match = xmldoc.get('match')
-        for child in xmldoc.getchildren():
+        for child in xmldoc:
             if child.tag == "numa":
                 numa = LibvirtConfigGuestCPUNUMA()
                 numa.parse_dom(child)
@@ -689,6 +889,7 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
         self.driver_cache = None
         self.driver_discard = None
         self.driver_io = None
+        self.driver_iommu = False
         self.source_path = None
         self.source_protocol = None
         self.source_name = None
@@ -788,10 +989,8 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
 
         dev.set("type", self.source_type)
         dev.set("device", self.source_device)
-        if (self.driver_name is not None or
-            self.driver_format is not None or
-            self.driver_cache is not None or
-                self.driver_discard is not None):
+        if any((self.driver_name, self.driver_format, self.driver_cache,
+                self.driver_discard, self.driver_iommu)):
             drv = etree.Element("driver")
             if self.driver_name is not None:
                 drv.set("name", self.driver_name)
@@ -803,6 +1002,8 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
                 drv.set("discard", self.driver_discard)
             if self.driver_io is not None:
                 drv.set("io", self.driver_io)
+            if self.driver_iommu:
+                drv.set("iommu", "on")
             dev.append(drv)
 
         if self.source_type == "file":
@@ -876,13 +1077,14 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
         self.source_type = xmldoc.get('type')
         self.snapshot = xmldoc.get('snapshot')
 
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == 'driver':
                 self.driver_name = c.get('name')
                 self.driver_format = c.get('type')
                 self.driver_cache = c.get('cache')
                 self.driver_discard = c.get('discard')
                 self.driver_io = c.get('io')
+                self.driver_iommu = c.get('iommu', '') == "on"
             elif c.tag == 'source':
                 if self.source_type == 'file':
                     self.source_path = c.get('file')
@@ -893,7 +1095,7 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
                 elif self.source_type == 'network':
                     self.source_protocol = c.get('protocol')
                     self.source_name = c.get('name')
-                    for sub in c.getchildren():
+                    for sub in c:
                         if sub.tag == 'host':
                             self.source_hosts.append(sub.get('name'))
                             self.source_ports.append(sub.get('port'))
@@ -952,7 +1154,7 @@ class LibvirtConfigGuestDiskBackingStore(LibvirtConfigObject):
         self.source_type = xmldoc.get('type')
         self.index = xmldoc.get('index')
 
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == 'driver':
                 self.driver_name = c.get('name')
                 self.driver_format = c.get('type')
@@ -960,12 +1162,12 @@ class LibvirtConfigGuestDiskBackingStore(LibvirtConfigObject):
                 self.source_file = c.get('file')
                 self.source_protocol = c.get('protocol')
                 self.source_name = c.get('name')
-                for d in c.getchildren():
+                for d in c:
                     if d.tag == 'host':
                         self.source_hosts.append(d.get('name'))
                         self.source_ports.append(d.get('port'))
             elif c.tag == 'backingStore':
-                if c.getchildren():
+                if len(c):
                     self.backing_store = LibvirtConfigGuestDiskBackingStore()
                     self.backing_store.parse_dom(c)
 
@@ -1068,7 +1270,7 @@ class LibvirtConfigGuestSnapshotDisk(LibvirtConfigObject):
         self.source_type = xmldoc.get('type')
         self.snapshot = xmldoc.get('snapshot')
 
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == 'driver':
                 self.driver_name = c.get('name')
                 self.driver_format = c.get('type')
@@ -1083,7 +1285,7 @@ class LibvirtConfigGuestSnapshotDisk(LibvirtConfigObject):
                 elif self.source_type == 'network':
                     self.source_protocol = c.get('protocol')
                     self.source_name = c.get('name')
-                    for sub in c.getchildren():
+                    for sub in c:
                         if sub.tag == 'host':
                             self.source_hosts.append(sub.get('name'))
                             self.source_ports.append(sub.get('port'))
@@ -1091,7 +1293,7 @@ class LibvirtConfigGuestSnapshotDisk(LibvirtConfigObject):
             elif c.tag == 'serial':
                 self.serial = c.text
 
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == 'target':
                 if self.source_type == 'mount':
                     self.target_path = c.get('dir')
@@ -1137,7 +1339,7 @@ class LibvirtConfigGuestFilesys(LibvirtConfigGuestDevice):
 
         self.source_type = xmldoc.get('type')
 
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == 'driver':
                 if self.source_type == 'file':
                     self.driver_type = c.get('type')
@@ -1180,7 +1382,7 @@ class LibvirtConfigGuestDiskEncryption(LibvirtConfigObject):
 
     def parse_dom(self, xmldoc):
         self.format = xmldoc.get('format')
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == 'secret':
                 m = LibvirtConfigGuestDiskEncryptionSecret()
                 m.parse_dom(c)
@@ -1354,6 +1556,7 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
         self.filtername = None
         self.filterparams = []
         self.driver_name = None
+        self.driver_iommu = False
         self.vhostuser_mode = None
         self.vhostuser_path = None
         self.vhostuser_type = None
@@ -1381,12 +1584,17 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
             dev.append(etree.Element("model", type=self.model))
 
         drv_elem = None
-        if self.driver_name:
-            drv_elem = etree.Element("driver", name=self.driver_name)
-        if self.net_type == "vhostuser":
-            # For vhostuser interface we should not set the driver
-            # name.
+        if (self.driver_name or
+                self.driver_iommu or
+                self.net_type == "vhostuser"):
+
             drv_elem = etree.Element("driver")
+            if self.driver_name and self.net_type != "vhostuser":
+                # For vhostuser interface we should not set the driver name.
+                drv_elem.set("name", self.driver_name)
+            if self.driver_iommu:
+                drv_elem.set("iommu", "on")
+
         if drv_elem is not None:
             if self.vhost_queues is not None:
                 drv_elem.set('queues', str(self.vhost_queues))
@@ -1397,9 +1605,10 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
 
             if (drv_elem.get('name') or drv_elem.get('queues') or
                 drv_elem.get('rx_queue_size') or
-                drv_elem.get('tx_queue_size')):
+                drv_elem.get('tx_queue_size') or
+                drv_elem.get('iommu')):
                 # Append the driver element into the dom only if name
-                # or queues or tx/rx attributes are set.
+                # or queues or tx/rx or iommu attributes are set.
                 dev.append(drv_elem)
 
         if self.net_type == "ethernet":
@@ -1487,13 +1696,14 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
 
         self.net_type = xmldoc.get('type')
 
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == 'mac':
                 self.mac_addr = c.get('address')
             elif c.tag == 'model':
                 self.model = c.get('type')
             elif c.tag == 'driver':
                 self.driver_name = c.get('name')
+                self.driver_iommu = (c.get('iommu', '') == 'on')
                 self.vhost_queues = c.get('queues')
                 self.vhost_rx_queue_size = c.get('rx_queue_size')
                 self.vhost_tx_queue_size = c.get('tx_queue_size')
@@ -1506,7 +1716,7 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
                     self.vhostuser_mode = c.get('mode')
                     self.vhostuser_path = c.get('path')
                 elif self.net_type == 'hostdev':
-                    for sub in c.getchildren():
+                    for sub in c:
                         if sub.tag == 'address' and sub.get('type') == 'pci':
                             # strip the 0x prefix on each attribute since
                             # format_dom puts them back on - note that
@@ -1529,24 +1739,24 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
                 # NOTE(mriedem): The vlan element can have multiple tag
                 # sub-elements but we're currently only storing a single tag
                 # id in the vlan attribute.
-                for sub in c.getchildren():
+                for sub in c:
                     if sub.tag == 'tag' and sub.get('id'):
                         self.vlan = int(sub.get('id'))
                         break
             elif c.tag == 'virtualport':
                 self.vporttype = c.get('type')
-                for sub in c.getchildren():
+                for sub in c:
                     if sub.tag == 'parameters':
                         for k, v in dict(sub.attrib).items():
                             self.add_vport_param(k, v)
             elif c.tag == 'filterref':
                 self.filtername = c.get('filter')
-                for sub in c.getchildren():
+                for sub in c:
                     if sub.tag == 'parameter':
                         self.add_filter_param(sub.get('name'),
                                               sub.get('value'))
             elif c.tag == 'bandwidth':
-                for sub in c.getchildren():
+                for sub in c:
                     # Note that only average is mandatory, burst and peak are
                     # optional (and all are ints).
                     if sub.tag == 'inbound':
@@ -1582,12 +1792,15 @@ class LibvirtConfigGuestInput(LibvirtConfigGuestDevice):
 
         self.type = "tablet"
         self.bus = "usb"
+        self.driver_iommu = False
 
     def format_dom(self):
         dev = super(LibvirtConfigGuestInput, self).format_dom()
 
         dev.set("type", self.type)
         dev.set("bus", self.bus)
+        if self.driver_iommu:
+            dev.append(etree.Element('driver', iommu="on"))
 
         return dev
 
@@ -1646,6 +1859,7 @@ class LibvirtConfigGuestVideo(LibvirtConfigGuestDevice):
         self.type = 'cirrus'
         self.vram = None
         self.heads = None
+        self.driver_iommu = False
 
     def format_dom(self):
         dev = super(LibvirtConfigGuestVideo, self).format_dom()
@@ -1661,6 +1875,9 @@ class LibvirtConfigGuestVideo(LibvirtConfigGuestDevice):
 
         dev.append(model)
 
+        if self.driver_iommu:
+            dev.append(etree.Element("driver", iommu="on"))
+
         return dev
 
 
@@ -1671,12 +1888,15 @@ class LibvirtConfigMemoryBalloon(LibvirtConfigGuestDevice):
             **kwargs)
         self.model = None
         self.period = None
+        self.driver_iommu = False
 
     def format_dom(self):
         dev = super(LibvirtConfigMemoryBalloon, self).format_dom()
         dev.set('model', str(self.model))
         if self.period is not None:
             dev.append(etree.Element('stats', period=str(self.period)))
+        if self.driver_iommu:
+            dev.append(etree.Element('driver', iommu='on'))
         return dev
 
 
@@ -1689,6 +1909,7 @@ class LibvirtConfigGuestController(LibvirtConfigGuestDevice):
         self.type = None
         self.index = None
         self.model = None
+        self.driver_iommu = False
 
     def format_dom(self):
         controller = super(LibvirtConfigGuestController, self).format_dom()
@@ -1699,6 +1920,9 @@ class LibvirtConfigGuestController(LibvirtConfigGuestDevice):
 
         if self.model:
             controller.set("model", str(self.model))
+
+        if self.driver_iommu:
+            controller.append(etree.Element("driver", iommu="on"))
 
         return controller
 
@@ -1750,7 +1974,7 @@ class LibvirtConfigGuestHostdev(LibvirtConfigGuestDevice):
         self.mode = xmldoc.get('mode')
         self.type = xmldoc.get('type')
         self.managed = xmldoc.get('managed')
-        return xmldoc.getchildren()
+        return list(xmldoc)
 
 
 class LibvirtConfigGuestHostdevPCI(LibvirtConfigGuestHostdev):
@@ -1780,7 +2004,7 @@ class LibvirtConfigGuestHostdevPCI(LibvirtConfigGuestHostdev):
         childs = super(LibvirtConfigGuestHostdevPCI, self).parse_dom(xmldoc)
         for c in childs:
             if c.tag == "source":
-                for sub in c.getchildren():
+                for sub in c:
                     if sub.tag == 'address':
                         self.domain = sub.get('domain')
                         self.bus = sub.get('bus')
@@ -1813,7 +2037,7 @@ class LibvirtConfigGuestHostdevMDEV(LibvirtConfigGuestHostdev):
             self.model = xmldoc.get('model')
         for c in children:
             if c.tag == "source":
-                for sub in c.getchildren():
+                for sub in c:
                     if sub.tag == 'address':
                         self.uuid = sub.get('uuid')
                         return
@@ -2116,19 +2340,19 @@ class LibvirtConfigGuestMemoryTune(LibvirtConfigObject):
         if self.hard_limit is not None:
             root.append(self._text_node("hard_limit",
                                         str(self.hard_limit),
-                                        units="K"))
+                                        unit="KiB"))
         if self.soft_limit is not None:
             root.append(self._text_node("soft_limit",
                                         str(self.soft_limit),
-                                        units="K"))
+                                        unit="KiB"))
         if self.swap_hard_limit is not None:
             root.append(self._text_node("swap_hard_limit",
                                         str(self.swap_hard_limit),
-                                        units="K"))
+                                        unit="KiB"))
         if self.min_guarantee is not None:
             root.append(self._text_node("min_guarantee",
                                         str(self.min_guarantee),
-                                        units="K"))
+                                        unit="KiB"))
 
         return root
 
@@ -2233,10 +2457,28 @@ class LibvirtConfigGuestFeatureKvmHidden(LibvirtConfigGuestFeature):
         return root
 
 
+class LibvirtConfigGuestFeaturePMU(LibvirtConfigGuestFeature):
+
+    def __init__(self, state, **kwargs):
+        super(LibvirtConfigGuestFeaturePMU, self).__init__("pmu", **kwargs)
+        # NOTE(sean-k-mooney): bool_from_string is needed to handle the raw
+        # flavor exta_sepc value. bool_from_string internally checks if the
+        # value is already a bool and returns it. As such it's safe to use
+        # with the image metadata property too, so we call it unconditionally.
+        self.state = strutils.bool_from_string(state)
+
+    def format_dom(self):
+        root = super(LibvirtConfigGuestFeaturePMU, self).format_dom()
+        root.attrib['state'] = "on" if self.state else "off"
+        return root
+
+
 class LibvirtConfigGuestFeatureHyperV(LibvirtConfigGuestFeature):
 
     # QEMU requires at least this value to be set
     MIN_SPINLOCK_RETRIES = 4095
+    # The spoofed vendor_id can be any alphanumeric string
+    SPOOFED_VENDOR_ID = "1234567890ab"
 
     def __init__(self, **kwargs):
         super(LibvirtConfigGuestFeatureHyperV, self).__init__("hyperv",
@@ -2246,6 +2488,8 @@ class LibvirtConfigGuestFeatureHyperV(LibvirtConfigGuestFeature):
         self.vapic = False
         self.spinlocks = False
         self.spinlock_retries = self.MIN_SPINLOCK_RETRIES
+        self.vendorid_spoof = False
+        self.vendorid = self.SPOOFED_VENDOR_ID
 
     def format_dom(self):
         root = super(LibvirtConfigGuestFeatureHyperV, self).format_dom()
@@ -2257,6 +2501,37 @@ class LibvirtConfigGuestFeatureHyperV(LibvirtConfigGuestFeature):
         if self.spinlocks:
             root.append(etree.Element("spinlocks", state="on",
                                       retries=str(self.spinlock_retries)))
+        if self.vendorid_spoof:
+            root.append(etree.Element("vendor_id", state="on",
+                                      value=self.vendorid))
+
+        return root
+
+
+class LibvirtConfigGuestSEVLaunchSecurity(LibvirtConfigObject):
+
+    def __init__(self, **kwargs):
+        super(LibvirtConfigGuestSEVLaunchSecurity, self).__init__(
+            root_name='launchSecurity', **kwargs)
+
+        self.cbitpos = None
+        self.reduced_phys_bits = None
+
+    def format_dom(self):
+        root = super(LibvirtConfigGuestSEVLaunchSecurity, self).format_dom()
+
+        root.set('type', 'sev')
+        policy = etree.Element('policy')
+        policy.text = '0x0033'  # hardcoded default according to the spec
+        root.append(policy)
+
+        cbitpos = etree.Element('cbitpos')
+        cbitpos.text = str(self.cbitpos)
+        root.append(cbitpos)
+
+        reducedPhysBits = etree.Element('reducedPhysBits')
+        reducedPhysBits.text = str(self.reduced_phys_bits)
+        root.append(reducedPhysBits)
 
         return root
 
@@ -2297,6 +2572,7 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         self.metadata = []
         self.idmaps = []
         self.perf_events = []
+        self.launch_security = None
 
     def _format_basic_props(self, root):
         root.append(self._text_node("uuid", self.uuid))
@@ -2389,6 +2665,10 @@ class LibvirtConfigGuest(LibvirtConfigObject):
             perfs.append(event)
         root.append(perfs)
 
+    def _format_sev(self, root):
+        if self.launch_security is not None:
+            root.append(self.launch_security.format_dom())
+
     def format_dom(self):
         root = super(LibvirtConfigGuest, self).format_dom()
 
@@ -2417,6 +2697,8 @@ class LibvirtConfigGuest(LibvirtConfigObject):
 
         self._format_perf_events(root)
 
+        self._format_sev(root)
+
         return root
 
     def _parse_basic_props(self, xmldoc):
@@ -2436,7 +2718,7 @@ class LibvirtConfigGuest(LibvirtConfigObject):
     def _parse_os(self, xmldoc):
         # smbios is skipped just because LibvirtConfigGuestSMBIOS
         # does not implement parse_dom method
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == 'type':
                 self.os_type = c.text
                 self.os_mach_type = c.get('machine')
@@ -2470,9 +2752,9 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         #                            LibvirtConfigGuestUidMap
         #                            LibvirtConfigGuestGidMap
         #                            LibvirtConfigGuestCPU
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == 'devices':
-                for d in c.getchildren():
+                for d in c:
                     if d.tag == 'disk':
                         obj = LibvirtConfigGuestDisk()
                         obj.parse_dom(d)
@@ -2494,22 +2776,22 @@ class LibvirtConfigGuest(LibvirtConfigObject):
                         obj.parse_dom(d)
                         self.devices.append(obj)
             if c.tag == 'idmap':
-                for map in c.getchildren():
+                for idmap in c:
                     obj = None
-                    if map.tag == 'uid':
+                    if idmap.tag == 'uid':
                         obj = LibvirtConfigGuestUIDMap()
-                    elif map.tag == 'gid':
+                    elif idmap.tag == 'gid':
                         obj = LibvirtConfigGuestGIDMap()
 
                     if obj:
-                        obj.parse_dom(map)
+                        obj.parse_dom(idmap)
                         self.idmaps.append(obj)
             elif c.tag == 'cpu':
                 obj = LibvirtConfigGuestCPU()
                 obj.parse_dom(c)
                 self.cpu = obj
             elif c.tag == 'perf':
-                for p in c.getchildren():
+                for p in c:
                     if p.get('enabled') and p.get('enabled') == 'yes':
                         self.add_perf_event(p.get('name'))
             elif c.tag == 'os':
@@ -2564,14 +2846,13 @@ class LibvirtConfigNodeDevice(LibvirtConfigObject):
                                                 **kwargs)
         self.name = None
         self.parent = None
-        self.driver = None
         self.pci_capability = None
         self.mdev_information = None
 
     def parse_dom(self, xmldoc):
         super(LibvirtConfigNodeDevice, self).parse_dom(xmldoc)
 
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == "name":
                 self.name = c.text
             elif c.tag == "parent":
@@ -2611,7 +2892,7 @@ class LibvirtConfigNodeDevicePciCap(LibvirtConfigObject):
     def parse_dom(self, xmldoc):
         super(LibvirtConfigNodeDevicePciCap, self).parse_dom(xmldoc)
 
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == "domain":
                 self.domain = int(c.text)
             elif c.tag == "slot":
@@ -2657,7 +2938,7 @@ class LibvirtConfigNodeDevicePciSubFunctionCap(LibvirtConfigObject):
     def parse_dom(self, xmldoc):
         super(LibvirtConfigNodeDevicePciSubFunctionCap, self).parse_dom(xmldoc)
         self.type = xmldoc.get("type")
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == "address":
                 self.device_addrs.append((int(c.get('domain'), 16),
                                           int(c.get('bus'), 16),
@@ -2677,10 +2958,10 @@ class LibvirtConfigNodeDeviceMdevCapableSubFunctionCap(LibvirtConfigObject):
     def parse_dom(self, xmldoc):
         super(LibvirtConfigNodeDeviceMdevCapableSubFunctionCap,
               self).parse_dom(xmldoc)
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == "type":
                 mdev_type = {'type': c.get('id')}
-                for e in c.getchildren():
+                for e in c:
                     mdev_type[e.tag] = (int(e.text)
                                         if e.tag == 'availableInstances'
                                         else e.text)
@@ -2697,7 +2978,7 @@ class LibvirtConfigNodeDeviceMdevInformation(LibvirtConfigObject):
     def parse_dom(self, xmldoc):
         super(LibvirtConfigNodeDeviceMdevInformation,
               self).parse_dom(xmldoc)
-        for c in xmldoc.getchildren():
+        for c in xmldoc:
             if c.tag == "type":
                 self.type = c.get('id')
             if c.tag == "iommuGroup":
@@ -2714,6 +2995,7 @@ class LibvirtConfigGuestRng(LibvirtConfigGuestDevice):
         self.backend = None
         self.rate_period = None
         self.rate_bytes = None
+        self.driver_iommu = False
 
     def format_dom(self):
         dev = super(LibvirtConfigGuestRng, self).format_dom()
@@ -2730,6 +3012,9 @@ class LibvirtConfigGuestRng(LibvirtConfigGuestDevice):
             dev.append(rate)
 
         dev.append(backend)
+
+        if self.driver_iommu:
+            dev.append(etree.Element('driver', iommu="on"))
 
         return dev
 

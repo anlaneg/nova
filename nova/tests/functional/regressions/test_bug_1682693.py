@@ -14,6 +14,7 @@
 
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit.image import fake as image_fake
 from nova.tests.unit import policy_fixture
@@ -34,7 +35,7 @@ class ServerTagsFilteringTest(test.TestCase,
         # The NeutronFixture is needed to stub out validate_networks in API.
         self.useFixture(nova_fixtures.NeutronFixture(self))
         # Use the PlacementFixture to avoid annoying warnings in the logs.
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
         self.api = api_fixture.api
@@ -52,9 +53,6 @@ class ServerTagsFilteringTest(test.TestCase,
         self.start_service('conductor')
         self.start_service('scheduler')
         self.start_service('compute')
-        # The consoleauth service is needed for deleting console tokens when
-        # the server is deleted.
-        self.start_service('consoleauth')
 
         # create two test servers
         self.servers = []

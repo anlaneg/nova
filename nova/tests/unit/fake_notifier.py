@@ -13,15 +13,19 @@
 #    under the License.
 
 import collections
-import copy
 import functools
+import pprint
 import threading
 
+from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
+from oslo_utils import excutils
 from oslo_utils import timeutils
 
 from nova import rpc
+
+LOG = logging.getLogger(__name__)
 
 
 class _Sub(object):
@@ -38,16 +42,28 @@ class _Sub(object):
             self._notifications.append(notification)
             self._cond.notifyAll()
 
-    def wait_n(self, n, timeout=1.0):
+    def wait_n(self, n, event, timeout):
         """Wait until at least n notifications have been received, and return
         them. May return less than n notifications if timeout is reached.
         """
 
         with timeutils.StopWatch(timeout) as timer:
             with self._cond:
-                while len(self._notifications) < n and not timer.expired():
+                while len(self._notifications) < n:
+                    if timer.expired():
+                        notifications = pprint.pformat(
+                            {event: sub._notifications
+                             for event, sub in VERSIONED_SUBS.items()})
+                        raise AssertionError(
+                            "Notification %(event)s hasn't been "
+                            "received. Received:\n%(notifications)s" % {
+                                'event': event,
+                                'notifications': notifications,
+                            })
                     self._cond.wait(timer.leftover())
-                return copy.copy(self._notifications)
+
+                # Return a copy of the notifications list
+                return list(self._notifications)
 
 
 VERSIONED_SUBS = collections.defaultdict(_Sub)
@@ -84,7 +100,11 @@ class FakeNotifier(object):
                               serializer=self._serializer)
 
     def _notify(self, priority, ctxt, event_type, payload):
-        payload = self._serializer.serialize_entity(ctxt, payload)
+        try:
+            payload = self._serializer.serialize_entity(ctxt, payload)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                LOG.error('Error serializing payload: %s', payload)
         # NOTE(sileht): simulate the kombu serializer
         # this permit to raise an exception if something have not
         # been serialized correctly
@@ -129,5 +149,5 @@ def stub_notifier(test):
                                                        None)))
 
 
-def wait_for_versioned_notifications(event_type, n_events=1, timeout=1.0):
-    return VERSIONED_SUBS[event_type].wait_n(n_events, timeout=timeout)
+def wait_for_versioned_notifications(event_type, n_events=1, timeout=10.0):
+    return VERSIONED_SUBS[event_type].wait_n(n_events, event_type, timeout)

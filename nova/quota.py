@@ -20,18 +20,33 @@ import copy
 
 from oslo_log import log as logging
 from oslo_utils import importutils
+from sqlalchemy.sql import and_
+from sqlalchemy.sql import false
+from sqlalchemy.sql import null
+from sqlalchemy.sql import or_
 
 import nova.conf
 from nova import context as nova_context
 from nova.db import api as db
+from nova.db.sqlalchemy import api as db_api
+from nova.db.sqlalchemy import api_models
 from nova import exception
 from nova import objects
+from nova.scheduler.client import report
 from nova import utils
 
 LOG = logging.getLogger(__name__)
-
-
 CONF = nova.conf.CONF
+# Lazy-loaded on first access.
+# Avoid constructing the KSA adapter and provider tree on every access.
+PLACEMENT_CLIENT = None
+# If user_id and queued_for_delete are populated for a project, cache the
+# result to avoid doing unnecessary EXISTS database queries.
+UID_QFD_POPULATED_CACHE_BY_PROJECT = set()
+# For the server group members check, we do not scope to a project, so if all
+# user_id and queued_for_delete are populated for all projects, cache the
+# result to avoid doing unnecessary EXISTS database queries.
+UID_QFD_POPULATED_CACHE_ALL = False
 
 
 class DbQuotaDriver(object):
@@ -40,22 +55,6 @@ class DbQuotaDriver(object):
     database.
     """
     UNLIMITED_VALUE = -1
-
-    def get_by_project_and_user(self, context, project_id, user_id, resource):
-        """Get a specific quota by project and user."""
-
-        return objects.Quotas.get(context, project_id, resource,
-                                  user_id=user_id)
-
-    def get_by_project(self, context, project_id, resource):
-        """Get a specific quota by project."""
-
-        return objects.Quotas.get(context, project_id, resource)
-
-    def get_by_class(self, context, quota_class, resource):
-        """Get a specific quota by quota class."""
-
-        return objects.Quotas.get_class(context, quota_class, resource)
 
     def get_defaults(self, context, resources):
         """Given a list of resources, retrieve the default quotas.
@@ -77,8 +76,7 @@ class DbQuotaDriver(object):
 
         return quotas
 
-    def get_class_quotas(self, context, resources, quota_class,
-                         defaults=True):
+    def get_class_quotas(self, context, resources, quota_class):
         """Given a list of resources, retrieve the quotas for the given
         quota class.
 
@@ -86,23 +84,19 @@ class DbQuotaDriver(object):
         :param resources: A dictionary of the registered resources.
         :param quota_class: The name of the quota class to return
                             quotas for.
-        :param defaults: If True, the default value will be reported
-                         if there is no specific value for the
-                         resource.
         """
 
         quotas = {}
         class_quotas = objects.Quotas.get_all_class_by_name(context,
                                                             quota_class)
         for resource in resources.values():
-            if defaults or resource.name in class_quotas:
-                quotas[resource.name] = class_quotas.get(resource.name,
-                                                         resource.default)
+            quotas[resource.name] = class_quotas.get(resource.name,
+                                                     resource.default)
 
         return quotas
 
     def _process_quotas(self, context, resources, project_id, quotas,
-                        quota_class=None, defaults=True, usages=None,
+                        quota_class=None, usages=None,
                         remains=False):
         modified_quotas = {}
         # Get the quotas for the appropriate class.  If the project ID
@@ -120,10 +114,6 @@ class DbQuotaDriver(object):
         default_quotas = self.get_defaults(context, resources)
 
         for resource in resources.values():
-            # Omit default/quota class values
-            if not defaults and resource.name not in quotas:
-                continue
-
             limit = quotas.get(resource.name, class_quotas.get(
                         resource.name, default_quotas[resource.name]))
             modified_quotas[resource.name] = dict(limit=limit)
@@ -215,7 +205,7 @@ class DbQuotaDriver(object):
         return usages
 
     def get_user_quotas(self, context, resources, project_id, user_id,
-                        quota_class=None, defaults=True,
+                        quota_class=None,
                         usages=True, project_quotas=None,
                         user_quotas=None):
         """Given a list of resources, retrieve the quotas for the given
@@ -230,10 +220,6 @@ class DbQuotaDriver(object):
                             parameter allows it to be specified.  It
                             will be ignored if project_id ==
                             context.project_id.
-        :param defaults: If True, the quota class value (or the
-                         default value, if there is no value from the
-                         quota class) will be reported if there is no
-                         specific value for the resource.
         :param usages: If True, the current counts will also be returned.
         :param project_quotas: Quotas dictionary for the specified project.
         :param user_quotas: Quotas dictionary for the specified project
@@ -256,10 +242,10 @@ class DbQuotaDriver(object):
                                            user_id=user_id)
         return self._process_quotas(context, resources, project_id,
                                     user_quotas, quota_class,
-                                    defaults=defaults, usages=user_usages)
+                                    usages=user_usages)
 
     def get_project_quotas(self, context, resources, project_id,
-                           quota_class=None, defaults=True,
+                           quota_class=None,
                            usages=True, remains=False, project_quotas=None):
         """Given a list of resources, retrieve the quotas for the given
         project.
@@ -272,10 +258,6 @@ class DbQuotaDriver(object):
                             parameter allows it to be specified.  It
                             will be ignored if project_id ==
                             context.project_id.
-        :param defaults: If True, the quota class value (or the
-                         default value, if there is no value from the
-                         quota class) will be reported if there is no
-                         specific value for the resource.
         :param usages: If True, the current counts will also be returned.
         :param remains: If True, the current remains of the project will
                         will be returned.
@@ -288,7 +270,7 @@ class DbQuotaDriver(object):
             project_usages = self._get_usages(context, resources, project_id)
         return self._process_quotas(context, resources, project_id,
                                     project_quotas, quota_class,
-                                    defaults=defaults, usages=project_usages,
+                                    usages=project_usages,
                                     remains=remains)
 
     def _is_unlimited_value(self, v):
@@ -628,26 +610,6 @@ class DbQuotaDriver(object):
                                       quotas=quotas_exceeded, usages={},
                                       headroom=headroom)
 
-    def destroy_all_by_project_and_user(self, context, project_id, user_id):
-        """Destroy all quotas associated with a project and user.
-
-        :param context: The request context, for access checks.
-        :param project_id: The ID of the project being deleted.
-        :param user_id: The ID of the user being deleted.
-        """
-
-        objects.Quotas.destroy_all_by_project_and_user(context, project_id,
-                                                       user_id)
-
-    def destroy_all_by_project(self, context, project_id):
-        """Destroy all quotas associated with a project.
-
-        :param context: The request context, for access checks.
-        :param project_id: The ID of the project being deleted.
-        """
-
-        objects.Quotas.destroy_all_by_project(context, project_id)
-
 
 class NoopQuotaDriver(object):
     """Driver that turns quotas calls into no-ops and pretends that quotas
@@ -656,21 +618,6 @@ class NoopQuotaDriver(object):
     cells, the parent cell should do quota checking, but the child cell
     should not.
     """
-
-    def get_by_project_and_user(self, context, project_id, user_id, resource):
-        """Get a specific quota by project and user."""
-        # Unlimited
-        return -1
-
-    def get_by_project(self, context, project_id, resource):
-        """Get a specific quota by project."""
-        # Unlimited
-        return -1
-
-    def get_by_class(self, context, quota_class, resource):
-        """Get a specific quota by quota class."""
-        # Unlimited
-        return -1
 
     def get_defaults(self, context, resources):
         """Given a list of resources, retrieve the default quotas.
@@ -683,8 +630,7 @@ class NoopQuotaDriver(object):
             quotas[resource.name] = -1
         return quotas
 
-    def get_class_quotas(self, context, resources, quota_class,
-                         defaults=True):
+    def get_class_quotas(self, context, resources, quota_class):
         """Given a list of resources, retrieve the quotas for the given
         quota class.
 
@@ -692,9 +638,6 @@ class NoopQuotaDriver(object):
         :param resources: A dictionary of the registered resources.
         :param quota_class: The name of the quota class to return
                             quotas for.
-        :param defaults: If True, the default value will be reported
-                         if there is no specific value for the
-                         resource.
         """
         quotas = {}
         for resource in resources.values():
@@ -713,7 +656,7 @@ class NoopQuotaDriver(object):
         return quotas
 
     def get_user_quotas(self, context, resources, project_id, user_id,
-                        quota_class=None, defaults=True,
+                        quota_class=None,
                         usages=True):
         """Given a list of resources, retrieve the quotas for the given
         user and project.
@@ -727,16 +670,12 @@ class NoopQuotaDriver(object):
                             parameter allows it to be specified.  It
                             will be ignored if project_id ==
                             context.project_id.
-        :param defaults: If True, the quota class value (or the
-                         default value, if there is no value from the
-                         quota class) will be reported if there is no
-                         specific value for the resource.
         :param usages: If True, the current counts will also be returned.
         """
         return self._get_noop_quotas(resources, usages=usages)
 
     def get_project_quotas(self, context, resources, project_id,
-                           quota_class=None, defaults=True,
+                           quota_class=None,
                            usages=True, remains=False):
         """Given a list of resources, retrieve the quotas for the given
         project.
@@ -749,10 +688,6 @@ class NoopQuotaDriver(object):
                             parameter allows it to be specified.  It
                             will be ignored if project_id ==
                             context.project_id.
-        :param defaults: If True, the quota class value (or the
-                         default value, if there is no value from the
-                         quota class) will be reported if there is no
-                         specific value for the resource.
         :param usages: If True, the current counts will also be returned.
         :param remains: If True, the current remains of the project will
                         will be returned.
@@ -836,23 +771,6 @@ class NoopQuotaDriver(object):
         """
         pass
 
-    def destroy_all_by_project_and_user(self, context, project_id, user_id):
-        """Destroy all quotas associated with a project and user.
-
-        :param context: The request context, for access checks.
-        :param project_id: The ID of the project being deleted.
-        :param user_id: The ID of the user being deleted.
-        """
-        pass
-
-    def destroy_all_by_project(self, context, project_id):
-        """Destroy all quotas associated with a project.
-
-        :param context: The request context, for access checks.
-        :param project_id: The ID of the project being deleted.
-        """
-        pass
-
 
 class BaseResource(object):
     """Describe a single resource for quota checking."""
@@ -868,52 +786,6 @@ class BaseResource(object):
 
         self.name = name
         self.flag = flag
-
-    def quota(self, driver, context, **kwargs):
-        """Given a driver and context, obtain the quota for this
-        resource.
-
-        :param driver: A quota driver.
-        :param context: The request context.
-        :param project_id: The project to obtain the quota value for.
-                           If not provided, it is taken from the
-                           context.  If it is given as None, no
-                           project-specific quota will be searched
-                           for.
-        :param quota_class: The quota class corresponding to the
-                            project, or for which the quota is to be
-                            looked up.  If not provided, it is taken
-                            from the context.  If it is given as None,
-                            no quota class-specific quota will be
-                            searched for.  Note that the quota class
-                            defaults to the value in the context,
-                            which may not correspond to the project if
-                            project_id is not the same as the one in
-                            the context.
-        """
-
-        # Get the project ID
-        project_id = kwargs.get('project_id', context.project_id)
-
-        # Ditto for the quota class
-        quota_class = kwargs.get('quota_class', context.quota_class)
-
-        # Look up the quota for the project
-        if project_id:
-            try:
-                return driver.get_by_project(context, project_id, self.name)
-            except exception.ProjectQuotaNotFound:
-                pass
-
-        # Try for the quota class
-        if quota_class:
-            try:
-                return driver.get_by_class(context, quota_class, self.name)
-            except exception.QuotaClassNotFound:
-                pass
-
-        # OK, return the default
-        return self.default
 
     @property
     def default(self):
@@ -994,9 +866,18 @@ class CountableResource(AbsoluteResource):
 class QuotaEngine(object):
     """Represent the set of recognized quotas."""
 
-    def __init__(self, quota_driver=None):
-        """Initialize a Quota object."""
-        self._resources = {}
+    def __init__(self, quota_driver=None, resources=None):
+        """Initialize a Quota object.
+
+        :param quota_driver: a QuotaDriver object (only used in testing. if
+                             None (default), instantiates a driver from the
+                             CONF.quota.driver option)
+        :param resources: iterable of Resource objects
+        """
+        resources = resources or []
+        self._resources = {
+            resource.name: resource for resource in resources
+        }
         # NOTE(mriedem): quota_driver is ever only supplied in tests with a
         # fake driver.
         self.__driver = quota_driver
@@ -1013,28 +894,6 @@ class QuotaEngine(object):
 
         self._resources[resource.name] = resource
 
-    def register_resources(self, resources):
-        """Register a list of resources."""
-
-        for resource in resources:
-            self.register_resource(resource)
-
-    def get_by_project_and_user(self, context, project_id, user_id, resource):
-        """Get a specific quota by project and user."""
-
-        return self._driver.get_by_project_and_user(context, project_id,
-                                                    user_id, resource)
-
-    def get_by_project(self, context, project_id, resource):
-        """Get a specific quota by project."""
-
-        return self._driver.get_by_project(context, project_id, resource)
-
-    def get_by_class(self, context, quota_class, resource):
-        """Get a specific quota by quota class."""
-
-        return self._driver.get_by_class(context, quota_class, resource)
-
     def get_defaults(self, context):
         """Retrieve the default quotas.
 
@@ -1043,22 +902,19 @@ class QuotaEngine(object):
 
         return self._driver.get_defaults(context, self._resources)
 
-    def get_class_quotas(self, context, quota_class, defaults=True):
+    def get_class_quotas(self, context, quota_class):
         """Retrieve the quotas for the given quota class.
 
         :param context: The request context, for access checks.
         :param quota_class: The name of the quota class to return
                             quotas for.
-        :param defaults: If True, the default value will be reported
-                         if there is no specific value for the
-                         resource.
         """
 
         return self._driver.get_class_quotas(context, self._resources,
-                                             quota_class, defaults=defaults)
+                                             quota_class)
 
     def get_user_quotas(self, context, project_id, user_id, quota_class=None,
-                        defaults=True, usages=True):
+                        usages=True):
         """Retrieve the quotas for the given user and project.
 
         :param context: The request context, for access checks.
@@ -1067,21 +923,16 @@ class QuotaEngine(object):
         :param quota_class: If project_id != context.project_id, the
                             quota class cannot be determined.  This
                             parameter allows it to be specified.
-        :param defaults: If True, the quota class value (or the
-                         default value, if there is no value from the
-                         quota class) will be reported if there is no
-                         specific value for the resource.
         :param usages: If True, the current counts will also be returned.
         """
 
         return self._driver.get_user_quotas(context, self._resources,
                                             project_id, user_id,
                                             quota_class=quota_class,
-                                            defaults=defaults,
                                             usages=usages)
 
     def get_project_quotas(self, context, project_id, quota_class=None,
-                           defaults=True, usages=True, remains=False):
+                           usages=True, remains=False):
         """Retrieve the quotas for the given project.
 
         :param context: The request context, for access checks.
@@ -1089,10 +940,6 @@ class QuotaEngine(object):
         :param quota_class: If project_id != context.project_id, the
                             quota class cannot be determined.  This
                             parameter allows it to be specified.
-        :param defaults: If True, the quota class value (or the
-                         default value, if there is no value from the
-                         quota class) will be reported if there is no
-                         specific value for the resource.
         :param usages: If True, the current counts will also be returned.
         :param remains: If True, the current remains of the project will
                         will be returned.
@@ -1101,7 +948,6 @@ class QuotaEngine(object):
         return self._driver.get_project_quotas(context, self._resources,
                                               project_id,
                                               quota_class=quota_class,
-                                              defaults=defaults,
                                               usages=usages,
                                               remains=remains)
 
@@ -1209,28 +1055,6 @@ class QuotaEngine(object):
             context, self._resources, project_values=project_values,
             user_values=user_values, project_id=project_id, user_id=user_id)
 
-    def destroy_all_by_project_and_user(self, context, project_id, user_id):
-        """Destroy all quotas, usages, and reservations associated with a
-        project and user.
-
-        :param context: The request context, for access checks.
-        :param project_id: The ID of the project being deleted.
-        :param user_id: The ID of the user being deleted.
-        """
-
-        self._driver.destroy_all_by_project_and_user(context,
-                                                     project_id, user_id)
-
-    def destroy_all_by_project(self, context, project_id):
-        """Destroy all quotas, usages, and reservations associated with a
-        project.
-
-        :param context: The request context, for access checks.
-        :param project_id: The ID of the project being deleted.
-        """
-
-        self._driver.destroy_all_by_project(context, project_id)
-
     @property
     def resources(self):
         return sorted(self._resources.keys())
@@ -1239,6 +1063,49 @@ class QuotaEngine(object):
         if isinstance(self._driver, NoopQuotaDriver):
             return -1
         return 0
+
+
+@db_api.api_context_manager.reader
+def _user_id_queued_for_delete_populated(context, project_id=None):
+    """Determine whether user_id and queued_for_delete are set.
+
+    This will be used to determine whether we need to fall back on
+    the legacy quota counting method (if we cannot rely on counting
+    instance mappings for the instance count). If any records with user_id=None
+    and queued_for_delete=False are found, we need to fall back to the legacy
+    counting method. If any records with queued_for_delete=None are found, we
+    need to fall back to the legacy counting method.
+
+    Note that this check specifies queued_for_deleted=False, which excludes
+    deleted and SOFT_DELETED instances. The 'populate_user_id' data migration
+    migrates SOFT_DELETED instances because they could be restored at any time
+    in the future. However, for this quota-check-time method, it is acceptable
+    to ignore SOFT_DELETED instances, since we just want to know if it is safe
+    to use instance mappings to count instances at this point in time (and
+    SOFT_DELETED instances do not count against quota limits).
+
+    We also want to fall back to the legacy counting method if we detect any
+    records that have not yet populated the queued_for_delete field. We do this
+    instead of counting queued_for_delete=None records since that might not
+    accurately reflect the project or project user's quota usage.
+
+    :param project_id: The project to check
+    :returns: True if user_id is set for all non-deleted instances and
+              queued_for_delete is set for all instances, else False
+    """
+    user_id_not_populated = and_(
+        api_models.InstanceMapping.user_id == null(),
+        api_models.InstanceMapping.queued_for_delete == false())
+    # If either queued_for_delete or user_id are unmigrated, we will return
+    # False.
+    unmigrated_filter = or_(
+        api_models.InstanceMapping.queued_for_delete == null(),
+        user_id_not_populated)
+    query = context.session.query(api_models.InstanceMapping).filter(
+        unmigrated_filter)
+    if project_id:
+        query = query.filter_by(project_id=project_id)
+    return not context.session.query(query.exists()).scalar()
 
 
 def _keypair_get_count_by_user(context, user_id):
@@ -1263,15 +1130,13 @@ def _security_group_count(context, project_id, user_id=None):
                                                 user_id=user_id)
 
 
-def _server_group_count_members_by_user(context, group, user_id):
+def _server_group_count_members_by_user_legacy(context, group, user_id):
     # NOTE(melwitt): This is mostly duplicated from
     # InstanceGroup.count_members_by_user() to query across multiple cells.
     # We need to be able to pass the correct cell context to
     # InstanceList.get_by_filters().
-    # TODO(melwitt): Counting across cells for instances means we will miss
-    # counting resources if a cell is down. In the future, we should query
-    # placement for cores/ram and InstanceMappings for instances (once we are
-    # deleting InstanceMappings when we delete instances).
+    # NOTE(melwitt): Counting across cells for instances means we will miss
+    # counting resources if a cell is down.
     cell_mappings = objects.CellMappingList.get_all(context)
     greenthreads = []
     filters = {'deleted': False, 'user_id': user_id, 'uuid': group.members}
@@ -1300,6 +1165,41 @@ def _server_group_count_members_by_user(context, group, user_id):
     return {'user': {'server_group_members': count}}
 
 
+def _server_group_count_members_by_user(context, group, user_id):
+    """Get the count of server group members for a group by user.
+
+    :param context: The request context for database access
+    :param group: The InstanceGroup object with members to count
+    :param user_id: The user_id to count across
+    :returns: A dict containing the user-scoped count. For example:
+
+                {'user': 'server_group_members': <count across user>}}
+    """
+    # Because server group members quota counting is not scoped to a project,
+    # but scoped to a particular InstanceGroup and user, we have no reasonable
+    # way of pruning down our migration check to only a subset of all instance
+    # mapping records.
+    # So, we check whether user_id/queued_for_delete is populated for all
+    # records and cache the result to prevent unnecessary checking once the
+    # data migration has been completed.
+    global UID_QFD_POPULATED_CACHE_ALL
+    if not UID_QFD_POPULATED_CACHE_ALL:
+        LOG.debug('Checking whether user_id and queued_for_delete are '
+                  'populated for all projects')
+        UID_QFD_POPULATED_CACHE_ALL = _user_id_queued_for_delete_populated(
+            context)
+
+    if UID_QFD_POPULATED_CACHE_ALL:
+        count = objects.InstanceMappingList.get_count_by_uuids_and_user(
+            context, group.members, user_id)
+        return {'user': {'server_group_members': count}}
+
+    LOG.warning('Falling back to legacy quota counting method for server '
+                'group members')
+    return _server_group_count_members_by_user_legacy(context, group,
+                                                      user_id)
+
+
 def _fixed_ip_count(context, project_id):
     # NOTE(melwitt): This assumes a single cell.
     count = objects.FixedIPList.get_count_by_project(context, project_id)
@@ -1312,8 +1212,8 @@ def _floating_ip_count(context, project_id):
     return {'project': {'floating_ips': count}}
 
 
-def _instances_cores_ram_count(context, project_id, user_id=None):
-    """Get the counts of instances, cores, and ram in the database.
+def _instances_cores_ram_count_legacy(context, project_id, user_id=None):
+    """Get the counts of instances, cores, and ram in cell databases.
 
     :param context: The request context for database access
     :param project_id: The project_id to count across
@@ -1328,24 +1228,94 @@ def _instances_cores_ram_count(context, project_id, user_id=None):
                           'cores': <count across user>,
                           'ram': <count across user>}}
     """
-    # TODO(melwitt): Counting across cells for instances means we will miss
-    # counting resources if a cell is down. In the future, we should query
-    # placement for cores/ram and InstanceMappings for instances (once we are
-    # deleting InstanceMappings when we delete instances).
-    results = nova_context.scatter_gather_all_cells(
-        context, objects.InstanceList.get_counts, project_id, user_id=user_id)
+    # NOTE(melwitt): Counting across cells for instances, cores, and ram means
+    # we will miss counting resources if a cell is down.
+    # NOTE(tssurya): We only go into those cells in which the tenant has
+    # instances. We could optimize this to avoid the CellMappingList query
+    # for single-cell deployments by checking the cell cache and only doing
+    # this filtering if there is more than one non-cell0 cell.
+    # TODO(tssurya): Consider adding a scatter_gather_cells_for_project
+    # variant that makes this native to nova.context.
+    cell_mappings = objects.CellMappingList.get_by_project_id(
+        context, project_id)
+    results = nova_context.scatter_gather_cells(
+        context, cell_mappings, nova_context.CELL_TIMEOUT,
+        objects.InstanceList.get_counts, project_id, user_id=user_id)
     total_counts = {'project': {'instances': 0, 'cores': 0, 'ram': 0}}
     if user_id:
         total_counts['user'] = {'instances': 0, 'cores': 0, 'ram': 0}
     for result in results.values():
-        if result not in (nova_context.did_not_respond_sentinel,
-                          nova_context.raised_exception_sentinel):
+        if not nova_context.is_cell_failure_sentinel(result):
             for resource, count in result['project'].items():
                 total_counts['project'][resource] += count
             if user_id:
                 for resource, count in result['user'].items():
                     total_counts['user'][resource] += count
     return total_counts
+
+
+def _cores_ram_count_placement(context, project_id, user_id=None):
+    global PLACEMENT_CLIENT
+    if not PLACEMENT_CLIENT:
+        PLACEMENT_CLIENT = report.SchedulerReportClient()
+    return PLACEMENT_CLIENT.get_usages_counts_for_quota(context, project_id,
+                                                        user_id=user_id)
+
+
+def _instances_cores_ram_count_api_db_placement(context, project_id,
+                                                user_id=None):
+    # Will return a dict with format: {'project': {'instances': M},
+    #                                  'user': {'instances': N}}
+    # where the 'user' key is optional.
+    total_counts = objects.InstanceMappingList.get_counts(context,
+                                                          project_id,
+                                                          user_id=user_id)
+    cores_ram_counts = _cores_ram_count_placement(context, project_id,
+                                                  user_id=user_id)
+    total_counts['project'].update(cores_ram_counts['project'])
+    if 'user' in total_counts:
+        total_counts['user'].update(cores_ram_counts['user'])
+    return total_counts
+
+
+def _instances_cores_ram_count(context, project_id, user_id=None):
+    """Get the counts of instances, cores, and ram.
+
+    :param context: The request context for database access
+    :param project_id: The project_id to count across
+    :param user_id: The user_id to count across
+    :returns: A dict containing the project-scoped counts and user-scoped
+              counts if user_id is specified. For example:
+
+                {'project': {'instances': <count across project>,
+                             'cores': <count across project>,
+                             'ram': <count across project>},
+                 'user': {'instances': <count across user>,
+                          'cores': <count across user>,
+                          'ram': <count across user>}}
+    """
+    global UID_QFD_POPULATED_CACHE_BY_PROJECT
+    if CONF.quota.count_usage_from_placement:
+        # If a project has all user_id and queued_for_delete data populated,
+        # cache the result to avoid needless database checking in the future.
+        if (not UID_QFD_POPULATED_CACHE_ALL and
+                project_id not in UID_QFD_POPULATED_CACHE_BY_PROJECT):
+            LOG.debug('Checking whether user_id and queued_for_delete are '
+                      'populated for project_id %s', project_id)
+            uid_qfd_populated = _user_id_queued_for_delete_populated(
+                context, project_id)
+            if uid_qfd_populated:
+                UID_QFD_POPULATED_CACHE_BY_PROJECT.add(project_id)
+        else:
+            uid_qfd_populated = True
+        if uid_qfd_populated:
+            return _instances_cores_ram_count_api_db_placement(context,
+                                                               project_id,
+                                                               user_id=user_id)
+        LOG.warning('Falling back to legacy quota counting method for '
+                    'instances, cores, and ram')
+    return _instances_cores_ram_count_legacy(context, project_id,
+                                             user_id=user_id)
 
 
 def _server_group_count(context, project_id, user_id=None):
@@ -1373,36 +1343,40 @@ def _security_group_rule_count_by_group(context, security_group_id):
     return {'user': {'security_group_rules': count}}
 
 
-QUOTAS = QuotaEngine()
-
-
-resources = [
-    CountableResource('instances', _instances_cores_ram_count, 'instances'),
-    CountableResource('cores', _instances_cores_ram_count, 'cores'),
-    CountableResource('ram', _instances_cores_ram_count, 'ram'),
-    CountableResource('security_groups', _security_group_count,
-                      'security_groups'),
-    CountableResource('fixed_ips', _fixed_ip_count, 'fixed_ips'),
-    CountableResource('floating_ips', _floating_ip_count,
-                      'floating_ips'),
-    AbsoluteResource('metadata_items', 'metadata_items'),
-    AbsoluteResource('injected_files', 'injected_files'),
-    AbsoluteResource('injected_file_content_bytes',
-                     'injected_file_content_bytes'),
-    AbsoluteResource('injected_file_path_bytes',
-                     'injected_file_path_length'),
-    CountableResource('security_group_rules',
-                      _security_group_rule_count_by_group,
-                      'security_group_rules'),
-    CountableResource('key_pairs', _keypair_get_count_by_user, 'key_pairs'),
-    CountableResource('server_groups', _server_group_count, 'server_groups'),
-    CountableResource('server_group_members',
-                      _server_group_count_members_by_user,
-                      'server_group_members'),
-    ]
-
-
-QUOTAS.register_resources(resources)
+QUOTAS = QuotaEngine(
+    resources=[
+        CountableResource(
+            'instances', _instances_cores_ram_count, 'instances'),
+        CountableResource(
+            'cores', _instances_cores_ram_count, 'cores'),
+        CountableResource(
+            'ram', _instances_cores_ram_count, 'ram'),
+        CountableResource(
+            'security_groups', _security_group_count, 'security_groups'),
+        CountableResource(
+            'fixed_ips', _fixed_ip_count, 'fixed_ips'),
+        CountableResource(
+            'floating_ips', _floating_ip_count, 'floating_ips'),
+        AbsoluteResource(
+            'metadata_items', 'metadata_items'),
+        AbsoluteResource(
+            'injected_files', 'injected_files'),
+        AbsoluteResource(
+            'injected_file_content_bytes', 'injected_file_content_bytes'),
+        AbsoluteResource(
+            'injected_file_path_bytes', 'injected_file_path_length'),
+        CountableResource(
+            'security_group_rules', _security_group_rule_count_by_group,
+            'security_group_rules'),
+        CountableResource(
+            'key_pairs', _keypair_get_count_by_user, 'key_pairs'),
+        CountableResource(
+            'server_groups', _server_group_count, 'server_groups'),
+        CountableResource(
+            'server_group_members', _server_group_count_members_by_user,
+            'server_group_members'),
+    ],
+)
 
 
 def _valid_method_call_check_resource(name, method, resources):

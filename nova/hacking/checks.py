@@ -17,7 +17,6 @@ import ast
 import os
 import re
 
-import pep8
 import six
 
 """
@@ -49,10 +48,10 @@ virt_config_re = re.compile(
     r"CONF\.import_opt\('.*?', 'nova\.virt\.(\w+)('|.)")
 asse_trueinst_re = re.compile(
                      r"(.)*assertTrue\(isinstance\((\w|\.|\'|\"|\[|\])+, "
-                     "(\w|\.|\'|\"|\[|\])+\)\)")
+                     r"(\w|\.|\'|\"|\[|\])+\)\)")
 asse_equal_type_re = re.compile(
                        r"(.)*assertEqual\(type\((\w|\.|\'|\"|\[|\])+\), "
-                       "(\w|\.|\'|\"|\[|\])+\)")
+                       r"(\w|\.|\'|\"|\[|\])+\)")
 asse_equal_in_end_with_true_or_false_re = re.compile(r"assertEqual\("
                     r"(\w|[][.'\"])+ in (\w|[][.'\", ])+, (True|False)\)")
 asse_equal_in_start_with_true_or_false_re = re.compile(r"assertEqual\("
@@ -77,7 +76,7 @@ asse_raises_regexp = re.compile(r"assertRaisesRegexp\(")
 conf_attribute_set_re = re.compile(r"CONF\.[a-z0-9_.]+\s*=\s*\w")
 translated_log = re.compile(
     r"(.)*LOG\.(audit|error|info|critical|exception)"
-    "\(\s*_\(\s*('|\")")
+    r"\(\s*_\(\s*('|\")")
 mutable_default_args = re.compile(r"^\s*def .+\((.+=\{\}|.+=\[\])")
 string_translation = re.compile(r"[^_]*_\(\s*('|\")")
 underscore_import_check = re.compile(r"(.)*import _(.)*")
@@ -100,6 +99,35 @@ return_not_followed_by_space = re.compile(r"^\s*return(?:\(|{|\"|'|#).*$")
 uuid4_re = re.compile(r"uuid4\(\)($|[^\.]|\.hex)")
 redundant_import_alias_re = re.compile(r"import (?:.*\.)?(.+) as \1$")
 yield_not_followed_by_space = re.compile(r"^\s*yield(?:\(|{|\[|\"|').*$")
+asse_regexpmatches = re.compile(
+    r"(assertRegexpMatches|assertNotRegexpMatches)\(")
+privsep_file_re = re.compile('^nova/privsep[./]')
+privsep_import_re = re.compile(
+    r"^(?:import|from).*\bprivsep\b")
+# Redundant parenthetical masquerading as a tuple, used with ``in``:
+# Space, "in", space, open paren
+# Optional single or double quote (so we match strings or symbols)
+# A sequence of the characters that can make up a symbol. (This is weak: a
+#   string can contain other characters; and a numeric symbol can start with a
+#   minus, and a method call has a param list, and... Not sure this gets better
+#   without a lexer.)
+# The same closing quote
+# Close paren
+disguised_as_tuple_re = re.compile(r''' in \((['"]?)[a-zA-Z0-9_.]+\1\)''')
+
+# NOTE(takashin): The patterns of nox-existent mock assertion methods and
+# attributes do not cover all cases. If you find a new pattern,
+# add the pattern in the following regex patterns.
+mock_assert_method_re = re.compile(
+    r"\.((called_once(_with)*|has_calls)|"
+    r"mock_assert_(called(_(once|with|once_with))?"
+    r"|any_call|has_calls|not_called)|"
+    r"(asser|asset|asssert|assset)_(called(_(once|with|once_with))?"
+    r"|any_call|has_calls|not_called))\(")
+mock_attribute_re = re.compile(r"[\.\(](retrun_value)[,=\s]")
+# Regex for useless assertions
+useless_assertion_re = re.compile(
+    r"\.((assertIsNone)\(None|(assertTrue)\((True|\d+|'.+'|\".+\")),")
 
 
 class BaseASTChecker(ast.NodeVisitor):
@@ -117,7 +145,7 @@ class BaseASTChecker(ast.NodeVisitor):
     """
 
     def __init__(self, tree, filename):
-        """This object is created automatically by pep8.
+        """This object is created automatically by pycodestyle.
 
         :param tree: an AST tree
         :param filename: name of the file being analyzed
@@ -127,12 +155,12 @@ class BaseASTChecker(ast.NodeVisitor):
         self._errors = []
 
     def run(self):
-        """Called automatically by pep8."""
+        """Called automatically by pycodestyle."""
         self.visit(self._tree)
         return self._errors
 
     def add_error(self, node, message=None):
-        """Add an error caused by a node to the list of errors for pep8."""
+        """Add an error caused by a node to the list of errors."""
         message = message or self.CHECK_DESC
         error = (node.lineno, node.col_offset, message, self.__class__)
         self._errors.append(error)
@@ -484,7 +512,7 @@ class CheckForUncalledTestClosure(BaseASTChecker):
     def visit_FunctionDef(self, node):
         # self._filename is 'stdin' in the unit test for this check.
         if (not os.path.basename(self._filename).startswith('test_') and
-            not 'stdin'):
+                os.path.basename(self._filename) != 'stdin'):
             return
 
         closures = []
@@ -553,10 +581,10 @@ def assert_equal_in(logical_line):
                   "contents.")
 
 
-def check_http_not_implemented(logical_line, physical_line, filename):
+def check_http_not_implemented(logical_line, physical_line, filename, noqa):
     msg = ("N339: HTTPNotImplemented response must be implemented with"
            " common raise_feature_not_supported().")
-    if pep8.noqa(physical_line):
+    if noqa:
         return
     if ("nova/api/openstack/compute" not in filename):
         return
@@ -622,15 +650,12 @@ def check_config_option_in_central_place(logical_line, filename):
 
 def check_policy_registration_in_central_place(logical_line, filename):
     msg = ('N350: Policy registration should be in the central location(s) '
-           '"/nova/policies/*" or "nova/api/openstack/placement/policies/*".')
+           '"/nova/policies/*"')
     # This is where registration should happen
-    if ("nova/policies/" in filename or
-            "nova/api/openstack/placement/policies/" in filename):
+    if "nova/policies/" in filename:
         return
     # A couple of policy tests register rules
-    if ("nova/tests/unit/test_policy.py" in filename or
-            "nova/tests/unit/api/openstack/placement/test_policy.py" in
-            filename):
+    if "nova/tests/unit/test_policy.py" in filename:
         return
 
     if rule_default_re.match(logical_line):
@@ -717,7 +742,7 @@ def no_log_warn(logical_line):
         yield (0, msg)
 
 
-def check_context_log(logical_line, physical_line, filename):
+def check_context_log(logical_line, physical_line, filename, noqa):
     """check whether context is being passed to the logs
 
     Not correct: LOG.info(_LI("Rebooting instance"), context=context)
@@ -726,10 +751,10 @@ def check_context_log(logical_line, physical_line, filename):
 
     N353
     """
-    if "nova/tests" in filename:
+    if noqa:
         return
 
-    if pep8.noqa(physical_line):
+    if "nova/tests" in filename:
         return
 
     if log_remove_context.match(logical_line):
@@ -838,6 +863,110 @@ def yield_followed_by_space(logical_line):
                "N360: Yield keyword should be followed by a space.")
 
 
+def assert_regexpmatches(logical_line):
+    """Check for usage of deprecated assertRegexpMatches/assertNotRegexpMatches
+
+    N361
+    """
+    res = asse_regexpmatches.search(logical_line)
+    if res:
+        yield (0, "N361: assertRegex/assertNotRegex must be used instead "
+                  "of assertRegexpMatches/assertNotRegexpMatches.")
+
+
+def privsep_imports_not_aliased(logical_line, filename):
+    """Do not abbreviate or alias privsep module imports.
+
+    When accessing symbols under nova.privsep in code or tests, the full module
+    path (e.g. nova.privsep.linux_net.delete_bridge(...)) should be used
+    explicitly rather than importing and using an alias/abbreviation such as:
+
+      from nova.privsep import linux_net
+      ...
+      linux_net.delete_bridge(...)
+
+    See Ief177dbcb018da6fbad13bb0ff153fc47292d5b9.
+
+    N362
+    """
+    if (
+            # Give modules under nova.privsep a pass
+            not privsep_file_re.match(filename) and
+            # Any style of import of privsep...
+            privsep_import_re.match(logical_line) and
+            # ...that isn't 'import nova.privsep[.foo...]'
+            logical_line.count(' ') > 1):
+        yield (0, "N362: always import privsep modules so that the use of "
+                  "escalated permissions is obvious to callers. For example, "
+                  "use 'import nova.privsep.path' instead of "
+                  "'from nova.privsep import path'.")
+
+
+def did_you_mean_tuple(logical_line):
+    """Disallow ``(not_a_tuple)`` because you meant ``(a_tuple_of_one,)``.
+
+    N363
+    """
+    if disguised_as_tuple_re.search(logical_line):
+        yield (0, "N363: You said ``in (not_a_tuple)`` when you almost "
+                  "certainly meant ``in (a_tuple_of_one,)``.")
+
+
+def nonexistent_assertion_methods_and_attributes(logical_line, filename):
+    """Check non-existent mock assertion methods and attributes.
+
+    The following assertion methods do not exist.
+
+    - called_once()
+    - called_once_with()
+    - has_calls()
+    - mock_assert_*()
+
+    The following typos were found in the past cases.
+
+    - asser_*
+    - asset_*
+    - assset_*
+    - asssert_*
+    - retrun_value
+
+    N364
+    """
+    msg = ("N364: Non existent mock assertion method or attribute (%s) is "
+           "used. Check a typo or whether the assertion method should begin "
+           "with 'assert_'.")
+    if 'nova/tests/' in filename:
+        match = mock_assert_method_re.search(logical_line)
+        if match:
+            yield (0, msg % match.group(1))
+
+        match = mock_attribute_re.search(logical_line)
+        if match:
+            yield (0, msg % match.group(1))
+
+
+def useless_assertion(logical_line, filename):
+    """Check useless assertions in tests.
+
+    The following assertions are useless.
+
+    - assertIsNone(None, ...)
+    - assertTrue(True, ...)
+    - assertTrue(2, ...)   # Constant number
+    - assertTrue('Constant string', ...)
+    - assertTrue("Constant string", ...)
+
+    They are usually misuses of assertIsNone or assertTrue.
+
+    N365
+    """
+    msg = "N365: Misuse of %s."
+    if 'nova/tests/' in filename:
+        match = useless_assertion_re.search(logical_line)
+        if match:
+            yield (0, msg % (match.group(2) or match.group(3)))
+
+
 def factory(register):
     register(import_no_db_in_virt)
     register(no_db_session_in_public_api)
@@ -881,3 +1010,8 @@ def factory(register):
     register(return_followed_by_space)
     register(no_redundant_import_alias)
     register(yield_followed_by_space)
+    register(assert_regexpmatches)
+    register(privsep_imports_not_aliased)
+    register(did_you_mean_tuple)
+    register(nonexistent_assertion_methods_and_attributes)
+    register(useless_assertion)

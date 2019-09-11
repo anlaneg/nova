@@ -13,6 +13,7 @@
 #    under the License.
 
 import mock
+from oslo_service import fixture as service_fixture
 
 from nova import test
 from nova.virt.disk.mount import api
@@ -28,9 +29,12 @@ AUTOMAP_PARTITION = "/dev/nullp77"
 MAP_PARTITION = "/dev/mapper/nullp77"
 
 
-# Make RetryDecorator not actually sleep on retries
-@mock.patch('oslo_service.loopingcall._ThreadingEvent.wait', new=mock.Mock())
 class MountTestCase(test.NoDBTestCase):
+    def setUp(self):
+        super(MountTestCase, self).setUp()
+        # Make RetryDecorator not actually sleep on retries
+        self.useFixture(service_fixture.SleepFixture())
+
     def _test_map_dev(self, partition):
         mount = api.Mount(mock.sentinel.image, mock.sentinel.mount_dir)
         mount.device = ORIG_DEVICE

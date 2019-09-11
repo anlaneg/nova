@@ -14,7 +14,6 @@ import mock
 
 import nova.conf
 from nova.tests.unit.virt.libvirt.volume import test_volume
-from nova.virt.libvirt import host
 from nova.virt.libvirt.volume import net
 
 CONF = nova.conf.CONF
@@ -150,7 +149,8 @@ class LibvirtNetVolumeDriverTestCase(
         secret_uuid wasn't set on the cinder side for the original connection
         which is now persisted in the
         nova.block_device_mappings.connection_info column and used here. In
-        this case we fallback to use the local config for secret_uuid.
+        this case we fallback to use the local config for secret_uuid and
+        username.
         """
         libvirt_driver = net.LibvirtNetVolumeDriver(self.fake_host)
         connection_info = self.rbd_connection(self.vol)
@@ -170,7 +170,7 @@ class LibvirtNetVolumeDriverTestCase(
         conf = libvirt_driver.get_config(connection_info, self.disk_info)
         tree = conf.format_dom()
         self._assertNetworkAndProtocolEquals(tree)
-        self.assertEqual(self.user, tree.find('./auth').get('username'))
+        self.assertEqual(flags_user, tree.find('./auth').get('username'))
         self.assertEqual(secret_type, tree.find('./auth/secret').get('type'))
         # Assert that the secret_uuid comes from CONF.libvirt.rbd_secret_uuid.
         self.assertEqual(flags_uuid, tree.find('./auth/secret').get('uuid'))
@@ -219,24 +219,15 @@ class LibvirtNetVolumeDriverTestCase(
         libvirt_driver.disconnect_volume(connection_info,
                                          mock.sentinel.instance)
 
-    @mock.patch.object(host.Host, 'find_secret')
-    @mock.patch.object(host.Host, 'create_secret')
-    @mock.patch.object(host.Host, 'delete_secret')
-    def test_libvirt_iscsi_net_driver(self, mock_delete, mock_create,
-                                      mock_find):
-        mock_find.return_value = test_volume.FakeSecret()
-        mock_create.return_value = test_volume.FakeSecret()
+    def test_extend_volume(self):
+        device_path = '/dev/fake-dev'
+        connection_info = {'data': {'device_path': device_path}}
+
+        requested_size = 20 * pow(1024, 3)  # 20GiB
+
         libvirt_driver = net.LibvirtNetVolumeDriver(self.fake_host)
-        connection_info = self.iscsi_connection(self.vol, self.location,
-                                                self.iqn, auth=True)
-        secret_type = 'iscsi'
-        flags_user = connection_info['data']['auth_username']
-        conf = libvirt_driver.get_config(connection_info, self.disk_info)
-        tree = conf.format_dom()
-        self._assertISCSINetworkAndProtocolEquals(tree)
-        self.assertEqual(flags_user, tree.find('./auth').get('username'))
-        self.assertEqual(secret_type, tree.find('./auth/secret').get('type'))
-        self.assertEqual(test_volume.SECRET_UUID,
-                         tree.find('./auth/secret').get('uuid'))
-        libvirt_driver.disconnect_volume(connection_info,
-                                         mock.sentinel.instance)
+        new_size = libvirt_driver.extend_volume(connection_info,
+                                                mock.sentinel.instance,
+                                                requested_size)
+
+        self.assertEqual(requested_size, new_size)

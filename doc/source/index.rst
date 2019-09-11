@@ -36,6 +36,9 @@ It requires the following additional OpenStack services for basic function:
   compute instances launch from glance images.
 * :neutron-doc:`Neutron <>`: This is responsible for provisioning the virtual
   or physical networks that compute instances connect to on boot.
+* :placement-doc:`Placement <>`: This is responsible for tracking inventory of
+  resources available in a cloud and assisting in choosing which provider of
+  those resources will be used when creating a virtual machine.
 
 It can also integrate with other services to include: persistent block
 storage, encrypted disks, and baremetal compute instances.
@@ -67,30 +70,22 @@ API, which can be used to build more complicated logic or automation with
 nova. This can be consumed directly, or via various SDKs. The following
 resources will help you get started with consuming the API directly.
 
-* `Compute API Guide <https://developer.openstack.org/api-guide/compute/>`_: The
+* `Compute API Guide <https://docs.openstack.org/api-guide/compute/>`_: The
   concept guide for the API. This helps lay out the concepts behind the API to
   make consuming the API reference easier.
-* `Compute API Reference <http://developer.openstack.org/api-ref/compute/>`_:
+* `Compute API Reference <https://docs.openstack.org/api-ref/compute/>`_:
   The complete reference for the compute API, including all methods and
   request / response parameters and their meaning.
 * :doc:`Compute API Microversion History </reference/api-microversion-history>`:
   The compute API evolves over time through `Microversions
-  <https://developer.openstack.org/api-guide/compute/microversions.html>`_. This
+  <https://docs.openstack.org/api-guide/compute/microversions.html>`_. This
   provides the history of all those changes. Consider it a "what's new" in the
   compute API.
-* `Placement API Reference <https://developer.openstack.org/api-ref/placement/>`_:
-  The complete reference for the placement API, including all methods and
-  request / response parameters and their meaning.
-* :ref:`Placement API Microversion History <placement-api-microversion-history>`:
-  The placement API evolves over time through `Microversions
-  <https://developer.openstack.org/api-guide/compute/microversions.html>`_. This
-  provides the history of all those changes. Consider it a "what's new" in the
-  placement API.
 * :doc:`Block Device Mapping </user/block-device-mapping>`: One of the trickier
   parts to understand is the Block Device Mapping parameters used to connect
   specific block devices to computes. This deserves its own deep dive.
-* :doc:`Configuration drive </user/config-drive>`: Provide information to the
-  guest instance when it is created.
+* :doc:`Metadata </user/metadata>`: Provide information to the guest instance
+  when it is created.
 
 Nova can be configured to emit notifications over RPC.
 
@@ -113,8 +108,9 @@ Installation
 
 The detailed install guide for nova. A functioning nova will also require
 having installed :keystone-doc:`keystone <install/>`, :glance-doc:`glance
-<install/>`, and :neutron-doc:`neutron <install/>`. Ensure that you follow
-their install guides first.
+<install/>`, :neutron-doc:`neutron <install/>`, and
+:placement-doc:`placement <install/>`. Ensure that you follow their install
+guides first.
 
 .. toctree::
    :maxdepth: 2
@@ -142,8 +138,6 @@ the defaults from the :doc:`install guide </install/index>` will be sufficient.
 * :doc:`Cells v2 Planning </user/cellsv2-layout>`: For large deployments, Cells v2
   allows sharding of your compute environment. Upfront planning is key to a
   successful Cells v2 layout.
-* :doc:`Placement service </user/placement>`: Overview of the placement
-  service, including how it fits in with the rest of nova.
 * :doc:`Running nova-api on wsgi <user/wsgi>`: Considerations for using a real
   WSGI container instead of the baked-in eventlet web server.
 
@@ -164,9 +158,10 @@ Once you are running nova, the following information is extremely useful.
   configured, and how that will impact where compute instances land in your
   environment. If you are seeing unexpected distribution of compute instances
   in your hosts, you'll want to dive into this configuration.
-* :doc:`Exposing custom metadata to compute instances </user/vendordata>`: How and
-  when you might want to extend the basic metadata exposed to compute instances
-  (either via metadata server or config drive) for your specific purposes.
+* :doc:`Exposing custom metadata to compute instances </admin/vendordata>`: How
+  and when you might want to extend the basic metadata exposed to compute
+  instances (either via metadata server or config drive) for your specific
+  purposes.
 
 Reference Material
 ------------------
@@ -215,17 +210,20 @@ looking parts of our architecture. These are collected below.
    contributor/code-review
    contributor/documentation
    contributor/microversions
-   contributor/placement.rst
    contributor/policies.rst
    contributor/releasenotes
    contributor/testing
    contributor/testing/libvirt-numa
    contributor/testing/serial-console
    contributor/testing/zero-downtime-upgrade
+   contributor/testing/down-cell
+   contributor/testing/eventlet-profiling
    contributor/how-to-get-involved
    contributor/process
    contributor/project-scope
+   contributor/ptl-guide
    reference/api-microversion-history.rst
+   reference/conductor
    reference/gmr
    reference/i18n
    reference/live-migration
@@ -248,18 +246,13 @@ looking parts of our architecture. These are collected below.
    user/cells
    user/cellsv2-layout
    user/certificate-validation
-   user/conductor
-   user/config-drive
    user/feature-classification
    user/filter-scheduler
    user/flavors
    user/manage-ip-addresses
-   user/placement
    user/quotas
    user/support-matrix
    user/upgrade
-   user/user-data
-   user/vendordata
    user/wsgi
 
 

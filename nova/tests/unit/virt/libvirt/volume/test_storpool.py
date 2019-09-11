@@ -1,4 +1,4 @@
-# (c) Copyright 2015 - 2018  StorPool
+# (c) Copyright 2015 - 2019  StorPool
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -119,6 +119,7 @@ class LibvirtStorPoolVolumeDriverTestCase(
         c = libvirt_driver.get_config(ci, self.disk_info)
         self.assertEqual('block', c.source_type)
         self.assertEqual('/dev/storpool/something', c.source_path)
+        self.assertEqual('native', c.driver_io)
 
     @mock_storpool
     def test_storpool_attach_detach_extend(self):
@@ -127,32 +128,34 @@ class LibvirtStorPoolVolumeDriverTestCase(
 
         ci_1 = self.conn_info('1')
         ci_2 = self.conn_info('2')
+        rs_1 = ci_1['data']['real_size']
+        rs_2 = ci_2['data']['real_size']
 
         self.assertRaises(MockStorPoolExc,
                           libvirt_driver.extend_volume,
-                          ci_1, mock.sentinel.instance)
+                          ci_1, mock.sentinel.instance, rs_1)
 
         self.assertRaises(MockStorPoolExc,
                           libvirt_driver.extend_volume,
-                          ci_2, mock.sentinel.instance)
+                          ci_2, mock.sentinel.instance, rs_2)
 
         libvirt_driver.connect_volume(ci_1, mock.sentinel.instance)
         self.assertStorpoolAttached(('1',))
 
-        ns_1 = libvirt_driver.extend_volume(ci_1, mock.sentinel.instance)
+        ns_1 = libvirt_driver.extend_volume(ci_1, mock.sentinel.instance, rs_1)
         self.assertEqual(ci_1['data']['real_size'], ns_1)
 
         self.assertRaises(MockStorPoolExc,
                           libvirt_driver.extend_volume,
-                          ci_2, mock.sentinel.instance)
+                          ci_2, mock.sentinel.instance, rs_2)
 
         libvirt_driver.connect_volume(ci_2, mock.sentinel.instance)
         self.assertStorpoolAttached(('1', '2'))
 
-        ns_1 = libvirt_driver.extend_volume(ci_1, mock.sentinel.instance)
+        ns_1 = libvirt_driver.extend_volume(ci_1, mock.sentinel.instance, rs_1)
         self.assertEqual(ci_1['data']['real_size'], ns_1)
 
-        ns_2 = libvirt_driver.extend_volume(ci_2, mock.sentinel.instance)
+        ns_2 = libvirt_driver.extend_volume(ci_2, mock.sentinel.instance, rs_2)
         self.assertEqual(ci_2['data']['real_size'], ns_2)
 
         self.assertRaises(MockStorPoolExc,
@@ -168,7 +171,7 @@ class LibvirtStorPoolVolumeDriverTestCase(
 
         self.assertRaises(MockStorPoolExc,
                           libvirt_driver.extend_volume,
-                          ci_1, mock.sentinel.instance)
+                          ci_1, mock.sentinel.instance, rs_1)
 
         libvirt_driver.disconnect_volume(ci_2, mock.sentinel.instance)
         self.assertDictEqual({}, test_attached)

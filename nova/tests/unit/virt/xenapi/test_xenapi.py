@@ -433,17 +433,17 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
         self.assertEqual(set(xenapi_fake.get_all('VBD')), set([vbd0, vbd2]))
 
     @mock.patch.object(objects.Instance, 'name',
-                       new_callable=mock.PropertyMock(return_value='foo'))
+                       new=mock.PropertyMock(return_value='foo'))
     @mock.patch.object(vm_utils, 'lookup', return_value=True)
-    def test_instance_exists(self, mock_lookup, mock_name):
+    def test_instance_exists(self, mock_lookup):
         instance = objects.Instance(uuid=uuids.instance)
         self.assertTrue(self.conn.instance_exists(instance))
         mock_lookup.assert_called_once_with(mock.ANY, 'foo')
 
     @mock.patch.object(objects.Instance, 'name',
-                       new_callable=mock.PropertyMock(return_value='bar'))
+                       new=mock.PropertyMock(return_value='bar'))
     @mock.patch.object(vm_utils, 'lookup', return_value=None)
-    def test_instance_not_exists(self, mock_lookup, mock_name):
+    def test_instance_not_exists(self, mock_lookup):
         instance = objects.Instance(uuid=uuids.instance)
         self.assertFalse(self.conn.instance_exists(instance))
         mock_lookup.assert_called_once_with(mock.ANY, 'bar')
@@ -1135,7 +1135,35 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
                                                              mock.ANY)
 
     @mock.patch.object(vmops.VMOps, '_create_vifs')
-    def test_spawn_vlanmanager(self, mock_create_vifs):
+    @mock.patch('nova.privsep.linux_net.add_bridge', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.set_device_mtu')
+    @mock.patch('nova.privsep.linux_net.set_device_enabled')
+    @mock.patch('nova.privsep.linux_net.set_device_macaddr')
+    @mock.patch('nova.privsep.linux_net.change_ip')
+    @mock.patch('nova.privsep.linux_net.address_command_deprecated')
+    @mock.patch('nova.privsep.linux_net.ipv4_forwarding_check',
+                return_value=False)
+    @mock.patch('nova.privsep.linux_net._enable_ipv4_forwarding_inner')
+    @mock.patch('nova.privsep.linux_net.add_vlan')
+    @mock.patch('nova.privsep.linux_net.iptables_get_rules',
+                return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.iptables_set_rules',
+                return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.bridge_setfd')
+    @mock.patch('nova.privsep.linux_net.bridge_disable_stp')
+    @mock.patch('nova.privsep.linux_net.bridge_add_interface',
+                return_value=('', ''))
+    def test_spawn_vlanmanager(self, mock_bridge_add_interface,
+                               mock_bridge_disable_stp,
+                               mock_bridge_setfd,
+                               mock_iptables_set_rules,
+                               mock_iptables_get_rules,
+                               mock_add_vlan, mock_forwarding_enable,
+                               mock_forwarding_check,
+                               mock_address_command_horrid,
+                               mock_change_ip, mock_set_macaddr,
+                               mock_set_enabled, mock_set_mtu, mock_add_bridge,
+                               mock_create_vifs):
         self.flags(network_manager='nova.network.manager.VlanManager',
                    vlan_interface='fake0')
         # Reset network table
@@ -1442,7 +1470,7 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
 
         conn = xenapi_conn.XenAPIDriver(fake.FakeVirtAPI(), False)
         conn._vmops = VMOpsMock()
-        conn.finish_revert_migration(self.context, instance, None)
+        conn.finish_revert_migration(self.context, instance, None, None)
         self.assertTrue(conn._vmops.finish_revert_migration_called)
 
     def test_reboot_hard(self):
@@ -1912,7 +1940,8 @@ class XenAPIMigrateInstance(stubs.XenAPITestBase):
         self.assertTrue(self.called)
         self.assertEqual(self.fake_vm_start_called, power_on)
 
-        conn.finish_revert_migration(context, instance, network_info)
+        conn.finish_revert_migration(context, instance, network_info,
+                                     self.migration)
         self.assertTrue(self.fake_finish_revert_migration_called)
 
     def test_revert_migrate_power_on(self):
@@ -2926,19 +2955,19 @@ class XenAPIDom0IptablesFirewallTestCase(stubs.XenAPITestBase):
         self.assertTrue(security_group_chain,
                         "The security group chain wasn't added")
 
-        regex = re.compile('\[0\:0\] -A .* -j ACCEPT -p icmp'
+        regex = re.compile(r'\[0\:0\] -A .* -j ACCEPT -p icmp'
                            ' -s 192.168.11.0/24')
         match_rules = [rule for rule in self._out_rules if regex.match(rule)]
         self.assertGreater(len(match_rules), 0,
                            "ICMP acceptance rule wasn't added")
 
-        regex = re.compile('\[0\:0\] -A .* -j ACCEPT -p icmp -m icmp'
+        regex = re.compile(r'\[0\:0\] -A .* -j ACCEPT -p icmp -m icmp'
                            ' --icmp-type 8 -s 192.168.11.0/24')
         match_rules = [rule for rule in self._out_rules if regex.match(rule)]
         self.assertGreater(len(match_rules), 0,
                            "ICMP Echo Request acceptance rule wasn't added")
 
-        regex = re.compile('\[0\:0\] -A .* -j ACCEPT -p tcp --dport 80:81'
+        regex = re.compile(r'\[0\:0\] -A .* -j ACCEPT -p tcp --dport 80:81'
                            ' -s 192.168.10.0/24')
         match_rules = [rule for rule in self._out_rules if regex.match(rule)]
         self.assertGreater(len(match_rules), 0,
@@ -2982,7 +3011,7 @@ class XenAPIDom0IptablesFirewallTestCase(stubs.XenAPITestBase):
         for ip in network_model.fixed_ips():
             if ip['version'] != 4:
                 continue
-            regex = re.compile('\[0\:0\] -A .* -j ACCEPT -p tcp'
+            regex = re.compile(r'\[0\:0\] -A .* -j ACCEPT -p tcp'
                                ' --dport 80:81 -s %s' % ip['address'])
             match_rules = [rule for rule in self._out_rules
                            if regex.match(rule)]
@@ -3054,7 +3083,7 @@ class XenAPIDom0IptablesFirewallTestCase(stubs.XenAPITestBase):
                                        'cidr': '192.168.99.0/24'})
         # validate the extra rule
         self.fw.refresh_security_group_rules(secgroup)
-        regex = re.compile('\[0\:0\] -A .* -j ACCEPT -p udp --dport 200:299'
+        regex = re.compile(r'\[0\:0\] -A .* -j ACCEPT -p udp --dport 200:299'
                            ' -s 192.168.99.0/24')
         match_rules = [rule for rule in self._out_rules if regex.match(rule)]
         self.assertGreater(len(match_rules), 0,
@@ -3581,18 +3610,17 @@ class XenAPILiveMigrateTestCase(stubs.XenAPITestBaseNoDB):
             fake_get_network_ref.return_value = 'fake_network_ref'
             expected = {'block_migration': True,
                         'is_volume_backed': False,
-                        'migrate_data': {
-                            'migrate_send_data': {'value':
-                                                  'fake_migrate_data'},
-                            'destination_sr_ref': 'asdf'}
-                        }
+                        'migrate_send_data': {'value': 'fake_migrate_data'},
+                        'destination_sr_ref': 'asdf',
+                        'vif_uuid_map': {'': 'fake_network_ref'}}
             result = self.conn.check_can_live_migrate_destination(
                 self.context,
                 fake_instance,
                 {}, {},
                 True, False)
             result.is_volume_backed = False
-            self.assertEqual(expected, result.to_legacy_dict())
+            self.assertEqual(expected,
+                             result.obj_to_primitive()['nova_object.data'])
 
     def test_check_live_migrate_destination_verifies_ip(self):
         stubs.stubout_session(self, stubs.FakeSessionForVMTests)
@@ -3684,8 +3712,7 @@ class XenAPILiveMigrateTestCase(stubs.XenAPITestBaseNoDB):
         result = self.conn.check_can_live_migrate_source(self.context,
                                                          {'host': 'host'},
                                                          dest_check_data)
-        self.assertEqual(dest_check_data.to_legacy_dict(),
-                         result.to_legacy_dict())
+        self.assertEqual(dest_check_data, result)
 
     @mock.patch.object(session.XenAPISession, 'is_xsm_sr_check_relaxed',
                        return_value=False)

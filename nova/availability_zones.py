@@ -110,23 +110,24 @@ def update_host_availability_zone_cache(context, host, availability_zone=None):
     cache.set(cache_key, availability_zone)
 
 
-def get_availability_zones(context, get_only_available=False,
-                           with_hosts=False):
+def get_availability_zones(context, hostapi, get_only_available=False,
+                           with_hosts=False, enabled_services=None):
     """Return available and unavailable zones on demand.
 
-        :param get_only_available: flag to determine whether to return
-            available zones only, default False indicates return both
-            available zones and not available zones, True indicates return
-            available zones only
-        :param with_hosts: whether to return hosts part of the AZs
-        :type with_hosts: bool
+    :param context: nova auth RequestContext
+    :param hostapi: nova.compute.api.HostAPI instance
+    :param get_only_available: flag to determine whether to return
+        available zones only, default False indicates return both
+        available zones and not available zones, True indicates return
+        available zones only
+    :param with_hosts: whether to return hosts part of the AZs
+    :type with_hosts: bool
+    :param enabled_services: list of enabled services to use; if None
+        enabled services will be retrieved from all cells with zones set
     """
-    # NOTE(danms): Avoid circular import
-    from nova import compute
-    hostapi = compute.HostAPI()
-
-    enabled_services = hostapi.service_get_all(
-        context, {'disabled': False}, set_zones=True, all_cells=True)
+    if enabled_services is None:
+        enabled_services = hostapi.service_get_all(
+            context, {'disabled': False}, set_zones=True, all_cells=True)
 
     available_zones = []
     for (zone, host) in [(service['availability_zone'], service['host'])
@@ -141,6 +142,10 @@ def get_availability_zones(context, get_only_available=False,
             available_zones = list(_available_zones.items())
 
     if not get_only_available:
+        # TODO(mriedem): We could probably optimize if we know that we're going
+        # to get both enabled and disabled services and just pull them all from
+        # the cell DBs at the same time and then filter into enabled/disabled
+        # lists in python.
         disabled_services = hostapi.service_get_all(
             context, {'disabled': True}, set_zones=True, all_cells=True)
         not_available_zones = []

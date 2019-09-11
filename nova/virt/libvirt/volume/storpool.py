@@ -1,4 +1,4 @@
-# (c) Copyright 2015 - 2018  StorPool
+# (c) Copyright 2015 - 2019  StorPool
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -32,6 +32,13 @@ class LibvirtStorPoolVolumeDriver(libvirt_volume.LibvirtVolumeDriver):
         self.connector = connector.InitiatorConnector.factory(
             initiator.STORPOOL, utils.get_root_helper())
 
+    def get_config(self, connection_info, disk_info):
+        """Returns xml for libvirt."""
+        conf = super(LibvirtStorPoolVolumeDriver,
+                     self).get_config(connection_info, disk_info)
+        conf.driver_io = "native"
+        return conf
+
     def connect_volume(self, connection_info, instance):
         LOG.debug("Attaching StorPool volume %s",
                   connection_info['data']['volume'], instance=instance)
@@ -46,7 +53,7 @@ class LibvirtStorPoolVolumeDriver(libvirt_volume.LibvirtVolumeDriver):
         self.connector.disconnect_volume(connection_info['data'], None)
         LOG.debug("Detached StorPool volume", instance=instance)
 
-    def extend_volume(self, connection_info, instance):
+    def extend_volume(self, connection_info, instance, requested_size):
         """Extend the volume."""
         LOG.debug("Extending StorPool volume %s",
                   connection_info['data']['volume'], instance=instance)

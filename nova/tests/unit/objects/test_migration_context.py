@@ -16,7 +16,7 @@ from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova import exception
 from nova import objects
-from nova.tests.unit.objects import test_instance_numa_topology
+from nova.tests.unit.objects import test_instance_numa
 from nova.tests.unit.objects import test_objects
 
 
@@ -26,7 +26,7 @@ fake_migration_context_obj = objects.MigrationContext()
 fake_migration_context_obj.instance_uuid = fake_instance_uuid
 fake_migration_context_obj.migration_id = 42
 fake_migration_context_obj.new_numa_topology = (
-    test_instance_numa_topology.fake_obj_numa_topology.obj_clone())
+    test_instance_numa.fake_obj_numa_topology.obj_clone())
 fake_migration_context_obj.old_numa_topology = None
 fake_migration_context_obj.new_pci_devices = objects.PciDeviceList()
 fake_migration_context_obj.old_pci_devices = None
@@ -49,6 +49,23 @@ fake_db_context = {
 def get_fake_migration_context_obj(ctxt):
     obj = fake_migration_context_obj.obj_clone()
     obj._context = ctxt
+    return obj
+
+
+def get_fake_migration_context_with_pci_devs(ctxt=None):
+    obj = get_fake_migration_context_obj(ctxt)
+    obj.old_pci_devices = objects.PciDeviceList(
+        objects=[objects.PciDevice(vendor_id='1377',
+                                   product_id='0047',
+                                   address='0000:0a:00.1',
+                                   compute_node_id=1,
+                                   request_id=uuids.pcidev)])
+    obj.new_pci_devices = objects.PciDeviceList(
+        objects=[objects.PciDevice(vendor_id='1377',
+                                   product_id='0047',
+                                   address='0000:0b:00.1',
+                                   compute_node_id=2,
+                                   request_id=uuids.pcidev)])
     return obj
 
 
@@ -104,7 +121,20 @@ class _TestMigrationContext(object):
 
 
 class TestMigrationContext(test_objects._LocalTest, _TestMigrationContext):
-    pass
+
+    def test_pci_mapping_for_migration(self):
+        mig_ctx = get_fake_migration_context_with_pci_devs()
+        pci_mapping = mig_ctx.get_pci_mapping_for_migration(False)
+        self.assertDictEqual(
+            {mig_ctx.old_pci_devices[0].address: mig_ctx.new_pci_devices[0]},
+            pci_mapping)
+
+    def test_pci_mapping_for_migration_revert(self):
+        mig_ctx = get_fake_migration_context_with_pci_devs()
+        pci_mapping = mig_ctx.get_pci_mapping_for_migration(True)
+        self.assertDictEqual(
+            {mig_ctx.new_pci_devices[0].address: mig_ctx.old_pci_devices[0]},
+            pci_mapping)
 
 
 class TestMigrationContextRemote(test_objects._RemoteTest,

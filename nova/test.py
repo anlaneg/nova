@@ -21,20 +21,20 @@ inline callbacks.
 
 """
 
-import eventlet  # noqa
-eventlet.monkey_patch(os=False)
+import nova.monkey_patch  # noqa
 
 import abc
-import contextlib
 import copy
 import datetime
 import inspect
 import itertools
 import os
+import os.path
 import pprint
 import sys
 
 import fixtures
+import mock
 from oslo_cache import core as cache
 from oslo_concurrency import lockutils
 from oslo_config import cfg
@@ -48,9 +48,10 @@ from oslo_versionedobjects import fixture as ovo_fixture
 from oslotest import mock_fixture
 from oslotest import moxstubout
 import six
+from six.moves import builtins
 import testtools
 
-from nova.api.openstack.placement.objects import resource_provider
+from nova.compute import rpcapi as compute_rpcapi
 from nova import context
 from nova.db import api as db
 from nova import exception
@@ -58,12 +59,18 @@ from nova.network import manager as network_manager
 from nova.network.security_group import openstack_driver
 from nova import objects
 from nova.objects import base as objects_base
+from nova import quota
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit import conf_fixture
+from nova.tests.unit import matchers
 from nova.tests.unit import policy_fixture
 from nova import utils
 from nova.virt import images
 
+if six.PY2:
+    import contextlib2 as contextlib
+else:
+    import contextlib
 
 CONF = cfg.CONF
 
@@ -76,13 +83,8 @@ _TRUE_VALUES = ('True', 'true', '1', 'yes')
 CELL1_NAME = 'cell1'
 
 
-if six.PY2:
-    nested = contextlib.nested
-else:
-    @contextlib.contextmanager
-    def nested(*contexts):
-        with contextlib.ExitStack() as stack:
-            yield [stack.enter_context(c) for c in contexts]
+# For compatibility with the large number of tests which use test.nested
+nested = utils.nested_contexts
 
 
 class SampleNetworks(fixtures.Fixture):
@@ -151,6 +153,13 @@ class skipIf(object):
                             'classes')
 
 
+# NOTE(claudiub): this needs to be called before any mock.patch calls are
+# being done, and especially before any other test classes load. This fixes
+# the mock.patch autospec issue:
+# https://github.com/testing-cabal/mock/issues/396
+mock_fixture.patch_mock_module()
+
+
 class NovaExceptionReraiseFormatError(object):
     real_log_exception = exception.NovaException._log_exception
 
@@ -204,6 +213,8 @@ class TestCase(testtools.TestCase):
             os.environ.get('OS_TEST_TIMEOUT', 0),
             self.TIMEOUT_SCALING_FACTOR))
 
+        self.useFixture(nova_fixtures.OpenStackSDKFixture())
+
         self.useFixture(fixtures.NestedTempfile())
         self.useFixture(fixtures.TempHomeDir())
         self.useFixture(log_fixture.get_logging_handle_error_fixture())
@@ -237,11 +248,11 @@ class TestCase(testtools.TestCase):
         if self.STUB_RPC:
             self.useFixture(nova_fixtures.RPCFixture('nova.test'))
 
-        # we cannot set this in the ConfFixture as oslo only registers the
-        # notification opts at the first instantiation of a Notifier that
-        # happens only in the RPCFixture
-        CONF.set_default('driver', ['test'],
-                         group='oslo_messaging_notifications')
+            # we cannot set this in the ConfFixture as oslo only registers the
+            # notification opts at the first instantiation of a Notifier that
+            # happens only in the RPCFixture
+            CONF.set_default('driver', ['test'],
+                             group='oslo_messaging_notifications')
 
         # NOTE(danms): Make sure to reset us back to non-remote objects
         # for each test to avoid interactions. Also, backup the object
@@ -266,7 +277,6 @@ class TestCase(testtools.TestCase):
             # NOTE(danms): Full database setup involves a cell0, cell1,
             # and the relevant mappings.
             self.useFixture(nova_fixtures.Database(database='api'))
-            self.useFixture(nova_fixtures.Database(database='placement'))
             self._setup_cells()
             self.useFixture(nova_fixtures.DefaultFlavorsFixture())
         elif not self.USES_DB_SELF:
@@ -287,14 +297,11 @@ class TestCase(testtools.TestCase):
         # caching of that value.
         utils._IS_NEUTRON = None
 
-        # Reset the traits sync and rc cache flags
-        def _reset_traits():
-            resource_provider._TRAITS_SYNCED = False
-        _reset_traits()
-        self.addCleanup(_reset_traits)
-        resource_provider._RC_CACHE = None
         # Reset the global QEMU version flag.
         images.QEMU_VERSION = None
+
+        # Reset the compute RPC API globals (mostly the _ROUTER).
+        compute_rpcapi.reset_globals()
 
         mox_fixture = self.useFixture(moxstubout.MoxStubout())
         self.mox = mox_fixture.mox
@@ -302,8 +309,6 @@ class TestCase(testtools.TestCase):
         self.addCleanup(self._clear_attrs)
         self.useFixture(fixtures.EnvironmentVariable('http_proxy'))
         self.policy = self.useFixture(policy_fixture.PolicyFixture())
-        self.placement_policy = self.useFixture(
-            policy_fixture.PlacementPolicyFixture())
 
         self.useFixture(nova_fixtures.PoisonFunctions())
 
@@ -319,6 +324,10 @@ class TestCase(testtools.TestCase):
         # any that depend on default/previous ordering
         self.flags(build_failure_weight_multiplier=0.0,
                    group='filter_scheduler')
+
+        # NOTE(melwitt): Reset the cached set of projects
+        quota.UID_QFD_POPULATED_CACHE_BY_PROJECT = set()
+        quota.UID_QFD_POPULATED_CACHE_ALL = False
 
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.
@@ -387,6 +396,29 @@ class TestCase(testtools.TestCase):
         """
         self.useFixture(fixtures.MonkeyPatch(old, new))
 
+    @staticmethod
+    def patch_exists(patched_path, result):
+        """Provide a static method version of patch_exists(), which if you
+        haven't already imported nova.test can be slightly easier to
+        use as a context manager within a test method via:
+
+            def test_something(self):
+                with self.patch_exists(path, True):
+                    ...
+        """
+        return patch_exists(patched_path, result)
+
+    @staticmethod
+    def patch_open(patched_path, read_data):
+        """Provide a static method version of patch_open() which is easier to
+        use as a context manager within a test method via:
+
+            def test_something(self):
+                with self.patch_open(path, "fake contents of file"):
+                    ...
+        """
+        return patch_open(patched_path, read_data)
+
     def flags(self, **kw):
         """Override flag variables for a test."""
         group = kw.pop('group', None)
@@ -395,6 +427,12 @@ class TestCase(testtools.TestCase):
 
     def start_service(self, name, host=None, **kwargs):
         cell = None
+        # if the host is None then the CONF.host remains defaulted to
+        # 'fake-mini' (originally done in ConfFixture)
+        if host is not None:
+            # Make sure that CONF.host is relevant to the right hostname
+            self.useFixture(nova_fixtures.ConfPatcher(host=host))
+
         if name == 'compute' and self.USES_DB:
             # NOTE(danms): We need to create the HostMapping first, because
             # otherwise we'll fail to update the scheduler while running
@@ -402,23 +440,29 @@ class TestCase(testtools.TestCase):
             ctxt = context.get_context()
             cell_name = kwargs.pop('cell', CELL1_NAME) or CELL1_NAME
             cell = self.cell_mappings[cell_name]
-            hm = objects.HostMapping(context=ctxt,
-                                     host=host or name,
-                                     cell_mapping=cell)
-            hm.create()
-            self.host_mappings[hm.host] = hm
-            if host is not None:
-                # Make sure that CONF.host is relevant to the right hostname
-                self.useFixture(nova_fixtures.ConfPatcher(host=host))
+            if (host or name) not in self.host_mappings:
+                # NOTE(gibi): If the HostMapping does not exists then this is
+                # the first start of the service so we create the mapping.
+                hm = objects.HostMapping(context=ctxt,
+                                         host=host or name,
+                                         cell_mapping=cell)
+                hm.create()
+                self.host_mappings[hm.host] = hm
         svc = self.useFixture(
             nova_fixtures.ServiceFixture(name, host, cell=cell, **kwargs))
 
         return svc.service
 
-    def restart_compute_service(self, compute):
-        """Restart a compute service in a realistic way.
+    def restart_compute_service(self, compute, keep_hypervisor_state=True):
+        """Stops the service and starts a new one to have realistic restart
 
         :param:compute: the nova-compute service to be restarted
+        :param:keep_hypervisor_state: If true then already defined instances
+                                      will survive the compute service restart.
+                                      If false then the new service will see
+                                      an empty hypervisor
+        :returns: a new compute service instance serving the same host and
+                  and node
         """
 
         # NOTE(gibi): The service interface cannot be used to simulate a real
@@ -428,31 +472,36 @@ class TestCase(testtools.TestCase):
         # a stop start. The service.kill() call cannot help as it deletes
         # the service from the DB which is unrealistic and causes that some
         # operation that refers to the killed host (e.g. evacuate) fails.
-        # So this helper method tries to simulate a better compute service
-        # restart by cleaning up some of the internal state of the compute
-        # manager.
+        # So this helper method will stop the original service and then starts
+        # a brand new compute service for the same host and node. This way
+        # a new ComputeManager instance will be created and initialized during
+        # the service startup.
         compute.stop()
-        compute.manager._resource_tracker = None
-        compute.start()
 
-    @staticmethod
-    def restart_scheduler_service(scheduler):
-        """Restart a scheduler service in a realistic way.
+        # this service was running previously so we have to make sure that
+        # we restart it in the same cell
+        cell_name = self.host_mappings[compute.host].cell_mapping.name
 
-        Deals with resetting the host state cache in the case of using the
-        CachingScheduler driver.
+        if keep_hypervisor_state:
+            # NOTE(gibi): FakeDriver does not provide a meaningful way to
+            # define some servers that exists already on the hypervisor when
+            # the driver is (re)created during the service startup. This means
+            # that we cannot simulate that the definition of a server
+            # survives a nova-compute service restart on the hypervisor.
+            # Instead here we save the FakeDriver instance that knows about
+            # the defined servers and inject that driver into the new Manager
+            # class during the startup of the compute service.
+            old_driver = compute.manager.driver
+            with mock.patch(
+                    'nova.virt.driver.load_compute_driver') as load_driver:
+                load_driver.return_value = old_driver
+                new_compute = self.start_service(
+                    'compute', host=compute.host, cell=cell_name)
+        else:
+            new_compute = self.start_service(
+                'compute', host=compute.host, cell=cell_name)
 
-        :param scheduler: The nova-scheduler service to be restarted.
-        """
-        scheduler.stop()
-        if hasattr(scheduler.manager.driver, 'all_host_states'):
-            # On startup, the CachingScheduler runs a periodic task to pull
-            # the initial set of compute nodes out of the database which it
-            # then puts into a cache (hence the name of the driver). This can
-            # race with actually starting the compute services so we need to
-            # restart the scheduler to refresh the cache.
-            scheduler.manager.driver.all_host_states = None
-        scheduler.start()
+        return new_compute
 
     def assertJsonEqual(self, expected, observed, message=''):
         """Asserts that 2 complex data structures are json equivalent.
@@ -543,6 +592,9 @@ class TestCase(testtools.TestCase):
             error.observed = observed
             error.difference = difference
             raise error
+
+    def assertXmlEqual(self, expected, observed, **options):
+        self.assertThat(observed, matchers.XMLMatches(expected, **options))
 
     def assertPublicAPISignatures(self, baseinst, inst):
         def get_public_apis(inst):
@@ -786,3 +838,97 @@ class ContainKeyValue(object):
     def __repr__(self):
         return "<ContainKeyValue: key " + str(self.wantkey) + \
                " and value " + str(self.wantvalue) + ">"
+
+
+@contextlib.contextmanager
+def patch_exists(patched_path, result):
+    """Selectively patch os.path.exists() so that if it's called with
+    patched_path, return result.  Calls with any other path are passed
+    through to the real os.path.exists() function.
+
+    Either import and use as a decorator / context manager, or use the
+    nova.TestCase.patch_exists() static method as a context manager.
+
+    Currently it is *not* recommended to use this if any of the
+    following apply:
+
+    - You want to patch via decorator *and* make assertions about how the
+      mock is called (since using it in the decorator form will not make
+      the mock available to your code).
+
+    - You want the result of the patched exists() call to be determined
+      programmatically (e.g. by matching substrings of patched_path).
+
+    - You expect exists() to be called multiple times on the same path
+      and return different values each time.
+
+    Additionally within unit tests which only test a very limited code
+    path, it may be possible to ensure that the code path only invokes
+    exists() once, in which case it's slightly overkill to do
+    selective patching based on the path.  In this case something like
+    like this may be more appropriate:
+
+        @mock.patch('os.path.exists', return_value=True)
+        def test_my_code(self, mock_exists):
+            ...
+            mock_exists.assert_called_once_with(path)
+    """
+    real_exists = os.path.exists
+
+    def fake_exists(path):
+        if path == patched_path:
+            return result
+        return real_exists(path)
+
+    with mock.patch.object(os.path, "exists") as mock_exists:
+        mock_exists.side_effect = fake_exists
+        yield mock_exists
+
+
+@contextlib.contextmanager
+def patch_open(patched_path, read_data):
+    """Selectively patch open() so that if it's called with patched_path,
+    return a mock which makes it look like the file contains
+    read_data.  Calls with any other path are passed through to the
+    real open() function.
+
+    Either import and use as a decorator, or use the
+    nova.TestCase.patch_open() static method as a context manager.
+
+    Currently it is *not* recommended to use this if any of the
+    following apply:
+
+    - The code under test will attempt to write to patched_path.
+
+    - You want to patch via decorator *and* make assertions about how the
+      mock is called (since using it in the decorator form will not make
+      the mock available to your code).
+
+    - You want the faked file contents to be determined
+      programmatically (e.g. by matching substrings of patched_path).
+
+    - You expect open() to be called multiple times on the same path
+      and return different file contents each time.
+
+    Additionally within unit tests which only test a very limited code
+    path, it may be possible to ensure that the code path only invokes
+    open() once, in which case it's slightly overkill to do
+    selective patching based on the path.  In this case something like
+    like this may be more appropriate:
+
+        @mock.patch(six.moves.builtins, 'open')
+        def test_my_code(self, mock_open):
+            ...
+            mock_open.assert_called_once_with(path)
+    """
+    real_open = builtins.open
+    m = mock.mock_open(read_data=read_data)
+
+    def selective_fake_open(path, *args, **kwargs):
+        if path == patched_path:
+            return m(patched_path)
+        return real_open(path, *args, **kwargs)
+
+    with mock.patch.object(builtins, 'open') as mock_open:
+        mock_open.side_effect = selective_fake_open
+        yield m

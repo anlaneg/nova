@@ -6,6 +6,8 @@ The nova project is large, and there are lots of complicated parts in it where
 it helps to have an overview to understand how the internals of a particular
 part work.
 
+.. _reference-internals:
+
 Internals
 =========
 
@@ -28,6 +30,10 @@ The following is a dive into some of the internals in nova.
   ``ComputeDriver.update_provider_tree`` method.
 * :doc:`/reference/upgrade-checks`: A guide to writing automated upgrade
   checks.
+* :doc:`/reference/conductor`
+
+.. todo:: Need something about versioned objects and how they fit in with
+          conductor as an object backporter during upgrades.
 
 Debugging
 =========
@@ -46,7 +52,7 @@ these documents will move into the "Internals" section.
 If you want to get involved in shaping the future of nova's architecture,
 these are a great place to start reading up on the current plans.
 
-* :doc:`/user/cells`: Comparison of Cells v1 and v2, and how v2 is evolving
+* :doc:`/user/cells`: How cells v2 is evolving
 * :doc:`/reference/policy-enforcement`: How we want policy checks on API actions
   to work in the future
 * :doc:`/reference/stable-api`: What stable api means to nova

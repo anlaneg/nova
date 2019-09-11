@@ -48,6 +48,12 @@ When we talk about block device mapping, we usually refer to one of two things
    virt driver code). We will refer to this format as 'Driver BDMs' from now
    on.
 
+.. note::
+
+   The maximum limit on the number of disk devices allowed to attach to
+   a single server is configurable with the option
+   :oslo.config:option:`compute.max_disk_devices_to_attach`.
+
 
 Data format and its history
 ----------------------------
@@ -127,7 +133,7 @@ fields (in addition to the ones that were already there):
   * `snapshot`
   * `blank`
 
-* dest_type  - this can have one of the following values:
+* destination_type  - this can have one of the following values:
 
   * `local`
   * `volume`
@@ -161,10 +167,18 @@ fields (in addition to the ones that were already there):
   usage is to set it to 0 for the boot device and leave it as None for any
   other devices.
 
-Valid source / dest combinations
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+* volume_type - Added in microversion 2.67 to the servers create API to
+  support specifying volume type when booting instances. When we snapshot a
+  volume-backed server, the block_device_mapping_v2 image metadata will
+  include the volume_type from the BDM record so if the user then creates
+  another server from that snapshot, the volume that nova creates from that
+  snapshot will use the same volume_type. If a user wishes to change that
+  volume type in the image metadata, they can do so via the image API.
 
-Combination of the ``source_type`` and ``dest_type`` will define the
+Valid source / destination combinations
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Combination of the ``source_type`` and ``destination_type`` will define the
 kind of block device the entry is referring to. The following
 combinations are supported:
 
@@ -206,3 +220,21 @@ mapping is valid before accepting a boot request.
 .. [3] This is a feature that the EC2 API offers as well and has been in Nova
    for a long time, although it has been broken in several releases. More info
    can be found on `this bug <https://launchpad.net/bugs/1370250>`
+
+
+FAQs
+----
+
+1. Is it possible to configure nova to automatically use cinder to back all
+   root disks with volumes?
+
+   No, there is nothing automatic within nova that converts a
+   non-boot-from-volume request to convert the image to a root volume.
+   Several ideas have been discussed over time which are captured in the
+   spec for `volume-backed flavors`_. However, if you wish to force users
+   to always create volume-backed servers, you can configure the API service
+   by setting :oslo.config:option:`max_local_block_devices` to 0. This will
+   result in any non-boot-from-volume server create request to fail with a
+   400 response.
+
+.. _volume-backed flavors: https://review.opendev.org/511965/

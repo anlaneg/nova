@@ -50,7 +50,7 @@ class RequestTest(MicroversionedTest):
         super(RequestTest, self).setUp()
         self.stub_out('nova.i18n.get_available_languages',
                       lambda *args, **kwargs:
-                      ['en_GB', 'en_AU', 'de', 'zh_CN', 'en_US'])
+                      ['en-GB', 'en-AU', 'de', 'zh-CN', 'en-US', 'ja-JP'])
 
     def test_content_type_missing(self):
         request = wsgi.Request.blank('/tests/123', method='POST')
@@ -76,52 +76,49 @@ class RequestTest(MicroversionedTest):
         result = request.best_match_content_type()
         self.assertEqual(result, "application/json")
 
-    def test_cache_and_retrieve_instances(self):
-        request = wsgi.Request.blank('/foo')
-        instances = []
-        for x in range(3):
-            instances.append({'uuid': 'uuid%s' % x})
-        # Store 2
-        request.cache_db_instances(instances[:2])
-        # Store 1
-        request.cache_db_instance(instances[2])
-        self.assertEqual(request.get_db_instance('uuid0'),
-                instances[0])
-        self.assertEqual(request.get_db_instance('uuid1'),
-                instances[1])
-        self.assertEqual(request.get_db_instance('uuid2'),
-                instances[2])
-        self.assertIsNone(request.get_db_instance('uuid3'))
-        self.assertEqual(request.get_db_instances(),
-                {'uuid0': instances[0],
-                 'uuid1': instances[1],
-                 'uuid2': instances[2]})
+    def test_content_type_accept_with_quality_values(self):
+        request = wsgi.Request.blank('/tests/123')
+        request.headers["Accept"] = (
+            "application/json;q=0.4,"
+            "application/vnd.openstack.compute+json;q=0.6")
+        result = request.best_match_content_type()
+        self.assertEqual("application/vnd.openstack.compute+json", result)
 
     def test_from_request(self):
         request = wsgi.Request.blank('/')
         accepted = 'bogus;q=1, en-gb;q=0.7,en-us,en;q=0.5,*;q=0.7'
         request.headers = {'Accept-Language': accepted}
-        self.assertEqual(request.best_match_language(), 'en_US')
+        self.assertEqual(request.best_match_language(), 'en-US')
 
     def test_asterisk(self):
-        # asterisk should match first available if there
-        # are not any other available matches
+        # In the section 3.4 of RFC4647, it says as follows:
+        # If the language range "*"(asterisk) is the only one
+        # in the language priority list or if no other language range
+        # follows, the default value is computed and returned.
+        #
+        # In this case, the default value 'None' is returned.
         request = wsgi.Request.blank('/')
-        accepted = '*,es;q=0.5'
+        accepted = '*;q=0.5'
         request.headers = {'Accept-Language': accepted}
-        self.assertEqual(request.best_match_language(), 'en_GB')
+        self.assertIsNone(request.best_match_language())
 
-    def test_prefix(self):
+    def test_asterisk_followed_by_other_language(self):
         request = wsgi.Request.blank('/')
-        accepted = 'zh'
+        accepted = '*,ja-jp;q=0.5'
         request.headers = {'Accept-Language': accepted}
-        self.assertEqual(request.best_match_language(), 'zh_CN')
+        self.assertEqual('ja-JP', request.best_match_language())
+
+    def test_truncate(self):
+        request = wsgi.Request.blank('/')
+        accepted = 'de-CH'
+        request.headers = {'Accept-Language': accepted}
+        self.assertEqual('de', request.best_match_language())
 
     def test_secondary(self):
         request = wsgi.Request.blank('/')
         accepted = 'nn,en-gb;q=0.5'
         request.headers = {'Accept-Language': accepted}
-        self.assertEqual(request.best_match_language(), 'en_GB')
+        self.assertEqual('en-GB', request.best_match_language())
 
     def test_none_found(self):
         request = wsgi.Request.blank('/')
@@ -255,7 +252,7 @@ class ResourceTest(MicroversionedTest):
     def get_req_id_header_name(self, request):
         header_name = 'x-openstack-request-id'
         if utils.get_api_version(request) < 3:
-                header_name = 'x-compute-request-id'
+            header_name = 'x-compute-request-id'
 
         return header_name
 
@@ -440,7 +437,7 @@ class ResourceTest(MicroversionedTest):
 
         controller = Controller()
         resource = wsgi.Resource(controller)
-        method, extensions = resource.get_method(None, 'index', None, '')
+        method = resource.get_method(None, 'index', None, '')
         actual = resource.dispatch(method, None, {'pants': 'off'})
         expected = 'off'
         self.assertEqual(actual, expected)
@@ -463,9 +460,9 @@ class ResourceTest(MicroversionedTest):
 
         controller = Controller()
         resource = wsgi.Resource(controller)
-        method, extensions = resource.get_method(None, 'action',
-                                                 'application/json',
-                                                 '{"fooAction": true}')
+        method = resource.get_method(None, 'action',
+                                     'application/json',
+                                     '{"fooAction": true}')
         self.assertEqual(controller._action_foo, method)
 
     def test_get_method_action_bad_body(self):
@@ -498,9 +495,9 @@ class ResourceTest(MicroversionedTest):
 
         controller = Controller()
         resource = wsgi.Resource(controller)
-        method, extensions = resource.get_method(None, 'action',
-                                                 'application/xml',
-                                                 '<fooAction>true</fooAction')
+        method = resource.get_method(None, 'action',
+                                     'application/xml',
+                                     '<fooAction>true</fooAction')
         self.assertEqual(controller.action, method)
 
     def test_get_action_args(self):
@@ -672,50 +669,17 @@ class ResourceTest(MicroversionedTest):
                 'barAction': extended._action_bar,
                 }, resource.wsgi_actions)
 
-    def test_register_extensions(self):
+    def test_get_method(self):
         class Controller(object):
             def index(self, req, pants=None):
                 return pants
 
-        class ControllerExtended(wsgi.Controller):
-            @wsgi.extends
-            def index(self, req, resp_obj, pants=None):
-                return None
-
-            @wsgi.extends(action='fooAction')
-            def _action_foo(self, req, resp, id, body):
-                return None
-
         controller = Controller()
         resource = wsgi.Resource(controller)
-        self.assertEqual({}, resource.wsgi_extensions)
-        self.assertEqual({}, resource.wsgi_action_extensions)
-
-        extended = ControllerExtended()
-        resource.register_extensions(extended)
-        self.assertEqual({'index': [extended.index]}, resource.wsgi_extensions)
-        self.assertEqual({'fooAction': [extended._action_foo]},
-                         resource.wsgi_action_extensions)
-
-    def test_get_method_extensions(self):
-        class Controller(object):
-            def index(self, req, pants=None):
-                return pants
-
-        class ControllerExtended(wsgi.Controller):
-            @wsgi.extends
-            def index(self, req, resp_obj, pants=None):
-                return None
-
-        controller = Controller()
-        extended = ControllerExtended()
-        resource = wsgi.Resource(controller)
-        resource.register_extensions(extended)
-        method, extensions = resource.get_method(None, 'index', None, '')
+        method = resource.get_method(None, 'index', None, '')
         self.assertEqual(method, controller.index)
-        self.assertEqual(extensions, [extended.index])
 
-    def test_get_method_action_extensions(self):
+    def test_get_method_action(self):
         class Controller(wsgi.Controller):
             def index(self, req, pants=None):
                 return pants
@@ -724,22 +688,14 @@ class ResourceTest(MicroversionedTest):
             def _action_foo(self, req, id, body):
                 return body
 
-        class ControllerExtended(wsgi.Controller):
-            @wsgi.extends(action='fooAction')
-            def _action_foo(self, req, resp_obj, id, body):
-                return None
-
         controller = Controller()
-        extended = ControllerExtended()
         resource = wsgi.Resource(controller)
-        resource.register_extensions(extended)
-        method, extensions = resource.get_method(None, 'action',
-                                                 'application/json',
-                                                 '{"fooAction": true}')
+        method = resource.get_method(None, 'action',
+                                     'application/json',
+                                     '{"fooAction": true}')
         self.assertEqual(method, controller._action_foo)
-        self.assertEqual(extensions, [extended._action_foo])
 
-    def test_get_method_action_whitelist_extensions(self):
+    def test_get_method_action_whitelist(self):
         class Controller(wsgi.Controller):
             def index(self, req, pants=None):
                 return pants
@@ -758,61 +714,13 @@ class ResourceTest(MicroversionedTest):
         resource = wsgi.Resource(controller)
         resource.register_actions(extended)
 
-        method, extensions = resource.get_method(None, 'create',
-                                                 'application/json',
-                                                 '{"create": true}')
+        method = resource.get_method(None, 'create',
+                                     'application/json',
+                                     '{"create": true}')
         self.assertEqual(method, extended._create)
-        self.assertEqual(extensions, [])
 
-        method, extensions = resource.get_method(None, 'delete', None, None)
+        method = resource.get_method(None, 'delete', None, None)
         self.assertEqual(method, extended._delete)
-        self.assertEqual(extensions, [])
-
-    def test_process_extensions_regular(self):
-        class Controller(object):
-            def index(self, req, pants=None):
-                return pants
-
-        controller = Controller()
-        resource = wsgi.Resource(controller)
-
-        called = []
-
-        def extension1(req, resp_obj):
-            called.append(1)
-            return None
-
-        def extension2(req, resp_obj):
-            called.append(2)
-            return None
-
-        response = resource.process_extensions([extension2, extension1],
-                                                    None, None, {})
-        self.assertEqual(called, [2, 1])
-        self.assertIsNone(response)
-
-    def test_process_extensions_regular_response(self):
-        class Controller(object):
-            def index(self, req, pants=None):
-                return pants
-
-        controller = Controller()
-        resource = wsgi.Resource(controller)
-
-        called = []
-
-        def extension1(req, resp_obj):
-            called.append(1)
-            return None
-
-        def extension2(req, resp_obj):
-            called.append(2)
-            return 'foo'
-
-        response = resource.process_extensions([extension2, extension1],
-                                                    None, None, {})
-        self.assertEqual(called, [2])
-        self.assertEqual(response, 'foo')
 
     def test_resource_exception_handler_type_error(self):
         # A TypeError should be translated to a Fault/HTTP 400.

@@ -19,7 +19,7 @@ from nova.api.openstack import api_version_request
 from nova.api.openstack import common
 from nova.api.openstack.compute.views import server_diagnostics
 from nova.api.openstack import wsgi
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.policies import server_diagnostics as sd_policies
 
@@ -27,8 +27,8 @@ from nova.policies import server_diagnostics as sd_policies
 class ServerDiagnosticsController(wsgi.Controller):
     _view_builder_class = server_diagnostics.ViewBuilder
 
-    def __init__(self, *args, **kwargs):
-        super(ServerDiagnosticsController, self).__init__(*args, **kwargs)
+    def __init__(self):
+        super(ServerDiagnosticsController, self).__init__()
         self.compute_api = compute.API()
 
     @wsgi.expected_errors((400, 404, 409, 501))

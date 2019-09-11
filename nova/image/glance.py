@@ -161,21 +161,35 @@ class GlanceClientWrapper(object):
         self.api_server = next(self.api_servers)
         return _glanceclient_from_endpoint(context, self.api_server, version)
 
-    def call(self, context, version, method, *args, **kwargs):
+    def call(self, context, version, method, controller=None, args=None,
+             kwargs=None):
         """Call a glance client method.  If we get a connection error,
         retry the request according to CONF.glance.num_retries.
+
+        :param context: RequestContext to use
+        :param version: Numeric version of the *Glance API* to use
+        :param method: string method name to execute on the glanceclient
+        :param controller: optional string name of the client controller to
+                           use. Default (None) is to use the 'images'
+                           controller
+        :param args: optional iterable of arguments to pass to the
+                     glanceclient method, splatted as positional args
+        :param kwargs: optional dict of arguments to pass to the glanceclient,
+                       splatted into named arguments
         """
+        args = args or []
+        kwargs = kwargs or {}
         retry_excs = (glanceclient.exc.ServiceUnavailable,
                 glanceclient.exc.InvalidEndpoint,
                 glanceclient.exc.CommunicationError)
         num_attempts = 1 + CONF.glance.num_retries
+        controller_name = controller or 'images'
 
         for attempt in range(1, num_attempts + 1):
             client = self.client or self._create_onetime_client(context,
                                                                 version)
             try:
-                controller = getattr(client,
-                                     kwargs.pop('controller', 'images'))
+                controller = getattr(client, controller_name)
                 result = getattr(controller, method)(*args, **kwargs)
                 if inspect.isgenerator(result):
                     # Convert generator results to a list, so that we can
@@ -240,7 +254,7 @@ class GlanceImageServiceV2(object):
                              image is deleted.
         """
         try:
-            image = self._client.call(context, 2, 'get', image_id)
+            image = self._client.call(context, 2, 'get', args=(image_id,))
         except Exception:
             _reraise_translated_image_exception(image_id)
 
@@ -275,7 +289,7 @@ class GlanceImageServiceV2(object):
         """Calls out to Glance for a list of detailed image information."""
         params = _extract_query_params_v2(kwargs)
         try:
-            images = self._client.call(context, 2, 'list', **params)
+            images = self._client.call(context, 2, 'list', kwargs=params)
         except Exception:
             _reraise_translated_exception()
 
@@ -321,7 +335,8 @@ class GlanceImageServiceV2(object):
                         LOG.exception("Download image error")
 
         try:
-            image_chunks = self._client.call(context, 2, 'data', image_id)
+            image_chunks = self._client.call(
+                context, 2, 'data', args=(image_id,))
         except Exception:
             _reraise_translated_image_exception(image_id)
 
@@ -454,11 +469,18 @@ class GlanceImageServiceV2(object):
         # empty data.
         force_activate = data is None and image_meta.get('size') == 0
 
+        # The "instance_owner" property is set in the API if a user, who is
+        # not the owner of an instance, is creating the image, e.g. admin
+        # snapshots or shelves another user's instance. This is used to add
+        # member access to the image for the instance owner.
+        sharing_member_id = image_meta.get('properties', {}).pop(
+            'instance_owner', None)
         sent_service_image_meta = _translate_to_glance(image_meta)
 
         try:
             image = self._create_v2(context, sent_service_image_meta,
-                                    data, force_activate)
+                                    data, force_activate,
+                                    sharing_member_id=sharing_member_id)
         except glanceclient.exc.HTTPException:
             _reraise_translated_exception()
 
@@ -467,14 +489,31 @@ class GlanceImageServiceV2(object):
     def _add_location(self, context, image_id, location):
         # 'show_multiple_locations' must be enabled in glance api conf file.
         try:
-            return self._client.call(context, 2, 'add_location', image_id,
-                                     location, {})
+            return self._client.call(
+                context, 2, 'add_location', args=(image_id, location, {}))
+        except glanceclient.exc.HTTPBadRequest:
+            _reraise_translated_exception()
+
+    def _add_image_member(self, context, image_id, member_id):
+        """Grant access to another project that does not own the image
+
+        :param context: nova auth RequestContext where context.project_id is
+            the owner of the image
+        :param image_id: ID of the image on which to grant access
+        :param member_id: ID of the member project to grant access to the
+            image; this should not be the owner of the image
+        :returns: A Member schema object of the created image member
+        """
+        try:
+            return self._client.call(
+                context, 2, 'create', controller='image_members',
+                args=(image_id, member_id))
         except glanceclient.exc.HTTPBadRequest:
             _reraise_translated_exception()
 
     def _upload_data(self, context, image_id, data):
-        self._client.call(context, 2, 'upload', image_id, data)
-        return self._client.call(context, 2, 'get', image_id)
+        self._client.call(context, 2, 'upload', args=(image_id, data))
+        return self._client.call(context, 2, 'get', args=(image_id,))
 
     def _get_image_create_disk_format_default(self, context):
         """Gets an acceptable default image disk_format based on the schema.
@@ -494,8 +533,8 @@ class GlanceImageServiceV2(object):
         # Get the image schema - note we don't cache this value since it could
         # change under us. This looks a bit funky, but what it's basically
         # doing is calling glanceclient.v2.Client.schemas.get('image').
-        image_schema = self._client.call(context, 2, 'get', 'image',
-                                         controller='schemas')
+        image_schema = self._client.call(
+            context, 2, 'get', args=('image',), controller='schemas')
         # get the disk_format schema property from the raw schema
         disk_format_schema = (
             image_schema.raw()['properties'].get('disk_format') if image_schema
@@ -520,7 +559,7 @@ class GlanceImageServiceV2(object):
         return preferred_disk_formats[0]
 
     def _create_v2(self, context, sent_service_image_meta, data=None,
-                   force_activate=False):
+                   force_activate=False, sharing_member_id=None):
         # Glance v1 allows image activation without setting disk and
         # container formats, v2 doesn't. It leads to the dirtiest workaround
         # where we have to hardcode this parameters.
@@ -535,12 +574,18 @@ class GlanceImageServiceV2(object):
 
         location = sent_service_image_meta.pop('location', None)
         image = self._client.call(
-            context, 2, 'create', **sent_service_image_meta)
+            context, 2, 'create', kwargs=sent_service_image_meta)
         image_id = image['id']
 
         # Sending image location in a separate request.
         if location:
             image = self._add_location(context, image_id, location)
+
+        # Add image membership in a separate request.
+        if sharing_member_id:
+            LOG.debug('Adding access for member %s to image %s',
+                      sharing_member_id, image_id)
+            self._add_image_member(context, image_id, sharing_member_id)
 
         # If we have some data we have to send it in separate request and
         # update the image then.
@@ -579,7 +624,7 @@ class GlanceImageServiceV2(object):
         location = sent_service_image_meta.pop('location', None)
         image_id = sent_service_image_meta['image_id']
         image = self._client.call(
-            context, 2, 'update', **sent_service_image_meta)
+            context, 2, 'update', kwargs=sent_service_image_meta)
 
         # Sending image location in a separate request.
         if location:
@@ -602,7 +647,7 @@ class GlanceImageServiceV2(object):
 
         """
         try:
-            self._client.call(context, 2, 'delete', image_id)
+            self._client.call(context, 2, 'delete', args=(image_id,))
         except glanceclient.exc.NotFound:
             raise exception.ImageNotFound(image_id=image_id)
         except glanceclient.exc.HTTPForbidden:
@@ -863,8 +908,8 @@ def _extract_attributes_v2(image, include_locations=False):
               'disk_format': None, 'container_format': None, 'name': None,
               'checksum': None}
     for name, value in image.items():
-        if (name in omit_attrs
-                or name in include_locations_attrs and not include_locations):
+        if (name in omit_attrs or
+                name in include_locations_attrs and not include_locations):
             continue
         elif name == 'visibility':
             output['is_public'] = value == 'public'

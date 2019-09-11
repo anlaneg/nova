@@ -26,44 +26,54 @@ import random
 import warnings
 
 import fixtures
-from keystoneauth1 import adapter as ka
-from keystoneauth1 import session as ks
+import futurist
+from keystoneauth1 import adapter as ksa_adap
 import mock
 from neutronclient.common import exceptions as neutron_client_exc
+from openstack import service_description
+import os_resource_classes as orc
 from oslo_concurrency import lockutils
 from oslo_config import cfg
+from oslo_db import exception as db_exc
+from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_messaging import conffixture as messaging_conffixture
 from oslo_privsep import daemon as privsep_daemon
+from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel
 from oslo_utils import uuidutils
 from requests import adapters
+from sqlalchemy import exc as sqla_exc
 from wsgi_intercept import interceptor
 
 from nova.api.openstack.compute import tenant_networks
-from nova.api.openstack.placement import db_api as placement_db
 from nova.api.openstack import wsgi_app
 from nova.api import wsgi
+from nova.compute import multi_cell_list
 from nova.compute import rpcapi as compute_rpcapi
 from nova import context
 from nova.db import migration
 from nova.db.sqlalchemy import api as session
 from nova import exception
 from nova.network import model as network_model
+from nova.network.neutronv2 import constants as neutron_constants
 from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import service as service_obj
+import nova.privsep
 from nova import quota as nova_quota
 from nova import rpc
 from nova import service
 from nova.tests.functional.api import client
-from nova.tests.functional.api.openstack.placement.fixtures import placement
+from nova.tests.unit import fake_requests
 
 _TRUE_VALUES = ('True', 'true', '1', 'yes')
 
 CONF = cfg.CONF
-DB_SCHEMA = {'main': "", 'api': "", 'placement': ""}
+DB_SCHEMA = {'main': "", 'api': ""}
 SESSION_CONFIGURED = False
+
+LOG = logging.getLogger(__name__)
 
 
 class ServiceFixture(fixtures.Fixture):
@@ -85,6 +95,12 @@ class ServiceFixture(fixtures.Fixture):
         self.ctxt = context.get_admin_context()
         if self.cell:
             context.set_target_cell(self.ctxt, self.cell)
+
+        # NOTE(mikal): we don't have root to manipulate iptables, so just
+        # zero that bit out.
+        self.useFixture(fixtures.MockPatch(
+            'nova.network.linux_net.IptablesManager._apply'))
+
         with mock.patch('nova.context.get_admin_context',
                         return_value=self.ctxt):
             self.service = service.Service.create(**self.kwargs)
@@ -179,6 +195,12 @@ class StandardLogging(fixtures.Fixture):
         self.useFixture(
             fixtures.MonkeyPatch('oslo_log.log.setup', fake_logging_setup))
 
+    def delete_stored_logs(self):
+        # NOTE(gibi): this depends on the internals of the fixtures.FakeLogger.
+        # This could be enhanced once the PR
+        # https://github.com/testing-cabal/fixtures/pull/42 merges
+        self.logger._output.truncate(0)
+
 
 class OutputStreamCapture(fixtures.Fixture):
     """Capture output streams during tests.
@@ -265,7 +287,7 @@ class DatabasePoisonFixture(fixtures.Fixture):
         #   to the code you're testing (for example: EventReporterStub)
         #
         # - peruse some of the other database poison warning fixes here:
-        #   https://review.openstack.org/#/q/topic:bug/1568414
+        #   https://review.opendev.org/#/q/topic:bug/1568414
         raise Exception('This test uses methods that set internal oslo_db '
                         'state, but it does not claim to use the database. '
                         'This will conflict with the setup of tests that '
@@ -426,7 +448,7 @@ class CellDatabases(fixtures.Fixture):
         global DB_SCHEMA
         if not DB_SCHEMA['main']:
             ctxt_mgr = self._ctxt_mgrs[connection_str]
-            engine = ctxt_mgr.get_legacy_facade().get_engine()
+            engine = ctxt_mgr.writer.get_engine()
             conn = engine.connect()
             migration.db_sync(database='main')
             DB_SCHEMA['main'] = "".join(line for line
@@ -435,27 +457,83 @@ class CellDatabases(fixtures.Fixture):
 
     @contextmanager
     def _wrap_target_cell(self, context, cell_mapping):
-        with self._cell_lock.write_lock():
-            if cell_mapping is None:
-                # NOTE(danms): The real target_cell untargets with a
-                # cell_mapping of None. Since we're controlling our
-                # own targeting in this fixture, we need to call this out
-                # specifically and avoid switching global database state
+        # NOTE(danms): This method is responsible for switching global
+        # database state in a safe way such that code that doesn't
+        # know anything about cell targeting (i.e. compute node code)
+        # can continue to operate when called from something that has
+        # targeted a specific cell. In order to make this safe from a
+        # dining-philosopher-style deadlock, we need to be able to
+        # support multiple threads talking to the same cell at the
+        # same time and potentially recursion within the same thread
+        # from code that would otherwise be running on separate nodes
+        # in real life, but where we're actually recursing in the
+        # tests.
+        #
+        # The basic logic here is:
+        #  1. Grab a reader lock to see if the state is already pointing at
+        #     the cell we want. If it is, we can yield and return without
+        #     altering the global state further. The read lock ensures that
+        #     global state won't change underneath us, and multiple threads
+        #     can be working at the same time, as long as they are looking
+        #     for the same cell.
+        #  2. If we do need to change the global state, grab a writer lock
+        #     to make that change, which assumes that nothing else is looking
+        #     at a cell right now. We do only non-schedulable things while
+        #     holding that lock to avoid the deadlock mentioned above.
+        #  3. We then re-lock with a reader lock just as step #1 above and
+        #     yield to do the actual work. We can do schedulable things
+        #     here and not exclude other threads from making progress.
+        #     If an exception is raised, we capture that and save it.
+        #  4. If we changed state in #2, we need to change it back. So we grab
+        #     a writer lock again and do that.
+        #  5. Finally, if an exception was raised in #3 while state was
+        #     changed, we raise it to the caller.
+
+        if cell_mapping:
+            desired = self._ctxt_mgrs[cell_mapping.database_connection]
+        else:
+            desired = self._default_ctxt_mgr
+
+        with self._cell_lock.read_lock():
+            if self._last_ctxt_mgr == desired:
                 with self._real_target_cell(context, cell_mapping) as c:
                     yield c
-                return
-            ctxt_mgr = self._ctxt_mgrs[cell_mapping.database_connection]
-            # This assumes the next local DB access is the same cell that
-            # was targeted last time.
-            self._last_ctxt_mgr = ctxt_mgr
+                    return
+
+        raised_exc = None
+
+        with self._cell_lock.write_lock():
+            if cell_mapping is not None:
+                # This assumes the next local DB access is the same cell that
+                # was targeted last time.
+                self._last_ctxt_mgr = desired
+
+        with self._cell_lock.read_lock():
+            if self._last_ctxt_mgr != desired:
+                # NOTE(danms): This is unlikely to happen, but it's possible
+                # another waiting writer changed the state between us letting
+                # it go and re-acquiring as a reader. If lockutils supported
+                # upgrading and downgrading locks, this wouldn't be a problem.
+                # Regardless, assert that it is still as we left it here
+                # so we don't hit the wrong cell. If this becomes a problem,
+                # we just need to retry the write section above until we land
+                # here with the cell we want.
+                raise RuntimeError('Global DB state changed underneath us')
+
             try:
                 with self._real_target_cell(context, cell_mapping) as ccontext:
                     yield ccontext
-            finally:
-                # Once we have returned from the context, we need
-                # to restore the default context manager for any
-                # subsequent calls
-                self._last_ctxt_mgr = self._default_ctxt_mgr
+            except Exception as exc:
+                raised_exc = exc
+
+        with self._cell_lock.write_lock():
+            # Once we have returned from the context, we need
+            # to restore the default context manager for any
+            # subsequent calls
+            self._last_ctxt_mgr = self._default_ctxt_mgr
+
+        if raised_exc:
+            raise raised_exc
 
     def _wrap_create_context_manager(self, connection=None):
         ctxt_mgr = self._ctxt_mgrs[connection]
@@ -535,7 +613,7 @@ class CellDatabases(fixtures.Fixture):
                 'nova.db.sqlalchemy.api.get_context_manager',
                 get_context_manager):
             self._cache_schema(connection_str)
-            engine = ctxt_mgr.get_legacy_facade().get_engine()
+            engine = ctxt_mgr.writer.get_engine()
             engine.dispose()
             conn = engine.connect()
             conn.connection.executescript(DB_SCHEMA['main'])
@@ -567,7 +645,7 @@ class CellDatabases(fixtures.Fixture):
 
     def cleanup(self):
         for ctxt_mgr in self._ctxt_mgrs.values():
-            engine = ctxt_mgr.get_legacy_facade().get_engine()
+            engine = ctxt_mgr.writer.get_engine()
             engine.dispose()
 
 
@@ -575,7 +653,7 @@ class Database(fixtures.Fixture):
     def __init__(self, database='main', connection=None):
         """Create a database fixture.
 
-        :param database: The type of database, 'main', 'api' or 'placement'
+        :param database: The type of database, 'main', or 'api'
         :param connection: The connection string to use
         """
         super(Database, self).__init__()
@@ -584,21 +662,17 @@ class Database(fixtures.Fixture):
         global SESSION_CONFIGURED
         if not SESSION_CONFIGURED:
             session.configure(CONF)
-            placement_db.configure(CONF)
             SESSION_CONFIGURED = True
         self.database = database
         if database == 'main':
             if connection is not None:
                 ctxt_mgr = session.create_context_manager(
                         connection=connection)
-                facade = ctxt_mgr.get_legacy_facade()
-                self.get_engine = facade.get_engine
+                self.get_engine = ctxt_mgr.writer.get_engine
             else:
                 self.get_engine = session.get_engine
         elif database == 'api':
             self.get_engine = session.get_api_engine
-        elif database == 'placement':
-            self.get_engine = placement_db.get_placement_engine
 
     def _cache_schema(self):
         global DB_SCHEMA
@@ -632,7 +706,7 @@ class DatabaseAtVersion(fixtures.Fixture):
         """Create a database fixture.
 
         :param version: Max version to sync to (or None for current)
-        :param database: The type of database, 'main', 'api', 'placement'
+        :param database: The type of database, 'main', 'api'
         """
         super(DatabaseAtVersion, self).__init__()
         self.database = database
@@ -641,8 +715,6 @@ class DatabaseAtVersion(fixtures.Fixture):
             self.get_engine = session.get_engine
         elif database == 'api':
             self.get_engine = session.get_api_engine
-        elif database == 'placement':
-            self.get_engine = placement_db.get_placement_engine
 
     def cleanup(self):
         engine = self.get_engine()
@@ -667,8 +739,7 @@ class DefaultFlavorsFixture(fixtures.Fixture):
         defaults = {'rxtx_factor': 1.0, 'disabled': False, 'is_public': True,
                     'ephemeral_gb': 0, 'swap': 0}
         extra_specs = {
-            "hw:mem_page_size": "2048",
-            "hw:cpu_policy": "dedicated"
+            "hw:numa_nodes": "1"
         }
         default_flavors = [
             objects.Flavor(context=ctxt, memory_mb=512, vcpus=1,
@@ -738,6 +809,11 @@ class RPCFixture(fixtures.Fixture):
             mock_gtu.return_value = None
             rpc.init(CONF)
 
+        def cleanup_in_flight_rpc_messages():
+            messaging._drivers.impl_fake.FakeExchangeManager._exchanges = {}
+
+        self.addCleanup(cleanup_in_flight_rpc_messages)
+
 
 class WarningsFixture(fixtures.Fixture):
     """Filters out warnings during test runs."""
@@ -766,6 +842,8 @@ class WarningsFixture(fixtures.Fixture):
         # about any deprecations coming from it
         warnings.filterwarnings('ignore',
             module='mox3.mox')
+        # NOTE(gibi): we can remove this once we get rid of Mox in nova
+        warnings.filterwarnings('ignore', message="Using class 'MoxStubout'")
         # NOTE(mriedem): Ignore scope check UserWarnings from oslo.policy.
         warnings.filterwarnings('ignore',
                                 message="Policy .* failed scope check",
@@ -775,6 +853,32 @@ class WarningsFixture(fixtures.Fixture):
         # valid UUID. Let's escalate that to an exception in the test to
         # prevent adding violations.
         warnings.filterwarnings('error', message=".*invalid UUID.*")
+
+        # NOTE(mriedem): Avoid adding anything which tries to convert an
+        # object to a primitive which jsonutils.to_primitive() does not know
+        # how to handle (or isn't given a fallback callback).
+        warnings.filterwarnings(
+            'error',
+            message="Cannot convert <oslo_db.sqlalchemy.enginefacade"
+                    "._Default object at ",
+            category=UserWarning)
+
+        warnings.filterwarnings(
+            'error', message='Evaluating non-mapped column expression',
+            category=sqla_exc.SAWarning)
+
+        # TODO(jangutter): Change (or remove) this to an error during the Train
+        # cycle when the os-vif port profile is no longer used.
+        warnings.filterwarnings(
+            'ignore', message=".* 'VIFPortProfileOVSRepresentor' .* "
+            "is deprecated", category=PendingDeprecationWarning)
+
+        # TODO(mriedem): Change (or remove) this DeprecationWarning once
+        # https://bugs.launchpad.net/sqlalchemy-migrate/+bug/1814288 is fixed.
+        warnings.filterwarnings(
+            'ignore', message='inspect.getargspec() is deprecated',
+            category=DeprecationWarning,
+            module='migrate.versioning.script.py')
 
         self.addCleanup(warnings.resetwarnings)
 
@@ -1014,24 +1118,22 @@ class SpawnIsSynchronousFixture(fixtures.Fixture):
             'nova.utils.spawn', _FakeGreenThread))
 
 
-class SynchronousThreadPoolExecutorFixture(fixtures.Fixture):
-    """Make ThreadPoolExecutor.submit() synchronous.
+class _FakeExecutor(futurist.SynchronousExecutor):
+    def __init__(self, *args, **kwargs):
+        # Ignore kwargs (example: max_workers) that SynchronousExecutor
+        # does not support.
+        super(_FakeExecutor, self).__init__()
 
-    The function passed to submit() will be executed and a mock.Mock
-    object will be returned as the Future where Future.result() will
-    return the result of the call to the submitted function.
+
+class SynchronousThreadPoolExecutorFixture(fixtures.Fixture):
+    """Make GreenThreadPoolExecutor synchronous.
+
+    Replace the GreenThreadPoolExecutor with the SynchronousExecutor.
     """
     def setUp(self):
         super(SynchronousThreadPoolExecutorFixture, self).setUp()
-
-        def fake_submit(_self, fn, *args, **kwargs):
-            result = fn(*args, **kwargs)
-            future = mock.Mock(spec='concurrent.futures.Future')
-            future.return_value.result.return_value = result
-            return future
         self.useFixture(fixtures.MonkeyPatch(
-            'concurrent.futures.ThreadPoolExecutor.submit',
-            fake_submit))
+            'futurist.GreenThreadPoolExecutor', _FakeExecutor))
 
 
 class BannedDBSchemaOperations(fixtures.Fixture):
@@ -1175,6 +1277,122 @@ class NeutronFixture(fixtures.Fixture):
         'binding:vif_type': 'ovs'
     }
 
+    port_with_resource_request = {
+        'id': '2f2613ce-95a9-490a-b3c4-5f1c28c1f886',
+        'network_id': network_1['id'],
+        'admin_state_up': True,
+        'status': 'ACTIVE',
+        'mac_address': '52:54:00:1e:59:c3',
+        'fixed_ips': [
+            {
+                'ip_address': '192.168.1.42',
+                'subnet_id': subnet_1['id']
+            }
+        ],
+        'tenant_id': tenant_id,
+        neutron_constants.RESOURCE_REQUEST: {
+            "resources": {
+                    orc.NET_BW_IGR_KILOBIT_PER_SEC: 1000,
+                    orc.NET_BW_EGR_KILOBIT_PER_SEC: 1000},
+            "required": ["CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_NORMAL"]
+        }
+    }
+
+    network_2 = {
+        'status': 'ACTIVE',
+        'subnets': [],
+        'name': 'private-network',
+        'admin_state_up': True,
+        'tenant_id': tenant_id,
+        'id': '1b70879f-fd00-411e-8ea9-143e7820e61d',
+        'shared': False,
+        'provider:physical_network': 'physnet2',
+        "provider:network_type": "vlan",
+    }
+
+    subnet_2 = {
+        'name': 'private-subnet',
+        'enable_dhcp': True,
+        'network_id': network_2['id'],
+        'tenant_id': tenant_id,
+        'dns_nameservers': [],
+        'allocation_pools': [
+            {
+                'start': '192.168.13.1',
+                'end': '192.168.1.254'
+            }
+        ],
+        'host_routes': [],
+        'ip_version': 4,
+        'gateway_ip': '192.168.1.1',
+        'cidr': '192.168.1.1/24',
+        'id': 'c7ca1baf-f536-4849-89fe-9671318375ff'
+    }
+    network_2['subnets'] = [subnet_2['id']]
+
+    sriov_port = {
+        'id': '5460ee0c-ffbb-4e45-8d58-37bfceabd084',
+        'network_id': network_2['id'],
+        'admin_state_up': True,
+        'status': 'ACTIVE',
+        'mac_address': '52:54:00:1e:59:c4',
+        'fixed_ips': [
+            {
+                'ip_address': '192.168.13.2',
+                'subnet_id': subnet_2['id']
+            }
+        ],
+        'tenant_id': tenant_id,
+        neutron_constants.RESOURCE_REQUEST: {},
+        'binding:vnic_type': 'direct',
+    }
+
+    port_with_sriov_resource_request = {
+        'id': '7059503b-a648-40fd-a561-5ca769304bee',
+        'network_id': network_2['id'],
+        'admin_state_up': True,
+        'status': 'ACTIVE',
+        'mac_address': '52:54:00:1e:59:c5',
+        # Do neutron really adds fixed_ips to an direct vnic_type port?
+        'fixed_ips': [
+            {
+                'ip_address': '192.168.13.3',
+                'subnet_id': subnet_2['id']
+            }
+        ],
+        'tenant_id': tenant_id,
+        neutron_constants.RESOURCE_REQUEST: {
+            "resources": {
+                orc.NET_BW_IGR_KILOBIT_PER_SEC: 10000,
+                orc.NET_BW_EGR_KILOBIT_PER_SEC: 10000},
+            "required": ["CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_DIRECT"]
+        },
+        'binding:vnic_type': 'direct',
+    }
+
+    port_macvtap_with_resource_request = {
+        'id': 'cbb9707f-3559-4675-a973-4ea89c747f02',
+        'network_id': network_2['id'],
+        'admin_state_up': True,
+        'status': 'ACTIVE',
+        'mac_address': '52:54:00:1e:59:c6',
+        # Do neutron really adds fixed_ips to an direct vnic_type port?
+        'fixed_ips': [
+            {
+                'ip_address': '192.168.13.4',
+                'subnet_id': subnet_2['id']
+            }
+        ],
+        'tenant_id': tenant_id,
+        neutron_constants.RESOURCE_REQUEST: {
+            "resources": {
+                orc.NET_BW_IGR_KILOBIT_PER_SEC: 10000,
+                orc.NET_BW_EGR_KILOBIT_PER_SEC: 10000},
+            "required": ["CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_MACVTAP"]
+        },
+        'binding:vnic_type': 'macvtap',
+    }
+
     nw_info = [{
         "profile": {},
         "ovs_interfaceid": "b71f1699-42be-4515-930a-f3ef01f94aa7",
@@ -1230,8 +1448,14 @@ class NeutronFixture(fixtures.Fixture):
         # The fixture allows port update so we need to deepcopy the class
         # variables to avoid test case interference.
         self._ports = {
-            NeutronFixture.port_1['id']: copy.deepcopy(NeutronFixture.port_1)
+            # NOTE(gibi)The port_with_sriov_resource_request cannot be added
+            # globally in this fixture as it adds a second network that makes
+            # auto allocation based test to fail due to ambiguous networks.
+            NeutronFixture.port_1['id']: copy.deepcopy(NeutronFixture.port_1),
+            NeutronFixture.port_with_resource_request['id']:
+                copy.deepcopy(NeutronFixture.port_with_resource_request)
         }
+
         # The fixture does not allow network update so we don't have to
         # deepcopy here
         self._networks = {
@@ -1261,15 +1485,37 @@ class NeutronFixture(fixtures.Fixture):
             lambda *args, **kwargs: network_model.NetworkInfo.hydrate(
                 NeutronFixture.nw_info))
         self.test.stub_out(
-            'nova.network.neutronv2.api.API.migrate_instance_finish',
-            lambda *args, **kwargs: None)
-        self.test.stub_out(
             'nova.network.security_group.neutron_driver.SecurityGroupAPI.'
             'get_instances_security_groups_bindings',
             lambda *args, **kwargs: {})
 
+        # Stub out port binding APIs which go through a KSA client Adapter
+        # rather than python-neutronclient.
+        self.test.stub_out(
+            'nova.network.neutronv2.api._get_ksa_client',
+            lambda *args, **kwargs: mock.Mock(
+                spec=ksa_adap.Adapter))
+        self.test.stub_out(
+            'nova.network.neutronv2.api.API._create_port_binding',
+            self.fake_create_port_binding)
+        self.test.stub_out(
+            'nova.network.neutronv2.api.API._delete_port_binding',
+            self.fake_delete_port_binding)
+
         self.test.stub_out('nova.network.neutronv2.api.get_client',
                            lambda *args, **kwargs: self)
+
+    @staticmethod
+    def fake_create_port_binding(context, client, port_id, data):
+        # TODO(mriedem): Make this smarter by keeping track of our bindings
+        # per port so we can reflect the status accurately.
+        return fake_requests.FakeResponse(200, content=jsonutils.dumps(data))
+
+    @staticmethod
+    def fake_delete_port_binding(context, client, port_id, host):
+        # TODO(mriedem): Make this smarter by keeping track of our bindings
+        # per port so we can reflect the status accurately.
+        return fake_requests.FakeResponse(204)
 
     def _get_first_id_match(self, id, list):
         filtered_list = [p for p in list if p['id'] == id]
@@ -1279,7 +1525,19 @@ class NeutronFixture(fixtures.Fixture):
             return None
 
     def list_extensions(self, *args, **kwargs):
-        return {'extensions': []}
+        return {
+            'extensions': [
+                {
+                    # Copied from neutron-lib portbindings_extended.py
+                    "updated": "2017-07-17T10:00:00-00:00",
+                    "name": neutron_constants.PORT_BINDING_EXTENDED,
+                    "links": [],
+                    "alias": "binding-extended",
+                    "description": "Expose port bindings of a virtual port to "
+                                   "external application"
+                }
+            ]
+        }
 
     def show_port(self, port_id, **_params):
         if port_id not in self._ports:
@@ -1305,6 +1563,9 @@ class NeutronFixture(fixtures.Fixture):
         return {'networks': copy.deepcopy(networks)}
 
     def list_ports(self, retrieve_all=True, **_params):
+        # If 'fields' is passed we need to strip that out since it will mess
+        # up the filtering as 'fields' is not a filter parameter.
+        _params.pop('fields', None)
         ports = [p for p in self._ports.values()
                  if all(p.get(opt) == _params[opt] for opt in _params)]
         return {'ports': copy.deepcopy(ports)}
@@ -1343,7 +1604,9 @@ class NeutronFixture(fixtures.Fixture):
 
     def update_port(self, port_id, body=None):
         port = self._ports[port_id]
-        port.update(body['port'])
+        # We need to deepcopy here as well as the body can have a nested dict
+        # which can be modified by the caller after this update_port call
+        port.update(copy.deepcopy(body['port']))
         return {'port': copy.deepcopy(port)}
 
     def show_quota(self, project_id):
@@ -1379,194 +1642,6 @@ class EventReporterStub(fixtures.Fixture):
 
 
 class CinderFixture(fixtures.Fixture):
-    """A fixture to volume operations"""
-
-    # the default project_id in OSAPIFixtures
-    tenant_id = '6f70656e737461636b20342065766572'
-
-    SWAP_OLD_VOL = 'a07f71dc-8151-4e7d-a0cc-cd24a3f11113'
-    SWAP_NEW_VOL = '227cc671-f30b-4488-96fd-7d0bf13648d8'
-    SWAP_ERR_OLD_VOL = '828419fa-3efb-4533-b458-4267ca5fe9b1'
-    SWAP_ERR_NEW_VOL = '9c6d9c2d-7a8f-4c80-938d-3bf062b8d489'
-
-    # This represents a bootable image-backed volume to test
-    # boot-from-volume scenarios.
-    IMAGE_BACKED_VOL = '6ca404f3-d844-4169-bb96-bc792f37de98'
-
-    def __init__(self, test):
-        super(CinderFixture, self).__init__()
-        self.test = test
-        self.swap_error = False
-        self.swap_volume_instance_uuid = None
-        self.swap_volume_instance_error_uuid = None
-        self.reserved_volumes = list()
-        # This is a map of instance UUIDs mapped to a list of volume IDs.
-        # This map gets updated on attach/detach operations.
-        self.attachments = collections.defaultdict(list)
-
-    def setUp(self):
-        super(CinderFixture, self).setUp()
-
-        def fake_get(self_api, context, volume_id, microversion=None):
-            # Check for the special swap volumes.
-            if volume_id in (CinderFixture.SWAP_OLD_VOL,
-                             CinderFixture.SWAP_ERR_OLD_VOL):
-                volume = {
-                             'status': 'available',
-                             'display_name': 'TEST1',
-                             'attach_status': 'detached',
-                             'id': volume_id,
-                             'multiattach': False,
-                             'size': 1
-                         }
-                if ((self.swap_volume_instance_uuid and
-                     volume_id == CinderFixture.SWAP_OLD_VOL) or
-                    (self.swap_volume_instance_error_uuid and
-                     volume_id == CinderFixture.SWAP_ERR_OLD_VOL)):
-                    instance_uuid = (self.swap_volume_instance_uuid
-                        if volume_id == CinderFixture.SWAP_OLD_VOL
-                        else self.swap_volume_instance_error_uuid)
-
-                    volume.update({
-                        'status': 'in-use',
-                        'attachments': {
-                            instance_uuid: {
-                                'mountpoint': '/dev/vdb',
-                                'attachment_id': volume_id
-                            }
-                        },
-                        'attach_status': 'attached'
-                    })
-                    return volume
-
-            # Check to see if the volume is attached.
-            for instance_uuid, volumes in self.attachments.items():
-                if volume_id in volumes:
-                    # The volume is attached.
-                    volume = {
-                        'status': 'in-use',
-                        'display_name': volume_id,
-                        'attach_status': 'attached',
-                        'id': volume_id,
-                        'multiattach': False,
-                        'size': 1,
-                        'attachments': {
-                            instance_uuid: {
-                                'attachment_id': volume_id,
-                                'mountpoint': '/dev/vdb'
-                            }
-                        }
-                    }
-                    break
-            else:
-                # This is a test that does not care about the actual details.
-                reserved_volume = (volume_id in self.reserved_volumes)
-                volume = {
-                    'status': 'attaching' if reserved_volume else 'available',
-                    'display_name': 'TEST2',
-                    'attach_status': 'detached',
-                    'id': volume_id,
-                    'multiattach': False,
-                    'size': 1
-                }
-
-            # Check for our special image-backed volume.
-            if volume_id == self.IMAGE_BACKED_VOL:
-                # Make it a bootable volume.
-                volume['bootable'] = True
-                # Add the image_id metadata.
-                volume['volume_image_metadata'] = {
-                    # There would normally be more image metadata in here...
-                    'image_id': '155d900f-4e14-4e4c-a73d-069cbf4541e6'
-                }
-
-            return volume
-
-        def fake_initialize_connection(self, context, volume_id, connector):
-            if volume_id == CinderFixture.SWAP_ERR_NEW_VOL:
-                # Return a tuple in order to raise an exception.
-                return ()
-            return {}
-
-        def fake_migrate_volume_completion(self, context, old_volume_id,
-                                           new_volume_id, error):
-            return {'save_volume_id': new_volume_id}
-
-        def fake_reserve_volume(self_api, context, volume_id):
-            self.reserved_volumes.append(volume_id)
-
-        def fake_unreserve_volume(self_api, context, volume_id):
-            # NOTE(mnaser): It's possible that we unreserve a volume that was
-            #               never reserved (ex: instance.volume_attach.error
-            #               notification tests)
-            if volume_id in self.reserved_volumes:
-                self.reserved_volumes.remove(volume_id)
-
-            # Signaling that swap_volume has encountered the error
-            # from initialize_connection and is working on rolling back
-            # the reservation on SWAP_ERR_NEW_VOL.
-            self.swap_error = True
-
-        def fake_attach(_self, context, volume_id, instance_uuid,
-                        mountpoint, mode='rw'):
-            # Check to see if the volume is already attached to any server.
-            for instance, volumes in self.attachments.items():
-                if volume_id in volumes:
-                    raise exception.InvalidInput(
-                        reason='Volume %s is already attached to '
-                               'instance %s' % (volume_id, instance))
-            # It's not attached so let's "attach" it.
-            self.attachments[instance_uuid].append(volume_id)
-
-        self.test.stub_out('nova.volume.cinder.API.attach',
-                           fake_attach)
-
-        def fake_detach(_self, context, volume_id, instance_uuid=None,
-                        attachment_id=None):
-            # NOTE(mnaser): It's possible that we unreserve a volume that was
-            #               never reserved (ex: instance.volume_attach.error
-            #               notification tests)
-            if volume_id in self.reserved_volumes:
-                self.reserved_volumes.remove(volume_id)
-
-            if instance_uuid is not None:
-                # If the volume isn't attached to this instance it will
-                # result in a ValueError which indicates a broken test or
-                # code, so we just let that raise up.
-                self.attachments[instance_uuid].remove(volume_id)
-            else:
-                for instance, volumes in self.attachments.items():
-                    if volume_id in volumes:
-                        volumes.remove(volume_id)
-                        break
-
-        self.test.stub_out('nova.volume.cinder.API.detach', fake_detach)
-
-        self.test.stub_out('nova.volume.cinder.API.begin_detaching',
-                           lambda *args, **kwargs: None)
-        self.test.stub_out('nova.volume.cinder.API.get',
-                           fake_get)
-        self.test.stub_out('nova.volume.cinder.API.initialize_connection',
-                           fake_initialize_connection)
-        self.test.stub_out(
-            'nova.volume.cinder.API.migrate_volume_completion',
-            fake_migrate_volume_completion)
-        self.test.stub_out('nova.volume.cinder.API.reserve_volume',
-                           fake_reserve_volume)
-        self.test.stub_out('nova.volume.cinder.API.roll_detaching',
-                           lambda *args, **kwargs: None)
-        self.test.stub_out('nova.volume.cinder.API.terminate_connection',
-                           lambda *args, **kwargs: None)
-        self.test.stub_out('nova.volume.cinder.API.unreserve_volume',
-                           fake_unreserve_volume)
-        self.test.stub_out('nova.volume.cinder.API.check_attached',
-                           lambda *args, **kwargs: None)
-
-
-# TODO(mriedem): We can probably pull some of the common parts from the
-# CinderFixture into a common mixin class for things like the variables
-# and fake_get.
-class CinderFixtureNewAttachFlow(fixtures.Fixture):
     """A fixture to volume operations with the new Cinder attach/detach API"""
 
     # the default project_id in OSAPIFixtures
@@ -1587,23 +1662,40 @@ class CinderFixtureNewAttachFlow(fixtures.Fixture):
     IMAGE_WITH_TRAITS_BACKED_VOL = '6194fc02-c60e-4a01-a8e5-600798208b5f'
 
     def __init__(self, test):
-        super(CinderFixtureNewAttachFlow, self).__init__()
+        super(CinderFixture, self).__init__()
         self.test = test
-        self.swap_error = False
         self.swap_volume_instance_uuid = None
         self.swap_volume_instance_error_uuid = None
         self.attachment_error_id = None
-        # This is a map of instance UUIDs mapped to a list of volume IDs.
-        # This map gets updated on attach/detach operations.
-        self.attachments = collections.defaultdict(list)
+        # A dict, keyed by volume id, to a dict, keyed by attachment id,
+        # with keys:
+        # - id: the attachment id
+        # - instance_uuid: uuid of the instance attached to the volume
+        # - connector: host connector dict; None if not connected
+        # Note that a volume can have multiple attachments even without
+        # multi-attach, as some flows create a blank 'reservation' attachment
+        # before deleting another attachment. However, a non-multiattach volume
+        # can only have at most one attachment with a host connector at a time.
+        self.volume_to_attachment = collections.defaultdict(dict)
+
+    def volume_ids_for_instance(self, instance_uuid):
+        for volume_id, attachments in self.volume_to_attachment.items():
+            for attachment in attachments.values():
+                if attachment['instance_uuid'] == instance_uuid:
+                    # we might have multiple volumes attached to this instance
+                    # so yield rather than return
+                    yield volume_id
+                    break
 
     def setUp(self):
-        super(CinderFixtureNewAttachFlow, self).setUp()
+        super(CinderFixture, self).setUp()
 
         def fake_get(self_api, context, volume_id, microversion=None):
             # Check for the special swap volumes.
-            if volume_id in (CinderFixture.SWAP_OLD_VOL,
-                             CinderFixture.SWAP_ERR_OLD_VOL):
+            attachments = self.volume_to_attachment[volume_id]
+
+            if volume_id in (self.SWAP_OLD_VOL,
+                             self.SWAP_ERR_OLD_VOL):
                 volume = {
                              'status': 'available',
                              'display_name': 'TEST1',
@@ -1613,44 +1705,46 @@ class CinderFixtureNewAttachFlow(fixtures.Fixture):
                              'size': 1
                          }
                 if ((self.swap_volume_instance_uuid and
-                     volume_id == CinderFixture.SWAP_OLD_VOL) or
+                     volume_id == self.SWAP_OLD_VOL) or
                     (self.swap_volume_instance_error_uuid and
-                     volume_id == CinderFixture.SWAP_ERR_OLD_VOL)):
+                     volume_id == self.SWAP_ERR_OLD_VOL)):
                     instance_uuid = (self.swap_volume_instance_uuid
-                        if volume_id == CinderFixture.SWAP_OLD_VOL
+                        if volume_id == self.SWAP_OLD_VOL
                         else self.swap_volume_instance_error_uuid)
 
-                    volume.update({
-                        'status': 'in-use',
-                        'attachments': {
-                            instance_uuid: {
-                                'mountpoint': '/dev/vdb',
-                                'attachment_id': volume_id
-                            }
-                        },
-                        'attach_status': 'attached'
-                    })
+                    if attachments:
+                        attachment = list(attachments.values())[0]
+
+                        volume.update({
+                            'status': 'in-use',
+                            'attachments': {
+                                instance_uuid: {
+                                    'mountpoint': '/dev/vdb',
+                                    'attachment_id': attachment['id']
+                                }
+                            },
+                            'attach_status': 'attached'
+                        })
                     return volume
 
             # Check to see if the volume is attached.
-            for instance_uuid, volumes in self.attachments.items():
-                if volume_id in volumes:
-                    # The volume is attached.
-                    volume = {
-                        'status': 'in-use',
-                        'display_name': volume_id,
-                        'attach_status': 'attached',
-                        'id': volume_id,
-                        'multiattach': volume_id == self.MULTIATTACH_VOL,
-                        'size': 1,
-                        'attachments': {
-                            instance_uuid: {
-                                'attachment_id': volume_id,
-                                'mountpoint': '/dev/vdb'
-                            }
+            if attachments:
+                # The volume is attached.
+                attachment = list(attachments.values())[0]
+                volume = {
+                    'status': 'in-use',
+                    'display_name': volume_id,
+                    'attach_status': 'attached',
+                    'id': volume_id,
+                    'multiattach': volume_id == self.MULTIATTACH_VOL,
+                    'size': 1,
+                    'attachments': {
+                        attachment['instance_uuid']: {
+                            'attachment_id': attachment['id'],
+                            'mountpoint': '/dev/vdb'
                         }
                     }
-                    break
+                }
             else:
                 # This is a test that does not care about the actual details.
                 volume = {
@@ -1682,9 +1776,24 @@ class CinderFixtureNewAttachFlow(fixtures.Fixture):
 
             return volume
 
-        def fake_migrate_volume_completion(self, context, old_volume_id,
+        def fake_migrate_volume_completion(_self, context, old_volume_id,
                                            new_volume_id, error):
             return {'save_volume_id': new_volume_id}
+
+        def _find_attachment(attachment_id):
+            """Find attachment corresponding to ``attachment_id``.
+
+            Returns:
+                A tuple of the volume ID, an attachment dict
+                for the given attachment ID, and a dict (keyed by attachment
+                id) of attachment dicts for the volume.
+            """
+            for volume_id, attachments in self.volume_to_attachment.items():
+                for attachment in attachments.values():
+                    if attachment_id == attachment['id']:
+                        return volume_id, attachment, attachments
+            raise exception.VolumeAttachmentNotFound(
+                attachment_id=attachment_id)
 
         def fake_attachment_create(_self, context, volume_id, instance_uuid,
                                    connector=None, mountpoint=None):
@@ -1692,36 +1801,73 @@ class CinderFixtureNewAttachFlow(fixtures.Fixture):
             if self.attachment_error_id is not None:
                 attachment_id = self.attachment_error_id
             attachment = {'id': attachment_id, 'connection_info': {'data': {}}}
-            self.attachments['instance_uuid'].append(instance_uuid)
-            self.attachments[instance_uuid].append(volume_id)
+            self.volume_to_attachment[volume_id][attachment_id] = {
+                'id': attachment_id,
+                'instance_uuid': instance_uuid,
+                'connector': connector}
+            LOG.info('Created attachment %s for volume %s. Total '
+                     'attachments for volume: %d', attachment_id, volume_id,
+                     len(self.volume_to_attachment[volume_id]))
 
             return attachment
 
         def fake_attachment_delete(_self, context, attachment_id):
-            instance_uuid = self.attachments['instance_uuid'][0]
-            del self.attachments[instance_uuid][0]
-            del self.attachments['instance_uuid'][0]
-            if attachment_id == CinderFixtureNewAttachFlow.SWAP_ERR_ATTACH_ID:
-                self.swap_error = True
+            # 'attachment' is a tuple defining a attachment-instance mapping
+            volume_id, attachment, attachments = (
+                _find_attachment(attachment_id))
+            del attachments[attachment_id]
+            LOG.info('Deleted attachment %s for volume %s. Total attachments '
+                     'for volume: %d', attachment_id, volume_id,
+                     len(attachments))
 
         def fake_attachment_update(_self, context, attachment_id, connector,
                                    mountpoint=None):
+            # Ensure the attachment exists
+            volume_id, attachment, attachments = (
+                _find_attachment(attachment_id))
+            # Cinder will only allow one "connected" attachment per
+            # non-multiattach volume at a time.
+            if volume_id != self.MULTIATTACH_VOL:
+                for _attachment in attachments.values():
+                    if _attachment['connector'] is not None:
+                        raise exception.InvalidInput(
+                            'Volume %s is already connected with attachment '
+                            '%s on host %s' % (volume_id, _attachment['id'],
+                            _attachment['connector'].get('host')))
+            attachment['connector'] = connector
+            LOG.info('Updating volume attachment: %s', attachment_id)
             attachment_ref = {'driver_volume_type': 'fake_type',
                               'id': attachment_id,
                               'connection_info': {'data':
                                                   {'foo': 'bar',
                                                    'target_lun': '1'}}}
-            if attachment_id == CinderFixtureNewAttachFlow.SWAP_ERR_ATTACH_ID:
+            if attachment_id == self.SWAP_ERR_ATTACH_ID:
+                # This intentionally triggers a TypeError for the
+                # instance.volume_swap.error versioned notification tests.
                 attachment_ref = {'connection_info': ()}
             return attachment_ref
 
         def fake_attachment_get(_self, context, attachment_id):
+            # Ensure the attachment exists
+            _find_attachment(attachment_id)
             attachment_ref = {'driver_volume_type': 'fake_type',
                               'id': attachment_id,
                               'connection_info': {'data':
                                                   {'foo': 'bar',
                                                    'target_lun': '1'}}}
             return attachment_ref
+
+        def fake_get_all_volume_types(*args, **kwargs):
+            return [{
+                # This is used in the 2.67 API sample test.
+                'id': '5f9204ec-3e94-4f27-9beb-fe7bb73b6eb9',
+                'name': 'lvm-1'
+            }]
+
+        def fake_attachment_complete(_self, _context, attachment_id):
+            # Ensure the attachment exists
+            _find_attachment(attachment_id)
+            LOG.info('Completing volume attachment: %s', attachment_id)
 
         self.test.stub_out('nova.volume.cinder.API.attachment_create',
                            fake_attachment_create)
@@ -1730,7 +1876,7 @@ class CinderFixtureNewAttachFlow(fixtures.Fixture):
         self.test.stub_out('nova.volume.cinder.API.attachment_update',
                            fake_attachment_update)
         self.test.stub_out('nova.volume.cinder.API.attachment_complete',
-                           lambda *args, **kwargs: None)
+                           fake_attachment_complete)
         self.test.stub_out('nova.volume.cinder.API.attachment_get',
                            fake_attachment_get)
         self.test.stub_out('nova.volume.cinder.API.begin_detaching',
@@ -1743,139 +1889,11 @@ class CinderFixtureNewAttachFlow(fixtures.Fixture):
         self.test.stub_out('nova.volume.cinder.API.roll_detaching',
                            lambda *args, **kwargs: None)
         self.test.stub_out('nova.volume.cinder.is_microversion_supported',
-                           lambda *args, **kwargs: None)
+                           lambda ctxt, microversion: None)
         self.test.stub_out('nova.volume.cinder.API.check_attached',
                            lambda *args, **kwargs: None)
-
-
-class PlacementApiClient(object):
-    def __init__(self, placement_fixture):
-        self.fixture = placement_fixture
-
-    def get(self, url, **kwargs):
-        return client.APIResponse(self.fixture._fake_get(None, url, **kwargs))
-
-    def put(self, url, body, **kwargs):
-        return client.APIResponse(
-            self.fixture._fake_put(None, url, body, **kwargs))
-
-    def post(self, url, body, **kwargs):
-        return client.APIResponse(
-            self.fixture._fake_post(None, url, body, **kwargs))
-
-
-class PlacementFixture(placement.PlacementFixture):
-    """A fixture to placement operations.
-
-    Runs a local WSGI server bound on a free port and having the Placement
-    application with NoAuth middleware.
-    This fixture also prevents calling the ServiceCatalog for getting the
-    endpoint.
-
-    It's possible to ask for a specific token when running the fixtures so
-    all calls would be passing this token.
-
-    Most of the time users of this fixture will also want the placement
-    database fixture (called first) as well:
-
-        self.useFixture(nova_fixtures.Database(database='placement'))
-
-    That is left as a manual step so tests may have fine grain control, and
-    because it is likely that these fixtures will continue to evolve as
-    the separation of nova and placement continues.
-    """
-
-    def setUp(self):
-        super(PlacementFixture, self).setUp()
-
-        # Turn off manipulation of socket_options in TCPKeepAliveAdapter
-        # to keep wsgi-intercept happy. Replace it with the method
-        # from its superclass.
-        self.useFixture(fixtures.MonkeyPatch(
-            'keystoneauth1.session.TCPKeepAliveAdapter.init_poolmanager',
-            adapters.HTTPAdapter.init_poolmanager))
-
-        self._client = ka.Adapter(ks.Session(auth=None), raise_exc=False)
-        # NOTE(sbauza): We need to mock the scheduler report client because
-        # we need to fake Keystone by directly calling the endpoint instead
-        # of looking up the service catalog, like we did for the OSAPIFixture.
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.scheduler.client.report.SchedulerReportClient.get',
-            self._fake_get))
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.scheduler.client.report.SchedulerReportClient.post',
-            self._fake_post))
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.scheduler.client.report.SchedulerReportClient.put',
-            self._fake_put))
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.scheduler.client.report.SchedulerReportClient.delete',
-            self._fake_delete))
-
-        self.api = PlacementApiClient(self)
-
-    @staticmethod
-    def _update_headers_with_version(headers, **kwargs):
-        version = kwargs.get("version")
-        if version is not None:
-            # TODO(mriedem): Perform some version discovery at some point.
-            headers.update({
-                'OpenStack-API-Version': 'placement %s' % version
-            })
-
-    def _fake_get(self, *args, **kwargs):
-        (url,) = args[1:]
-        # TODO(sbauza): The current placement NoAuthMiddleware returns a 401
-        # in case a token is not provided. We should change that by creating
-        # a fake token so we could remove adding the header below.
-        headers = {'x-auth-token': self.token}
-        self._update_headers_with_version(headers, **kwargs)
-        return self._client.get(
-            url,
-            endpoint_override=self.endpoint,
-            headers=headers)
-
-    def _fake_post(self, *args, **kwargs):
-        (url, data) = args[1:]
-        # NOTE(sdague): using json= instead of data= sets the
-        # media type to application/json for us. Placement API is
-        # more sensitive to this than other APIs in the OpenStack
-        # ecosystem.
-        # TODO(sbauza): The current placement NoAuthMiddleware returns a 401
-        # in case a token is not provided. We should change that by creating
-        # a fake token so we could remove adding the header below.
-        headers = {'x-auth-token': self.token}
-        self._update_headers_with_version(headers, **kwargs)
-        return self._client.post(
-            url, json=data,
-            endpoint_override=self.endpoint,
-            headers=headers)
-
-    def _fake_put(self, *args, **kwargs):
-        (url, data) = args[1:]
-        # NOTE(sdague): using json= instead of data= sets the
-        # media type to application/json for us. Placement API is
-        # more sensitive to this than other APIs in the OpenStack
-        # ecosystem.
-        # TODO(sbauza): The current placement NoAuthMiddleware returns a 401
-        # in case a token is not provided. We should change that by creating
-        # a fake token so we could remove adding the header below.
-        headers = {'x-auth-token': self.token}
-        self._update_headers_with_version(headers, **kwargs)
-        return self._client.put(
-            url, json=data,
-            endpoint_override=self.endpoint,
-            headers=headers)
-
-    def _fake_delete(self, *args, **kwargs):
-        (url,) = args[1:]
-        # TODO(sbauza): The current placement NoAuthMiddleware returns a 401
-        # in case a token is not provided. We should change that by creating
-        # a fake token so we could remove adding the header below.
-        return self._client.delete(
-            url,
-            endpoint_override=self.endpoint,
-            headers={'x-auth-token': self.token})
+        self.test.stub_out('nova.volume.cinder.API.get_all_volume_types',
+                           fake_get_all_volume_types)
 
 
 class UnHelperfulClientChannel(privsep_daemon._ClientChannel):
@@ -1904,6 +1922,16 @@ class PrivsepNoHelperFixture(fixtures.Fixture):
             UnHelperfulClientChannel))
 
 
+class PrivsepFixture(fixtures.Fixture):
+    """Disable real privsep checking so we can test the guts of methods
+    decorated with sys_admin_pctxt.
+    """
+    def setUp(self):
+        super(PrivsepFixture, self).setUp()
+        self.useFixture(fixtures.MockPatchObject(
+            nova.privsep.sys_admin_pctxt, 'client_mode', False))
+
+
 class NoopQuotaDriverFixture(fixtures.Fixture):
     """A fixture to run tests using the NoopQuotaDriver.
 
@@ -1925,3 +1953,197 @@ class NoopQuotaDriverFixture(fixtures.Fixture):
         # When using self.flags, the concurrent test failures returned.
         CONF.set_override('driver', 'nova.quota.NoopQuotaDriver', 'quota')
         self.addCleanup(CONF.clear_override, 'driver', 'quota')
+
+
+class DownCellFixture(fixtures.Fixture):
+    """A fixture to simulate when a cell is down either due to error or timeout
+
+    This fixture will stub out the scatter_gather_cells routine and target_cell
+    used in various cells-related API operations like listing/showing server
+    details to return a ``oslo_db.exception.DBError`` per cell in the results.
+    Therefore it is best used with a test scenario like this:
+
+    1. Create a server successfully.
+    2. Using the fixture, list/show servers. Depending on the microversion
+       used, the API should either return minimal results or by default skip
+       the results from down cells.
+
+    Example usage::
+
+        with nova_fixtures.DownCellFixture():
+            # List servers with down cells.
+            self.api.get_servers()
+            # Show a server in a down cell.
+            self.api.get_server(server['id'])
+            # List services with down cells.
+            self.admin_api.api_get('/os-services')
+    """
+    def __init__(self, down_cell_mappings=None):
+        self.down_cell_mappings = down_cell_mappings
+
+    def setUp(self):
+        super(DownCellFixture, self).setUp()
+
+        def stub_scatter_gather_cells(ctxt, cell_mappings, timeout, fn, *args,
+                                      **kwargs):
+            # Return a dict with an entry per cell mapping where the results
+            # are some kind of exception.
+            up_cell_mappings = objects.CellMappingList()
+            if not self.down_cell_mappings:
+                # User has not passed any down cells explicitly, so all cells
+                # are considered as down cells.
+                self.down_cell_mappings = cell_mappings
+            else:
+                # User has passed down cell mappings, so the rest of the cells
+                # should be up meaning we should return the right results.
+                # We assume that down cells will be a subset of the
+                # cell_mappings.
+                down_cell_uuids = [cell.uuid
+                    for cell in self.down_cell_mappings]
+                up_cell_mappings.objects = [cell
+                    for cell in cell_mappings
+                        if cell.uuid not in down_cell_uuids]
+
+            def wrap(cell_uuid, thing):
+                # We should embed the cell_uuid into the context before
+                # wrapping since its used to calcualte the cells_timed_out and
+                # cells_failed properties in the object.
+                ctxt.cell_uuid = cell_uuid
+                return multi_cell_list.RecordWrapper(ctxt, sort_ctx, thing)
+
+            if fn is multi_cell_list.query_wrapper:
+                # If the function called through scatter-gather utility is the
+                # multi_cell_list.query_wrapper, we should wrap the exception
+                # object into the multi_cell_list.RecordWrapper. This is
+                # because unlike the other functions where the exception object
+                # is returned directly, the query_wrapper wraps this into the
+                # RecordWrapper object format. So if we do not wrap it will
+                # blow up at the point of generating results from heapq further
+                # down the stack.
+                sort_ctx = multi_cell_list.RecordSortContext([], [])
+                ret1 = {
+                    cell_mapping.uuid: [wrap(cell_mapping.uuid,
+                        db_exc.DBError())]
+                    for cell_mapping in self.down_cell_mappings
+                }
+            else:
+                ret1 = {
+                    cell_mapping.uuid: db_exc.DBError()
+                    for cell_mapping in self.down_cell_mappings
+                }
+            ret2 = {}
+            for cell in up_cell_mappings:
+                ctxt.cell_uuid = cell.uuid
+                cctxt = context.RequestContext.from_dict(ctxt.to_dict())
+                context.set_target_cell(cctxt, cell)
+                result = fn(cctxt, *args, **kwargs)
+                ret2[cell.uuid] = result
+            return dict(list(ret1.items()) + list(ret2.items()))
+
+        @contextmanager
+        def stub_target_cell(ctxt, cell_mapping):
+            # This is to give the freedom to simulate down cells for each
+            # individual cell targeted function calls.
+            if not self.down_cell_mappings:
+                # User has not passed any down cells explicitly, so all cells
+                # are considered as down cells.
+                self.down_cell_mappings = [cell_mapping]
+                raise db_exc.DBError()
+            else:
+                # if down_cell_mappings are passed, then check if this cell
+                # is down or up.
+                down_cell_uuids = [cell.uuid
+                    for cell in self.down_cell_mappings]
+                if cell_mapping.uuid in down_cell_uuids:
+                    # its a down cell raise the exception straight away
+                    raise db_exc.DBError()
+                else:
+                    # its an up cell, so yield its context
+                    cctxt = context.RequestContext.from_dict(ctxt.to_dict())
+                    context.set_target_cell(cctxt, cell_mapping)
+                    yield cctxt
+
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.context.scatter_gather_cells', stub_scatter_gather_cells))
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.context.target_cell', stub_target_cell))
+
+
+class AvailabilityZoneFixture(fixtures.Fixture):
+    """Fixture to stub out the nova.availability_zones module
+
+    The list of ``zones`` provided to the fixture are what get returned from
+    ``get_availability_zones``.
+
+    ``get_instance_availability_zone`` will return the availability_zone
+    requested when creating a server otherwise the instance.availabilty_zone
+    or default_availability_zone is returned.
+    """
+    def __init__(self, zones):
+        self.zones = zones
+
+    def setUp(self):
+        super(AvailabilityZoneFixture, self).setUp()
+
+        def fake_get_availability_zones(
+                ctxt, hostapi, get_only_available=False,
+                with_hosts=False, enabled_services=None):
+            # A 2-item tuple is returned if get_only_available=False.
+            if not get_only_available:
+                return self.zones, []
+            return self.zones
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.availability_zones.get_availability_zones',
+            fake_get_availability_zones))
+
+        def fake_get_instance_availability_zone(ctxt, instance):
+            # If the server was created with a specific AZ, return it.
+            reqspec = objects.RequestSpec.get_by_instance_uuid(
+                ctxt, instance.uuid)
+            requested_az = reqspec.availability_zone
+            if requested_az:
+                return requested_az
+            # Otherwise return the instance.availability_zone if set else
+            # the default AZ.
+            return instance.availability_zone or CONF.default_availability_zone
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.availability_zones.get_instance_availability_zone',
+            fake_get_instance_availability_zone))
+
+
+class KSAFixture(fixtures.Fixture):
+    """Lets us initialize an openstack.connection.Connection by stubbing the
+    auth plugin.
+    """
+    def setUp(self):
+        super(KSAFixture, self).setUp()
+        self.mock_load_auth = self.useFixture(fixtures.MockPatch(
+            'keystoneauth1.loading.load_auth_from_conf_options')).mock
+        self.mock_load_sess = self.useFixture(fixtures.MockPatch(
+            'keystoneauth1.loading.load_session_from_conf_options')).mock
+        # For convenience, an attribute for the "Session" itself
+        self.mock_session = self.mock_load_sess.return_value
+
+
+class OpenStackSDKFixture(fixtures.Fixture):
+    # This satisfies tests that happen to run through get_sdk_adapter but don't
+    # care about the adapter itself (default mocks are fine).
+    # TODO(efried): Get rid of this and use fixtures from openstacksdk once
+    # https://storyboard.openstack.org/#!/story/2005475 is resolved.
+    def setUp(self):
+        super(OpenStackSDKFixture, self).setUp()
+        self.useFixture(fixtures.MockPatch(
+            'openstack.proxy.Proxy.get_endpoint'))
+        real_make_proxy = service_description.ServiceDescription._make_proxy
+        _stub_service_types = {'placement'}
+
+        def fake_make_proxy(self, instance):
+            if self.service_type in _stub_service_types:
+                return instance.config.get_session_client(
+                    self.service_type,
+                    allow_version_hack=True,
+                )
+            return real_make_proxy(self, instance)
+        self.useFixture(fixtures.MockPatchObject(
+            service_description.ServiceDescription, '_make_proxy',
+            fake_make_proxy))

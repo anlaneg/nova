@@ -122,3 +122,35 @@ class InstanceObjectTestCase(test.TestCase):
         self.assertEqual(1, count_hit)
         inst3 = objects.Instance.get_by_uuid(self.context, uuid3)
         self.assertEqual('nova-test', inst3.availability_zone)
+
+    def test_get_count_by_hosts(self):
+        self._create_instance(host='fake_host1')
+        self._create_instance(host='fake_host1')
+        self._create_instance(host='fake_host2')
+        count = objects.InstanceList.get_count_by_hosts(
+            self.context, hosts=['fake_host1'])
+        self.assertEqual(2, count)
+        count = objects.InstanceList.get_count_by_hosts(
+            self.context, hosts=['fake_host2'])
+        self.assertEqual(1, count)
+        count = objects.InstanceList.get_count_by_hosts(
+            self.context, hosts=['fake_host1', 'fake_host2'])
+        self.assertEqual(3, count)
+
+    def test_hidden_instance_not_counted(self):
+        """Tests that a hidden instance is not counted against quota usage."""
+        # Create an instance that is not hidden and count usage.
+        instance = self._create_instance(vcpus=1, memory_mb=2048)
+        counts = objects.InstanceList.get_counts(
+            self.context, instance.project_id)['project']
+        self.assertEqual(1, counts['instances'])
+        self.assertEqual(instance.vcpus, counts['cores'])
+        self.assertEqual(instance.memory_mb, counts['ram'])
+        # Now hide the instance and count usage again, everything should be 0.
+        instance.hidden = True
+        instance.save()
+        counts = objects.InstanceList.get_counts(
+            self.context, instance.project_id)['project']
+        self.assertEqual(0, counts['instances'])
+        self.assertEqual(0, counts['cores'])
+        self.assertEqual(0, counts['ram'])

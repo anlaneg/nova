@@ -22,6 +22,7 @@ A connection to the VMware vCenter platform.
 import os
 import re
 
+import os_resource_classes as orc
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import units
@@ -38,8 +39,8 @@ from nova.compute import utils as compute_utils
 import nova.conf
 from nova import exception
 from nova.i18n import _
+from nova import objects
 import nova.privsep.path
-from nova import rc_fields as fields
 from nova.virt import driver
 from nova.virt.vmwareapi import constants
 from nova.virt.vmwareapi import ds_util
@@ -68,6 +69,18 @@ class VMwareVCDriver(driver.ComputeDriver):
         "supports_attach_interface": True,
         "supports_multiattach": False,
         "supports_trusted_certs": False,
+
+        # Image type support flags
+        "supports_image_type_aki": False,
+        "supports_image_type_ami": False,
+        "supports_image_type_ari": False,
+        "supports_image_type_iso": True,
+        "supports_image_type_qcow2": False,
+        "supports_image_type_raw": False,
+        "supports_image_type_vdi": False,
+        "supports_image_type_vhd": False,
+        "supports_image_type_vhdx": False,
+        "supports_image_type_vmdk": True,
     }
 
     # Legacy nodename is of the form: <mo id>(<cluster name>)
@@ -75,7 +88,7 @@ class VMwareVCDriver(driver.ComputeDriver):
     # We assume <mo id> consists of alphanumeric, _ and -.
     # We assume cluster name is everything between the first ( and the last ).
     # We pull out <mo id> for re-use.
-    LEGACY_NODENAME = re.compile('([\w-]+)\(.+\)')
+    LEGACY_NODENAME = re.compile(r'([\w-]+)\(.+\)')
 
     # The vCenter driver includes API that acts on ESX hosts or groups
     # of ESX hosts in clusters or non-cluster logical-groupings.
@@ -256,7 +269,8 @@ class VMwareVCDriver(driver.ComputeDriver):
         self._vmops.confirm_migration(migration, instance, network_info)
 
     def finish_revert_migration(self, context, instance, network_info,
-                                block_device_info=None, power_on=True):
+                                migration, block_device_info=None,
+                                power_on=True):
         """Finish reverting a resize, powering back on the instance."""
         self._vmops.finish_revert_migration(context, instance, network_info,
                                             block_device_info, power_on)
@@ -268,6 +282,71 @@ class VMwareVCDriver(driver.ComputeDriver):
         self._vmops.finish_migration(context, migration, instance, disk_info,
                                      network_info, image_meta, resize_instance,
                                      block_device_info, power_on)
+
+    def ensure_filtering_rules_for_instance(self, instance, network_info):
+        pass
+
+    def pre_live_migration(self, context, instance, block_device_info,
+                           network_info, disk_info, migrate_data):
+        return migrate_data
+
+    def post_live_migration_at_source(self, context, instance, network_info):
+        pass
+
+    def post_live_migration_at_destination(self, context, instance,
+                                           network_info,
+                                           block_migration=False,
+                                           block_device_info=None):
+        pass
+
+    def cleanup_live_migration_destination_check(self, context,
+                                                 dest_check_data):
+        pass
+
+    def live_migration(self, context, instance, dest,
+                       post_method, recover_method, block_migration=False,
+                       migrate_data=None):
+        """Live migration of an instance to another host."""
+        self._vmops.live_migration(context, instance, dest, post_method,
+                                   recover_method, block_migration,
+                                   migrate_data)
+
+    def check_can_live_migrate_source(self, context, instance,
+                                      dest_check_data, block_device_info=None):
+        cluster_name = dest_check_data.cluster_name
+        cluster_ref = vm_util.get_cluster_ref_by_name(self._session,
+                                                      cluster_name)
+        if cluster_ref is None:
+            msg = (_("Cannot find destination cluster %s for live migration") %
+                   cluster_name)
+            raise exception.MigrationPreCheckError(reason=msg)
+        res_pool_ref = vm_util.get_res_pool_ref(self._session, cluster_ref)
+        if res_pool_ref is None:
+            msg = _("Cannot find destination resource pool for live migration")
+            raise exception.MigrationPreCheckError(reason=msg)
+        return dest_check_data
+
+    def check_can_live_migrate_destination(self, context, instance,
+                                           src_compute_info, dst_compute_info,
+                                           block_migration=False,
+                                           disk_over_commit=False):
+        # the information that we need for the destination compute node
+        # is the name of its cluster and datastore regex
+        data = objects.VMwareLiveMigrateData()
+        data.cluster_name = CONF.vmware.cluster_name
+        data.datastore_regex = CONF.vmware.datastore_regex
+        return data
+
+    def unfilter_instance(self, instance, network_info):
+        pass
+
+    def rollback_live_migration_at_destination(self, context, instance,
+                                               network_info,
+                                               block_device_info,
+                                               destroy_disks=True,
+                                               migrate_data=None):
+        """Clean up destination node after a failed live migration."""
+        self.destroy(context, instance, network_info, block_device_info)
 
     def get_instance_disk_info(self, instance, block_device_info=None):
         pass
@@ -352,10 +431,57 @@ class VMwareVCDriver(driver.ComputeDriver):
         """
         return [self._nodename]
 
-    def get_inventory(self, nodename):
-        """Return a dict, keyed by resource class, of inventory information for
-        the supplied node.
+    def update_provider_tree(self, provider_tree, nodename, allocations=None):
+        """Update a ProviderTree object with current resource provider,
+        inventory information and CPU traits.
+
+        :param nova.compute.provider_tree.ProviderTree provider_tree:
+            A nova.compute.provider_tree.ProviderTree object representing all
+            the providers in the tree associated with the compute node, and any
+            sharing providers (those with the ``MISC_SHARES_VIA_AGGREGATE``
+            trait) associated via aggregate with any of those providers (but
+            not *their* tree- or aggregate-associated providers), as currently
+            known by placement.
+        :param nodename:
+            String name of the compute node (i.e.
+            ComputeNode.hypervisor_hostname) for which the caller is requesting
+            updated provider information.
+        :param allocations:
+            Dict of allocation data of the form:
+              { $CONSUMER_UUID: {
+                    # The shape of each "allocations" dict below is identical
+                    # to the return from GET /allocations/{consumer_uuid}
+                    "allocations": {
+                        $RP_UUID: {
+                            "generation": $RP_GEN,
+                            "resources": {
+                                $RESOURCE_CLASS: $AMOUNT,
+                                ...
+                            },
+                        },
+                        ...
+                    },
+                    "project_id": $PROJ_ID,
+                    "user_id": $USER_ID,
+                    "consumer_generation": $CONSUMER_GEN,
+                },
+                ...
+              }
+            If None, and the method determines that any inventory needs to be
+            moved (from one provider to another and/or to a different resource
+            class), the ReshapeNeeded exception must be raised. Otherwise, this
+            dict must be edited in place to indicate the desired final state of
+            allocations.
+        :raises ReshapeNeeded: If allocations is None and any inventory needs
+            to be moved from one provider to another and/or to a different
+            resource class. At this time the VMware driver does not reshape.
+        :raises: ReshapeFailed if the requested tree reshape fails for
+            whatever reason.
         """
+        # NOTE(cdent): This is a side-effecty method, we are changing the
+        # the provider tree in place (on purpose).
+        inv = provider_tree.data(nodename).inventory
+        ratios = self._get_allocation_ratios(inv)
         stats = vm_util.get_stats_from_cluster(self._session,
                                                self._cluster_ref)
         datastores = ds_util.get_available_datastores(self._session,
@@ -366,33 +492,52 @@ class VMwareVCDriver(driver.ComputeDriver):
         reserved_disk_gb = compute_utils.convert_mb_to_ceil_gb(
             CONF.reserved_host_disk_mb)
         result = {
-            fields.ResourceClass.VCPU: {
+            orc.VCPU: {
                 'total': stats['cpu']['vcpus'],
                 'reserved': CONF.reserved_host_cpus,
                 'min_unit': 1,
                 'max_unit': stats['cpu']['max_vcpus_per_host'],
                 'step_size': 1,
+                'allocation_ratio': ratios[orc.VCPU],
             },
-            fields.ResourceClass.MEMORY_MB: {
+            orc.MEMORY_MB: {
                 'total': stats['mem']['total'],
                 'reserved': CONF.reserved_host_memory_mb,
                 'min_unit': 1,
                 'max_unit': stats['mem']['max_mem_mb_per_host'],
                 'step_size': 1,
-            },
-            fields.ResourceClass.DISK_GB: {
-                'total': total_disk_capacity // units.Gi,
-                'reserved': reserved_disk_gb,
-                'min_unit': 1,
-                'max_unit': max_free_space // units.Gi,
-                'step_size': 1,
+                'allocation_ratio': ratios[orc.MEMORY_MB],
             },
         }
-        return result
+
+        # If a sharing DISK_GB provider exists in the provider tree, then our
+        # storage is shared, and we should not report the DISK_GB inventory in
+        # the compute node provider.
+        # TODO(cdent): We don't do this yet, in part because of the issues
+        # in bug #1784020, but also because we can represent all datastores
+        # as shared providers and should do once update_provider_tree is
+        # working well.
+        if provider_tree.has_sharing_provider(orc.DISK_GB):
+            LOG.debug('Ignoring sharing provider - see bug #1784020')
+        result[orc.DISK_GB] = {
+            'total': total_disk_capacity // units.Gi,
+            'reserved': reserved_disk_gb,
+            'min_unit': 1,
+            'max_unit': max_free_space // units.Gi,
+            'step_size': 1,
+            'allocation_ratio': ratios[orc.DISK_GB],
+        }
+
+        provider_tree.update_inventory(nodename, result)
+
+        # TODO(cdent): Here is where additional functionality would be added.
+        # In the libvirt driver this is where nested GPUs are reported and
+        # where cpu traits are added. In the vmware world, this is where we
+        # would add nested providers representing tenant VDC and similar.
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
         """Create VM instance."""
         self._vmops.spawn(context, instance, image_meta, injected_files,
                           admin_password, network_info, block_device_info)
@@ -517,7 +662,7 @@ class VMwareVCDriver(driver.ComputeDriver):
         """Poll for rebooting instances."""
         self._vmops.poll_rebooting_instances(timeout, instances)
 
-    def get_info(self, instance):
+    def get_info(self, instance, use_cache=True):
         """Return info about the VM instance."""
         return self._vmops.get_info(instance)
 

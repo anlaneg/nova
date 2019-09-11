@@ -18,7 +18,7 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import reset_server_state
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova.compute import vm_states
 from nova import exception
 from nova.policies import admin_actions as aa_policies
@@ -30,8 +30,8 @@ state_map = dict(active=vm_states.ACTIVE, error=vm_states.ERROR)
 
 
 class AdminActionsController(wsgi.Controller):
-    def __init__(self, *args, **kwargs):
-        super(AdminActionsController, self).__init__(*args, **kwargs)
+    def __init__(self):
+        super(AdminActionsController, self).__init__()
         self.compute_api = compute.API()
 
     @wsgi.response(202)
@@ -44,8 +44,6 @@ class AdminActionsController(wsgi.Controller):
         instance = common.get_instance(self.compute_api, context, id)
         try:
             self.compute_api.reset_network(context, instance)
-        except exception.InstanceUnknownCell as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceIsLocked as e:
             raise exc.HTTPConflict(explanation=e.format_message())
 
@@ -59,8 +57,6 @@ class AdminActionsController(wsgi.Controller):
         instance = common.get_instance(self.compute_api, context, id)
         try:
             self.compute_api.inject_network_info(context, instance)
-        except exception.InstanceUnknownCell as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceIsLocked as e:
             raise exc.HTTPConflict(explanation=e.format_message())
 

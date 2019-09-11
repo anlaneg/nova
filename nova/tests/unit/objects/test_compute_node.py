@@ -22,6 +22,7 @@ from oslo_utils import timeutils
 from oslo_versionedobjects import base as ovo_base
 from oslo_versionedobjects import exception as ovo_exc
 
+from nova import conf
 from nova.db import api as db
 from nova import exception
 from nova import objects
@@ -39,15 +40,25 @@ fake_stats_db_format = jsonutils.dumps(fake_stats)
 # host_ip is coerced from a string to an IPAddress
 # but needs to be converted to a string for the database format
 fake_host_ip = '127.0.0.1'
-fake_numa_topology = objects.NUMATopology(
-        cells=[objects.NUMACell(id=0, cpuset=set([1, 2]), memory=512,
-                                cpu_usage=0, memory_usage=0,
-                                mempages=[], pinned_cpus=set([]),
-                                siblings=[set([1]), set([2])]),
-               objects.NUMACell(id=1, cpuset=set([3, 4]), memory=512,
-                                cpu_usage=0, memory_usage=0,
-                                mempages=[], pinned_cpus=set([]),
-                                siblings=[set([3]), set([4])])])
+fake_numa_topology = objects.NUMATopology(cells=[
+    objects.NUMACell(
+        id=0,
+        cpuset=set([1, 2]),
+        memory=512,
+        cpu_usage=0,
+        memory_usage=0,
+        mempages=[],
+        pinned_cpus=set(),
+        siblings=[set([1]), set([2])]),
+    objects.NUMACell(
+        id=1,
+        cpuset=set([3, 4]),
+        memory=512,
+        cpu_usage=0,
+        memory_usage=0,
+        mempages=[],
+        pinned_cpus=set(),
+        siblings=[set([3]), set([4])])])
 fake_numa_topology_db_format = fake_numa_topology._to_json()
 fake_supported_instances = [('x86_64', 'kvm', 'hvm')]
 fake_hv_spec = hv_spec.HVSpec(arch=fake_supported_instances[0][0],
@@ -130,6 +141,8 @@ fake_compute_with_resources = objects.ComputeNode(
     host_ip=netaddr.IPAddress(fake_resources['host_ip']),
     supported_hv_specs=fake_supported_hv_specs,
 )
+
+CONF = conf.CONF
 
 
 class _TestComputeNodeObject(object):
@@ -232,6 +245,16 @@ class _TestComputeNodeObject(object):
 
         compute = compute_node.ComputeNode.get_by_host_and_nodename(
             self.context, 'fake', 'vm.danplanet.com')
+        self.compare_obj(compute, fake_compute_node,
+                         subs=self.subs(),
+                         comparators=self.comparators())
+
+    @mock.patch.object(db, 'compute_node_get_by_nodename')
+    def test_get_by_nodename(self, cn_get_by_n):
+        cn_get_by_n.return_value = fake_compute_node
+
+        compute = compute_node.ComputeNode.get_by_nodename(
+            self.context, 'vm.danplanet.com')
         self.compare_obj(compute, fake_compute_node,
                          subs=self.subs(),
                          comparators=self.comparators())
@@ -444,11 +467,15 @@ class _TestComputeNodeObject(object):
                          comparators=self.comparators())
 
     def test_compat_numa_topology(self):
-        compute = compute_node.ComputeNode()
+        compute = compute_node.ComputeNode(numa_topology='fake-numa-topology')
         versions = ovo_base.obj_tree_get_versions('ComputeNode')
         primitive = compute.obj_to_primitive(target_version='1.4',
                                              version_manifest=versions)
-        self.assertNotIn('numa_topology', primitive)
+        self.assertNotIn('numa_topology', primitive['nova_object.data'])
+
+        primitive = compute.obj_to_primitive(target_version='1.5',
+                                             version_manifest=versions)
+        self.assertIn('numa_topology', primitive['nova_object.data'])
 
     def test_compat_supported_hv_specs(self):
         compute = compute_node.ComputeNode()
@@ -456,12 +483,20 @@ class _TestComputeNodeObject(object):
         versions = ovo_base.obj_tree_get_versions('ComputeNode')
         primitive = compute.obj_to_primitive(target_version='1.5',
                                              version_manifest=versions)
-        self.assertNotIn('supported_hv_specs', primitive)
+        self.assertNotIn('supported_hv_specs', primitive['nova_object.data'])
 
-    def test_compat_host(self):
-        compute = compute_node.ComputeNode()
+        primitive = compute.obj_to_primitive(target_version='1.6',
+                                             version_manifest=versions)
+        self.assertIn('supported_hv_specs', primitive['nova_object.data'])
+
+    @mock.patch('nova.objects.service.Service.get_by_compute_host')
+    def test_compat_host(self, mock_get_compute):
+        compute = compute_node.ComputeNode(host='fake-host')
         primitive = compute.obj_to_primitive(target_version='1.6')
-        self.assertNotIn('host', primitive)
+        self.assertNotIn('host', primitive['nova_object.data'])
+
+        primitive = compute.obj_to_primitive(target_version='1.7')
+        self.assertIn('host', primitive['nova_object.data'])
 
     def test_compat_pci_device_pools(self):
         compute = compute_node.ComputeNode()
@@ -469,7 +504,11 @@ class _TestComputeNodeObject(object):
         versions = ovo_base.obj_tree_get_versions('ComputeNode')
         primitive = compute.obj_to_primitive(target_version='1.8',
                                              version_manifest=versions)
-        self.assertNotIn('pci_device_pools', primitive)
+        self.assertNotIn('pci_device_pools', primitive['nova_object.data'])
+
+        primitive = compute.obj_to_primitive(target_version='1.9',
+                                             version_manifest=versions)
+        self.assertIn('pci_device_pools', primitive['nova_object.data'])
 
     @mock.patch('nova.objects.Service.get_by_compute_host')
     def test_compat_service_id(self, mock_get):
@@ -494,6 +533,20 @@ class _TestComputeNodeObject(object):
         compute.update_from_virt_driver(resources)
         expected = fake_compute_with_resources.obj_clone()
         expected.uuid = uuidsentinel.node_uuid
+        self.assertTrue(base.obj_equal_prims(expected, compute))
+
+    def test_update_from_virt_driver_uuid_already_set(self):
+        """Tests update_from_virt_driver where the compute node object already
+        has a uuid value so the uuid from the virt driver is ignored.
+        """
+        # copy in case the update has a side effect
+        resources = copy.deepcopy(fake_resources)
+        # Emulate the ironic driver which adds a uuid field.
+        resources['uuid'] = uuidsentinel.node_uuid
+        compute = compute_node.ComputeNode(uuid=uuidsentinel.something_else)
+        compute.update_from_virt_driver(resources)
+        expected = fake_compute_with_resources.obj_clone()
+        expected.uuid = uuidsentinel.something_else
         self.assertTrue(base.obj_equal_prims(expected, compute))
 
     def test_update_from_virt_driver_missing_field(self):
@@ -526,17 +579,32 @@ class _TestComputeNodeObject(object):
                           compute.update_from_virt_driver, resources)
 
     def test_compat_allocation_ratios(self):
-        compute = compute_node.ComputeNode()
+        compute = compute_node.ComputeNode(
+            cpu_allocation_ratio=1.0, ram_allocation_ratio=1.0)
         primitive = compute.obj_to_primitive(target_version='1.13')
-        self.assertNotIn('cpu_allocation_ratio', primitive)
-        self.assertNotIn('ram_allocation_ratio', primitive)
+        self.assertNotIn('cpu_allocation_ratio', primitive['nova_object.data'])
+        self.assertNotIn('ram_allocation_ratio', primitive['nova_object.data'])
+
+        primitive = compute.obj_to_primitive(target_version='1.14')
+        self.assertIn('cpu_allocation_ratio', primitive['nova_object.data'])
+        self.assertIn('ram_allocation_ratio', primitive['nova_object.data'])
 
     def test_compat_disk_allocation_ratio(self):
-        compute = compute_node.ComputeNode()
+        compute = compute_node.ComputeNode(disk_allocation_ratio=1.0)
         primitive = compute.obj_to_primitive(target_version='1.15')
-        self.assertNotIn('disk_allocation_ratio', primitive)
+        self.assertNotIn(
+            'disk_allocation_ratio', primitive['nova_object.data'])
 
-    def test_compat_allocation_ratios_old_compute(self):
+        primitive = compute.obj_to_primitive(target_version='1.16')
+        self.assertIn('disk_allocation_ratio', primitive['nova_object.data'])
+
+    @mock.patch('nova.db.api.compute_node_update')
+    def test_compat_allocation_ratios_old_compute(self, mock_update):
+        """Tests the scenario that allocation ratios are overridden in config
+        and the legacy compute node record from the database has None set for
+        the allocation ratio values. The result is that the migrated record
+        allocation ratios should reflect the config overrides.
+        """
         self.flags(cpu_allocation_ratio=2.0, ram_allocation_ratio=3.0,
                    disk_allocation_ratio=0.9)
         compute_dict = fake_compute_node.copy()
@@ -551,31 +619,96 @@ class _TestComputeNodeObject(object):
         self.assertEqual(3.0, compute.ram_allocation_ratio)
         self.assertEqual(0.9, compute.disk_allocation_ratio)
 
-    def test_compat_allocation_ratios_default_values(self):
-        compute_dict = fake_compute_node.copy()
-        # new computes provide allocation ratios defaulted to 0.0
-        compute_dict['cpu_allocation_ratio'] = 0.0
-        compute_dict['ram_allocation_ratio'] = 0.0
-        compute_dict['disk_allocation_ratio'] = 0.0
-        cls = objects.ComputeNode
-        compute = cls._from_db_object(self.context, cls(), compute_dict)
+        mock_update.assert_called_once_with(
+            self.context, 123, {'cpu_allocation_ratio': 2.0,
+                                'ram_allocation_ratio': 3.0,
+                                'disk_allocation_ratio': 0.9})
 
-        self.assertEqual(16.0, compute.cpu_allocation_ratio)
-        self.assertEqual(1.5, compute.ram_allocation_ratio)
-        self.assertEqual(1.0, compute.disk_allocation_ratio)
-
-    def test_compat_allocation_ratios_old_compute_default_values(self):
+    @mock.patch('nova.db.api.compute_node_update')
+    def test_compat_allocation_ratios_zero_conf(self, mock_update):
+        """Tests that the override allocation ratios are set to 0.0 for
+        whatever reason (maybe an old nova.conf sample file is being used)
+        and the legacy compute node record has None for allocation ratios,
+        so the resulting data migration makes the record allocation ratios
+        use the CONF.initial_*_allocation_ratio values.
+        """
+        self.flags(cpu_allocation_ratio=0.0, ram_allocation_ratio=0.0,
+                   disk_allocation_ratio=0.0)
         compute_dict = fake_compute_node.copy()
-        # old computes don't provide allocation ratios to the table
+        # the computes provide allocation ratios None
         compute_dict['cpu_allocation_ratio'] = None
         compute_dict['ram_allocation_ratio'] = None
         compute_dict['disk_allocation_ratio'] = None
         cls = objects.ComputeNode
         compute = cls._from_db_object(self.context, cls(), compute_dict)
 
-        self.assertEqual(16.0, compute.cpu_allocation_ratio)
-        self.assertEqual(1.5, compute.ram_allocation_ratio)
-        self.assertEqual(1.0, compute.disk_allocation_ratio)
+        self.assertEqual(
+            CONF.initial_cpu_allocation_ratio, compute.cpu_allocation_ratio)
+        self.assertEqual(
+            CONF.initial_ram_allocation_ratio, compute.ram_allocation_ratio)
+        self.assertEqual(
+            CONF.initial_disk_allocation_ratio, compute.disk_allocation_ratio)
+
+        mock_update.assert_called_once_with(
+            self.context, 123, {'cpu_allocation_ratio': 16.0,
+                                'ram_allocation_ratio': 1.5,
+                                'disk_allocation_ratio': 1.0})
+
+    @mock.patch('nova.db.api.compute_node_update')
+    def test_compat_allocation_ratios_None_conf_zero_values(self, mock_update):
+        """Tests the scenario that the CONF.*_allocation_ratio overrides are
+        left to the default (None) and the compute node record allocation
+        ratio values in the DB are 0.0, so they will be migrated to the
+        CONF.initial_*_allocation_ratio values.
+        """
+        # the CONF.x_allocation_ratio is None by default
+        compute_dict = fake_compute_node.copy()
+        # the computes provide allocation ratios 0.0
+        compute_dict['cpu_allocation_ratio'] = 0.0
+        compute_dict['ram_allocation_ratio'] = 0.0
+        compute_dict['disk_allocation_ratio'] = 0.0
+        cls = objects.ComputeNode
+        compute = cls._from_db_object(self.context, cls(), compute_dict)
+
+        self.assertEqual(
+            CONF.initial_cpu_allocation_ratio, compute.cpu_allocation_ratio)
+        self.assertEqual(
+            CONF.initial_ram_allocation_ratio, compute.ram_allocation_ratio)
+        self.assertEqual(
+            CONF.initial_disk_allocation_ratio, compute.disk_allocation_ratio)
+
+        mock_update.assert_called_once_with(
+            self.context, 123, {'cpu_allocation_ratio': 16.0,
+                                'ram_allocation_ratio': 1.5,
+                                'disk_allocation_ratio': 1.0})
+
+    @mock.patch('nova.db.api.compute_node_update')
+    def test_compat_allocation_ratios_None_conf_None_values(self, mock_update):
+        """Tests the scenario that the override CONF.*_allocation_ratio options
+        are the default values (None), the compute node record from the DB has
+        None values for allocation ratios, so the resulting migrated record
+        will have the CONF.initial_*_allocation_ratio values.
+        """
+        # the CONF.x_allocation_ratio is None by default
+        compute_dict = fake_compute_node.copy()
+        # # the computes provide allocation ratios None
+        compute_dict['cpu_allocation_ratio'] = None
+        compute_dict['ram_allocation_ratio'] = None
+        compute_dict['disk_allocation_ratio'] = None
+        cls = objects.ComputeNode
+        compute = cls._from_db_object(self.context, cls(), compute_dict)
+
+        self.assertEqual(
+            CONF.initial_cpu_allocation_ratio, compute.cpu_allocation_ratio)
+        self.assertEqual(
+            CONF.initial_ram_allocation_ratio, compute.ram_allocation_ratio)
+        self.assertEqual(
+            CONF.initial_disk_allocation_ratio, compute.disk_allocation_ratio)
+
+        mock_update.assert_called_once_with(
+            self.context, 123, {'cpu_allocation_ratio': 16.0,
+                                'ram_allocation_ratio': 1.5,
+                                'disk_allocation_ratio': 1.0})
 
     def test_get_all_by_not_mapped(self):
         for mapped in (1, 0, 1, 3):

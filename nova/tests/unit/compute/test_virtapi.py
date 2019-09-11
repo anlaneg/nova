@@ -12,13 +12,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
+
 import mock
+import os_traits
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.compute import manager as compute_manager
-from nova import context
-from nova.db import api as db
+from nova import context as nova_context
 from nova import exception
 from nova import objects
+from nova.scheduler.client import report
 from nova import test
 from nova.virt import fake
 from nova.virt import virtapi
@@ -30,7 +34,6 @@ class VirtAPIBaseTest(test.NoDBTestCase, test.APICoverage):
 
     def setUp(self):
         super(VirtAPIBaseTest, self).setUp()
-        self.context = context.RequestContext('fake-user', 'fake-project')
         self.set_up_virtapi()
 
     def set_up_virtapi(self):
@@ -38,12 +41,17 @@ class VirtAPIBaseTest(test.NoDBTestCase, test.APICoverage):
 
     def assertExpected(self, method, *args, **kwargs):
         self.assertRaises(NotImplementedError,
-                          getattr(self.virtapi, method), self.context,
+                          getattr(self.virtapi, method),
                           *args, **kwargs)
 
     def test_wait_for_instance_event(self):
         self.assertExpected('wait_for_instance_event',
                             'instance', ['event'])
+
+    def test_update_compute_provider_status(self):
+        self.assertExpected('update_compute_provider_status',
+                            nova_context.get_admin_context(), uuids.rp_uuid,
+                            enabled=False)
 
 
 class FakeVirtAPITest(VirtAPIBaseTest):
@@ -59,24 +67,10 @@ class FakeVirtAPITest(VirtAPIBaseTest):
             with self.virtapi.wait_for_instance_event(*args, **kwargs):
                 run = True
             self.assertTrue(run)
-            return
-
-        if method in ('aggregate_metadata_add', 'aggregate_metadata_delete',
-                      'security_group_rule_get_by_security_group'):
-            # NOTE(danms): FakeVirtAPI will convert the first argument to
-            # argument['id'], so expect that in the actual db call
-            e_args = tuple([args[0]['id']] + list(args[1:]))
-        elif method == 'security_group_get_by_instance':
-            e_args = tuple([args[0]['uuid']] + list(args[1:]))
+        elif method == 'update_compute_provider_status':
+            self.virtapi.update_compute_provider_status(*args, **kwargs)
         else:
-            e_args = args
-
-        with mock.patch.object(db, method,
-                               return_value='it worked') as mock_call:
-            result = getattr(self.virtapi, method)(self.context, *args,
-                                                   **kwargs)
-            self.assertEqual('it worked', result)
-            mock_call.assert_called_once_with(self.context, *e_args, **kwargs)
+            self.fail("Unhandled FakeVirtAPI method: %s" % method)
 
 
 class FakeCompute(object):
@@ -87,6 +81,20 @@ class FakeCompute(object):
         self.instance_events = mock.MagicMock()
         self.instance_events.prepare_for_instance_event.side_effect = \
             self._prepare_for_instance_event
+
+        self.reportclient = mock.Mock(spec=report.SchedulerReportClient)
+        # Keep track of the traits set on each provider in the test.
+        self.provider_traits = collections.defaultdict(set)
+        self.reportclient.get_provider_traits.side_effect = (
+            self._get_provider_traits)
+        self.reportclient.set_traits_for_provider.side_effect = (
+            self._set_traits_for_provider)
+
+    def _get_provider_traits(self, context, rp_uuid):
+        return mock.Mock(traits=self.provider_traits[rp_uuid])
+
+    def _set_traits_for_provider(self, context, rp_uuid, traits):
+        self.provider_traits[rp_uuid] = traits
 
     def _event_waiter(self):
         event = mock.MagicMock()
@@ -111,14 +119,6 @@ class ComputeVirtAPITest(VirtAPIBaseTest):
     def set_up_virtapi(self):
         self.compute = FakeCompute()
         self.virtapi = compute_manager.ComputeVirtAPI(self.compute)
-
-    def assertExpected(self, method, *args, **kwargs):
-        with mock.patch.object(self.compute.conductor_api,
-                               method, return_value='it worked') as mock_call:
-            result = getattr(self.virtapi, method)(self.context, *args,
-                                                   **kwargs)
-            self.assertEqual('it worked', result)
-            mock_call.assert_called_once_with(self.context, *args, **kwargs)
 
     def test_wait_for_instance_event(self):
         and_i_ran = ''
@@ -181,3 +181,25 @@ class ComputeVirtAPITest(VirtAPIBaseTest):
                 pass
 
         self.assertRaises(test.TestingException, do_test)
+
+    def test_update_compute_provider_status(self):
+        """Tests scenarios for adding/removing the COMPUTE_STATUS_DISABLED
+        trait on a given compute node resource provider.
+        """
+        ctxt = nova_context.get_admin_context()
+        # Start by adding the trait to a disabled provider.
+        self.assertNotIn(uuids.rp_uuid, self.compute.provider_traits)
+        self.virtapi.update_compute_provider_status(
+            ctxt, uuids.rp_uuid, enabled=False)
+        self.assertEqual({os_traits.COMPUTE_STATUS_DISABLED},
+                         self.compute.provider_traits[uuids.rp_uuid])
+        # Now run it again to make sure nothing changed.
+        with mock.patch.object(self.compute.reportclient,
+                               'set_traits_for_provider',
+                               new_callable=mock.NonCallableMock):
+            self.virtapi.update_compute_provider_status(
+                ctxt, uuids.rp_uuid, enabled=False)
+        # Now enable the provider and make sure the trait is removed.
+        self.virtapi.update_compute_provider_status(
+            ctxt, uuids.rp_uuid, enabled=True)
+        self.assertEqual(set(), self.compute.provider_traits[uuids.rp_uuid])

@@ -59,9 +59,9 @@ server status is one of the following values:
 
 -  ``SHUTOFF``: The server was powered down by the user, either through the
    OpenStack Compute API or from within the server. For example, the user
-   issued a ``shutdown -h`` command from within the server. If the OpenStack
-   Compute manager detects that the VM was powered down, it transitions the
-   server to the SHUTOFF status.
+   issued a :command:`shutdown -h` command from within the server.
+   If the OpenStack Compute manager detects that the VM was powered down,
+   it transitions the server to the SHUTOFF status.
 
 -  ``SOFT_DELETED``: The server is marked as deleted but will remain in the
    cloud for some configurable amount of time. While soft-deleted, an
@@ -77,8 +77,9 @@ server status is one of the following values:
    Suspending a server is similar to placing a device in hibernation;
    memory and vCPUs become available to create other servers.
 
--  ``UNKNOWN``: The state of the server is unknown. Contact your cloud
-   provider.
+-  ``UNKNOWN``: The state of the server is unknown. It could be because a part
+   of the infrastructure is temporarily down (see :doc:`down_cells`
+   for more information). Contact your cloud provider.
 
 -  ``VERIFY_RESIZE``: System is awaiting confirmation that the server is
    operational after a move or resize.
@@ -93,8 +94,8 @@ are exposed to administrators:
   Refer to :nova-doc:`VM States <reference/vm-states.html>`.
 
 - task_state represents what is happening to the instance at the
-  current moment. These tasks can be generic, such as 'spawning', or specific,
-  such as 'block_device_mapping'. These task states allow for a better view into
+  current moment. These tasks can be generic, such as `spawning`, or specific,
+  such as `block_device_mapping`. These task states allow for a better view into
   what a server is doing.
 
 Server creation
@@ -102,24 +103,28 @@ Server creation
 
 Status Transition:
 
-``BUILD``
+- ``BUILD``
 
-``ACTIVE``
+  .. todo:: Add more details.
 
-``ERROR`` (on error)
+- ``ACTIVE``
 
-When you create a server, the operation asynchronously provisions a new
-server. The progress of this operation depends on several factors
-including location of the requested image, network I/O, host load, and
-the selected flavor. The progress of the request can be checked by
-performing a **GET** on /servers/*``id``*, which returns a progress
-attribute (from 0% to 100% complete). The full URL to the newly created
-server is returned through the ``Location`` header and is available as a
-``self`` and ``bookmark`` link in the server representation. Note that
-when creating a server, only the server ID, its links, and the
-administrative password are guaranteed to be returned in the request.
-You can retrieve additional attributes by performing subsequent **GET**
-operations on the server.
+  .. todo:: Add more details.
+
+- ``ERROR`` (on error)
+
+  When you create a server, the operation asynchronously provisions a new
+  server. The progress of this operation depends on several factors
+  including location of the requested image, network I/O, host load, and
+  the selected flavor. The progress of the request can be checked by
+  performing a **GET** on /servers/*{server_id}*, which returns a progress
+  attribute (from 0% to 100% complete). The full URL to the newly created
+  server is returned through the ``Location`` header and is available as a
+  ``self`` and ``bookmark`` link in the server representation. Note that
+  when creating a server, only the server ID, its links, and the
+  administrative password are guaranteed to be returned in the request.
+  You can retrieve additional attributes by performing subsequent **GET**
+  operations on the server.
 
 Server query
 ~~~~~~~~~~~~
@@ -131,10 +136,24 @@ by using query options.
 For different user roles, the user has different query options set:
 
 - For general user, there is limited set of attributes of the servers can be
-  used as query option. ``reservation_id``, ``name``, ``status``, ``image``,
-  ``flavor``, ``ip``, ``changes-since``, ``changes-before``, ``ip6``,
-  ``tags``, ``tags-any``, ``not-tags``, ``not-tags-any`` are supported options
-  to be used. Other options will be ignored by nova silently.
+  used as query option. The supported options are:
+
+  - ``changes-since``
+  - ``flavor``
+  - ``image``
+  - ``ip``
+  - ``ip6`` (New in version 2.5)
+  - ``name``
+  - ``not-tags`` (New in version 2.26)
+  - ``not-tags-any`` (New in version 2.26)
+  - ``reservation_id``
+  - ``status``
+  - ``tags`` (New in version 2.26)
+  - ``tags-any`` (New in version 2.26)
+  - ``changes-before`` (New in version 2.66)
+  - ``locked`` (New in version 2.73)
+
+  Other options will be ignored by nova silently.
 
 - For administrator, most of the server attributes can be used as query
   options. Before the Ocata release, the fields in the database schema of
@@ -144,31 +163,37 @@ For different user roles, the user has different query options set:
   the query options are different from the attribute naming in the servers API
   response.
 
-.. code::
 
-   Precondition:
-   there are 2 servers existing in cloud with following info:
+Precondition: there are 2 servers existing in cloud with following info::
 
-   "servers": [
-       {
-           "name": "t1",
-           "locked": "true",
-           ...
-       },
-       {
-           "name": "t2",
-           "locked": "false",
-           ...
-       }
-   ]
+  {
+      "servers": [
+          {
+              "name": "t1",
+              "OS-EXT-STS:vm_state": "active",
+              ...
+          },
+          {
+              "name": "t2",
+              "OS-EXT-STS:vm_state": "stopped",
+              ...
+          }
+      ]
+  }
 
-   **Example: General user query server with administrator only options**
+**Example: General user query server with administrator only options**
 
-   Request with non-administrator context:
-   GET /servers/detail?locked=1
-   Note that 'locked' is not returned through API layer
+Request with non-administrator context: ``GET /servers/detail?vm_state=active``
 
-   Response:
+.. note::
+
+  The ``vm_state`` query parameter is only for administrator users and
+  the query parameter is ignored if specified by non-administrator users.
+  Thus the API returns servers of both ``active`` and ``stopped``
+  in this example.
+
+Response::
+
    {
        "servers": [
            {
@@ -182,12 +207,12 @@ For different user roles, the user has different query options set:
        ]
    }
 
-   **Example: Administrator query server with administrator only options**
+**Example: Administrator query server with administrator only options**
 
-   Request with administrator context:
-   GET /servers/detail?locked=1
+Request with administrator context: ``GET /servers/detail?vm_state=active``
 
-   Response:
+Response::
+
    {
        "servers": [
            {
@@ -213,14 +238,13 @@ There are also some special query options:
 - ``all_tenants`` is an administrator query option, which allows the
   administrator to query the servers in any tenant.
 
-.. code::
 
-   **Example: User query server with special keys changes-since or changes-before**
+**Example: User query server with special keys changes-since or changes-before**
 
-   Precondition:
-   GET /servers/detail
+Request: ``GET /servers/detail``
 
-   Response:
+Response::
+
    {
        "servers": [
            {
@@ -236,9 +260,10 @@ There are also some special query options:
        ]
    }
 
-   GET /servers/detail?changes-since='2015-12-16T15:55:52Z'
+Request: ``GET /servers/detail?changes-since='2015-12-16T15:55:52Z'``
 
-   Response:
+Response::
+
    {
        {
            "name": "t2",
@@ -247,9 +272,10 @@ There are also some special query options:
        }
    }
 
-   GET /servers/detail?changes-before='2015-12-16T15:55:52Z'
+Request: ``GET /servers/detail?changes-before='2015-12-16T15:55:52Z'``
 
-   Response:
+Response::
+
    {
        {
            "name": "t1",
@@ -258,9 +284,11 @@ There are also some special query options:
        }
    }
 
-   GET /servers/detail?changes-since='2015-12-10T15:55:52Z'&changes-before='2015-12-28T15:55:52Z'
+Request:
+``GET /servers/detail?changes-since='2015-12-10T15:55:52Z'&changes-before='2015-12-28T15:55:52Z'``
 
-   Response:
+Response::
+
    {
        "servers": [
            {
@@ -279,15 +307,11 @@ There are also some special query options:
 There are two kinds of matching in query options: Exact matching and
 regex matching.
 
-.. code::
+**Example: User query server using exact matching on host**
 
-   **Example: User query server using exact matching on host**
+Request with administrator context: ``GET /servers/detail``
 
-   Precondition:
-   Request with administrator context:
-   GET /servers/detail
-
-   Response:
+Response::
 
    {
        "servers": [
@@ -304,10 +328,9 @@ regex matching.
        ]
    }
 
-   Request with administrator context:
-   GET /servers/detail?host=devstack
+Request with administrator context: ``GET /servers/detail?host=devstack``
 
-   Response:
+Response::
 
    {
        "servers": [
@@ -319,13 +342,11 @@ regex matching.
        ]
    }
 
-   **Example: Query server using regex matching on name**
+**Example: Query server using regex matching on name**
 
-   Precondition:
-   Request with administrator context:
-   GET /servers/detail
+Request with administrator context: ``GET /servers/detail``
 
-   Response:
+Response::
 
    {
        "servers": [
@@ -348,10 +369,9 @@ regex matching.
        ]
    }
 
-   Request with administrator context:
-   GET /servers/detail?name=t1
+Request with administrator context: ``GET /servers/detail?name=t1``
 
-   Response:
+Response::
 
    {
        "servers": [
@@ -370,14 +390,12 @@ regex matching.
        ]
    }
 
-   **Example: User query server using exact matching on host and
-   regex matching on name**
+**Example: User query server using exact matching on host and regex
+matching on name**
 
-   Precondition:
-   Request with administrator context:
-   GET /servers/detail
+Request with administrator context: ``GET /servers/detail``
 
-   Response:
+Response::
 
    {
        "servers": [
@@ -399,10 +417,10 @@ regex matching.
        ]
    }
 
-   Request with administrator context:
-   GET /servers/detail?host=devstack1&name=test
+Request with administrator context:
+``GET /servers/detail?host=devstack1&name=test``
 
-   Response:
+Response::
 
    {
        "servers": [
@@ -414,16 +432,10 @@ regex matching.
        ]
    }
 
-               "name": "t2",
-               "updated": "2015-12-17T15:55:52Z"
-               ...
-           }
-       ]
-   }
+Request: ``GET /servers/detail?changes-since='2015-12-16T15:55:52Z'``
 
-   GET /servers/detail?changes-since='2015-12-16T15:55:52Z'
+Response::
 
-   Response:
    {
        {
            "name": "t2",
@@ -468,21 +480,15 @@ Server actions
    flavor, in essence, scaling the server up or down. The original
    server is saved for a period of time to allow rollback if there is a
    problem. All resizes should be tested and explicitly confirmed, at
-   which time the original server is removed. All resizes are
-   automatically confirmed after 24 hours if you do not confirm or
-   revert them.
+   which time the original server is removed. The resized server may be
+   automatically confirmed based on the administrator's configuration of
+   the deployment.
 
    Confirm resize action will delete the old server in the virt layer.
    The spawned server in the virt layer will be used from then on.
    On the contrary, Revert resize action will delete the new server
    spawned in the virt layer and revert all changes. The original server
    will be used from then on.
-
-   Also, there is a periodic task configured by configuration option
-   resize_confirm_window(in seconds), if this value is not 0, nova compute
-   will check whether the server is in resized state longer than
-   value of resize_confirm_window, it will automatically confirm the resize
-   of the server.
 
 -  **Pause**, **Unpause**
 
@@ -567,13 +573,62 @@ Server actions
 
 -  **Lock**, **Unlock**
 
-   Lock a server so no further actions are allowed to the server. This can
-   be done by either administrator or the server's owner. By default, only owner
-   or administrator can lock the sever, and administrator can overwrite owner's lock.
+   Lock a server so the following actions by non-admin users are not
+   allowed to the server.
+
+   - Delete Server
+   - Change Administrative Password (changePassword Action)
+   - Confirm Resized Server (confirmResize Action)
+   - Force-Delete Server (forceDelete Action)
+   - Pause Server (pause Action)
+   - Reboot Server (reboot Action)
+   - Rebuild Server (rebuild Action)
+   - Rescue Server (rescue Action)
+   - Resize Server (resize Action)
+   - Restore Soft-Deleted Instance (restore Action)
+   - Resume Suspended Server (resume Action)
+   - Revert Resized Server (revertResize Action)
+   - Shelf-Offload (Remove) Server (shelveOffload Action)
+   - Shelve Server (shelve Action)
+   - Start Server (os-start Action)
+   - Stop Server (os-stop Action)
+   - Suspend Server (suspend Action)
+   - Trigger Crash Dump In Server
+   - Unpause Server (unpause Action)
+   - Unrescue Server (unrescue Action)
+   - Unshelve (Restore) Shelved Server (unshelve Action)
+   - Attach a volume to an instance
+   - Update a volume attachment
+   - Detach a volume from an instance
+   - Create Interface
+   - Detach Interface
+   - Create Or Update Metadata Item
+   - Create or Update Metadata Items
+   - Delete Metadata Item
+   - Replace Metadata Items
+   - Add (Associate) Fixed Ip (addFixedIp Action) (DEPRECATED)
+   - Remove (Disassociate) Fixed Ip (removeFixedIp Action) (DEPRECATED)
+
+   ..
+     NOTE(takashin):
+     The following APIs can be performed by administrators only by default.
+     So they are not listed in the above list.
+
+     - Migrate Server (migrate Action)
+     - Live-Migrate Server (os-migrateLive Action)
+     - Force Migration Complete Action (force_complete Action)
+     - Delete (Abort) Migration
+     - Inject Network Information (injectNetworkInfo Action)
+     - Reset Networking On A Server (resetNetwork Action)
+
+   But administrators can perform the actions on the server
+   even though the server is locked. By default, only owner or administrator
+   can lock the sever, and administrator can overwrite owner's lock along with
+   the locked_reason if it is specified.
 
    Unlock will unlock a server in locked state so additional
-   operations can be performed on the server. By default, only owner or
-   administrator can unlock the server.
+   operations can be performed on the server by non-admin users.
+   By default, only owner or administrator can unlock the server.
 
 -  **Rescue**, **Unrescue**
 
@@ -635,13 +690,84 @@ limit.
 Block Device Mapping
 ~~~~~~~~~~~~~~~~~~~~
 
-TODO: Add some description about BDM.
+Simply speaking, Block Device Mapping describes how block devices are
+exposed to the server.
+
+For some historical reasons, nova has two ways to mention the block device
+mapping in server creation request body:
+
+- ``block_device_mapping``: This is the legacy way and supports backward
+  compatibility for EC2 API.
+- ``block_device_mapping_v2``: This is the recommended format to specify
+  Block Device Mapping information in server creation request body.
+
+Users cannot mix the two formats in the same request.
+
+For more information, refer to `Block Device Mapping
+<https://docs.openstack.org/nova/latest/user/block-device-mapping.html>`_.
+
+For the full list of ``block_device_mapping_v2`` parameters available when
+creating a server, see the `API reference
+<https://docs.openstack.org/api-ref/compute/?expanded=create-server-detail#create-server>`_.
+
+**Example for block_device_mapping_v2**
+
+This will create a 100GB size volume type block device from an image with UUID
+of ``bb02b1a3-bc77-4d17-ab5b-421d89850fca``. It will be used as the first order
+boot device (``boot_index=0``), and this block device will not be deleted after
+we terminate the server. Note that the ``imageRef`` parameter is not required
+in this case since we are creating a volume-backed server.
+
+.. code-block:: json
+
+    {
+        "server": {
+            "name": "volume-backed-server-test",
+            "flavorRef": "52415800-8b69-11e0-9b19-734f1195ff37",
+            "block_device_mapping_v2": [
+                {
+                    "boot_index": 0,
+                    "uuid": "bb02b1a3-bc77-4d17-ab5b-421d89850fca",
+                    "volume_size": "100",
+                    "source_type": "image",
+                    "destination_type": "volume",
+                    "delete_on_termination": false
+                }
+            ]
+        }
+    }
 
 Scheduler Hints
 ~~~~~~~~~~~~~~~
 
-Refer to `this document`_ for information on scheduler hints.
+Scheduler hints are a way for the user to influence on which host the scheduler
+places a server. They are pre-determined key-value pairs specified as a
+dictionary separate from the main ``server`` dictionary in the server create
+request. Available scheduler hints vary from cloud to cloud, depending on the
+`cloud's configuration`_.
 
+.. code-block:: json
+
+    {
+        "server": {
+            "name": "server-in-group",
+            "imageRef": "52415800-8b69-11e0-9b19-734f6f006e54",
+            "flavorRef": "52415800-8b69-11e0-9b19-734f1195ff37"
+        },
+        "os:scheduler_hints": {
+            "group": "05a81485-010f-4df1-bbec-7821c85686e8"
+        }
+    }
+
+
+For more information on how to specify scheduler hints refer to
+`the create-server-detail Request section`_ in the Compute API reference.
+
+For more information on how scheduler hints are different from flavor extra
+specs, refer to `this document`_.
+
+.. _cloud's configuration: https://docs.openstack.org/nova/latest/admin/configuration/schedulers.html
+.. _the create-server-detail Request section: https://docs.openstack.org/api-ref/compute/?expanded=create-server-detail#create-server
 .. _this document: https://docs.openstack.org/nova/latest/reference/scheduler-hints-vs-flavor-extra-specs.html#scheduler-hints
 
 Server Consoles
@@ -706,7 +832,7 @@ assigned at creation time.
 
 **Example: Create server with access IP: JSON request**
 
-.. code::
+.. code-block:: json
 
     {
         "server": {
@@ -724,7 +850,7 @@ assigned at creation time.
 
 **Example: Create server with multiple access IPs: JSON request**
 
-.. code::
+.. code-block:: json
 
     {
         "server": {
@@ -803,7 +929,7 @@ a cloud:
    This process can be repeated until the whole cloud has been updated,
    usually using a pool of empty hosts instead of just one.
 
-- **Resource Optimization**
+-  **Resource Optimization**
 
    To reduce energy usage, some cloud operators will try and move
    servers so they fit into the minimum number of hosts, allowing
@@ -914,10 +1040,11 @@ Configure Guest OS
 
 Metadata API
 ------------
-Nova provides a metadata api for servers to retrieve server specific metadata.
-Neutron ensures this metadata api can be accessed through a predefined ip
-address (169.254.169.254). For more details, see :nova-doc:`Metadata Service
-<user/metadata-service.html>`.
+
+Nova provides a metadata API for servers to retrieve server specific metadata.
+Neutron ensures this metadata API can be accessed through a predefined IP
+address, ``169.254.169.254``. For more details, refer to the :nova-doc:`user
+guide <user/metadata.html>`.
 
 Config Drive
 ------------
@@ -925,20 +1052,19 @@ Config Drive
 Nova is able to write metadata to a special configuration drive that attaches
 to the server when it boots. The server can mount this drive and read files
 from it to get information that is normally available through the metadata
-service. For more details, see :nova-doc:`Config Drive
-<user/config-drive.html>`.
+service. For more details, refer to the :nova-doc:`user guide
+<user/metadata.html>`.
 
 User data
 ---------
+
 A user data file is a special key in the metadata service that holds a file
 that cloud-aware applications in the server can access.
 
-Nova has two ways to send user data to the deployed server, one is by
-metadata service to let server able to access to its metadata through
-a predefined ip address (169.254.169.254), then other way is to use config
-drive which will wrap metadata into a iso9660 or vfat format disk so that
-the deployed server can consume it by active engines such as cloud-init
-during its boot process.
+This information can be accessed via the metadata API or a config drive. The
+latter allows the deployed server to consume it by active engines such as
+cloud-init during its boot process, where network connectivity may not be an
+option.
 
 Server personality
 ------------------

@@ -60,14 +60,18 @@ class ComputeManagerTestCase(test.TestCase):
         @mock.patch.object(self.compute.manager.network_api,
                            'cleanup_instance_network_on_host')
         @mock.patch('nova.compute.utils.notify_about_instance_usage')
-        @mock.patch.object(self.compute.manager, '_get_resource_tracker')
+        @mock.patch.object(self.compute.manager, 'rt')
         @mock.patch.object(self.compute.manager.driver, 'spawn')
         def _test(mock_spawn, mock_grt, mock_notify, mock_cinoh, mock_can):
             mock_spawn.side_effect = test.TestingException('Preserve this')
             # Simulate that we're on the last retry attempt
             filter_properties = {'retry': {'num_attempts': 3}}
             request_spec = objects.RequestSpec.from_primitives(
-                self.context, {}, filter_properties)
+                self.context,
+                {'instance_properties': {'uuid': instance.uuid},
+                 'instance_type': flavor,
+                 'image': None},
+                filter_properties)
             self.compute.manager.build_and_run_instance(
                     self.context, instance, {}, request_spec,
                     filter_properties, block_device_mapping=[])

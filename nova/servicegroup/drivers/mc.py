@@ -54,8 +54,9 @@ class MemcachedDriver(base.Driver):
                                  'Memcached based ServiceGroup driver'))
         report_interval = service.report_interval
         if report_interval:
-            service.tg.add_timer(report_interval, self._report_state,
-                                 api.INITIAL_REPORTING_DELAY, service)
+            service.tg.add_timer_args(
+                report_interval, self._report_state, args=[service],
+                initial_delay=api.INITIAL_REPORTING_DELAY)
 
     def is_up(self, service_ref):
         """Moved from nova.utils
@@ -76,8 +77,7 @@ class MemcachedDriver(base.Driver):
 
         if updated_time_in_mc:
             # Change mc time to offset-aware time
-            updated_time_in_mc = \
-                updated_time_in_mc.replace(tzinfo=iso8601.UTC)
+            updated_time_in_mc = updated_time_in_mc.replace(tzinfo=iso8601.UTC)
             # If [DEFAULT]/enable_new_services is set to be false, the
             # ``updated_time_in_db`` will be None, in this case, use
             # ``updated_time_in_mc`` instead.

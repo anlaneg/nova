@@ -213,9 +213,10 @@ class API(base_api.NetworkAPI):
 
     @base_api.refresh_cache
     def allocate_for_instance(self, context, instance, vpn,
-                              requested_networks, macs=None,
+                              requested_networks,
                               security_groups=None,
-                              bind_host_id=None):
+                              bind_host_id=None, attach=False,
+                              resource_provider_mapping=None):
         """Allocates all network structures for an instance.
 
         :param context: The request context.
@@ -223,12 +224,11 @@ class API(base_api.NetworkAPI):
         :param vpn: A boolean, if True, indicate a vpn to access the instance.
         :param requested_networks: A list of requested_network tuples
             containing network_id and fixed_ip
-        :param macs: None or a set of MAC addresses that the instance
-            should use. macs is supplied by the hypervisor driver (contrast
-            with requested_networks which is user supplied).
         :param security_groups: None or security groups to allocate for
             instance.
         :param bind_host_id: ignored by this driver.
+        :param attach: ignored by this driver
+        :param resource_provider_mapping: ignored by this driver
         :returns: network info as from get_instance_nw_info() below
         """
         # NOTE(vish): We can't do the floating ip allocation here because
@@ -243,7 +243,6 @@ class API(base_api.NetworkAPI):
         args['project_id'] = instance.project_id
         args['host'] = instance.host
         args['rxtx_factor'] = flavor['rxtx_factor']
-        args['macs'] = macs
 
         # Check to see if we're asked to 'auto' allocate networks because if
         # so we need to just null out the requested_networks value so the
@@ -389,10 +388,22 @@ class API(base_api.NetworkAPI):
                                  pci_requests=None):
         """Retrieve all information for the networks passed at the time of
         creating the server.
+
+        :param context: The request context.
+        :param requested_networks: The networks requested for the server.
+        :type requested_networks: nova.objects.NetworkRequestList
+        :param pci_requests: The list of PCI requests to which additional PCI
+            requests created here will be added.
+        :type pci_requests: nova.objects.InstancePCIRequests
+
+        :returns: A tuple with an instance of ``objects.NetworkMetadata`` for
+                  use by the scheduler or None and a list of RequestGroup
+                  objects representing the resource needs of each requested
+                  port
         """
         # This is NOOP for Nova network since it doesn't support SR-IOV or
         # NUMA-aware vSwitch functionality.
-        pass
+        return None, []
 
     def get_dns_domains(self, context):
         """Returns a list of available dns domains.
@@ -491,7 +502,8 @@ class API(base_api.NetworkAPI):
 
         self.network_rpcapi.migrate_instance_start(context, **args)
 
-    def migrate_instance_finish(self, context, instance, migration):
+    def migrate_instance_finish(
+            self, context, instance, migration, provider_mappings):
         """Finish migrating the network of an instance."""
         flavor = instance.get_flavor()
         args = dict(
@@ -513,9 +525,9 @@ class API(base_api.NetworkAPI):
     def setup_instance_network_on_host(self, context, instance, host,
                                        migration=None):
         """Setup network for specified instance on host."""
-        self.migrate_instance_finish(context, instance,
-                                     {'source_compute': None,
-                                      'dest_compute': host})
+        self.migrate_instance_finish(
+            context, instance, {'source_compute': None, 'dest_compute': host},
+            None)
 
     def cleanup_instance_network_on_host(self, context, instance, host):
         """Cleanup network for specified instance on host."""

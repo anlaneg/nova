@@ -46,7 +46,7 @@ class ConfFixture(config_fixture.Config):
         # We should fix the tests to use real
         # UUIDs then drop this work around.
         self.conf.set_default('project_id_regex',
-                              '[0-9a-fk\-]+', 'osapi_v21')
+                              '[0-9a-fk-]+', 'osapi_v21')
         self.conf.set_default('use_ipv6', True)
         self.conf.set_default('vlan_interface', 'eth0')
 
@@ -76,6 +76,10 @@ class ConfFixture(config_fixture.Config):
         # leak between requests from separate services in concurrently running
         # tests.
         self.conf.set_default('keep_alive', False, group="wsgi")
+
+        # many tests synchronizes on the reception of versioned notifications
+        self.conf.set_default(
+            'notification_format', "both", group="notifications")
 
         config.parse_args([], default_config_files=[], configure_db=False,
                           init_rpc=False)

@@ -25,7 +25,6 @@ tag_location:
   in: header
   required: true
   type: string
-  min_version: 2.26
 x-compute-request-id_resp:
   description: |
     The local request ID, which is a unique ID generated automatically
@@ -324,7 +323,6 @@ tag:
   in: path
   required: true
   type: string
-  min_version: 2.26
 tenant_id:
   description: |
     The UUID of the tenant in a multi-tenancy cloud.
@@ -467,6 +465,9 @@ changes_before_instance_action:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-before`` must be later than or equal to
+    the value of the ``changes-since`` otherwise API will return 400.
   in: query
   required: false
   type: string
@@ -485,6 +486,9 @@ changes_before_migration:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-before`` must be later than or equal to
+    the value of the ``changes-since`` otherwise API will return 400.
   in: query
   required: false
   type: string
@@ -504,6 +508,9 @@ changes_before_server:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-before`` must be later than or equal to
+    the value of the ``changes-since`` otherwise API will return 400.
   in: query
   required: false
   type: string
@@ -521,6 +528,9 @@ changes_since_instance_action:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-since`` must be earlier than or equal to
+    the value of the ``changes-before`` otherwise API will return 400.
   in: query
   required: false
   type: string
@@ -538,6 +548,9 @@ changes_since_migration:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-since`` must be earlier than or equal to
+    the value of the ``changes-before`` otherwise API will return 400.
   in: query
   required: false
   type: string
@@ -556,6 +569,9 @@ changes_since_server:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-since`` must be earlier than or equal to
+    the value of the ``changes-before`` otherwise API will return 400.
   in: query
   required: false
   type: string
@@ -959,6 +975,18 @@ locked_by_query_server:
   in: query
   required: false
   type: string
+locked_query_server:
+  description: |
+    Specify the ``locked`` query parameter to list all locked or unlocked
+    instances. If the value is specified, ``1``, ``t``, ``true``,
+    ``on``, ``y`` and ``yes`` are treated as ``True``. ``0``, ``f``,
+    ``false``, ``off``, ``n`` and ``no`` are treated as ``False``.
+    (They are case-insensitive.) Any other value provided will be considered
+    invalid.
+  in: query
+  required: false
+  type: boolean
+  min_version: 2.73
 marker:
   description: |
     The ID of the last-seen item. Use the ``limit`` parameter to make an initial limited
@@ -1022,7 +1050,12 @@ migration_status:
   type: string
 migration_type:
   description: |
-    The type of migration to filter.
+    The type of migration to filter. Valid values are:
+
+    * ``evacuation``
+    * ``live-migration``
+    * ``migration``
+    * ``resize``
   in: query
   required: false
   type: string
@@ -1215,7 +1248,23 @@ sort_key_flavor:
     Sorts by a flavor attribute. Default attribute is ``flavorid``. You can specify
     multiple pairs of sort key and sort direction query parameters. If you omit the
     sort direction in a pair, the API uses the natural sorting direction of the flavor
-    ``sort_key`` attribute.
+    ``sort_key`` attribute. The sort keys are limited to:
+
+    - ``created_at``
+    - ``description``
+    - ``disabled``
+    - ``ephemeral_gb``
+    - ``flavorid``
+    - ``id``
+    - ``is_public``
+    - ``memory_mb``
+    - ``name``
+    - ``root_gb``
+    - ``rxtx_factor``
+    - ``swap``
+    - ``updated_at``
+    - ``vcpu_weight``
+    - ``vcpus``
   in: query
   required: false
   type: string
@@ -1243,6 +1292,7 @@ sort_key_server:
     - ``key_name``
     - ``launch_index``
     - ``launched_at``
+    - ``locked`` (New in version 2.73)
     - ``locked_by``
     - ``node``
     - ``power_state``
@@ -1588,12 +1638,26 @@ aggregate_az:
   in: body
   required: true
   type: string
-aggregate_az_optional:
+aggregate_az_optional_create:
   description: |
     The availability zone of the host aggregate. You should use a custom
     availability zone rather than the default returned by the
     os-availability-zone API. The availability zone must not include ':'
     in its name.
+  in: body
+  required: false
+  type: string
+aggregate_az_optional_update:
+  description: |
+    The availability zone of the host aggregate. You should use a custom
+    availability zone rather than the default returned by the
+    os-availability-zone API. The availability zone must not include ':'
+    in its name.
+
+    .. warning:: You should not change or unset the availability zone of an
+      aggregate when that aggregate has hosts which contain servers in it
+      since that may impact the ability for those servers to move to another
+      host.
   in: body
   required: false
   type: string
@@ -1609,9 +1673,26 @@ aggregate_id_body:
   in: body
   required: true
   type: integer
-aggregate_metadata:
+aggregate_metadata_request:
   description: |
-    Metadata key and value pairs associate with the aggregate.
+    Metadata key and value pairs associated with the aggregate.
+    The maximum size for each metadata key and value pair is 255 bytes.
+
+    New keys will be added to existing aggregate metadata. For existing
+    keys, if the value is ``null`` the entry is removed, otherwise the
+    value is updated. Note that the special ``availability_zone`` metadata
+    entry cannot be unset to ``null``.
+
+    .. warning:: You should not change the availability zone of an
+      aggregate when that aggregate has hosts which contain servers in it
+      since that may impact the ability for those servers to move to another
+      host.
+  in: body
+  required: true
+  type: object
+aggregate_metadata_response:
+  description: |
+    Metadata key and value pairs associated with the aggregate.
   in: body
   required: true
   type: object
@@ -1718,6 +1799,15 @@ availability_zone_state:
   in: body
   required: true
   type: object
+availability_zone_unshelve:
+  description: |
+    The availability zone name. Specifying an availability zone is only
+    allowed when the server status is ``SHELVED_OFFLOADED`` otherwise a
+    409 HTTPConflict response is returned.
+  in: body
+  required: false
+  type: string
+  min_version: 2.77
 available:
   description: |
     Returns true if the availability zone is available.
@@ -1937,7 +2027,7 @@ code:
   type: string
 config_drive:
   description: |
-    Indicates whether a configuration drive enables metadata injection. The config_drive
+    Indicates whether a config drive enables metadata injection. The config_drive
     setting provides information about a drive that the instance can mount at boot
     time. The instance reads files from the drive to get information that is normally
     available through the metadata service. This metadata is different from the user
@@ -1961,6 +2051,15 @@ config_drive_resp:
   in: body
   required: true
   type: string
+config_drive_resp_update_rebuild:
+  description: |
+    Indicates whether or not a config drive was used for this server.
+    The value is ``True`` or an empty string. An empty string stands for
+    ``False``.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
 configure_project_cloudpipe:
   description: |
     VPN IP and Port information to configure the cloudpipe instance..
@@ -2149,6 +2248,22 @@ delete_on_termination:
   in: body
   required: false
   type: boolean
+delete_on_termination_attachments_req:
+  description: |
+    To delete the attached volume when the server is destroyed, specify ``true``.
+    Otherwise, specify ``false``. Default: ``false``
+  in: body
+  required: false
+  type: boolean
+  min_version: 2.79
+delete_on_termination_attachments_resp:
+  description: |
+    A flag indicating if the attached volume will be deleted when the server is
+    deleted.
+  in: body
+  required: true
+  type: boolean
+  min_version: 2.79
 deleted:
   description: |
     A boolean indicates whether this aggregate is deleted or not, if it has
@@ -2239,6 +2354,13 @@ device_tag_bdm_attachment:
   required: false
   type: string
   min_version: 2.49
+device_tag_bdm_attachment_resp:
+  description: |
+    The device tag applied to the volume block device or ``null``.
+  in: body
+  required: true
+  type: string
+  min_version: 2.70
 device_tag_nic:
   description: |
     A device role tag that can be applied to a network interface. The guest OS
@@ -2263,12 +2385,36 @@ device_tag_nic_attachment:
   required: false
   type: string
   min_version: 2.49
+device_tag_nic_attachment_resp:
+  description: |
+    The device tag applied to the virtual network interface or ``null``.
+  in: body
+  required: true
+  type: string
+  min_version: 2.70
 device_type:
   description: |
     The device type. For example, ``disk``, ``cdrom``.
   in: body
   required: false
   type: string
+device_volume_type:
+  description: |
+    The device ``volume_type``. This can be used to specify the type of volume
+    which the compute service will create and attach to the server.
+    If not specified, the block storage service will provide a default volume
+    type. See the `block storage volume types API <https://docs.openstack.org/api-ref/block-storage/v3/#volume-types-types>`_
+    for more details.
+    There are some restrictions on ``volume_type``:
+
+    - It can be a volume type ID or name.
+    - It is only supported with ``source_type`` of ``blank``, ``image`` or
+      ``snapshot``.
+    - It is only supported with ``destination_type`` of ``volume``.
+  in: body
+  required: false
+  type: string
+  min_version: 2.67
 # Optional input parameter in the body for PUT /os-services/{service_id} added
 # in microversion 2.53.
 disabled_reason_2_53_in:
@@ -2286,13 +2432,17 @@ disabled_reason_body:
   type: string
 disk_available_least:
   description: |
-    The actual free disk on this hypervisor(in GiB).
+    The actual free disk on this hypervisor(in GiB). If allocation ratios used
+    for overcommit are configured, this may be negative. This is intentional as
+    it provides insight into the amount by which the disk is overcommitted.
   in: body
   required: true
   type: integer
 disk_available_least_total:
   description: |
-    The actual free disk on all hypervisors(in GiB).
+    The actual free disk on all hypervisors(in GiB). If allocation ratios used
+    for overcommit are configured, this may be negative. This is intentional as
+    it provides insight into the amount by which the disk is overcommitted.
   in: body
   required: true
   type: integer
@@ -2471,9 +2621,15 @@ event_hostId:
   type: string
 event_name:
   description: |
-    The event name. A valid value is ``network-changed``, ``network-vif-plugged``,
-    ``network-vif-unplugged``, ``network-vif-deleted``, or ``volume-extended``.
-    The event name ``volume-extended`` is added since microversion ``2.51``.
+    The event name. A valid value is:
+
+    - ``network-changed``
+    - ``network-vif-plugged``
+    - ``network-vif-unplugged``
+    - ``network-vif-deleted``
+    - ``volume-extended`` (since microversion ``2.51``)
+    - ``power-update`` (since microversion ``2.76``)
+
   in: body
   required: true
   type: string
@@ -2507,7 +2663,13 @@ event_status:
   type: string
 event_tag:
   description: |
-    A string value that identifies the event.
+    A string value that identifies the event. Certain types of events require
+    specific tags:
+
+    - For the ``power-update`` event the tag must be either be ``POWER_ON``
+      or ``POWER_OFF``.
+    - For the ``volume-extended`` event the tag must be the volume id.
+
   in: body
   required: false
   type: string
@@ -2523,7 +2685,7 @@ event_traceback:
   type: string
 events:
   description: |
-    The action.
+    List of external events to process.
   in: body
   required: true
   type: array
@@ -2749,7 +2911,6 @@ flavor_description_required:
   type: string
   in: body
   required: true
-  min_version: 2.55
   description: |
     A free form description of the flavor. Limited to 65535 characters
     in length. Only printable characters are allowed.
@@ -2760,6 +2921,12 @@ flavor_description_resp:
   required: true
   type: string
   min_version: 2.55
+flavor_description_resp_no_min:
+  description: |
+    The description of the flavor.
+  in: body
+  required: true
+  type: string
 flavor_disabled:
   in: body
   required: false
@@ -2882,7 +3049,7 @@ flavor_links_2_46:
   description: |
     Links to the flavor resource. See `API Guide / Links and
     References
-    <http://developer.openstack.org/api-guide/compute/links_and_references.html>`_
+    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
     for more info.
   in: body
   required: true
@@ -2953,6 +3120,8 @@ flavor_swap:
     The size of a dedicated swap disk that will be allocated, in
     MiB. If 0 (the default), no dedicated swap disk will be created.
     Currently, the empty string ('') is used to represent 0.
+    As of microversion 2.75 default return value of swap is 0
+    instead of empty string.
   in: body
   required: true
   type: integer
@@ -3105,6 +3274,7 @@ force_evacuate:
   required: false
   type: boolean
   min_version: 2.29
+  max_version: 2.67
 force_live_migrate:
   description: |
     Force a live-migration by not verifying the provided destination host by
@@ -3118,13 +3288,13 @@ force_live_migrate:
   required: false
   type: boolean
   min_version: 2.30
+  max_version: 2.67
 force_migration_complete:
   description: |
     The action to force an in-progress live migration to complete.
   in: body
   required: true
   type: none
-  min_version: 2.22
 force_snapshot:
   description: |
     Indicates whether to create a snapshot, even if the volume is attached.
@@ -3180,13 +3350,15 @@ forceDelete:
   type: none
 free_ram_mb:
   description: |
-    The free RAM in this hypervisor(in MiB).
+    The free RAM in this hypervisor(in MiB). This does not take allocation
+    ratios used for overcommit into account so this value may be negative.
   in: body
   required: true
   type: integer
 free_ram_mb_total:
   description: |
-    The free RAM on all hypervisors(in MiB).
+    The free RAM on all hypervisors(in MiB). This does not take allocation
+    ratios used for overcommit into account so this value may be negative.
   in: body
   required: true
   type: integer
@@ -3395,6 +3567,22 @@ host_status_body_in:
   in: body
   required: false
   type: string
+host_status_update_rebuild:
+  description: |
+    The host status. Values where next value in list can override the previous:
+
+    - ``UP`` if nova-compute up.
+    - ``UNKNOWN`` if nova-compute not reported by servicegroup driver.
+    - ``DOWN`` if nova-compute forced down.
+    - ``MAINTENANCE`` if nova-compute is disabled.
+    - Empty string indicates there is no host for server.
+
+    This attribute appears in the response only if the policy permits.
+    By default, only administrators can get this parameter.
+  in: body
+  required: false
+  type: string
+  min_version: 2.75
 host_zone:
   description: |
     The available zone of the host.
@@ -3465,13 +3653,17 @@ hypervisor_diagnostics:
   min_version: 2.48
 hypervisor_free_disk_gb:
   description: |
-    The free disk remaining on this hypervisor(in GiB).
+    The free disk remaining on this hypervisor(in GiB). This does not take
+    allocation ratios used for overcommit into account so this value may be
+    negative.
   in: body
   required: true
   type: integer
 hypervisor_free_disk_gb_total:
   description: |
-    The free disk remaining on all hypervisors(in GiB).
+    The free disk remaining on all hypervisors(in GiB). This does not take
+    allocation ratios used for overcommit into account so this value may be
+    negative.
   in: body
   required: true
   type: integer
@@ -3506,7 +3698,7 @@ hypervisor_links:
   description: |
     Links to the hypervisors resource. See `API Guide / Links and
     References
-    <http://developer.openstack.org/api-guide/compute/links_and_references.html>`_
+    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
     for more info.
   in: body
   type: array
@@ -3522,8 +3714,10 @@ hypervisor_os_diagnostics:
 hypervisor_servers:
   description: |
     A list of ``server`` objects.
+    This field has become mandatory in microversion 2.75. If no servers is on hypervisor
+    then empty list is returned.
   in: body
-  required: false
+  required: true
   type: array
   min_version: 2.53
 hypervisor_servers_name:
@@ -3578,13 +3772,17 @@ hypervisor_type_body:
   type: string
 hypervisor_vcpus:
   description: |
-    The number of vcpu in this hypervisor.
+    The number of vcpu in this hypervisor. This does not take allocation
+    ratios used for overcommit into account so there may be disparity between
+    this and the used count.
   in: body
   required: true
   type: integer
 hypervisor_vcpus_total:
   description: |
-    The number of vcpu on all hypervisors.
+    The number of vcpu on all hypervisors. This does not take allocation
+    ratios used for overcommit into account so there may be disparity between
+    this and the used count.
   in: body
   required: true
   type: integer
@@ -3792,7 +3990,7 @@ injectNetworkInfo:
   type: none
 instance_action_events_2_50:
   description: |
-    The events which occurred in this action.
+    The events which occurred in this action in descending order of creation.
 
     Policy defaults enable only users with the administrative role to see
     instance action event information. Cloud providers can change these
@@ -3803,7 +4001,7 @@ instance_action_events_2_50:
   max_version: 2.50
 instance_action_events_2_51:
   description: |
-    The events which occurred in this action.
+    The events which occurred in this action in descending order of creation.
 
     Policy defaults enable only users with the administrative role or the owner
     of the server to see instance action event information. Cloud providers can
@@ -3817,7 +4015,7 @@ instance_actions_next_links:
     Links pertaining to the instance action.
     This parameter is returned when paging and more data is available.
     See `API Guide / Links and References
-    <http://developer.openstack.org/api-guide/compute/links_and_references.html>`_
+    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
     for more info.
   in: body
   required: false
@@ -3874,7 +4072,7 @@ instanceAction:
   type: object
 instanceActions:
   description: |
-    List of the actions for the given instance.
+    List of the actions for the given instance in descending order of creation.
   in: body
   required: true
   type: array
@@ -4008,6 +4206,13 @@ key_name_resp:
   in: body
   required: true
   type: string
+key_name_resp_update:
+  description: |
+    The name of associated key pair, if any.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
 key_pairs: &key_pairs
   description: |
     The number of allowed key pairs for each user.
@@ -4068,7 +4273,7 @@ keypair_links:
   description: |
     Links pertaining to keypair. See `API Guide / Links and
     References
-    <http://developer.openstack.org/api-guide/compute/links_and_references.html>`_
+    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
     for more info.
   in: body
   type: array
@@ -4185,14 +4390,16 @@ links:
   description: |
     Links to the resources in question. See `API Guide / Links and
     References
-    <http://developer.openstack.org/api-guide/compute/links_and_references.html>`_
+    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
     for more info.
   in: body
   required: true
   type: array
 local_gb:
   description: |
-    The disk in this hypervisor(in GiB).
+    The disk in this hypervisor(in GiB). This does not take allocation
+    ratios used for overcommit into account so there may be disparity between
+    this and the used count.
   in: body
   required: true
   type: integer
@@ -4212,7 +4419,9 @@ local_gb_simple_tenant_usage_optional:
   type: integer
 local_gb_total:
   description: |
-    The disk on all hypervisors(in GiB).
+    The disk on all hypervisors(in GiB). This does not take allocation
+    ratios used for overcommit into account so there may be disparity between
+    this and the used count.
   in: body
   required: true
   type: integer
@@ -4231,9 +4440,11 @@ local_gb_used_total:
 lock:
   description: |
     The action to lock a server.
+    This parameter can be ``null``.
+    Up to microversion 2.73, this parameter should be ``null``.
   in: body
   required: true
-  type: none
+  type: object
 locked:
   description: |
     True if the instance is locked otherwise False.
@@ -4241,6 +4452,20 @@ locked:
   required: true
   type: boolean
   min_version: 2.9
+locked_reason_req:
+  description: |
+    The reason behind locking a server. Limited to 255 characters in length.
+  in: body
+  required: false
+  type: string
+  min_version: 2.73
+locked_reason_resp:
+  description: |
+    The reason behind locking a server.
+  in: body
+  required: true
+  type: string
+  min_version: 2.73
 mac_addr:
   description: |
     The MAC address.
@@ -4292,7 +4517,9 @@ memory_details_diagnostics:
   min_version: 2.48
 memory_mb:
   description: |
-    The memory of this hypervisor(in MiB).
+    The memory of this hypervisor(in MiB). This does not take allocation
+    ratios used for overcommit into account so there may be disparity between
+    this and the used count.
   in: body
   required: true
   type: integer
@@ -4310,7 +4537,9 @@ memory_mb_simple_tenant_usage_optional:
   type: integer
 memory_mb_total:
   description: |
-    The memory of all hypervisors(in MiB).
+    The memory of all hypervisors(in MiB). This does not take allocation
+    ratios used for overcommit into account so there may be disparity between
+    this and the used count.
   in: body
   required: true
   type: integer
@@ -4484,7 +4713,7 @@ migration_links_2_23:
     This parameter is returned if the migration type is ``live-migration`` and
     the migration status is one of ``queued``, ``preparing``, ``running``
     and ``post-migrating``. See `API Guide / Links and References
-    <http://developer.openstack.org/api-guide/compute/links_and_references.html>`_
+    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
     for more info.
   in: body
   required: false
@@ -4507,7 +4736,7 @@ migration_next_links_2_59:
     Links pertaining to the migration.
     This parameter is returned when paging and more data is available.
     See `API Guide / Links and References
-    <http://developer.openstack.org/api-guide/compute/links_and_references.html>`_
+    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
     for more info.
   in: body
   required: false
@@ -4574,6 +4803,13 @@ name_server_group:
   in: body
   required: true
   type: string
+name_update_rebuild:
+  description: |
+    The security group name.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
 namespace:
   description: |
     A URL pointing to the namespace for this extension.
@@ -4763,18 +4999,21 @@ os-availability-zone:availability_zone:
     want your instance to be built.  Typically, an admin user will use
     availability zones to arrange OpenStack compute hosts into logical
     groups.
+
     An availability zone provides a form of physical isolation and redundancy from
     other availability zones. For instance, if some racks in your data center are
     on a separate power source, you can put servers in those racks in their own availability
     zone. Availability zones can also help separate different classes of hardware.  By
     segregating resources into availability zones, you can ensure that your application
     resources are spread across disparate machines to achieve high availability in
-    the event of hardware or other failure.
+    the event of hardware or other failure. See
+    `Availability Zones (AZs) <https://docs.openstack.org/nova/latest/user/aggregates.html#availability-zones-azs>`_ for more information.
+
     You can list the available availability zones by calling the
-    os-availability-zone API, but you should avoid using the default
-    availability zone when booting the instance.  In general, the
-    default availability zone is named ``nova``. This AZ is only shown
-    when listing the availability zones as an admin.
+    :ref:`os-availability-zone` API, but you should avoid using the `default
+    availability zone <https://docs.openstack.org/nova/latest/configuration/config.html#DEFAULT.default_availability_zone>`_
+    when creating the server.  The default availability zone is named ``nova``.
+    This AZ is only shown when listing the availability zones as an admin.
   in: body
   required: false
   type: string
@@ -4811,6 +5050,13 @@ OS-EXT-AZ:availability_zone_optional:
   in: body
   required: false
   type: string
+OS-EXT-AZ:availability_zone_update_rebuild:
+  description: |
+    The availability zone name.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
 OS-EXT-SRV-ATTR:host:
   description: |
     The name of the compute host on which this instance is running.
@@ -4818,6 +5064,14 @@ OS-EXT-SRV-ATTR:host:
   in: body
   required: true
   type: string
+OS-EXT-SRV-ATTR:host_update_rebuild:
+  description: |
+    The name of the compute host on which this instance is running.
+    Appears in the response for administrative users only.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
 OS-EXT-SRV-ATTR:hypervisor_hostname:
   description: |
     The hypervisor host name provided by the Nova virt driver. For the Ironic driver,
@@ -4825,6 +5079,14 @@ OS-EXT-SRV-ATTR:hypervisor_hostname:
   in: body
   required: true
   type: string
+OS-EXT-SRV-ATTR:hypervisor_hostname_update_rebuild:
+  description: |
+    The hypervisor host name provided by the Nova virt driver. For the Ironic driver,
+    it is the Ironic node uuid. Appears in the response for administrative users only.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
 OS-EXT-SRV-ATTR:instance_name:
   description: |
     The instance name. The Compute API generates the instance name from the instance
@@ -4832,6 +5094,14 @@ OS-EXT-SRV-ATTR:instance_name:
   in: body
   required: true
   type: string
+OS-EXT-SRV-ATTR:instance_name_update_rebuild:
+  description: |
+    The instance name. The Compute API generates the instance name from the instance
+    name template. Appears in the response for administrative users only.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
 OS-EXT-STS:power_state:
   description: |
     The power state of the instance. This is an enum value that is mapped as::
@@ -4845,18 +5115,46 @@ OS-EXT-STS:power_state:
   in: body
   required: true
   type: integer
+OS-EXT-STS:power_state_update_rebuild:
+  description: |
+    The power state of the instance. This is an enum value that is mapped as::
+
+      0: NOSTATE
+      1: RUNNING
+      3: PAUSED
+      4: SHUTDOWN
+      6: CRASHED
+      7: SUSPENDED
+  in: body
+  required: true
+  type: integer
+  min_version: 2.75
 OS-EXT-STS:task_state:
   description: |
     The task state of the instance.
   in: body
   required: true
   type: string
+OS-EXT-STS:task_state_update_rebuild:
+  description: |
+    The task state of the instance.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
 OS-EXT-STS:vm_state:
   description: |
     The VM state.
   in: body
   required: true
   type: string
+OS-EXT-STS:vm_state_update_rebuild:
+  description: |
+    The VM state.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
 os-extended-volumes:volumes_attached:
   description: |
     The attached volumes, if any.
@@ -4866,19 +5164,39 @@ os-extended-volumes:volumes_attached:
 os-extended-volumes:volumes_attached.delete_on_termination:
   description: |
     A flag indicating if the attached volume will be deleted
-    when the server is deleted. By default this is False and
-    can only be set when creating a volume while creating a
-    server, which is commonly referred to as boot from volume.
+    when the server is deleted. By default this is False.
   in: body
   required: true
   type: boolean
   min_version: 2.3
+os-extended-volumes:volumes_attached.delete_on_termination_update_rebuild:
+  description: |
+    A flag indicating if the attached volume will be deleted
+    when the server is deleted. By default this is False.
+  in: body
+  required: true
+  type: boolean
+  min_version: 2.75
 os-extended-volumes:volumes_attached.id:
   description: |
     The attached volume ID.
   in: body
   required: true
   type: string
+os-extended-volumes:volumes_attached.id_update_rebuild:
+  description: |
+    The attached volume ID.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
+os-extended-volumes:volumes_attached_update_rebuild:
+  description: |
+    The attached volumes, if any.
+  in: body
+  required: true
+  type: array
+  min_version: 2.75
 os-getConsoleOutput:
   description: |
     The action to get console output of the server.
@@ -4992,6 +5310,24 @@ OS-SRV-USG:launched_at:
   in: body
   required: true
   type: string
+OS-SRV-USG:launched_at_update_rebuild:
+  description: |
+    The date and time when the server was launched.
+
+    The date and time stamp format is `ISO 8601 <https://en.wikipedia.org/wiki/ISO_8601>`_:
+
+    ::
+
+      CCYY-MM-DDThh:mm:ss±hh:mm
+
+    For example, ``2015-08-27T09:49:58-05:00``.
+
+    The ``hh±:mm`` value, if included, is the time zone as an offset from UTC.
+    If the ``deleted_at`` date and time stamp is not set, its value is ``null``.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
 OS-SRV-USG:terminated_at:
   description: |
     The date and time when the server was deleted.
@@ -5008,6 +5344,23 @@ OS-SRV-USG:terminated_at:
   in: body
   required: true
   type: string
+OS-SRV-USG:terminated_at_update_rebuild:
+  description: |
+    The date and time when the server was deleted.
+
+    The date and time stamp format is `ISO 8601 <https://en.wikipedia.org/wiki/ISO_8601>`_:
+
+    ::
+
+      CCYY-MM-DDThh:mm:ss±hh:mm
+
+    For example, ``2015-08-27T09:49:58-05:00``.
+    The ``±hh:mm`` value, if included, is the time zone as an offset from UTC.
+    If the ``deleted_at`` date and time stamp is not set, its value is ``null``.
+  in: body
+  required: true
+  type: string
+  min_version: 2.75
 os-start:
   description: |
     The action to start a stopped server.
@@ -5095,7 +5448,7 @@ os:scheduler_hints_query:
     Schedule the server by using a custom filter in JSON format.
     For example::
 
-      "query": "[&gt;=,$free_ram_mb,1024]"
+      "query": "[\">=\",\"$free_ram_mb\",1024]"
 
     It is available when ``JsonFilter`` is available on cloud side.
   in: body
@@ -5229,7 +5582,7 @@ policy_name:
       instead of resulting in a build failure.
   in: body
   required: true
-  type: object
+  type: string
   min_version: 2.64
 policy_rules:
   description: |
@@ -5344,9 +5697,15 @@ project_id:
   in: body
   required: false
   type: string
-project_id_instance_action:
+project_id_server:
   description: |
-    The UUID of the project that this server belongs to.
+    The ID of the project that this server belongs to.
+  in: body
+  required: true
+  type: string
+project_id_server_action:
+  description: |
+    The ID of the project which initiated the server action.
   in: body
   required: true
   type: string
@@ -5687,6 +6046,13 @@ security_groups_obj:
   in: body
   required: true
   type: array
+security_groups_obj_update_rebuild:
+  description: |
+    One or more security groups objects.
+  in: body
+  required: true
+  type: array
+  min_version: 2.75
 security_groups_quota:
   description: |
     The number of allowed security groups for each tenant.
@@ -5782,6 +6148,14 @@ server_groups: &server_groups
   in: body
   required: true
   type: integer
+server_groups_2_71:
+  description: |
+    The UUIDs of the server groups to which the server belongs. Currently
+    this can contain at most one entry.
+  in: body
+  required: true
+  type: array
+  min_version: 2.71
 server_groups_list:
   description: |
     The list of existing server groups.
@@ -5811,6 +6185,16 @@ server_groups_quota_optional:
   in: body
   required: false
   type: integer
+# This is the host in a POST (create instance) request body.
+server_host_create:
+  description: |
+    The name of the compute service host on which the server is to be created.
+    The API will return 400 if no compute services are found with the given
+    host name. By default, it can be specified by administrators only.
+  in: body
+  required: false
+  type: string
+  min_version: 2.74
 server_hostname:
   in: body
   required: false
@@ -5819,6 +6203,24 @@ server_hostname:
     The hostname set on the instance when it is booted.
     By default, it appears in the response for administrative users only.
   min_version: 2.3
+server_hostname_update_rebuild:
+  in: body
+  required: false
+  type: string
+  description: |
+    The hostname set on the instance when it is booted.
+    By default, it appears in the response for administrative users only.
+  min_version: 2.75
+# This is the hypervisor_hostname in a POST (create instance) request body.
+server_hypervisor_hostname_create:
+  description: |
+    The hostname of the hypervisor on which the server is to be created.
+    The API will return 400 if no hypervisors are found with the given
+    hostname. By default, it can be specified by administrators only.
+  in: body
+  required: false
+  type: string
+  min_version: 2.74
 server_id:
   description: |
     The UUID of the server.
@@ -5839,6 +6241,14 @@ server_kernel_id:
     The UUID of the kernel image when using an AMI. Will be null if not.
     By default, it appears in the response for administrative users only.
   min_version: 2.3
+server_kernel_id_update_rebuild:
+  in: body
+  required: false
+  type: string
+  description: |
+    The UUID of the kernel image when using an AMI. Will be null if not.
+    By default, it appears in the response for administrative users only.
+  min_version: 2.75
 server_launch_index:
   in: body
   required: false
@@ -5848,11 +6258,20 @@ server_launch_index:
     sequence in which the servers were launched.
     By default, it appears in the response for administrative users only.
   min_version: 2.3
+server_launch_index_update_rebuild:
+  in: body
+  required: false
+  type: integer
+  description: |
+    When servers are launched via multiple create, this is the
+    sequence in which the servers were launched.
+    By default, it appears in the response for administrative users only.
+  min_version: 2.75
 server_links:
   description: |
     Links pertaining to the server. See `API Guide / Links and
     References
-    <http://developer.openstack.org/api-guide/compute/links_and_references.html>`_
+    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
     for more info.
   in: body
   type: array
@@ -5877,6 +6296,14 @@ server_ramdisk_id:
     The UUID of the ramdisk image when using an AMI. Will be null if not.
     By default, it appears in the response for administrative users only.
   min_version: 2.3
+server_ramdisk_id_update_rebuild:
+  in: body
+  required: false
+  type: string
+  description: |
+    The UUID of the ramdisk image when using an AMI. Will be null if not.
+    By default, it appears in the response for administrative users only.
+  min_version: 2.75
 server_reservation_id:
   in: body
   required: false
@@ -5887,6 +6314,16 @@ server_reservation_id:
     create, that will all have the same reservation_id.
     By default, it appears in the response for administrative users only.
   min_version: 2.3
+server_reservation_id_update_rebuild:
+  in: body
+  required: false
+  type: string
+  description: |
+    The reservation id for the server. This is an id that can
+    be useful in tracking groups of servers created with multiple
+    create, that will all have the same reservation_id.
+    By default, it appears in the response for administrative users only.
+  min_version: 2.75
 server_root_device_name:
   in: body
   required: false
@@ -5895,6 +6332,14 @@ server_root_device_name:
     The root device name for the instance
     By default, it appears in the response for administrative users only.
   min_version: 2.3
+server_root_device_name_update_rebuild:
+  in: body
+  required: false
+  type: string
+  description: |
+    The root device name for the instance
+    By default, it appears in the response for administrative users only.
+  min_version: 2.75
 server_status:
   description: |
     The server status.
@@ -5921,6 +6366,77 @@ server_tags_create:
   required: false
   type: array
   min_version: 2.52
+server_topology_nodes:
+  description: |
+    NUMA nodes information of a server.
+  in: body
+  required: true
+  type: array
+server_topology_nodes_cpu_pinning:
+  description: |
+    The mapping of server cores to host physical CPU. for example::
+
+     cpu_pinning: { 0: 0, 1: 5}
+
+    This means vcpu 0 is mapped to physical CPU 0, and vcpu 1 is mapped
+    physical CPU 5.
+
+    By default the ``cpu_pinning`` field is only visible to users with the
+    administrative role. You can change the default behavior via the policy
+    rule::
+
+     compute:server:topology:host:index
+  in: body
+  required: false
+  type: dict
+server_topology_nodes_cpu_siblings:
+  description: |
+    A mapping of host cpus thread sibling. For example::
+
+      siblings: [[0,1],[2,3]]
+
+    This means vcpu 0 and vcpu 1 belong to same CPU core, vcpu 2, vcpu 3
+    belong to another CPU core.
+
+    By default the ``siblings`` field is only visible to users with the
+    administrative role. You can change the default behavior via the policy
+    rule::
+
+      compute:server:topology:host:index
+  in: body
+  required: false
+  type: list
+server_topology_nodes_host_numa_node:
+  description: |
+    The host NUMA node the virtual NUMA node is map to.
+
+    By default the ``host_numa_node`` field is only visible to users with the
+    administrator role. You can change the default behavior via the policy
+    rule::
+
+     compute:server:topology:host:index
+  in: body
+  required: false
+  type: integer
+server_topology_nodes_memory_mb:
+  description: |
+    The amount of memory assigned to this NUMA node in MB.
+  in: body
+  required: false
+  type: integer
+server_topology_nodes_vcpu_set:
+  description: |
+    A list of IDs of the virtual CPU assigned to this NUMA node.
+  in: body
+  required: false
+  type: list
+server_topology_pagesize_kb:
+  description: |
+    The page size in KB of a server. This field is ``null`` if the
+    page size information is not available.
+  in: body
+  required: true
+  type: integer
 server_trusted_image_certificates_create_req:
   description: |
     A list of trusted certificate IDs, which are used during image
@@ -5976,6 +6492,14 @@ server_user_data:
     The user_data the instance was created with.
     By default, it appears in the response for administrative users only.
   min_version: 2.3
+server_user_data_update:
+  in: body
+  required: false
+  type: string
+  description: |
+    The user_data the instance was created with.
+    By default, it appears in the response for administrative users only.
+  min_version: 2.75
 server_uuid:
   description: |
     The UUID of the server instance to which the API dispatches the event.  You must
@@ -5995,7 +6519,7 @@ servers_links:
     Links to the next server. It is available when the number of servers exceeds
     ``limit`` parameter or ``[api]/max_limit`` in the configuration file.
     See `API Guide / Links and References
-    <http://developer.openstack.org/api-guide/compute/links_and_references.html>`_
+    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
     for more info.
   in: body
   type: array
@@ -6287,6 +6811,12 @@ tags:
   required: true
   type: array
   min_version: 2.26
+tags_no_min:
+  description: |
+    A list of tags. The maximum count of tags in this list is 50.
+  in: body
+  required: true
+  type: array
 tenant_id_body:
   description: |
     The UUID of the tenant in a multi-tenancy cloud.
@@ -6537,7 +7067,7 @@ usage_links:
   description: |
     Links pertaining to usage. See `API Guide / Links and
     References
-    <http://developer.openstack.org/api-guide/compute/links_and_references.html>`_
+    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
     for more info.
   in: body
   type: array
@@ -6574,6 +7104,12 @@ user_data_rebuild_resp:
 user_id:
   description: |
     The user ID of the user who owns the server.
+  in: body
+  required: true
+  type: string
+user_id_server_action:
+  description: |
+    The ID of the user which initiated the server action.
   in: body
   required: true
   type: string
@@ -6714,6 +7250,17 @@ volume_size:
     The size of the volume (in GiB).
     This is integer value from range 1 to 2147483647
     which can be requested as integer and string.
+    This parameter must be specified in the following cases:
+
+    - An image to volume case
+
+      * ``block_device_mapping_v2.source_type`` is ``image``
+      * ``block_device_mapping_v2.destination_type`` is ``volume``
+
+    - A blank to volume case
+
+      * ``block_device_mapping_v2.source_type`` is ``blank``
+      * ``block_device_mapping_v2.destination_type`` is ``volume``
   in: body
   required: false
   type: integer

@@ -15,14 +15,15 @@
 import time
 
 import fixtures
+import io
 import mock
 
 import nova
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.unit import cast_as_call
 from nova.tests.unit import policy_fixture
-from nova.tests.unit.virt.libvirt import fake_libvirt_utils
 from nova.tests.unit.virt.libvirt import fakelibvirt
 from nova.virt.libvirt import guest as libvirt_guest
 
@@ -34,13 +35,10 @@ class TestSerialConsoleLiveMigrate(test.TestCase):
         super(TestSerialConsoleLiveMigrate, self).setUp()
         self.useFixture(policy_fixture.RealPolicyFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
         # Replace libvirt with fakelibvirt
-        self.useFixture(fixtures.MonkeyPatch(
-           'nova.virt.libvirt.driver.libvirt_utils',
-           fake_libvirt_utils))
         self.useFixture(fixtures.MonkeyPatch(
            'nova.virt.libvirt.driver.libvirt',
            fakelibvirt))
@@ -68,7 +66,6 @@ class TestSerialConsoleLiveMigrate(test.TestCase):
         self.start_service('conductor')
         self.start_service('scheduler')
         self.compute = self.start_service('compute', host='test_compute1')
-        self.consoleauth = self.start_service('consoleauth')
 
         self.useFixture(cast_as_call.CastAsCall(self))
         self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
@@ -85,7 +82,18 @@ class TestSerialConsoleLiveMigrate(test.TestCase):
     @mock.patch('nova.conductor.tasks.live_migrate.LiveMigrationTask.'
                 '_check_destination_is_not_source', return_value=False)
     @mock.patch('nova.virt.libvirt.LibvirtDriver._create_image')
-    def test_serial_console_live_migrate(self, mock_create_image,
+    @mock.patch('nova.virt.libvirt.LibvirtDriver._get_local_gb_info',
+                return_value={'total': 128,
+                              'used': 44,
+                              'free': 84})
+    @mock.patch('nova.virt.libvirt.driver.libvirt_utils.is_valid_hostname',
+                return_value=True)
+    @mock.patch('nova.virt.libvirt.driver.libvirt_utils.file_open',
+                side_effect=[io.BytesIO(b''), io.BytesIO(b'')])
+    def test_serial_console_live_migrate(self, mock_file_open,
+                                         mock_valid_hostname,
+                                         mock_get_fs_info,
+                                         mock_create_image,
                                          mock_conductor_source_check,
                                          mock_path_get_size,
                                          mock_get_disk_size,
@@ -102,7 +110,7 @@ class TestSerialConsoleLiveMigrate(test.TestCase):
         is then enabled and VNC + SPICE are disabled.
 
         The error will be raised at
-            https://github.com/openstack/nova/blob/
+            https://opendev.org/openstack/nova/src/commit/
             4f33047d07f5a11b208c344fe206aba01cd8e6fe/
             nova/virt/libvirt/driver.py#L5842-L5852
         """

@@ -13,6 +13,7 @@
 
 from eventlet import tpool
 import mock
+from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.compute import task_states
@@ -23,7 +24,7 @@ from nova.virt.libvirt.storage import rbd_utils
 from nova.virt.libvirt import utils as libvirt_utils
 
 
-CEPH_MON_DUMP = """dumped monmap epoch 1
+CEPH_MON_DUMP = r"""dumped monmap epoch 1
 { "epoch": 1,
   "fsid": "33630410-6d93-4d66-8e42-3b953cf194aa",
   "modified": "2013-05-22 17:44:56.343618",
@@ -51,6 +52,53 @@ CEPH_MON_DUMP = """dumped monmap epoch 1
 """
 
 
+# max_avail stats are tweaked for testing
+CEPH_DF = """
+{
+    "stats": {
+        "total_bytes": 25757220864,
+        "total_used_bytes": 274190336,
+        "total_avail_bytes": 25483030528
+    },
+    "pools": [
+        {
+            "name": "images",
+            "id": 1,
+            "stats": {
+                "kb_used": 12419,
+                "bytes_used": 12716067,
+                "percent_used": 0.05,
+                "max_avail": 24195168123,
+                "objects": 6
+            }
+        },
+        {
+            "name": "rbd",
+            "id": 2,
+            "stats": {
+                "kb_used": 0,
+                "bytes_used": 0,
+                "percent_used": 0.00,
+                "max_avail": 24195168456,
+                "objects": 0
+            }
+        },
+        {
+            "name": "volumes",
+            "id": 3,
+            "stats": {
+                "kb_used": 0,
+                "bytes_used": 0,
+                "percent_used": 0.00,
+                "max_avail": 24195168789,
+                "objects": 0
+            }
+        }
+    ]
+}
+"""
+
+
 class FakeException(Exception):
     pass
 
@@ -59,6 +107,12 @@ class RbdTestCase(test.NoDBTestCase):
 
     def setUp(self):
         super(RbdTestCase, self).setUp()
+
+        self.rbd_pool = 'rbd'
+        self.rbd_connect_timeout = 5
+        self.flags(images_rbd_pool=self.rbd_pool, group='libvirt')
+        self.flags(rbd_connect_timeout=self.rbd_connect_timeout,
+                    group='libvirt')
 
         rados_patcher = mock.patch.object(rbd_utils, 'rados')
         self.mock_rados = rados_patcher.start()
@@ -82,8 +136,7 @@ class RbdTestCase(test.NoDBTestCase):
         self.mock_rbd.ImageBusy = FakeException
         self.mock_rbd.ImageHasSnapshots = FakeException
 
-        self.rbd_pool = 'rbd'
-        self.driver = rbd_utils.RBDDriver(self.rbd_pool, None, None)
+        self.driver = rbd_utils.RBDDriver()
 
         self.volume_name = u'volume-00000001'
         self.snap_name = u'test-snap'
@@ -118,6 +171,13 @@ class RbdTestCase(test.NoDBTestCase):
                               self.driver.parse_url, loc)
             self.assertFalse(self.driver.is_cloneable({'url': loc},
                                                       image_meta))
+
+    @mock.patch.object(rbd_utils, 'RADOSClient')
+    def test_rbddriver(self, mock_client):
+        client = mock_client.return_value
+        client.__enter__.return_value = client
+        client.cluster.get_fsid.side_effect = lambda: b'abc'
+        self.assertEqual('abc', self.driver.get_fsid())
 
     @mock.patch.object(rbd_utils.RBDDriver, 'get_fsid')
     def test_cloneable(self, mock_get_fsid):
@@ -269,7 +329,8 @@ class RbdTestCase(test.NoDBTestCase):
 
     def test_connect_to_rados_default(self):
         ret = self.driver._connect_to_rados()
-        self.assertTrue(self.mock_rados.Rados.connect.called)
+        self.mock_rados.Rados.connect.assert_called_once_with(
+                timeout=self.rbd_connect_timeout)
         self.assertTrue(self.mock_rados.Rados.open_ioctx.called)
         self.assertIsInstance(ret[0], self.mock_rados.Rados)
         self.assertEqual(self.mock_rados.Rados.ioctx, ret[1])
@@ -277,7 +338,8 @@ class RbdTestCase(test.NoDBTestCase):
 
     def test_connect_to_rados_different_pool(self):
         ret = self.driver._connect_to_rados('alt_pool')
-        self.assertTrue(self.mock_rados.Rados.connect.called)
+        self.mock_rados.Rados.connect.assert_called_once_with(
+                timeout=self.rbd_connect_timeout)
         self.assertTrue(self.mock_rados.Rados.open_ioctx.called)
         self.assertIsInstance(ret[0], self.mock_rados.Rados)
         self.assertEqual(self.mock_rados.Rados.ioctx, ret[1])
@@ -550,3 +612,19 @@ class RbdTestCase(test.NoDBTestCase):
         proxy.list_snaps.return_value = [{'name': self.snap_name}, ]
         self.driver.rollback_to_snap(self.volume_name, self.snap_name)
         proxy.rollback_to_snap.assert_called_once_with(self.snap_name)
+
+    @mock.patch('oslo_concurrency.processutils.execute')
+    def test_get_pool_info(self, mock_execute):
+        mock_execute.return_value = (CEPH_DF, '')
+        ceph_df_json = jsonutils.loads(CEPH_DF)
+        expected = {'total': ceph_df_json['stats']['total_bytes'],
+                    'free': ceph_df_json['pools'][1]['stats']['max_avail'],
+                    'used': ceph_df_json['pools'][1]['stats']['bytes_used']}
+        self.assertDictEqual(expected, self.driver.get_pool_info())
+
+    @mock.patch('oslo_concurrency.processutils.execute')
+    def test_get_pool_info_not_found(self, mock_execute):
+        # Make the pool something other than self.rbd_pool so it won't be found
+        ceph_df_not_found = CEPH_DF.replace('rbd', 'vms')
+        mock_execute.return_value = (ceph_df_not_found, '')
+        self.assertRaises(exception.NotFound, self.driver.get_pool_info)

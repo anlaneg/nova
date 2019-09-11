@@ -13,7 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import errno
 import os
 
 from oslo_concurrency import processutils
@@ -25,8 +24,8 @@ import six
 import nova.conf
 from nova import exception as nova_exception
 from nova.i18n import _
+import nova.privsep.libvirt
 from nova import utils
-from nova.virt.libvirt import utils as libvirt_utils
 from nova.virt.libvirt.volume import fs
 
 LOG = logging.getLogger(__name__)
@@ -37,35 +36,66 @@ SOURCE_PROTOCOL = 'quobyte'
 SOURCE_TYPE = 'file'
 DRIVER_CACHE = 'none'
 DRIVER_IO = 'native'
+VALID_SYSD_STATES = ["starting", "running", "degraded"]
+SYSTEMCTL_CHECK_PATH = "/run/systemd/system"
+
+
+_is_systemd = None
+
+
+def is_systemd():
+    """Checks if the host is running systemd"""
+    global _is_systemd
+
+    if _is_systemd is not None:
+        return _is_systemd
+
+    tmp_is_systemd = False
+
+    if psutil.Process(1).name() == "systemd" or os.path.exists(
+            SYSTEMCTL_CHECK_PATH):
+        # NOTE(kaisers): exit code might be >1 in theory but in practice this
+        # is hard coded to 1. Due to backwards compatibility and systemd
+        # CODING_STYLE this is unlikely to change.
+        sysdout, sysderr = processutils.execute("systemctl",
+                                                "is-system-running",
+                                                check_exit_code=[0, 1])
+        for state in VALID_SYSD_STATES:
+            if state == sysdout.strip():
+                tmp_is_systemd = True
+                break
+
+    _is_systemd = tmp_is_systemd
+    return _is_systemd
 
 
 def mount_volume(volume, mnt_base, configfile=None):
     """Wraps execute calls for mounting a Quobyte volume"""
     fileutils.ensure_tree(mnt_base)
 
-    # NOTE(kaisers): disable xattrs to speed up io as this omits
-    # additional metadata requests in the backend. xattrs can be
-    # enabled without issues but will reduce performance.
-    command = ['mount.quobyte', '--disable-xattrs', volume, mnt_base]
-    if os.path.exists(" /run/systemd/system"):
-        # Note(kaisers): with systemd this requires a separate CGROUP to
-        # prevent Nova service stop/restarts from killing the mount.
-        command = ['systemd-run', '--scope', '--user', 'mount.quobyte',
-                   '--disable-xattrs', volume, mnt_base]
-    if configfile:
-        command.extend(['-c', configfile])
+    # Note(kaisers): with systemd this requires a separate CGROUP to
+    # prevent Nova service stop/restarts from killing the mount.
+    if is_systemd():
+        LOG.debug('Mounting volume %s at mount point %s via systemd-run',
+                  volume, mnt_base)
+        nova.privsep.libvirt.systemd_run_qb_mount(volume, mnt_base,
+                                                  cfg_file=configfile)
+    else:
+        LOG.debug('Mounting volume %s at mount point %s via mount.quobyte',
+                  volume, mnt_base, cfg_file=configfile)
 
-    LOG.debug('Mounting volume %s at mount point %s ...',
-              volume,
-              mnt_base)
-    utils.execute(*command)
+        nova.privsep.libvirt.unprivileged_qb_mount(volume, mnt_base,
+                                                   cfg_file=configfile)
     LOG.info('Mounted volume: %s', volume)
 
 
 def umount_volume(mnt_base):
     """Wraps execute calls for unmouting a Quobyte volume"""
     try:
-        utils.execute('umount.quobyte', mnt_base)
+        if is_systemd():
+            nova.privsep.libvirt.umount(mnt_base)
+        else:
+            nova.privsep.libvirt.unprivileged_umount(mnt_base)
     except processutils.ProcessExecutionError as exc:
         if 'Device or resource busy' in six.text_type(exc):
             LOG.error("The Quobyte volume at %s is still in use.", mnt_base)
@@ -75,12 +105,15 @@ def umount_volume(mnt_base):
 
 
 def validate_volume(mount_path):
-    """Runs a number of tests to be sure this is a (working) Quobyte mount"""
+    """Determine if the volume is a valid Quobyte mount.
+
+    Runs a number of tests to be sure this is a (working) Quobyte mount
+    """
     partitions = psutil.disk_partitions(all=True)
     for p in partitions:
         if mount_path != p.mountpoint:
             continue
-        if p.device.startswith("quobyte@"):
+        if p.device.startswith("quobyte@") or p.fstype == "fuse.quobyte":
             statresult = os.stat(mount_path)
             # Note(kaisers): Quobyte always shows mount points with size 0
             if statresult.st_size == 0:
@@ -90,10 +123,10 @@ def validate_volume(mount_path):
                 msg = (_("The mount %(mount_path)s is not a "
                          "valid Quobyte volume. Stale mount?")
                        % {'mount_path': mount_path})
-            raise nova_exception.InvalidVolume(msg)
+            raise nova_exception.StaleVolumeMount(msg, mount_path=mount_path)
         else:
-            msg = (_("The mount %(mount_path)s is not a valid"
-                     " Quobyte volume according to partition list.")
+            msg = (_("The mount %(mount_path)s is not a valid "
+                     "Quobyte volume according to partition list.")
                    % {'mount_path': mount_path})
             raise nova_exception.InvalidVolume(msg)
     msg = (_("No matching Quobyte mount entry for %(mount_path)s"
@@ -125,42 +158,48 @@ class LibvirtQuobyteVolumeDriver(fs.LibvirtBaseFileSystemVolumeDriver):
     @utils.synchronized('connect_qb_volume')
     def connect_volume(self, connection_info, instance):
         """Connect the volume."""
+        if is_systemd():
+            LOG.debug("systemd detected.")
+        else:
+            LOG.debug("No systemd detected.")
+
         data = connection_info['data']
         quobyte_volume = self._normalize_export(data['export'])
         mount_path = self._get_mount_path(connection_info)
-        mounted = libvirt_utils.is_mounted(mount_path,
-                                           SOURCE_PROTOCOL
-                                           + '@' + quobyte_volume)
-        if mounted:
-            try:
-                os.stat(mount_path)
-            except OSError as exc:
-                if exc.errno == errno.ENOTCONN:
-                    mounted = False
-                    LOG.info('Fixing previous mount %s which was not'
-                             ' unmounted correctly.', mount_path)
-                    umount_volume(mount_path)
+        try:
+            validate_volume(mount_path)
+            mounted = True
+        except nova_exception.StaleVolumeMount:
+            mounted = False
+            LOG.info('Fixing previous mount %s which was not '
+                     'unmounted correctly.', mount_path)
+            umount_volume(mount_path)
+        except nova_exception.InvalidVolume:
+            mounted = False
 
         if not mounted:
             mount_volume(quobyte_volume,
                          mount_path,
                          CONF.libvirt.quobyte_client_cfg)
 
-        validate_volume(mount_path)
+        try:
+            validate_volume(mount_path)
+        except (nova_exception.InvalidVolume,
+                nova_exception.StaleVolumeMount) as nex:
+            LOG.error("Could not mount Quobyte volume: %s", nex)
 
     @utils.synchronized('connect_qb_volume')
     def disconnect_volume(self, connection_info, instance):
         """Disconnect the volume."""
 
-        quobyte_volume = self._normalize_export(
-                                        connection_info['data']['export'])
         mount_path = self._get_mount_path(connection_info)
-
-        if libvirt_utils.is_mounted(mount_path, 'quobyte@' + quobyte_volume):
-            umount_volume(mount_path)
+        try:
+            validate_volume(mount_path)
+        except (nova_exception.InvalidVolume,
+                nova_exception.StaleVolumeMount) as exc:
+            LOG.warning("Could not disconnect Quobyte volume mount: %s", exc)
         else:
-            LOG.info("Trying to disconnected unmounted volume at %s",
-                     mount_path)
+            umount_volume(mount_path)
 
     def _normalize_export(self, export):
         protocol = SOURCE_PROTOCOL + "://"

@@ -30,6 +30,7 @@ from oslo_db.sqlalchemy import enginefacade
 from oslo_db.sqlalchemy import update_match
 from oslo_db.sqlalchemy import utils as sqlalchemyutils
 from oslo_log import log as logging
+from oslo_utils import excutils
 from oslo_utils import importutils
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
@@ -46,7 +47,6 @@ from sqlalchemy import or_
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import contains_eager
 from sqlalchemy.orm import joinedload
-from sqlalchemy.orm import joinedload_all
 from sqlalchemy.orm import noload
 from sqlalchemy.orm import undefer
 from sqlalchemy.schema import Table
@@ -96,6 +96,15 @@ def _context_manager_from_context(context):
             pass
 
 
+def _joinedload_all(column):
+    elements = column.split('.')
+    joined = joinedload(elements.pop(0))
+    for element in elements:
+        joined = joined.joinedload(element)
+
+    return joined
+
+
 def configure(conf):
     main_context_manager.configure(**_get_db_conf(conf.database))
     api_context_manager.configure(**_get_db_conf(conf.api_database))
@@ -134,11 +143,13 @@ def get_engine(use_slave=False, context=None):
     :param context: The request context that can contain a context manager
     """
     ctxt_mgr = get_context_manager(context)
-    return ctxt_mgr.get_legacy_facade().get_engine(use_slave=use_slave)
+    if use_slave:
+        return ctxt_mgr.reader.get_engine()
+    return ctxt_mgr.writer.get_engine()
 
 
 def get_api_engine():
-    return api_context_manager.get_legacy_facade().get_engine()
+    return api_context_manager.writer.get_engine()
 
 
 _SHADOW_TABLE_PREFIX = 'shadow_'
@@ -146,6 +157,7 @@ _DEFAULT_QUOTA_NAME = 'default'
 PER_PROJECT_QUOTAS = ['fixed_ips', 'floating_ips', 'networks']
 
 
+# NOTE(stephenfin): This is required and used by oslo.db
 def get_backend():
     """The backend is this module itself."""
     return sys.modules[__name__]
@@ -166,20 +178,6 @@ def require_context(f):
     def wrapper(*args, **kwargs):
         nova.context.require_context(args[0])
         return f(*args, **kwargs)
-    return wrapper
-
-
-def require_instance_exists_using_uuid(f):
-    """Decorator to require the specified instance to exist.
-
-    Requires the wrapped function to use context and instance_uuid as
-    their first two arguments.
-    """
-    @functools.wraps(f)
-    def wrapper(context, instance_uuid, *args, **kwargs):
-        instance_get_by_uuid(context, instance_uuid)
-        return f(context, instance_uuid, *args, **kwargs)
-
     return wrapper
 
 
@@ -473,8 +471,7 @@ def service_get_by_host_and_topic(context, host, topic):
 
 @pick_context_manager_reader
 def service_get_all_by_binary(context, binary, include_disabled=False):
-    query = model_query(context, models.Service, read_deleted="no").\
-                    filter_by(binary=binary)
+    query = model_query(context, models.Service).filter_by(binary=binary)
     if not include_disabled:
         query = query.filter_by(disabled=False)
     return query.all()
@@ -654,6 +651,15 @@ def compute_node_get_by_host_and_nodename(context, host, nodename):
     return results[0]
 
 
+@pick_context_manager_reader
+def compute_node_get_by_nodename(context, hypervisor_hostname):
+    results = _compute_node_fetchall(context,
+            {"hypervisor_hostname": hypervisor_hostname})
+    if not results:
+        raise exception.ComputeHostNotFound(host=hypervisor_hostname)
+    return results[0]
+
+
 @pick_context_manager_reader_allow_async
 def compute_node_get_all_by_host(context, host):
     results = _compute_node_fetchall(context, {"host": host})
@@ -695,9 +701,52 @@ def compute_node_create(context, values):
 
     compute_node_ref = models.ComputeNode()
     compute_node_ref.update(values)
-    compute_node_ref.save(context.session)
+    try:
+        compute_node_ref.save(context.session)
+    except db_exc.DBDuplicateEntry:
+        with excutils.save_and_reraise_exception(logger=LOG) as err_ctx:
+            # Check to see if we have a (soft) deleted ComputeNode with the
+            # same UUID and if so just update it and mark as no longer (soft)
+            # deleted. See bug 1839560 for details.
+            if 'uuid' in values:
+                # Get a fresh context for a new DB session and allow it to
+                # get a deleted record.
+                ctxt = nova.context.get_admin_context(read_deleted='yes')
+                compute_node_ref = _compute_node_get_and_update_deleted(
+                    ctxt, values)
+                # If we didn't get anything back we failed to find the node
+                # by uuid and update it so re-raise the DBDuplicateEntry.
+                if compute_node_ref:
+                    err_ctx.reraise = False
 
     return compute_node_ref
+
+
+@pick_context_manager_writer
+def _compute_node_get_and_update_deleted(context, values):
+    """Find a ComputeNode by uuid, update and un-delete it.
+
+    This is a special case from the ``compute_node_create`` method which
+    needs to be separate to get a new Session.
+
+    This method will update the ComputeNode, if found, to have deleted=0 and
+    deleted_at=None values.
+
+    :param context: request auth context which should be able to read deleted
+        records
+    :param values: values used to update the ComputeNode record - must include
+        uuid
+    :return: updated ComputeNode sqlalchemy model object if successfully found
+        and updated, None otherwise
+    """
+    cn = model_query(
+        context, models.ComputeNode).filter_by(uuid=values['uuid']).first()
+    if cn:
+        # Update with the provided values but un-soft-delete.
+        update_values = copy.deepcopy(values)
+        update_values['deleted'] = 0
+        update_values['deleted_at'] = None
+        return compute_node_update(context, cn.id, update_values)
 
 
 @oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
@@ -847,7 +896,7 @@ def floating_ip_get(context, id):
     try:
         result = model_query(context, models.FloatingIp, project_only=True).\
                      filter_by(id=id).\
-                     options(joinedload_all('fixed_ip.instance')).\
+                     options(_joinedload_all('fixed_ip.instance')).\
                      first()
 
         if not result:
@@ -965,15 +1014,6 @@ def floating_ip_create(context, values):
     return floating_ip_ref
 
 
-def _floating_ip_count_by_project(context, project_id):
-    nova.context.authorize_project_context(context, project_id)
-    # TODO(tr3buchet): why leave auto_assigned floating IPs out?
-    return model_query(context, models.FloatingIp, read_deleted="no").\
-                   filter_by(project_id=project_id).\
-                   filter_by(auto_assigned=False).\
-                   count()
-
-
 @require_context
 @oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
 @pick_context_manager_writer
@@ -1075,7 +1115,7 @@ def floating_ip_get_all_by_project(context, project_id):
     return _floating_ip_get_all(context).\
                          filter_by(project_id=project_id).\
                          filter_by(auto_assigned=False).\
-                         options(joinedload_all('fixed_ip.instance')).\
+                         options(_joinedload_all('fixed_ip.instance')).\
                          all()
 
 
@@ -1093,7 +1133,7 @@ def _floating_ip_get_by_address(context, address):
     try:
         result = model_query(context, models.FloatingIp).\
                     filter_by(address=address).\
-                    options(joinedload_all('fixed_ip.instance')).\
+                    options(_joinedload_all('fixed_ip.instance')).\
                     first()
 
         if not result:
@@ -1150,7 +1190,7 @@ def floating_ip_update(context, address, values):
 def dnsdomain_get(context, fqdomain):
     return model_query(context, models.DNSDomain, read_deleted="no").\
                filter_by(domain=fqdomain).\
-               with_lockmode('update').\
+               with_for_update().\
                first()
 
 
@@ -1408,7 +1448,7 @@ def _fixed_ip_get_by_address(context, address, columns_to_join=None):
     try:
         result = model_query(context, models.FixedIp)
         for column in columns_to_join:
-            result = result.options(joinedload_all(column))
+            result = result.options(_joinedload_all(column))
         result = result.filter_by(address=address).first()
         if not result:
             raise exception.FixedIpNotFoundForAddress(address=address)
@@ -1468,7 +1508,8 @@ def fixed_ip_get_by_instance(context, instance_uuid):
 
 @pick_context_manager_reader
 def fixed_ip_get_by_host(context, host):
-    instance_uuids = _instance_get_all_uuids_by_host(context, host)
+    instance_uuids = _instance_get_all_uuids_by_hosts(
+        context, [host]).get(host, [])
     if not instance_uuids:
         return []
 
@@ -1507,16 +1548,6 @@ def fixed_ips_by_virtual_interface(context, vif_id):
 @pick_context_manager_writer
 def fixed_ip_update(context, address, values):
     _fixed_ip_get_by_address(context, address).update(values)
-
-
-def _fixed_ip_count_by_project(context, project_id):
-    nova.context.authorize_project_context(context, project_id)
-    return model_query(context, models.FixedIp, (models.FixedIp.id,),
-                       read_deleted="no").\
-                join((models.Instance,
-                      models.Instance.uuid == models.FixedIp.instance_uuid)).\
-                filter(models.Instance.project_id == project_id).\
-                count()
 
 
 ###################
@@ -1598,7 +1629,6 @@ def virtual_interface_get_by_uuid(context, vif_uuid):
 
 
 @require_context
-@require_instance_exists_using_uuid
 @pick_context_manager_reader_allow_async
 def virtual_interface_get_by_instance(context, instance_uuid):
     """Gets all virtual interfaces for instance.
@@ -1760,6 +1790,7 @@ def instance_create(context, values):
          'pci_requests': None,
          'vcpu_model': None,
          'trusted_certs': None,
+         'vpmems': None,
          })
     instance_ref['extra'].update(values.pop('extra', {}))
     # 更新instances表
@@ -1798,45 +1829,46 @@ def instance_create(context, values):
 @require_context
 @oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
 @pick_context_manager_writer
-def instance_destroy(context, instance_uuid, constraint=None):
+def instance_destroy(context, instance_uuid, constraint=None,
+                     hard_delete=False):
     if uuidutils.is_uuid_like(instance_uuid):
         instance_ref = _instance_get_by_uuid(context, instance_uuid)
     else:
-        raise exception.InvalidUUID(instance_uuid)
+        raise exception.InvalidUUID(uuid=instance_uuid)
 
     query = model_query(context, models.Instance).\
                     filter_by(uuid=instance_uuid)
     if constraint is not None:
         query = constraint.apply(models.Instance, query)
+    # Either in hard or soft delete, we soft delete the instance first
+    # to make sure that that the constraints were met.
     count = query.soft_delete()
     if count == 0:
         raise exception.ConstraintNotMet()
-    model_query(context, models.SecurityGroupInstanceAssociation).\
-            filter_by(instance_uuid=instance_uuid).\
-            soft_delete()
-    model_query(context, models.InstanceInfoCache).\
-            filter_by(instance_uuid=instance_uuid).\
-            soft_delete()
-    model_query(context, models.InstanceMetadata).\
-            filter_by(instance_uuid=instance_uuid).\
-            soft_delete()
-    model_query(context, models.InstanceFault).\
-            filter_by(instance_uuid=instance_uuid).\
-            soft_delete()
-    model_query(context, models.InstanceExtra).\
-            filter_by(instance_uuid=instance_uuid).\
-            soft_delete()
-    model_query(context, models.InstanceSystemMetadata).\
-            filter_by(instance_uuid=instance_uuid).\
-            soft_delete()
-    model_query(context, models.BlockDeviceMapping).\
-            filter_by(instance_uuid=instance_uuid).\
-            soft_delete()
-    model_query(context, models.Migration).\
-            filter_by(instance_uuid=instance_uuid).\
-            soft_delete()
-    model_query(context, models.InstanceIdMapping).filter_by(
-        uuid=instance_uuid).soft_delete()
+
+    models_to_delete = [
+        models.SecurityGroupInstanceAssociation, models.InstanceInfoCache,
+        models.InstanceMetadata, models.InstanceFault, models.InstanceExtra,
+        models.InstanceSystemMetadata, models.BlockDeviceMapping,
+        models.Migration, models.VirtualInterface
+    ]
+
+    # For most referenced models we filter by the instance_uuid column, but for
+    # these models we filter by the uuid column.
+    filtered_by_uuid = [models.InstanceIdMapping]
+
+    for model in models_to_delete + filtered_by_uuid:
+        key = 'instance_uuid' if model not in filtered_by_uuid else 'uuid'
+        filter_ = {key: instance_uuid}
+        if hard_delete:
+            # We need to read any soft-deleted related records to make sure
+            # and clean those up as well otherwise we can fail with ForeignKey
+            # constraint errors when hard deleting the instance.
+            model_query(context, model, read_deleted='yes').filter_by(
+                **filter_).delete()
+        else:
+            model_query(context, model).filter_by(**filter_).soft_delete()
+
     # NOTE(snikitin): We can't use model_query here, because there is no
     # column 'deleted' in 'tags' or 'console_auth_tokens' tables.
     context.session.query(models.Tag).filter_by(
@@ -1848,6 +1880,21 @@ def instance_destroy(context, instance_uuid, constraint=None):
     # can be used by operators to find out what actions were performed on a
     # deleted instance.  Both of these tables are special-cased in
     # _archive_deleted_rows_for_table().
+    if hard_delete:
+        # NOTE(ttsiousts): In case of hard delete, we need to remove the
+        # instance actions too since instance_uuid is a foreign key and
+        # for this we need to delete the corresponding InstanceActionEvents
+        actions = context.session.query(models.InstanceAction).filter_by(
+            instance_uuid=instance_uuid).all()
+        for action in actions:
+            context.session.query(models.InstanceActionEvent).filter_by(
+                action_id=action.id).delete()
+        context.session.query(models.InstanceAction).filter_by(
+            instance_uuid=instance_uuid).delete()
+        # NOTE(ttsiouts): The instance is the last thing to be deleted in
+        # order to respect all constraints
+        context.session.query(models.Instance).filter_by(
+            uuid=instance_uuid).delete()
 
     return instance_ref
 
@@ -1890,7 +1937,7 @@ def instance_get(context, instance_id, columns_to_join=None):
 
 def _build_instance_get(context, columns_to_join=None):
     query = model_query(context, models.Instance, project_only=True).\
-            options(joinedload_all('security_groups.rules')).\
+            options(_joinedload_all('security_groups.rules')).\
             options(joinedload('info_cache'))
     if columns_to_join is None:
         columns_to_join = ['metadata', 'system_metadata']
@@ -2063,8 +2110,10 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
 
     |   ['project_id', 'user_id', 'image_ref',
     |    'vm_state', 'instance_type_id', 'uuid',
-    |    'metadata', 'host', 'system_metadata']
+    |    'metadata', 'host', 'system_metadata', 'locked', 'hidden']
 
+    Hidden instances will *not* be returned by default, unless there's a
+    filter that says otherwise.
 
     A third type of filter (also using exact matching), filters
     based on instance metadata tags when supplied under a special
@@ -2226,12 +2275,16 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
         else:
             filters['user_id'] = context.user_id
 
+    if 'hidden' not in filters:
+        # Filter out hidden instances by default.
+        filters['hidden'] = False
+
     # Filters for exact matches that we can do along with the SQL query...
     # For other filters that don't match this, we will do regexp matching
     exact_match_filter_names = ['project_id', 'user_id', 'image_ref',
                                 'vm_state', 'instance_type_id', 'uuid',
                                 'metadata', 'host', 'task_state',
-                                'system_metadata']
+                                'system_metadata', 'locked', 'hidden']
 
     # Filter the query
     query_prefix = _exact_instance_filter(query_prefix,
@@ -2624,23 +2677,30 @@ def instance_get_all_by_host(context, host, columns_to_join=None):
                                     manual_joins=columns_to_join)
 
 
-def _instance_get_all_uuids_by_host(context, host):
-    """Return a list of the instance uuids on a given host.
+def _instance_get_all_uuids_by_hosts(context, hosts):
+    """Return a dict, keyed by hostname, of a list of the instance uuids on the
+    host for each supplied hostname.
 
-    Returns a list of UUIDs, not Instance model objects.
+    Returns a dict, keyed by hostname, of a list of UUIDs, not Instance model
+    objects.
     """
-    uuids = []
-    for tuple in model_query(context, models.Instance, (models.Instance.uuid,),
-                             read_deleted="no").\
-                filter_by(host=host).\
-                all():
-        uuids.append(tuple[0])
-    return uuids
+    itbl = models.Instance.__table__
+    default_deleted_value = itbl.c.deleted.default.arg
+    sel = sql.select([itbl.c.host, itbl.c.uuid])
+    sel = sel.where(sql.and_(
+            itbl.c.deleted == default_deleted_value,
+            itbl.c.host.in_(hosts)))
+
+    # group the instance UUIDs by hostname
+    res = collections.defaultdict(list)
+    for rec in context.session.execute(sel).fetchall():
+        res[rec[0]].append(rec[1])
+    return res
 
 
 @pick_context_manager_reader
-def instance_get_all_uuids_by_host(context, host):
-    return _instance_get_all_uuids_by_host(context, host)
+def instance_get_all_uuids_by_hosts(context, hosts):
+    return _instance_get_all_uuids_by_hosts(context, hosts)
 
 
 @pick_context_manager_reader
@@ -2789,7 +2849,12 @@ def _instance_metadata_update_in_place(context, instance, metadata_type, model,
 
 def _instance_update(context, instance_uuid, values, expected, original=None):
     if not uuidutils.is_uuid_like(instance_uuid):
-        raise exception.InvalidUUID(instance_uuid)
+        raise exception.InvalidUUID(uuid=instance_uuid)
+
+    # NOTE(mdbooth): We pop values from this dict below, so we copy it here to
+    # ensure there are no side effects for the caller or if we retry the
+    # function due to a db conflict.
+    updates = copy.copy(values)
 
     if expected is None:
         expected = {}
@@ -2802,8 +2867,8 @@ def _instance_update(context, instance_uuid, values, expected, original=None):
     # updates
     for field in ('task_state', 'vm_state'):
         expected_field = 'expected_%s' % field
-        if expected_field in values:
-            value = values.pop(expected_field, None)
+        if expected_field in updates:
+            value = updates.pop(expected_field, None)
             # Coerce all single values to singleton lists
             if value is None:
                 expected[field] = [None]
@@ -2811,23 +2876,23 @@ def _instance_update(context, instance_uuid, values, expected, original=None):
                 expected[field] = sqlalchemyutils.to_list(value)
 
     # Values which need to be updated separately
-    metadata = values.pop('metadata', None)
-    system_metadata = values.pop('system_metadata', None)
+    metadata = updates.pop('metadata', None)
+    system_metadata = updates.pop('system_metadata', None)
 
-    _handle_objects_related_type_conversions(values)
+    _handle_objects_related_type_conversions(updates)
 
     # Hostname is potentially unique, but this is enforced in code rather
     # than the DB. The query below races, but the number of users of
     # osapi_compute_unique_server_name_scope is small, and a robust fix
     # will be complex. This is intentionally left as is for the moment.
-    if 'hostname' in values:
-        _validate_unique_server_name(context, values['hostname'])
+    if 'hostname' in updates:
+        _validate_unique_server_name(context, updates['hostname'])
 
     compare = models.Instance(uuid=instance_uuid, **expected)
     try:
         instance_ref = model_query(context, models.Instance,
                                    project_only=True).\
-                       update_on_match(compare, 'uuid', values)
+                       update_on_match(compare, 'uuid', updates)
     except update_match.NoRowsMatched:
         # Update failed. Try to find why and raise a specific error.
 
@@ -3020,7 +3085,7 @@ def instance_extra_get_by_instance_uuid(context, instance_uuid,
         filter_by(instance_uuid=instance_uuid)
     if columns is None:
         columns = ['numa_topology', 'pci_requests', 'flavor', 'vcpu_model',
-                   'trusted_certs', 'migration_context']
+                   'trusted_certs', 'vpmems', 'migration_context']
     for column in columns:
         query = query.options(undefer(column))
     instance_extra = query.first()
@@ -3118,7 +3183,7 @@ def network_associate(context, project_id, network_id=None, force=False):
             filter_kwargs['id'] = id
         return model_query(context, models.Network, read_deleted="no").\
                        filter_by(**filter_kwargs).\
-                       with_lockmode('update').\
+                       with_for_update().\
                        first()
 
     if not force:
@@ -3885,7 +3950,7 @@ def security_group_create(context, values):
     security_group_ref = models.SecurityGroup()
     # FIXME(devcamcar): Unless I do this, rules fails with lazy load exception
     # once save() is called.  This will get cleaned up in next orm pass.
-    security_group_ref.rules
+    security_group_ref.rules = []
     security_group_ref.update(values)
     try:
         with get_context_manager(context).writer.savepoint.using(context):
@@ -3902,7 +3967,7 @@ def _security_group_get_query(context, read_deleted=None,
     query = model_query(context, models.SecurityGroup,
             read_deleted=read_deleted, project_only=project_only)
     if join_rules:
-        query = query.options(joinedload_all('rules.grantee_group'))
+        query = query.options(_joinedload_all('rules.grantee_group'))
     return query
 
 
@@ -3946,7 +4011,7 @@ def security_group_get(context, security_group_id, columns_to_join=None):
         columns_to_join = []
     for column in columns_to_join:
         if column.startswith('instances'):
-            query = query.options(joinedload_all(column))
+            query = query.options(_joinedload_all(column))
 
     result = query.first()
     if not result:
@@ -3969,7 +4034,7 @@ def security_group_get_by_name(context, project_id, group_name,
         columns_to_join = ['instances', 'rules.grantee_group']
 
     for column in columns_to_join:
-        query = query.options(joinedload_all(column))
+        query = query.options(_joinedload_all(column))
 
     result = query.first()
     if not result:
@@ -4025,7 +4090,7 @@ def security_group_update(context, security_group_id, values,
         id=security_group_id)
     if columns_to_join:
         for column in columns_to_join:
-            query = query.options(joinedload_all(column))
+            query = query.options(_joinedload_all(column))
     security_group_ref = query.first()
 
     if not security_group_ref:
@@ -4103,14 +4168,6 @@ def security_group_destroy(context, security_group_id):
             soft_delete()
 
 
-def _security_group_count_by_project_and_user(context, project_id, user_id):
-    nova.context.authorize_project_context(context, project_id)
-    return model_query(context, models.SecurityGroup, read_deleted="no").\
-                   filter_by(project_id=project_id).\
-                   filter_by(user_id=user_id).\
-                   count()
-
-
 ###################
 
 
@@ -4149,7 +4206,7 @@ def security_group_rule_get_by_security_group(context, security_group_id,
     query = (_security_group_rule_get_query(context).
              filter_by(parent_group_id=security_group_id))
     for column in columns_to_join:
-        query = query.options(joinedload_all(column))
+        query = query.options(_joinedload_all(column))
     return query.all()
 
 
@@ -4291,6 +4348,7 @@ def migration_create(context, values):
     return migration
 
 
+@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
 @pick_context_manager_writer
 def migration_update(context, id, values):
     migration = migration_get(context, id)
@@ -4384,7 +4442,7 @@ def migration_get_in_progress_by_host_and_node(context, host, node):
                                                  'reverted', 'error',
                                                  'failed', 'completed',
                                                  'cancelled', 'done'])).\
-            options(joinedload_all('instance.system_metadata')).\
+            options(_joinedload_all('instance.system_metadata')).\
             all()
 
 
@@ -4606,51 +4664,6 @@ def console_get(context, console_id, instance_uuid=None):
             raise exception.ConsoleNotFound(console_id=console_id)
 
     return result
-
-
-##################
-
-
-@pick_context_manager_writer
-def cell_create(context, values):
-    cell = models.Cell()
-    cell.update(values)
-    try:
-        cell.save(context.session)
-    except db_exc.DBDuplicateEntry:
-        raise exception.CellExists(name=values['name'])
-    return cell
-
-
-def _cell_get_by_name_query(context, cell_name):
-    return model_query(context, models.Cell).filter_by(name=cell_name)
-
-
-@pick_context_manager_writer
-def cell_update(context, cell_name, values):
-    cell_query = _cell_get_by_name_query(context, cell_name)
-    if not cell_query.update(values):
-        raise exception.CellNotFound(cell_name=cell_name)
-    cell = cell_query.first()
-    return cell
-
-
-@pick_context_manager_writer
-def cell_delete(context, cell_name):
-    return _cell_get_by_name_query(context, cell_name).soft_delete()
-
-
-@pick_context_manager_reader
-def cell_get(context, cell_name):
-    result = _cell_get_by_name_query(context, cell_name).first()
-    if not result:
-        raise exception.CellNotFound(cell_name=cell_name)
-    return result
-
-
-@pick_context_manager_reader
-def cell_get_all(context):
-    return model_query(context, models.Cell, read_deleted="no").all()
 
 
 ########################
@@ -5447,7 +5460,7 @@ def task_log_end_task(context, task_name, period_beginning, period_ending,
 
 
 def _archive_if_instance_deleted(table, shadow_table, instances, conn,
-                                 max_rows):
+                                 max_rows, before):
     """Look for records that pertain to deleted instances, but may not be
     deleted themselves. This catches cases where we delete an instance,
     but leave some residue because of a failure in a cleanup path or
@@ -5456,21 +5469,32 @@ def _archive_if_instance_deleted(table, shadow_table, instances, conn,
     Logic is: if I have a column called instance_uuid, and that instance
     is deleted, then I can be deleted.
     """
-    query_insert = shadow_table.insert(inline=True).\
-        from_select(
-            [c.name for c in table.c],
-            sql.select(
+
+    # NOTE(jake): handle instance_actions_events differently as it relies on
+    # instance_actions.id not instances.uuid
+    if table.name == "instance_actions_events":
+        instance_actions = models.BASE.metadata.tables["instance_actions"]
+        query_select = sql.select(
                 [table],
                 and_(instances.c.deleted != instances.c.deleted.default.arg,
-                     instances.c.uuid == table.c.instance_uuid)).
-            order_by(table.c.id).limit(max_rows))
+                     instances.c.uuid == instance_actions.c.instance_uuid,
+                     instance_actions.c.id == table.c.action_id))
 
-    query_delete = sql.select(
-        [table.c.id],
-        and_(instances.c.deleted != instances.c.deleted.default.arg,
-             instances.c.uuid == table.c.instance_uuid)).\
-        order_by(table.c.id).limit(max_rows)
-    delete_statement = DeleteFromSelect(table, query_delete,
+    else:
+        query_select = sql.select(
+                [table],
+                and_(instances.c.deleted != instances.c.deleted.default.arg,
+                     instances.c.uuid == table.c.instance_uuid))
+
+    if before:
+        query_select = query_select.where(instances.c.deleted_at < before)
+
+    query_select = query_select.order_by(table.c.id).limit(max_rows)
+
+    query_insert = shadow_table.insert(inline=True).\
+        from_select([c.name for c in table.c], query_select)
+
+    delete_statement = DeleteFromSelect(table, query_select,
                                         table.c.id)
 
     try:
@@ -5485,16 +5509,16 @@ def _archive_if_instance_deleted(table, shadow_table, instances, conn,
         return 0
 
 
-def _archive_deleted_rows_for_table(tablename, max_rows):
+def _archive_deleted_rows_for_table(metadata, tablename, max_rows, before):
     """Move up to max_rows rows from one tables to the corresponding
     shadow table.
 
-    :returns: number of rows archived
+    :returns: 2-item tuple:
+
+        - number of rows archived
+        - list of UUIDs of instances that were archived
     """
-    engine = get_engine()
-    conn = engine.connect()
-    metadata = MetaData()
-    metadata.bind = engine
+    conn = metadata.bind.connect()
     # NOTE(tdurakov): table metadata should be received
     # from models, not db tables. Default value specified by SoftDeleteMixin
     # is known only by models, not DB layer.
@@ -5521,40 +5545,12 @@ def _archive_deleted_rows_for_table(tablename, max_rows):
     deleted_column = table.c.deleted
     columns = [c.name for c in table.c]
 
-    # NOTE(clecomte): Tables instance_actions and instances_actions_events
-    # have to be manage differently so we soft-delete them here to let
-    # the archive work the same for all tables
-    # NOTE(takashin): The record in table migrations should be
-    # soft deleted when the instance is deleted.
-    # This is just for upgrading.
-    if tablename in ("instance_actions", "migrations"):
-        instances = models.BASE.metadata.tables["instances"]
-        deleted_instances = sql.select([instances.c.uuid]).\
-            where(instances.c.deleted != instances.c.deleted.default.arg)
-        update_statement = table.update().values(deleted=table.c.id).\
-            where(table.c.instance_uuid.in_(deleted_instances))
-
-        conn.execute(update_statement)
-
-    elif tablename == "instance_actions_events":
-        # NOTE(clecomte): we have to grab all the relation from
-        # instances because instance_actions_events rely on
-        # action_id and not uuid
-        instances = models.BASE.metadata.tables["instances"]
-        instance_actions = models.BASE.metadata.tables["instance_actions"]
-        deleted_instances = sql.select([instances.c.uuid]).\
-            where(instances.c.deleted != instances.c.deleted.default.arg)
-        deleted_actions = sql.select([instance_actions.c.id]).\
-            where(instance_actions.c.instance_uuid.in_(deleted_instances))
-
-        update_statement = table.update().values(deleted=table.c.id).\
-            where(table.c.action_id.in_(deleted_actions))
-
-        conn.execute(update_statement)
-
     select = sql.select([column],
-                        deleted_column != deleted_column.default.arg).\
-                        order_by(column).limit(max_rows)
+                        deleted_column != deleted_column.default.arg)
+    if before:
+        select = select.where(table.c.deleted_at < before)
+
+    select = select.order_by(column).limit(max_rows)
     rows = conn.execute(select).fetchall()
     records = [r[0] for r in rows]
 
@@ -5563,10 +5559,10 @@ def _archive_deleted_rows_for_table(tablename, max_rows):
                 from_select(columns, sql.select([table], column.in_(records)))
         delete = table.delete().where(column.in_(records))
         # NOTE(tssurya): In order to facilitate the deletion of records from
-        # instance_mappings and request_specs tables in the nova_api DB, the
-        # rows of deleted instances from the instances table are stored prior
-        # to their deletion. Basically the uuids of the archived instances
-        # are queried and returned.
+        # instance_mappings, request_specs and instance_group_member tables in
+        # the nova_api DB, the rows of deleted instances from the instances
+        # table are stored prior to their deletion. Basically the uuids of the
+        # archived instances are queried and returned.
         if tablename == "instances":
             query_select = sql.select([table.c.uuid], table.c.id.in_(records))
             rows = conn.execute(query_select).fetchall()
@@ -5586,37 +5582,45 @@ def _archive_deleted_rows_for_table(tablename, max_rows):
                         "%(tablename)s: %(error)s",
                         {'tablename': tablename, 'error': six.text_type(ex)})
 
-    if ((max_rows is None or rows_archived < max_rows)
-            and 'instance_uuid' in columns):
+    # NOTE(jake): instance_actions_events doesn't have a instance_uuid column
+    # but still needs to be archived as it is a FK constraint
+    if ((max_rows is None or rows_archived < max_rows) and
+            ('instance_uuid' in columns or
+             tablename == 'instance_actions_events')):
         instances = models.BASE.metadata.tables['instances']
         limit = max_rows - rows_archived if max_rows is not None else None
         extra = _archive_if_instance_deleted(table, shadow_table, instances,
-                                             conn, limit)
+                                             conn, limit, before)
         rows_archived += extra
 
     return rows_archived, deleted_instance_uuids
 
 
-def archive_deleted_rows(max_rows=None):
+def archive_deleted_rows(context=None, max_rows=None, before=None):
     """Move up to max_rows rows from production tables to the corresponding
     shadow tables.
 
-    :returns: dict that maps table name to number of rows archived from that
-              table, for example:
+    :param context: nova.context.RequestContext for database access
+    :param max_rows: Maximum number of rows to archive (required)
+    :param before: optional datetime which when specified filters the records
+        to only archive those records deleted before the given date
+    :returns: 3-item tuple:
 
-    ::
+        - dict that maps table name to number of rows archived from that table,
+          for example::
 
-        {
-            'instances': 5,
-            'block_device_mapping': 5,
-            'pci_devices': 2,
-        }
-
+            {
+                'instances': 5,
+                'block_device_mapping': 5,
+                'pci_devices': 2,
+            }
+        - list of UUIDs of instances that were archived
+        - total number of rows that were archived
     """
     table_to_rows_archived = {}
     deleted_instance_uuids = []
     total_rows_archived = 0
-    meta = MetaData(get_engine(use_slave=True))
+    meta = MetaData(get_engine(use_slave=True, context=context))
     meta.reflect()
     # Reverse sort the tables so we get the leaf nodes first for processing.
     for table in reversed(meta.sorted_tables):
@@ -5627,18 +5631,20 @@ def archive_deleted_rows(max_rows=None):
         if (tablename == 'migrate_version' or
                 tablename.startswith(_SHADOW_TABLE_PREFIX)):
             continue
-        rows_archived,\
-        deleted_instance_uuid = _archive_deleted_rows_for_table(
-                tablename, max_rows=max_rows - total_rows_archived)
+        rows_archived, _deleted_instance_uuids = (
+            _archive_deleted_rows_for_table(
+                meta, tablename,
+                max_rows=max_rows - total_rows_archived,
+                before=before))
         total_rows_archived += rows_archived
         if tablename == 'instances':
-            deleted_instance_uuids = deleted_instance_uuid
+            deleted_instance_uuids = _deleted_instance_uuids
         # Only report results for tables that had updates.
         if rows_archived:
             table_to_rows_archived[tablename] = rows_archived
         if total_rows_archived >= max_rows:
             break
-    return table_to_rows_archived, deleted_instance_uuids
+    return table_to_rows_archived, deleted_instance_uuids, total_rows_archived
 
 
 def _purgeable_tables(metadata):
@@ -5700,6 +5706,7 @@ def purge_shadow_tables(context, before_date, status_fn=None):
     return total_deleted
 
 
+# TODO(mriedem): Remove this in the U release.
 @pick_context_manager_writer
 def service_uuids_online_data_migration(context, max_count):
     from nova.objects import service
@@ -5838,7 +5845,7 @@ def instance_tag_set(context, instance_uuid, tags):
     if to_add:
         data = [
             {'resource_id': instance_uuid, 'tag': tag} for tag in to_add]
-        context.session.execute(models.Tag.__table__.insert(), data)
+        context.session.execute(models.Tag.__table__.insert(None), data)
 
     return context.session.query(models.Tag).filter_by(
         resource_id=instance_uuid).all()
@@ -5906,6 +5913,13 @@ def console_auth_token_get_valid(context, token_hash, instance_uuid=None):
 def console_auth_token_destroy_all_by_instance(context, instance_uuid):
     context.session.query(models.ConsoleAuthToken).\
         filter_by(instance_uuid=instance_uuid).delete()
+
+
+@pick_context_manager_writer
+def console_auth_token_destroy_expired(context):
+    context.session.query(models.ConsoleAuthToken).\
+        filter(models.ConsoleAuthToken.expires <= timeutils.utcnow_ts()).\
+        delete()
 
 
 @pick_context_manager_writer

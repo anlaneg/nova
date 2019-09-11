@@ -10,14 +10,17 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import os_resource_classes as orc
+import os_traits
 import six
 
 from nova import context as nova_context
 from nova import exception
 from nova import objects
-from nova import rc_fields
 from nova.tests.functional.api import client as api_client
 from nova.tests.functional import integrated_helpers
+from nova.tests.unit.image import fake as fake_image
+from nova import utils
 
 
 class TestServicesAPI(integrated_helpers.ProviderUsageBaseTestCase):
@@ -60,9 +63,7 @@ class TestServicesAPI(integrated_helpers.ProviderUsageBaseTestCase):
         # Make sure the resource provider has inventory.
         inventories = self._get_provider_inventory(rp_uuid)
         # Expect a minimal set of inventory for the fake virt driver.
-        for resource_class in [rc_fields.ResourceClass.VCPU,
-                               rc_fields.ResourceClass.MEMORY_MB,
-                               rc_fields.ResourceClass.DISK_GB]:
+        for resource_class in [orc.VCPU, orc.MEMORY_MB, orc.DISK_GB]:
             self.assertIn(resource_class, inventories)
 
         # Now create a server so that the resource provider has some allocation
@@ -116,3 +117,189 @@ class TestServicesAPI(integrated_helpers.ProviderUsageBaseTestCase):
         # and allocation information.
         resp = self.placement_api.get('/resource_providers/%s' % rp_uuid)
         self.assertEqual(404, resp.status)
+
+    def test_evacuate_then_delete_compute_service(self):
+        """Tests a scenario where a server is created on a host, the host
+        goes down, the server is evacuated to another host, and then the
+        source host compute service is deleted. After that the deleted
+        compute service is restarted. Related placement resources are checked
+        throughout.
+        """
+        # Create our source host that we will evacuate *from* later.
+        host1 = self._start_compute('host1')
+        # Create a server which will go on host1 since it is the only host.
+        flavor = self.api.get_flavors()[0]
+        server = self._boot_and_check_allocations(flavor, 'host1')
+        # Get the compute service record for host1 so we can manage it.
+        service = self.admin_api.get_services(
+            binary='nova-compute', host='host1')[0]
+        # Get the corresponding resource provider uuid for host1.
+        rp_uuid = self._get_provider_uuid_by_host(service['host'])
+        # Make sure there is a resource provider for that compute node based
+        # on the uuid.
+        resp = self.placement_api.get('/resource_providers/%s' % rp_uuid)
+        self.assertEqual(200, resp.status)
+        # Down the compute service for host1 so we can evacuate from it.
+        self.admin_api.put_service(service['id'], {'forced_down': True})
+        host1.stop()
+        # Start another host and trigger the server evacuate to that host.
+        self._start_compute('host2')
+        self.admin_api.post_server_action(server['id'], {'evacuate': {}})
+        # The host does not change until after the status is changed to ACTIVE
+        # so wait for both parameters.
+        self._wait_for_server_parameter(
+            self.admin_api, server, {'status': 'ACTIVE',
+                                     'OS-EXT-SRV-ATTR:host': 'host2'})
+        # Delete the compute service for host1 and check the related
+        # placement resources for that host.
+        self.admin_api.api_delete('/os-services/%s' % service['id'])
+        # Make sure the service is gone.
+        services = self.admin_api.get_services(
+            binary='nova-compute', host='host1')
+        self.assertEqual(0, len(services), services)
+        # FIXME(mriedem): This is bug 1829479 where the compute service is
+        # deleted but the resource provider is not because there are still
+        # allocations against the provider from the evacuated server.
+        resp = self.placement_api.get('/resource_providers/%s' % rp_uuid)
+        self.assertEqual(200, resp.status)
+        self.assertFlavorMatchesUsage(rp_uuid, flavor)
+        # Try to restart the host1 compute service to create a new resource
+        # provider.
+        self.restart_compute_service(host1)
+        # FIXME(mriedem): This is bug 1817833 where restarting the now-deleted
+        # compute service attempts to create a new resource provider with a
+        # new uuid but the same name which results in a conflict. The service
+        # does not die, however, because _update_available_resource_for_node
+        # catches and logs but does not re-raise the error.
+        log_output = self.stdlog.logger.output
+        self.assertIn('Error updating resources for node host1.', log_output)
+        self.assertIn('Failed to create resource provider host1', log_output)
+
+
+class ComputeStatusFilterTest(integrated_helpers.ProviderUsageBaseTestCase):
+    """Tests the API, compute service and Placement interaction with the
+    COMPUTE_STATUS_DISABLED trait when a compute service is enable/disabled.
+
+    This version of the test uses the 2.latest microversion for testing the
+    2.53+ behavior of the PUT /os-services/{service_id} API.
+    """
+    compute_driver = 'fake.SmallFakeDriver'
+
+    def _update_service(self, service, disabled, forced_down=None):
+        """Update the service using the 2.53 request schema.
+
+        :param service: dict representing the service resource in the API
+        :param disabled: True if the service should be disabled, False if the
+            service should be enabled
+        :param forced_down: Optionally change the forced_down value.
+        """
+        status = 'disabled' if disabled else 'enabled'
+        req = {'status': status}
+        if forced_down is not None:
+            req['forced_down'] = forced_down
+        self.admin_api.put_service(service['id'], req)
+
+    def test_compute_status_filter(self):
+        """Tests the compute_status_filter placement request filter"""
+        # Start a compute service so a compute node and resource provider is
+        # created.
+        compute = self._start_compute('host1')
+        # Get the UUID of the resource provider that was created.
+        rp_uuid = self._get_provider_uuid_by_host('host1')
+        # Get the service from the compute API.
+        services = self.admin_api.get_services(binary='nova-compute',
+                                               host='host1')
+        self.assertEqual(1, len(services))
+        service = services[0]
+
+        # At this point, the service should be enabled and the
+        # COMPUTE_STATUS_DISABLED trait should not be set on the
+        # resource provider in placement.
+        self.assertEqual('enabled', service['status'])
+        rp_traits = self._get_provider_traits(rp_uuid)
+        trait = os_traits.COMPUTE_STATUS_DISABLED
+        self.assertNotIn(trait, rp_traits)
+
+        # Now disable the compute service via the API.
+        self._update_service(service, disabled=True)
+
+        # The update to placement should be synchronous so check the provider
+        # traits and COMPUTE_STATUS_DISABLED should be set.
+        rp_traits = self._get_provider_traits(rp_uuid)
+        self.assertIn(trait, rp_traits)
+
+        # Try creating a server which should fail because nothing is available.
+        networks = [{'port': self.neutron.port_1['id']}]
+        server_req = self._build_minimal_create_server_request(
+            self.api, 'test_compute_status_filter',
+            image_uuid=fake_image.get_valid_image_id(), networks=networks)
+        server = self.api.post_server({'server': server_req})
+        server = self._wait_for_state_change(self.api, server, 'ERROR')
+        # There should be a NoValidHost fault recorded.
+        self.assertIn('fault', server)
+        self.assertIn('No valid host', server['fault']['message'])
+
+        # Now enable the service and the trait should be gone.
+        self._update_service(service, disabled=False)
+        rp_traits = self._get_provider_traits(rp_uuid)
+        self.assertNotIn(trait, rp_traits)
+
+        # Try creating another server and it should be OK.
+        server = self.api.post_server({'server': server_req})
+        self._wait_for_state_change(self.api, server, 'ACTIVE')
+
+        # Stop, force-down and disable the service so the API cannot call
+        # the compute service to sync the trait.
+        compute.stop()
+        self._update_service(service, disabled=True, forced_down=True)
+        # The API should have logged a message about the service being down.
+        self.assertIn('Compute service on host host1 is down. The '
+                      'COMPUTE_STATUS_DISABLED trait will be synchronized '
+                      'when the service is restarted.',
+                      self.stdlog.logger.output)
+        # The trait should not be on the provider even though the node is
+        # disabled.
+        rp_traits = self._get_provider_traits(rp_uuid)
+        self.assertNotIn(trait, rp_traits)
+        # Restart the compute service which should sync and set the trait on
+        # the provider in placement.
+        self.restart_compute_service(compute)
+        rp_traits = self._get_provider_traits(rp_uuid)
+        self.assertIn(trait, rp_traits)
+
+
+class ComputeStatusFilterTest211(ComputeStatusFilterTest):
+    """Extends ComputeStatusFilterTest and uses the 2.11 API for the
+    legacy os-services disable/enable/force-down API behavior
+    """
+    microversion = '2.11'
+
+    def _update_service(self, service, disabled, forced_down=None):
+        """Update the service using the 2.11 request schema.
+
+        :param service: dict representing the service resource in the API
+        :param disabled: True if the service should be disabled, False if the
+            service should be enabled
+        :param forced_down: Optionally change the forced_down value.
+        """
+        # Before 2.53 the service is uniquely identified by host and binary.
+        body = {
+            'host': service['host'],
+            'binary': service['binary']
+        }
+        # Handle forced_down first if provided since the enable/disable
+        # behavior in the API depends on it.
+        if forced_down is not None:
+            body['forced_down'] = forced_down
+            self.admin_api.api_put('/os-services/force-down', body)
+
+        if disabled:
+            self.admin_api.api_put('/os-services/disable', body)
+        else:
+            self.admin_api.api_put('/os-services/enable', body)
+
+    def _get_provider_uuid_by_host(self, host):
+        # We have to temporarily mutate to 2.53 to get the hypervisor UUID.
+        with utils.temporary_mutation(self.admin_api, microversion='2.53'):
+            return super(ComputeStatusFilterTest211,
+                         self)._get_provider_uuid_by_host(host)

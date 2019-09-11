@@ -112,19 +112,19 @@ In this section we focus on this related to networking.
 
 -  **Port**
 
-   TODO
+   .. todo:: Add more details.
 
 -  **Floating IPs, Pools and DNS**
 
-   TODO
+   .. todo:: Add more details.
 
 -  **Security Groups**
 
-   TODO
+   .. todo:: Add more details.
 
 -  **Extended Networks**
 
-   TODO
+   .. todo:: Add more details.
 
 
 Administrator Concepts
@@ -176,10 +176,6 @@ on compute hosts rather than servers.
      This service handles networking of virtual servers. It is no longer under
      active development, and is being replaced by Neutron.
 
-   - **nova-consoleauth (deprecated)**
-
-     This service provides authorization for compute instances consoles.
-
 -  **Services Actions**
 
    .. note::
@@ -222,9 +218,9 @@ on compute hosts rather than servers.
 -  **Hosts**
 
    Hosts are the *physical machines* that provide the resources for the virtual
-   servers created in Nova. They run a ``hypervisor`` (see definition below)
+   servers created in Nova. They run a **hypervisor** (see definition below)
    that handles the actual creation and management of the virtual servers.
-   Hosts also run the ``Nova compute service``, which receives requests from
+   Hosts also run the **Nova compute service**, which receives requests from
    Nova to interact with the virtual servers on that machine. When compute
    service receives a request, it calls the appropriate methods of the driver
    for that hypervisor in order to carry out the request. The driver acts as
@@ -282,7 +278,7 @@ Relationship with Volume API
 
 Here we discuss about Cinder's API and how Nova users volume UUIDs.
 
-TODO - add more details.
+.. todo:: add more details.
 
 Relationship with Image API
 ===========================
@@ -290,7 +286,7 @@ Relationship with Image API
 Here we discuss about Glance's API and how Nova uses image UUIDs.
 We also discuss how Nova proxies setting image metadata.
 
-TODO - add more details.
+.. todo:: add more details.
 
 Interactions with neutron and nova-network (deprecated)
 =======================================================
@@ -302,4 +298,4 @@ Here we discuss about Neutron's API and how Nova users port UUIDs.
 We also discuss Nova automatically creating ports, proxying security groups,
 and proxying floating IPs. Also talk about the APIs we do not proxy.
 
-TODO - add more details.
+.. todo:: add more details.

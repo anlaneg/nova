@@ -22,6 +22,7 @@ from oslo_utils import fixture as utils_fixture
 
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests import json_ref
 from nova.tests.unit.api.openstack.compute import test_services
@@ -80,10 +81,15 @@ class NotificationSampleTestBase(test.TestCase,
 
         self.useFixture(utils_fixture.TimeFixture(test_services.fake_utcnow()))
 
+        # NOTE(mikal): this is used to stub away privsep helpers
+        def fake_noop(*args, **kwargs):
+            return None
+        self.stub_out('nova.privsep.linux_net.bind_ip', fake_noop)
+
         # the image fake backend needed for image discovery
         nova.tests.unit.image.fake.stub_out_image_service(self)
         self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
 
         context_patcher = self.mock_gen_request_id = mock.patch(
             'oslo_context.context.generate_request_id',
@@ -93,7 +99,6 @@ class NotificationSampleTestBase(test.TestCase,
 
         self.start_service('conductor')
         self.start_service('scheduler')
-        self.start_service('network', manager=CONF.network_manager)
         self.compute = self.start_service('compute')
         # Reset the service create notifications
         fake_notifier.reset()
@@ -140,7 +145,8 @@ class NotificationSampleTestBase(test.TestCase,
                        notification emitted during the test.
         """
         if not actual:
-            self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+            self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS),
+                             fake_notifier.VERSIONED_NOTIFICATIONS)
             notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
         else:
             notification = actual
@@ -156,8 +162,25 @@ class NotificationSampleTestBase(test.TestCase,
 
         self.assertJsonEqual(sample_obj, notification)
 
+    def _pop_and_verify_dest_select_notification(self,
+            server_id, replacements=None):
+        replacements = replacements or {}
+        replacements['instance_uuid'] = server_id
+        replacements['pci_requests.instance_uuid'] = server_id
+        replacements['flavor.extra_specs'] = self.ANY
+        replacements['numa_topology'] = self.ANY
+        scheduler_expected_notifications = [
+            'scheduler-select_destinations-start',
+            'scheduler-select_destinations-end']
+        self.assertLessEqual(2, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        for notification in scheduler_expected_notifications:
+            self._verify_notification(
+                notification,
+                replacements=replacements,
+                actual=fake_notifier.VERSIONED_NOTIFICATIONS.pop(0))
+
     def _boot_a_server(self, expected_status='ACTIVE', extra_params=None,
-                       scheduler_hints=None):
+                       scheduler_hints=None, additional_extra_specs=None):
 
         # We have to depend on a specific image and flavor to fix the content
         # of the notification that will be emitted
@@ -172,6 +195,8 @@ class NotificationSampleTestBase(test.TestCase,
         extra_specs = {
             "extra_specs": {
                 "hw:watchdog_action": "disabled"}}
+        if additional_extra_specs:
+            extra_specs['extra_specs'].update(additional_extra_specs)
         self.admin_api.post_extra_spec(flavor_id, extra_specs)
 
         # Ignore the create flavor notification
@@ -225,6 +250,11 @@ class NotificationSampleTestBase(test.TestCase,
                                                    expected_status)
         found_server['reservation_id'] = reservation_id
 
+        # Note(elod.illes): let's just pop and verify the dest_select
+        # notifications if we don't have a special case
+        if scheduler_hints is None and expected_status != 'ERROR':
+            self._pop_and_verify_dest_select_notification(found_server['id'])
+
         if found_server['status'] == 'ACTIVE':
             self.api.put_server_tags(found_server['id'], ['tag1'])
         return found_server
@@ -235,11 +265,11 @@ class NotificationSampleTestBase(test.TestCase,
                     if notification['event_type'] == event_type]
 
     def _wait_for_notification(self, event_type, timeout=10.0):
-        notifications = fake_notifier.wait_for_versioned_notifications(
+        # NOTE(mdbooth): wait_for_versioned_notifications raises an exception
+        # if it times out since change I017d1a31. Consider removing this
+        # method.
+        fake_notifier.wait_for_versioned_notifications(
             event_type, timeout=timeout)
-        self.assertTrue(
-            len(notifications) > 0,
-            'notification %s hasn\'t been received' % event_type)
 
     def _wait_for_notifications(self, event_type, expected_count,
                                 timeout=10.0):

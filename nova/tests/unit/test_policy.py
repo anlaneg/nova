@@ -134,6 +134,10 @@ class PolicyTestCase(test.NoDBTestCase):
         target_not_mine = {'project_id': 'another'}
         action = "example:my_file"
         policy.authorize(self.context, action, target_mine)
+        # check we fallback to context.project_id
+        # TODO(johngarbutt): longer term we need to remove this and make
+        #  the target a required param.
+        policy.authorize(self.context, action)
         self.assertRaises(exception.PolicyNotAuthorized, policy.authorize,
                           self.context, action, target_not_mine)
 
@@ -192,9 +196,9 @@ class PolicyTestCase(test.NoDBTestCase):
             old_policy, new_policy, default_rule, self.context)
 
         mock_warning.assert_called_once_with("Start using the new "
-            "action '{0}'. The existing action '{1}' is being deprecated and "
-            "will be removed in future release.".format(new_policy,
-                                                        old_policy))
+            "action '%(new_policy)s'. The existing action '%(old_policy)s' "
+            "is being deprecated and will be removed in future release.",
+            {'new_policy': new_policy, 'old_policy': old_policy})
         self.assertTrue(using_old_action)
 
     def test_verify_deprecated_policy_using_new_action(self):
@@ -243,6 +247,17 @@ class IsAdminCheckTestCase(test.NoDBTestCase):
         self.assertTrue(check('target', dict(is_admin=False),
                               policy._ENFORCER))
 
+    def test_check_is_admin(self):
+        ctxt = context.RequestContext(
+            user_id='fake-user', project_id='fake-project')
+        with mock.patch('oslo_policy.policy.Enforcer.authorize') as mock_auth:
+            result = policy.check_is_admin(ctxt)
+        self.assertEqual(mock_auth.return_value, result)
+        mock_auth.assert_called_once_with(
+            'context_is_admin',
+            {'user_id': 'fake-user', 'project_id': 'fake-project'},
+            ctxt.to_policy_values())
+
 
 class AdminRolePolicyTestCase(test.NoDBTestCase):
     def setUp(self):
@@ -273,10 +288,10 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
         self.fake_policy = jsonutils.loads(fake_policy.policy_data)
 
         self.admin_only_rules = (
-"cells_scheduler_filter:DifferentCellFilter",
-"cells_scheduler_filter:TargetCellFilter",
+"compute:server:topology:host:index",
 "network:attach_external_network",
 "os_compute_api:servers:create:forced_host",
+"compute:servers:create:requested_destination",
 "os_compute_api:servers:detail:get_all_tenants",
 "os_compute_api:servers:index:get_all_tenants",
 "os_compute_api:servers:allow_all_filters",
@@ -296,11 +311,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-aggregates:set_metadata",
 "os_compute_api:os-agents",
 "os_compute_api:os-baremetal-nodes",
-"os_compute_api:os-cells",
-"os_compute_api:os-cells:create",
-"os_compute_api:os-cells:delete",
-"os_compute_api:os-cells:update",
-"os_compute_api:os-cells:sync_instances",
 "os_compute_api:os-evacuate",
 "os_compute_api:os-extended-server-attributes",
 "os_compute_api:os-flavor-access:remove_tenant_access",
@@ -308,7 +318,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-flavor-extra-specs:create",
 "os_compute_api:os-flavor-extra-specs:update",
 "os_compute_api:os-flavor-extra-specs:delete",
-"os_compute_api:os-flavor-manage",
 "os_compute_api:os-flavor-manage:create",
 "os_compute_api:os-flavor-manage:update",
 "os_compute_api:os-flavor-manage:delete",
@@ -337,11 +346,13 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-quota-class-sets:update",
 "os_compute_api:os-server-external-events:create",
 "os_compute_api:os-volumes-attachments:update",
+"os_compute_api:servers:create:zero_disk_flavor",
 "os_compute_api:servers:migrations:index",
 "os_compute_api:servers:migrations:show",
 )
 
         self.admin_or_owner_rules = (
+"compute:server:topology:index",
 "os_compute_api:servers:start",
 "os_compute_api:servers:stop",
 "os_compute_api:servers:trigger_crash_dump",
@@ -374,7 +385,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:servers:create:attach_network",
 "os_compute_api:servers:create:attach_volume",
 "os_compute_api:servers:create:trusted_certs",
-"os_compute_api:servers:create:zero_disk_flavor",
 "os_compute_api:servers:create_image",
 "os_compute_api:servers:delete",
 "os_compute_api:servers:detail",
@@ -399,7 +409,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-remote-consoles",
 "os_compute_api:os-deferred-delete",
 "os_compute_api:os-flavor-access",
-"os_compute_api:flavors",
 "os_compute_api:os-flavor-extra-specs:index",
 "os_compute_api:os-flavor-extra-specs:show",
 "os_compute_api:os-floating-ip-pools",
@@ -411,7 +420,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-rescue",
 "os_compute_api:os-security-groups",
 "os_compute_api:os-server-password",
-"os_compute_api:os-server-groups",
 "os_compute_api:os-server-tags:delete",
 "os_compute_api:os-server-tags:delete_all",
 "os_compute_api:os-server-tags:index",

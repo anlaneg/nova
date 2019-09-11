@@ -25,7 +25,7 @@ from nova.api.openstack.compute.views \
     import instance_actions as instance_actions_view
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
 from nova.policies import instance_actions as ia_policies
@@ -110,6 +110,12 @@ class InstanceActionsController(wsgi.Controller):
         if 'changes-before' in search_opts:
             search_opts['changes-before'] = timeutils.parse_isotime(
                 search_opts['changes-before'])
+            changes_since = search_opts.get('changes-since')
+            if (changes_since and search_opts['changes-before'] <
+                    search_opts['changes-since']):
+                msg = _('The value of changes-since must be less than '
+                        'or equal to changes-before.')
+                raise exc.HTTPBadRequest(explanation=msg)
 
         limit, marker = common.get_limit_and_marker(req)
         try:
@@ -169,8 +175,15 @@ class InstanceActionsController(wsgi.Controller):
         if show_events:
             events_raw = self.action_api.action_events_get(context, instance,
                                                            action_id)
+            # NOTE(takashin): The project IDs of instance action events
+            # become null (None) when instance action events are created
+            # by periodic tasks. If the project ID is null (None),
+            # it causes an error when 'hostId' is generated.
+            # If the project ID is null (None), pass the project ID of
+            # the server instead of that of instance action events.
             action['events'] = [self._format_event(
-                evt, action['project_id'], show_traceback=show_traceback,
+                evt, action['project_id'] or instance.project_id,
+                show_traceback=show_traceback,
                 show_host=show_host, show_hostid=show_hostid
             ) for evt in events_raw]
         return {'instanceAction': action}

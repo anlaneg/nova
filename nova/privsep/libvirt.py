@@ -72,8 +72,7 @@ def ploop_init(size, disk_format, fs_type, disk_path):
     :param disk_path: ploop image file
     """
     processutils.execute('ploop', 'init', '-s', size, '-f', disk_format, '-t',
-                         fs_type, disk_path, run_as_root=True,
-                         check_exit_code=True)
+                         fs_type, disk_path, check_exit_code=True)
 
     # Add read access for all users, because "ploop init" creates
     # disk with rw rights only for root. OpenStack user should have access
@@ -98,7 +97,7 @@ def ploop_resize(disk_path, size):
                          '--size', '%dM' % (size // units.Mi),
                          '--resize_partition',
                          '--hdd', disk_path,
-                         run_as_root=True, check_exit_code=True)
+                         check_exit_code=True)
 
 
 @nova.privsep.sys_admin_pctxt.entrypoint
@@ -111,7 +110,7 @@ def ploop_restore_descriptor(image_dir, base_delta, fmt):
     """
     processutils.execute('ploop', 'restore-descriptor', '-f', fmt,
                          image_dir, base_delta,
-                         run_as_root=True, check_exit_code=True)
+                         check_exit_code=True)
 
 
 @nova.privsep.sys_admin_pctxt.entrypoint
@@ -119,15 +118,6 @@ def enable_hairpin(interface):
     """Enable hairpin mode for a libvirt guest."""
     with open('/sys/class/net/%s/brport/hairpin_mode' % interface, 'w') as f:
         f.write('1')
-
-
-@nova.privsep.sys_admin_pctxt.entrypoint
-def delete_bridge(interface):
-    """Delete a bridge.
-
-    :param interface: the name of the bridge
-    """
-    processutils.execute('brctl', 'delbr', interface)
 
 
 @nova.privsep.sys_admin_pctxt.entrypoint
@@ -163,38 +153,6 @@ def plug_plumgrid_vif(dev, iface_id, vif_address, net_id, tenant_id):
 def unplug_plumgrid_vif(dev):
     processutils.execute('ifc_ctl', 'gateway', 'ifdown', dev)
     processutils.execute('ifc_ctl', 'gateway', 'del_port', dev)
-
-
-@nova.privsep.sys_admin_pctxt.entrypoint
-def plug_contrail_vif(project_id, vm_id, vm_name, vif_id, net_id, port_type,
-                      dev_name, mac, ip_addr, ip6_addr):
-    cmd = (
-        'vrouter-port-control',
-        '--oper=add',
-        '--vm_project_uuid=%s' % project_id,
-        '--instance_uuid=%s' % vm_id,
-        ' --vm_name=%s' % vm_name,
-        '--uuid=%s' % vif_id,
-        '--vn_uuid=%s' % net_id,
-        '--port_type=%s' % port_type,
-        '--tap_name=%s' % dev_name,
-        '--mac=%s' % mac,
-        '--ip_address=%s' % ip_addr,
-        '--ipv6_address=%s' % ip6_addr,
-        '--tx_vlan_id=-1',
-        '--rx_vlan_id=-1',
-    )
-    processutils.execute(*cmd)
-
-
-@nova.privsep.sys_admin_pctxt.entrypoint
-def unplug_contrail_vif(port_id):
-    cmd = (
-        'vrouter-port-control',
-        '--oper=delete',
-        '--uuid=%s' % port_id,
-    )
-    processutils.execute(*cmd)
 
 
 @nova.privsep.sys_admin_pctxt.entrypoint
@@ -255,3 +213,36 @@ def create_mdev(physical_device, mdev_type, uuid=None):
     with open(fpath, 'w') as f:
         f.write(uuid)
     return uuid
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def systemd_run_qb_mount(qb_vol, mnt_base, cfg_file=None):
+    """Mount QB volume in separate CGROUP"""
+    # Note(kaisers): Details on why we run without --user at bug #1756823
+    sysdr_cmd = ['systemd-run', '--scope', 'mount.quobyte', '--disable-xattrs',
+                 qb_vol, mnt_base]
+    if cfg_file:
+        sysdr_cmd.extend(['-c', cfg_file])
+    return processutils.execute(*sysdr_cmd)
+
+
+# NOTE(kaisers): this method is deliberately not wrapped in a privsep entry.
+def unprivileged_qb_mount(qb_vol, mnt_base, cfg_file=None):
+    """Mount QB volume"""
+    mnt_cmd = ['mount.quobyte', '--disable-xattrs', qb_vol, mnt_base]
+    if cfg_file:
+        mnt_cmd.extend(['-c', cfg_file])
+    return processutils.execute(*mnt_cmd)
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def umount(mnt_base):
+    """Unmount volume"""
+    unprivileged_umount(mnt_base)
+
+
+# NOTE(kaisers): this method is deliberately not wrapped in a privsep entry.
+def unprivileged_umount(mnt_base):
+    """Unmount volume"""
+    umnt_cmd = ['umount', mnt_base]
+    return processutils.execute(*umnt_cmd)

@@ -67,7 +67,6 @@ def objectify(data):
 
 
 class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
-    all_extensions = True
     sample_dir = None
     microversion = None
     _use_common_server_api_samples = False
@@ -303,6 +302,24 @@ class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
 
         return matched_value
 
+    @property
+    def project_id(self):
+        # We'll allow test cases to override the default project id. This is
+        # useful when using multiple tenants.
+        project_id = None
+        try:
+            project_id = self.api.project_id
+        except AttributeError:
+            pass
+
+        return project_id or PROJECT_ID
+
+    @project_id.setter
+    def project_id(self, project_id):
+        self.api.project_id = project_id
+        # Reset cached credentials
+        self.api.auth_result = None
+
     def generalize_subs(self, subs, vanilla_regexes):
         """Give the test a chance to modify subs after the server response
         was verified, and before the on-disk doc/api_samples file is checked.
@@ -317,17 +334,20 @@ class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
     def _update_links(self, sample_data):
         """Process sample data and update version specific links."""
         # replace version urls
-        url_re = self._get_host() + "/v(2|2\.1)/" + PROJECT_ID
+
+        project_id_exp = '(%s|%s)' % (PROJECT_ID, self.project_id)
+
+        url_re = self._get_host() + r"/v(2|2\.1)/" + project_id_exp
         new_url = self._get_host() + "/" + self.api_major_version
-        if self._project_id:
-            new_url += "/" + PROJECT_ID
+        if self._use_project_id:
+            new_url += "/" + self.project_id
         updated_data = re.sub(url_re, new_url, sample_data)
 
         # replace unversioned urls
-        url_re = self._get_host() + "/" + PROJECT_ID
+        url_re = self._get_host() + "/" + project_id_exp
         new_url = self._get_host()
-        if self._project_id:
-            new_url += "/" + PROJECT_ID
+        if self._use_project_id:
+            new_url += "/" + self.project_id
         updated_data = re.sub(url_re, new_url, updated_data)
         return updated_data
 
@@ -411,13 +431,13 @@ class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
 
     def _get_regexes(self):
         text = r'(\\"|[^"])*'
-        isotime_re = '\d{4}-[0,1]\d-[0-3]\dT\d{2}:\d{2}:\d{2}Z'
-        strtime_re = '\d{4}-[0,1]\d-[0-3]\dT\d{2}:\d{2}:\d{2}\.\d{6}'
-        strtime_url_re = ('\d{4}-[0,1]\d-[0-3]\d'
-                          '\+\d{2}\%3A\d{2}\%3A\d{2}\.\d{6}')
-        xmltime_re = ('\d{4}-[0,1]\d-[0-3]\d '
-                      '\d{2}:\d{2}:\d{2}'
-                      '(\.\d{6})?(\+00:00)?')
+        isotime_re = r'\d{4}-[0,1]\d-[0-3]\dT\d{2}:\d{2}:\d{2}Z'
+        strtime_re = r'\d{4}-[0,1]\d-[0-3]\dT\d{2}:\d{2}:\d{2}\.\d{6}'
+        strtime_url_re = (r'\d{4}-[0,1]\d-[0-3]\d'
+                          r'\+\d{2}\%3A\d{2}\%3A\d{2}\.\d{6}')
+        xmltime_re = (r'\d{4}-[0,1]\d-[0-3]\d '
+                      r'\d{2}:\d{2}:\d{2}'
+                      r'(\.\d{6})?(\+00:00)?')
 
         # NOTE(claudiub): the x509 keypairs are different from the
         # ssh keypairs. For example, the x509 fingerprint has 40 bytes.
@@ -461,17 +481,17 @@ class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
     def _get_compute_endpoint(self):
         # NOTE(sdague): "openstack" is stand in for project_id, it
         # should be more generic in future.
-        if self._project_id:
-            return '%s/%s' % (self._get_host(), PROJECT_ID)
+        if self._use_project_id:
+            return '%s/%s' % (self._get_host(), self.project_id)
         else:
             return self._get_host()
 
     def _get_vers_compute_endpoint(self):
         # NOTE(sdague): "openstack" is stand in for project_id, it
         # should be more generic in future.
-        if self._project_id:
+        if self._use_project_id:
             return '%s/%s/%s' % (self._get_host(), self.api_major_version,
-                                 PROJECT_ID)
+                                 self.project_id)
         else:
             return '%s/%s' % (self._get_host(), self.api_major_version)
 
@@ -502,7 +522,7 @@ class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
             body = self._read_template(name) % self.subs
             sample = self._get_sample(name, self.microversion)
             if self.generate_samples and not os.path.exists(sample):
-                    self._write_sample(name, body)
+                self._write_sample(name, body)
         return self._get_response(url, method, body, headers=headers)
 
     def _do_put(self, url, name=None, subs=None, headers=None):

@@ -1,7 +1,6 @@
 .. -*- rst -*-
-.. needs:parameter_verification
-.. needs:example_verification
-.. needs:body_verification
+.. NOTE(gmann): These APIs are deprecated so do not update this
+   file even body, example or parameters are not complete.
 
 ==================================================
  Security groups (os-security-groups) (DEPRECATED)
@@ -13,7 +12,7 @@
    deprecated all the proxy APIs and users should use the native APIs
    instead. These will fail with a 404 starting from microversion 2.36.
    See: `Relevant Network APIs
-   <https://developer.openstack.org/api-ref/networking/v2/#security-groups-security-groups>`__.
+   <https://docs.openstack.org/api-ref/network/v2/#security-groups-security-groups>`__.
 
 Lists, shows information for, creates, updates and deletes security groups.
 

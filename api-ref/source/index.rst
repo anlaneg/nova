@@ -6,7 +6,7 @@
 
 This is a reference for the OpenStack Compute API which is provided by the Nova
 project. To learn more about the OpenStack Compute API concepts, please refer to
-the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
+the `API guide <https://docs.openstack.org/api-guide/compute/index.html>`_.
 
 .. rest_expand_all::
 
@@ -16,13 +16,13 @@ the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
 .. include:: servers.inc
 .. include:: servers-actions.inc
 .. include:: servers-action-fixed-ip.inc
-.. include:: servers-action-evacuate.inc
 .. include:: servers-action-deferred-delete.inc
 .. include:: servers-action-console-output.inc
 .. include:: servers-action-shelve.inc
 .. include:: servers-action-crash-dump.inc
 .. include:: servers-action-remote-consoles.inc
 .. include:: servers-admin-action.inc
+.. include:: servers-action-evacuate.inc
 .. include:: servers-remote-consoles.inc
 .. include:: server-security-groups.inc
 .. include:: diagnostics.inc
@@ -41,7 +41,6 @@ the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
 .. include:: os-aggregates.inc
 .. include:: os-assisted-volume-snapshots.inc
 .. include:: os-availability-zone.inc
-.. include:: os-cells.inc
 .. include:: os-consoles.inc
 .. include:: os-hypervisors.inc
 .. include:: os-instance-usage-audit-log.inc
@@ -54,6 +53,15 @@ the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
 .. include:: os-services.inc
 .. include:: os-simple-tenant-usage.inc
 .. include:: os-server-external-events.inc
+.. include:: server-topology.inc
+
+===============
+Deprecated APIs
+===============
+
+This section contains references for APIs which are deprecated and usually
+limited to some maximum microversion.
+
 .. include:: extensions.inc
 .. include:: os-networks.inc
 .. include:: os-volumes.inc
@@ -81,3 +89,4 @@ Compute API in the past, but no longer exist.
 .. include:: os-fixed-ips.inc
 .. include:: os-floating-ips-bulk.inc
 .. include:: os-floating-ip-dns.inc
+.. include:: os-cells.inc

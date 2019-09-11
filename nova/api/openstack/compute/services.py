@@ -21,7 +21,7 @@ from nova.api.openstack.compute.schemas import services
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova import availability_zones
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
 from nova import objects
@@ -31,18 +31,26 @@ from nova import servicegroup
 from nova import utils
 
 UUID_FOR_ID_MIN_VERSION = '2.53'
+PARTIAL_CONSTRUCT_FOR_CELL_DOWN_MIN_VERSION = '2.69'
 
 
 class ServiceController(wsgi.Controller):
 
     def __init__(self):
+        super(ServiceController, self).__init__()
         self.host_api = compute.HostAPI()
-        self.aggregate_api = compute.api.AggregateAPI()
+        self.aggregate_api = compute.AggregateAPI()
         self.servicegroup_api = servicegroup.API()
         self.actions = {"enable": self._enable,
                         "disable": self._disable,
                         "disable-log-reason": self._disable_log_reason}
-        self.placementclient = report.SchedulerReportClient()
+        self._placementclient = None  # Lazy-load on first access.
+
+    @property
+    def placementclient(self):
+        if self._placementclient is None:
+            self._placementclient = report.SchedulerReportClient()
+        return self._placementclient
 
     def _get_services(self, req):
         # The API services are filtered out since they are not RPC services
@@ -53,11 +61,14 @@ class ServiceController(wsgi.Controller):
         context = req.environ['nova.context']
         context.can(services_policies.BASE_POLICY_NAME)
 
+        cell_down_support = api_version_request.is_supported(
+            req, min_version=PARTIAL_CONSTRUCT_FOR_CELL_DOWN_MIN_VERSION)
+
         _services = [
-           s
-           for s in self.host_api.service_get_all(context, set_zones=True,
-                                                  all_cells=True)
-           if s['binary'] not in api_services
+            s
+            for s in self.host_api.service_get_all(context, set_zones=True,
+                all_cells=True, cell_down_support=cell_down_support)
+            if s['binary'] not in api_services
         ]
 
         host = ''
@@ -73,7 +84,16 @@ class ServiceController(wsgi.Controller):
 
         return _services
 
-    def _get_service_detail(self, svc, additional_fields, req):
+    def _get_service_detail(self, svc, additional_fields, req,
+                            cell_down_support=False):
+        # NOTE(tssurya): The below logic returns a minimal service construct
+        # consisting of only the host, binary and status fields for the compute
+        # services in the down cell.
+        if (cell_down_support and 'uuid' not in svc):
+            return {'binary': svc.binary,
+                    'host': svc.host,
+                    'status': "UNKNOWN"}
+
         alive = self.servicegroup_api.service_is_up(svc)
         state = (alive and "up") or "down"
         active = 'enabled'
@@ -110,8 +130,10 @@ class ServiceController(wsgi.Controller):
 
     def _get_services_list(self, req, additional_fields=()):
         _services = self._get_services(req)
-        return [self._get_service_detail(svc, additional_fields, req)
-                for svc in _services]
+        cell_down_support = api_version_request.is_supported(req,
+            min_version=PARTIAL_CONSTRUCT_FOR_CELL_DOWN_MIN_VERSION)
+        return [self._get_service_detail(svc, additional_fields, req,
+                cell_down_support=cell_down_support) for svc in _services]
 
     def _enable(self, body, context):
         """Enable scheduling for a service."""
@@ -172,8 +194,18 @@ class ServiceController(wsgi.Controller):
 
     def _update(self, context, host, binary, payload):
         """Do the actual PUT/update"""
+        # If the user tried to perform an action
+        # (disable/enable/force down) on a non-nova-compute
+        # service, provide a more useful error message.
+        if binary != 'nova-compute':
+            msg = (_(
+                'Updating a %(binary)s service is not supported. Only '
+                'nova-compute services can be updated.') % {'binary': binary})
+            raise webob.exc.HTTPBadRequest(explanation=msg)
+
         try:
-            self.host_api.service_update(context, host, binary, payload)
+            self.host_api.service_update_by_host_and_binary(
+                context, host, binary, payload)
         except (exception.HostBinaryNotFound,
                 exception.HostMappingNotFound) as exc:
             raise webob.exc.HTTPNotFound(explanation=exc.format_message())
@@ -219,11 +251,9 @@ class ServiceController(wsgi.Controller):
                 # related compute_nodes record) delete since it will impact
                 # resource accounting in Placement and orphan the compute node
                 # resource provider.
-                # TODO(mriedem): Use a COUNT SQL query-based function instead
-                # of InstanceList.get_uuids_by_host for performance.
-                instance_uuids = objects.InstanceList.get_uuids_by_host(
-                    context, service['host'])
-                if instance_uuids:
+                num_instances = objects.InstanceList.get_count_by_hosts(
+                    context, [service['host']])
+                if num_instances:
                     raise webob.exc.HTTPConflict(
                         explanation=_('Unable to delete compute service that '
                                       'is hosting instances. Migrate or '
@@ -236,9 +266,14 @@ class ServiceController(wsgi.Controller):
                                                                   ag.id,
                                                                   service.host)
                 # remove the corresponding resource provider record from
-                # placement for this compute node
-                self.placementclient.delete_resource_provider(
-                    context, service.compute_node, cascade=True)
+                # placement for the compute nodes managed by this service;
+                # remember that an ironic compute service can manage multiple
+                # nodes
+                compute_nodes = objects.ComputeNodeList.get_all_by_host(
+                    context, service.host)
+                for compute_node in compute_nodes:
+                    self.placementclient.delete_resource_provider(
+                        context, compute_node, cascade=True)
                 # remove the host_mapping of this host.
                 try:
                     hm = objects.HostMapping.get_by_host(context, service.host)
@@ -257,7 +292,8 @@ class ServiceController(wsgi.Controller):
             explanation = _("Service id %s refers to multiple services.") % id
             raise webob.exc.HTTPBadRequest(explanation=explanation)
 
-    @validation.query_schema(services.index_query_schema)
+    @validation.query_schema(services.index_query_schema_275, '2.75')
+    @validation.query_schema(services.index_query_schema, '2.0', '2.74')
     @wsgi.expected_errors(())
     def index(self, req):
         """Return a list of all running services. Filter by host & service
@@ -324,7 +360,7 @@ class ServiceController(wsgi.Controller):
         # technically disable a nova-scheduler service, although that doesn't
         # really do anything within Nova and is just confusing. Now trying to
         # do that will fail as a nova-scheduler service won't have a host
-        # mapping so you'll get a 404. In this new microversion, we close that
+        # mapping so you'll get a 400. In this new microversion, we close that
         # old gap and make sure you can only enable/disable and set forced_down
         # on nova-compute services since those are the only ones that make
         # sense to update for those operations.
@@ -369,7 +405,7 @@ class ServiceController(wsgi.Controller):
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
         # Now save our updates to the service record in the database.
-        service.save()
+        self.host_api.service_update(context, service)
 
         # Return the full service record details.
         additional_fields = ['forced_down']

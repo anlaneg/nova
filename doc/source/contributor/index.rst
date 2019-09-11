@@ -24,7 +24,7 @@ is important for maintaining the strong ecosystem around nova.
 
 Our process is always evolving, just as nova and the community around nova
 evolves over time. If there are things that seem strange, or you have ideas on
-how to improve things, please bring them forward on IRC or the openstack-dev
+how to improve things, please bring them forward on IRC or the openstack-discuss
 mailing list, so we continue to improve how the nova community operates.
 
 This section looks at the processes and why. The main aim behind all the
@@ -41,6 +41,8 @@ while keeping users happy and keeping developers productive.
   under
 
 * :doc:`/contributor/blueprints`: An overview of our tracking artifacts.
+
+* :doc:`/contributor/ptl-guide`: A chronological PTL reference guide
 
 Reviewing
 =========
@@ -76,6 +78,12 @@ be Python code. All new code needs to be validated somehow.
 
   * :doc:`/contributor/testing/zero-downtime-upgrade`
 
+  * :doc:`/contributor/testing/down-cell`
+
+* **Profiling Guides**: These are guides to profiling nova.
+
+  * :doc:`/contributor/testing/eventlet-profiling`
+
 The Nova API
 ============
 
@@ -96,10 +104,6 @@ changes done to the API, as the impact can be very wide.
 Nova Major Subsystems
 =====================
 
-Major subsystems in nova have different needs; some of those are documented
-here. If you are contributing to one of these please read the subsystem guide
-before diving in.
-
-* :doc:`/contributor/placement`
-
-* :doc:`/user/conductor`
+Major subsystems in nova have different needs. If you are contributing to one
+of these please read the :ref:`reference guide <reference-internals>` before
+diving in.

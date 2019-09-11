@@ -20,7 +20,7 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import server_metadata
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
 from nova.policies import server_metadata as sm_policies
@@ -30,8 +30,8 @@ class ServerMetadataController(wsgi.Controller):
     """The server metadata API controller for the OpenStack API."""
 
     def __init__(self):
-        self.compute_api = compute.API()
         super(ServerMetadataController, self).__init__()
+        self.compute_api = compute.API()
 
     def _get_metadata(self, context, server_id):
         server = common.get_instance(self.compute_api, context, server_id)
@@ -108,16 +108,10 @@ class ServerMetadataController(wsgi.Controller):
                                                              server,
                                                              metadata,
                                                              delete)
-
-        except exception.InstanceUnknownCell as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
-
         except exception.QuotaError as error:
             raise exc.HTTPForbidden(explanation=error.format_message())
-
         except exception.InstanceIsLocked as e:
             raise exc.HTTPConflict(explanation=e.format_message())
-
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'update metadata', server_id)
@@ -150,13 +144,8 @@ class ServerMetadataController(wsgi.Controller):
         server = common.get_instance(self.compute_api, context, server_id)
         try:
             self.compute_api.delete_instance_metadata(context, server, id)
-
-        except exception.InstanceUnknownCell as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
-
         except exception.InstanceIsLocked as e:
             raise exc.HTTPConflict(explanation=e.format_message())
-
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'delete metadata', server_id)

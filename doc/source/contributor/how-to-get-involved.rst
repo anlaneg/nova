@@ -57,7 +57,7 @@ you don't understand. It's also OK to see some potential problems but put a +0.
 
 Another way is to look for a subteam you'd like to get involved with and review
 their patches. See:
-https://etherpad.openstack.org/p/stein-nova-subteam-tracking
+https://etherpad.openstack.org/p/train-nova-subteam-tracking
 
 Once you're ready to write code, take a look at some of the work already marked
 as low-hanging fruit:
@@ -100,7 +100,6 @@ Here are some top tips around engaging with the Nova community:
 -  IRC
 
    -  we talk a lot in #openstack-nova
-   -  we also have #openstack-placement for :doc:`placement </user/placement>`
    -  do ask us questions in there, and we will try to help you
    -  not sure about asking questions? feel free to listen in around
       other people's questions
@@ -265,7 +264,7 @@ reviews:
 -  Where do I start? What should I review?
 
    -  There are various tools, but a good place to start is:
-      https://etherpad.openstack.org/p/stein-nova-subteam-tracking
+      https://etherpad.openstack.org/p/train-nova-subteam-tracking
    -  Depending on the time in the cycle, it's worth looking at
       NeedsCodeReview blueprints:
       https://blueprints.launchpad.net/nova/
@@ -280,7 +279,7 @@ reviews:
    -  Maybe take a look at things you want to see merged, bug fixes and
       features, or little code fixes
    -  Look for things that have been waiting a long time for a review:
-      https://review.openstack.org/#/q/project:openstack/nova+status:open+age:2weeks
+      https://review.opendev.org/#/q/project:openstack/nova+status:open+age:2weeks
    -  If you get through the above lists, try other tools, such as:
       http://status.openstack.org/reviews
 
@@ -327,7 +326,7 @@ becoming a member of nova-core.
 How to do great nova-spec reviews?
 ==================================
 
-https://specs.openstack.org/openstack/nova-specs/specs/stein/template.html
+https://specs.openstack.org/openstack/nova-specs/specs/train/template.html
 
 :doc:`/contributor/blueprints`.
 

@@ -23,7 +23,7 @@ from webob import exc
 from nova.api.openstack.compute.schemas import assisted_volume_snapshots
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.policies import assisted_volume_snapshots as avs_policies
 
@@ -32,8 +32,8 @@ class AssistedVolumeSnapshotsController(wsgi.Controller):
     """The Assisted volume snapshots API controller for the OpenStack API."""
 
     def __init__(self):
-        self.compute_api = compute.API()
         super(AssistedVolumeSnapshotsController, self).__init__()
+        self.compute_api = compute.API()
 
     @wsgi.expected_errors(400)
     @validation.schema(assisted_volume_snapshots.snapshots_create)
@@ -62,7 +62,10 @@ class AssistedVolumeSnapshotsController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=e.format_message())
 
     @wsgi.response(204)
-    @validation.query_schema(assisted_volume_snapshots.delete_query)
+    @validation.query_schema(assisted_volume_snapshots.delete_query_275,
+                             '2.75')
+    @validation.query_schema(assisted_volume_snapshots.delete_query, '2.0',
+                             '2.74')
     @wsgi.expected_errors((400, 404))
     def delete(self, req, id):
         """Delete a snapshot."""

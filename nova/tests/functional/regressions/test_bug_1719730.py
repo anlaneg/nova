@@ -13,11 +13,11 @@
 from nova import exception
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import fake_network
 import nova.tests.unit.image.fake
 from nova.tests.unit import policy_fixture
-from nova.virt import fake
 
 
 class TestRescheduleWithServerGroup(test.TestCase,
@@ -46,7 +46,7 @@ class TestRescheduleWithServerGroup(test.TestCase,
 
         # We need the computes reporting into placement for the filter
         # scheduler to pick a host.
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -64,11 +64,7 @@ class TestRescheduleWithServerGroup(test.TestCase,
 
         # We start two compute services because we're going to fake one raising
         # RescheduledException to trigger a retry to the other compute host.
-        fake.set_nodes(['host1'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host1')
-        fake.set_nodes(['host2'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host2')
 
         self.image_id = self.api.get_images()[0]['id']

@@ -24,7 +24,7 @@ compute resources might be Virtual Machines, Physical Machines or Containers.
 
 This guide covers the concepts in the OpenStack Compute API.
 For a full reference listing, please see:
-`Compute API Reference <https://developer.openstack.org/api-ref/compute/#compute-api>`__.
+`Compute API Reference <https://docs.openstack.org/api-ref/compute/#compute-api>`__.
 
 We welcome feedback, comments, and bug reports at
 `bugs.launchpad.net/nova <https://bugs.launchpad.net/nova>`__.
@@ -60,7 +60,7 @@ the following endpoints:
 
 * / - list of available versions
 * /v2 - the first version of the Compute API, uses extensions
-        (we call this Compute API v2.0)
+  (we call this Compute API v2.0)
 * /v2.1 - same API, except uses microversions
 
 While this guide concentrates on documenting the v2.1 API,
@@ -85,6 +85,8 @@ Contents
     paginated_collections
     polling_changes
     request_and_response_formats
+    down_cells
+    port_with_resource_request
 
 .. toctree::
     :hidden:

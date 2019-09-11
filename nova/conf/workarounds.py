@@ -67,6 +67,13 @@ Interdependencies to other options:
     cfg.BoolOpt(
         'disable_libvirt_livesnapshot',
         default=False,
+        deprecated_for_removal=True,
+        deprecated_since='19.0.0',
+        deprecated_reason="""
+This option was added to work around issues with libvirt 1.2.2. We no longer
+support this version of libvirt, which means this workaround is no longer
+necessary. It will be removed in a future release.
+""",
         help="""
 Disable live snapshots when using the libvirt driver.
 
@@ -115,8 +122,7 @@ instances that get out of sync between the hypervisor and the Nova database
 will have to be synchronized manually.
 
 For more information, refer to the bug report:
-
-  https://bugs.launchpad.net/bugs/1444630
+https://bugs.launchpad.net/bugs/1444630
 
 Interdependencies to other options:
 
@@ -149,41 +155,61 @@ Related options:
 """),
 
     cfg.BoolOpt(
-        'enable_consoleauth',
+        'enable_numa_live_migration',
         default=False,
-        deprecated_for_removal=True,
-        deprecated_since="18.0.0",
-        deprecated_reason="""
-This option has been added as deprecated originally because it is used
-for avoiding a upgrade issue and it will not be used in the future.
-See the help text for more details.
-""",
         help="""
-Enable the consoleauth service to avoid resetting unexpired consoles.
+Enable live migration of instances with NUMA topologies.
 
-Console token authorizations have moved from the ``nova-consoleauth`` service
-to the database, so all new consoles will be supported by the database backend.
-With this, consoles that existed before database backend support will be reset.
-For most operators, this should be a minimal disruption as the default TTL of a
-console token is 10 minutes.
+Live migration of instances with NUMA topologies is disabled by default
+when using the libvirt driver. This includes live migration of instances with
+CPU pinning or hugepages. CPU pinning and huge page information for such
+instances is not currently re-calculated, as noted in `bug #1289064`_.  This
+means that if instances were already present on the destination host, the
+migrated instance could be placed on the same dedicated cores as these
+instances or use hugepages allocated for another instance. Alternately, if the
+host platforms were not homogeneous, the instance could be assigned to
+non-existent cores or be inadvertently split across host NUMA nodes.
 
-Operators that have much longer token TTL configured or otherwise wish to avoid
-immediately resetting all existing consoles can enable this flag to continue
-using the ``nova-consoleauth`` service in addition to the database backend.
-Once all of the old ``nova-consoleauth`` supported console tokens have expired,
-this flag should be disabled. For example, if a deployment has configured a
-token TTL of one hour, the operator may disable the flag, one hour after
-deploying the new code during an upgrade.
-
-.. note:: Cells v1 was not converted to use the database backend for
-  console token authorizations. Cells v1 console token authorizations will
-  continue to be supported by the ``nova-consoleauth`` service and use of
-  the ``[workarounds]/enable_consoleauth`` option does not apply to
-  Cells v1 users.
+Despite these known issues, there may be cases where live migration is
+necessary. By enabling this option, operators that are aware of the issues and
+are willing to manually work around them can enable live migration support for
+these instances.
 
 Related options:
 
-* ``[consoleauth]/token_ttl``
+* ``compute_driver``: Only the libvirt driver is affected.
+
+.. _bug #1289064: https://bugs.launchpad.net/nova/+bug/1289064
+"""),
+
+    cfg.BoolOpt(
+        'ensure_libvirt_rbd_instance_dir_cleanup',
+        default=False,
+        help="""
+Ensure the instance directory is removed during clean up when using rbd.
+
+When enabled this workaround will ensure that the instance directory is always
+removed during cleanup on hosts using ``[libvirt]/images_type=rbd``. This
+avoids the following bugs with evacuation and revert resize clean up that lead
+to the instance directory remaining on the host:
+
+https://bugs.launchpad.net/nova/+bug/1414895
+
+https://bugs.launchpad.net/nova/+bug/1761062
+
+Both of these bugs can then result in ``DestinationDiskExists`` errors being
+raised if the instances ever attempt to return to the host.
+
+.. warning:: Operators will need to ensure that the instance directory itself,
+  specified by ``[DEFAULT]/instances_path``, is not shared between computes
+  before enabling this workaround otherwise the console.log, kernels, ramdisks
+  and any additional files being used by the running instance will be lost.
+
+Related options:
+
+* ``compute_driver`` (libvirt)
+* ``[libvirt]/images_type`` (rbd)
+* ``instances_path``
 """),
 ]
 

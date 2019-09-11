@@ -62,7 +62,10 @@ class ApiSampleTestBaseV21(testscenarios.WithScenarios,
     # any additional fixtures needed for this scenario
     _additional_fixtures = []
     sample_dir = None
-    _project_id = True
+    _use_project_id = True
+    # Availability zones for the API samples tests. Can be overridden by
+    # sub-classes. If set, the AvailabilityZoneFilter is not used.
+    availability_zones = ['us-west']
 
     scenarios = [
         # test v2 with the v2.1 compatibility stack
@@ -74,7 +77,7 @@ class ApiSampleTestBaseV21(testscenarios.WithScenarios,
         # test v2.18 code without project id
         ('v2_1_noproject_id', {
             'api_major_version': 'v2.1',
-            '_project_id': False,
+            '_use_project_id': False,
             '_additional_fixtures': [
                 api_paste_fixture.ApiPasteNoProjectId]})
     ]
@@ -107,8 +110,6 @@ class ApiSampleTestBaseV21(testscenarios.WithScenarios,
         if not self.SUPPORTS_CELLS:
             self.useFixture(fixtures.Database())
             self.useFixture(fixtures.Database(database='api'))
-            # FIXME(cdent): Placement db already provided by IntegratedHelpers
-            self.useFixture(fixtures.Database(database='placement'))
             self.useFixture(fixtures.DefaultFlavorsFixture())
             self.useFixture(fixtures.SingleCellSimple())
 
@@ -122,5 +123,48 @@ class ApiSampleTestBaseV21(testscenarios.WithScenarios,
         # this is used to generate sample docs
         self.generate_samples = os.getenv('GENERATE_SAMPLES') is not None
 
+        # NOTE(mikal): this is used to stub away privsep helpers
+        def fake_noop(*args, **kwargs):
+            return '', ''
+
+        def fake_true(*args, **kwargs):
+            return True
+
+        self.stub_out('nova.privsep.linux_net.add_bridge', fake_noop)
+        self.stub_out('nova.privsep.linux_net.set_device_mtu', fake_noop)
+        self.stub_out('nova.privsep.linux_net.set_device_enabled', fake_noop)
+        self.stub_out('nova.privsep.linux_net.set_device_macaddr', fake_noop)
+        self.stub_out('nova.privsep.linux_net.routes_show', fake_noop)
+        self.stub_out('nova.privsep.linux_net.lookup_ip', fake_noop)
+        self.stub_out('nova.privsep.linux_net.change_ip', fake_noop)
+        self.stub_out('nova.privsep.linux_net.address_command_deprecated',
+                      fake_noop)
+        self.stub_out('nova.privsep.linux_net.ipv4_forwarding_check',
+                      fake_true)
+        self.stub_out('nova.privsep.linux_net._enable_ipv4_forwarding_inner',
+                      fake_noop)
+        self.stub_out('nova.privsep.linux_net.add_vlan', fake_noop)
+        self.stub_out('nova.privsep.linux_net.bridge_setfd', fake_noop)
+        self.stub_out('nova.privsep.linux_net.bridge_disable_stp', fake_noop)
+        self.stub_out('nova.privsep.linux_net.bridge_add_interface', fake_noop)
+
+        if self.availability_zones:
+            self.useFixture(
+                fixtures.AvailabilityZoneFixture(self.availability_zones))
+
     def _setup_services(self):
         pass
+
+    def _setup_scheduler_service(self):
+        """Overrides _IntegratedTestBase._setup_scheduler_service to filter
+        out the AvailabilityZoneFilter prior to starting the scheduler.
+        """
+        if self.availability_zones:
+            # The test is using fake zones so disable the
+            # AvailabilityZoneFilter which is otherwise enabled by default.
+            enabled_filters = CONF.filter_scheduler.enabled_filters
+            if 'AvailabilityZoneFilter' in enabled_filters:
+                enabled_filters.remove('AvailabilityZoneFilter')
+                self.flags(enabled_filters=enabled_filters,
+                           group='filter_scheduler')
+        return super(ApiSampleTestBaseV21, self)._setup_scheduler_service()

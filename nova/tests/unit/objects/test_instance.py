@@ -13,6 +13,7 @@
 #    under the License.
 
 import datetime
+import six
 
 import mock
 import netaddr
@@ -20,9 +21,8 @@ from oslo_db import exception as db_exc
 from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
+from oslo_versionedobjects import base as ovo_base
 
-from nova.cells import rpcapi as cells_rpcapi
-from nova.compute import flavors
 from nova.compute import task_states
 from nova.compute import vm_states
 from nova.db import api as db
@@ -30,7 +30,6 @@ from nova import exception
 from nova.network import model as network_model
 from nova import notifications
 from nova import objects
-from nova.objects import base
 from nova.objects import fields
 from nova.objects import instance
 from nova.objects import instance_info_cache
@@ -41,7 +40,7 @@ from nova.tests.unit import fake_instance
 from nova.tests.unit.objects import test_instance_device_metadata
 from nova.tests.unit.objects import test_instance_fault
 from nova.tests.unit.objects import test_instance_info_cache
-from nova.tests.unit.objects import test_instance_numa_topology
+from nova.tests.unit.objects import test_instance_numa
 from nova.tests.unit.objects import test_instance_pci_requests
 from nova.tests.unit.objects import test_migration_context as test_mig_ctxt
 from nova.tests.unit.objects import test_objects
@@ -152,8 +151,7 @@ class _TestInstanceObject(object):
                          'extra.migration_context', 'extra.keypairs',
                          'extra.device_metadata', 'extra.trusted_certs'])
 
-        fake_topology = (test_instance_numa_topology.
-                         fake_db_topology['numa_topology'])
+        fake_topology = test_instance_numa.fake_db_topology['numa_topology']
         fake_requests = jsonutils.dumps(test_instance_pci_requests.
                                         fake_pci_requests)
         fake_devices_metadata = \
@@ -241,6 +239,24 @@ class _TestInstanceObject(object):
                                     project_id=self.context.project_id)
         self.assertNotIn('system_metadata', instance)
         self.assertEqual(0, len(instance.system_metadata))
+
+    def test_lazy_load_flavor_on_deleted_instance(self):
+        # For something like a flavor, we should be reading from the DB
+        # with read_deleted='yes'
+        flavor = objects.Flavor(name='testflavor')
+        instance = objects.Instance(self.context, uuid=uuids.instance,
+                                    flavor=flavor,
+                                    user_id=self.context.user_id,
+                                    project_id=self.context.project_id)
+        instance.create()
+        instance.destroy()
+        # Re-create our local object to make sure it doesn't have sysmeta
+        # filled in by create()
+        instance = objects.Instance(self.context, uuid=uuids.instance,
+                                    user_id=self.context.user_id,
+                                    project_id=self.context.project_id)
+        self.assertNotIn('flavor', instance)
+        self.assertEqual('testflavor', instance.flavor.name)
 
     def test_lazy_load_tags(self):
         instance = objects.Instance(self.context, uuid=uuids.instance,
@@ -342,8 +358,10 @@ class _TestInstanceObject(object):
         # make sure we default the "new" flavor's disabled value to False on
         # load from the database.
         fake_flavor = jsonutils.dumps(
-            {'cur': objects.Flavor(disabled=False).obj_to_primitive(),
-             'old': objects.Flavor(disabled=True).obj_to_primitive(),
+            {'cur': objects.Flavor(disabled=False,
+                                   is_public=True).obj_to_primitive(),
+             'old': objects.Flavor(disabled=True,
+                                   is_public=False).obj_to_primitive(),
              'new': objects.Flavor().obj_to_primitive()})
         fake_inst = dict(self.fake_instance, extra={'flavor': fake_flavor})
         mock_get.return_value = fake_inst
@@ -351,6 +369,10 @@ class _TestInstanceObject(object):
         self.assertFalse(inst.flavor.disabled)
         self.assertTrue(inst.old_flavor.disabled)
         self.assertFalse(inst.new_flavor.disabled)
+        # Assert the is_public values on the flavors
+        self.assertTrue(inst.flavor.is_public)
+        self.assertFalse(inst.old_flavor.is_public)
+        self.assertTrue(inst.new_flavor.is_public)
 
     @mock.patch.object(db, 'instance_get_by_uuid')
     def test_get_remote(self, mock_get):
@@ -408,22 +430,15 @@ class _TestInstanceObject(object):
             expected_attrs=['metadata'], use_slave=False)
 
     @mock.patch.object(notifications, 'send_update')
-    @mock.patch.object(cells_rpcapi, 'CellsAPI')
     @mock.patch.object(db, 'instance_info_cache_update')
     @mock.patch.object(db, 'instance_update_and_get_original')
     @mock.patch.object(db, 'instance_get_by_uuid')
-    def _save_test_helper(self, cell_type, save_kwargs,
+    def _save_test_helper(self, save_kwargs,
                           mock_db_instance_get_by_uuid,
                           mock_db_instance_update_and_get_original,
                           mock_db_instance_info_cache_update,
-                          mock_cells_rpcapi_CellsAPI,
                           mock_notifications_send_update):
         """Common code for testing save() for cells/non-cells."""
-        if cell_type:
-            self.flags(enable=True, cell_type=cell_type, group='cells')
-        else:
-            self.flags(enable=False, group='cells')
-
         old_ref = dict(self.fake_instance, host='oldhost', user_data='old',
                        vm_state='old', task_state='old')
         fake_uuid = old_ref['uuid']
@@ -434,7 +449,6 @@ class _TestInstanceObject(object):
         new_ref = dict(old_ref, host='newhost', **expected_updates)
         exp_vm_state = save_kwargs.get('expected_vm_state')
         exp_task_state = save_kwargs.get('expected_task_state')
-        admin_reset = save_kwargs.get('admin_state_reset', False)
         if exp_vm_state:
             expected_updates['expected_vm_state'] = exp_vm_state
         if exp_task_state:
@@ -474,53 +488,24 @@ class _TestInstanceObject(object):
             columns_to_join=['info_cache', 'security_groups',
                              'system_metadata']
         )
-        if cell_type == 'api':
-            mock_cells_rpcapi_CellsAPI.return_value.instance_update_from_api \
-                .assert_called_once_with(
-                self.context, test.MatchType(objects.Instance),
-                exp_vm_state, exp_task_state, admin_reset
-            )
-        elif cell_type == 'compute':
-            mock_cells_rpcapi_CellsAPI.return_value.instance_update_at_top \
-                .assert_called_once_with(
-                self.context, mock.ANY
-            )
         mock_notifications_send_update.assert_called_with(self.context,
                                                           mock.ANY,
                                                           mock.ANY)
 
     def test_save(self):
-        self._save_test_helper(None, {})
-
-    def test_save_in_api_cell(self):
-        self._save_test_helper('api', {})
-
-    def test_save_in_compute_cell(self):
-        self._save_test_helper('compute', {})
+        self._save_test_helper({})
 
     def test_save_exp_vm_state(self):
-        self._save_test_helper(None, {'expected_vm_state': ['meow']})
+        self._save_test_helper({'expected_vm_state': ['meow']})
 
     def test_save_exp_task_state(self):
-        self._save_test_helper(None, {'expected_task_state': ['meow']})
-
-    def test_save_exp_vm_state_api_cell(self):
-        self._save_test_helper('api', {'expected_vm_state': ['meow']})
-
-    def test_save_exp_task_state_api_cell(self):
-        self._save_test_helper('api', {'expected_task_state': ['meow']})
-
-    def test_save_exp_task_state_api_cell_admin_reset(self):
-        self._save_test_helper('api', {'admin_state_reset': True})
+        self._save_test_helper({'expected_task_state': ['meow']})
 
     @mock.patch.object(db, 'instance_update_and_get_original')
     @mock.patch.object(db, 'instance_get_by_uuid')
     @mock.patch.object(notifications, 'send_update')
     def test_save_rename_sends_notification(self, mock_send, mock_get,
                                             mock_update_and_get):
-        # Tests that simply changing the 'display_name' on the instance
-        # will send a notification.
-        self.flags(enable=False, group='cells')
         old_ref = dict(self.fake_instance, display_name='hello')
         fake_uuid = old_ref['uuid']
         expected_updates = dict(display_name='goodbye')
@@ -548,8 +533,9 @@ class _TestInstanceObject(object):
     @mock.patch('nova.db.api.instance_extra_update_by_uuid')
     def test_save_object_pci_requests(self, mock_instance_extra_update):
         expected_json = ('[{"count": 1, "alias_name": null, "is_new": false,'
-                         '"request_id": null, "spec": [{"vendor_id": "8086",'
-                         '"product_id": "1502"}]}]')
+                         '"request_id": null, "requester_id": null,'
+                         '"spec": [{"vendor_id": "8086", '
+                         '"product_id": "1502"}], "numa_policy": null}]')
 
         inst = objects.Instance()
         inst = objects.Instance._from_db_object(self.context, inst,
@@ -692,77 +678,6 @@ class _TestInstanceObject(object):
                          'vcpu_model': json_vcpu_model}
         mock_update.assert_called_once_with(self.context, inst.uuid,
                                             expected_vals)
-
-    @mock.patch.object(notifications, 'send_update')
-    @mock.patch.object(cells_rpcapi.CellsAPI, 'instance_update_from_api')
-    @mock.patch.object(cells_rpcapi.CellsAPI, 'instance_update_at_top')
-    @mock.patch.object(db, 'instance_update_and_get_original')
-    def _test_skip_cells_sync_helper(self, mock_db_update, mock_update_at_top,
-            mock_update_from_api, mock_notif_update, cell_type):
-        self.flags(enable=True, cell_type=cell_type, group='cells')
-        inst = fake_instance.fake_instance_obj(self.context, cell_name='fake')
-        inst.vm_state = 'foo'
-        inst.task_state = 'bar'
-        inst.cell_name = 'foo!bar@baz'
-
-        old_ref = dict(base.obj_to_primitive(inst), vm_state='old',
-                task_state='old')
-        new_ref = dict(old_ref, vm_state='foo', task_state='bar')
-        newer_ref = dict(new_ref, vm_state='bar', task_state='foo')
-        mock_db_update.side_effect = [(old_ref, new_ref), (new_ref, newer_ref)]
-
-        with inst.skip_cells_sync():
-            inst.save()
-
-        mock_update_at_top.assert_has_calls([])
-        mock_update_from_api.assert_has_calls([])
-        self.assertFalse(mock_notif_update.called)
-
-        inst.vm_state = 'bar'
-        inst.task_state = 'foo'
-
-        def fake_update_from_api(context, instance, expected_vm_state,
-                expected_task_state, admin_state_reset):
-            self.assertEqual('foo!bar@baz', instance.cell_name)
-
-        # This is re-mocked so that cell_name can be checked above.  Since
-        # instance objects have no equality testing assert_called_once_with
-        # doesn't work.
-        with mock.patch.object(cells_rpcapi.CellsAPI,
-                'instance_update_from_api',
-                side_effect=fake_update_from_api) as fake_update_from_api:
-            inst.save()
-
-        self.assertEqual('foo!bar@baz', inst.cell_name)
-        self.assertTrue(mock_notif_update.called)
-        if cell_type == 'compute':
-            mock_update_at_top.assert_called_once_with(self.context, mock.ANY)
-            # Compare primitives since we can't check instance object equality
-            expected_inst_p = base.obj_to_primitive(inst)
-            actual_inst = mock_update_at_top.call_args[0][1]
-            actual_inst_p = base.obj_to_primitive(actual_inst)
-            self.assertEqual(expected_inst_p, actual_inst_p)
-            self.assertFalse(fake_update_from_api.called)
-        elif cell_type == 'api':
-            self.assertFalse(mock_update_at_top.called)
-            fake_update_from_api.assert_called_once_with(self.context,
-                    mock.ANY, None, None, False)
-
-        expected_calls = [
-                mock.call(self.context, inst.uuid,
-                    {'vm_state': 'foo', 'task_state': 'bar',
-                     'cell_name': 'foo!bar@baz'},
-                    columns_to_join=['tags', 'system_metadata']),
-                mock.call(self.context, inst.uuid,
-                    {'vm_state': 'bar', 'task_state': 'foo'},
-                    columns_to_join=['system_metadata', 'tags'])]
-        mock_db_update.assert_has_calls(expected_calls)
-
-    def test_skip_cells_api(self):
-        self._test_skip_cells_sync_helper(cell_type='api')
-
-    def test_skip_cells_compute(self):
-        self._test_skip_cells_sync_helper(cell_type='compute')
 
     @mock.patch.object(db, 'instance_get_by_uuid')
     def test_get_deleted(self, mock_get):
@@ -1130,7 +1045,7 @@ class _TestInstanceObject(object):
     def test_create_with_extras(self):
         inst = objects.Instance(context=self.context,
             uuid=self.fake_instance['uuid'],
-            numa_topology=test_instance_numa_topology.fake_obj_numa_topology,
+            numa_topology=test_instance_numa.fake_obj_numa_topology,
             pci_requests=objects.InstancePCIRequests(
                 requests=[
                     objects.InstancePCIRequest(count=123,
@@ -1209,7 +1124,8 @@ class _TestInstanceObject(object):
                          timeutils.normalize_time(inst.deleted_at))
         self.assertTrue(inst.deleted)
         mock_destroy.assert_called_once_with(self.context, uuids.instance,
-                                             constraint=None)
+                                             constraint=None,
+                                             hard_delete=False)
 
     def test_destroy(self):
         values = {'user_id': self.context.user_id,
@@ -1232,29 +1148,28 @@ class _TestInstanceObject(object):
         self.assertRaises(exception.ObjectActionError,
                           inst.destroy)
 
-    @mock.patch.object(cells_rpcapi.CellsAPI, 'instance_destroy_at_top')
-    @mock.patch.object(db, 'instance_destroy')
-    def test_destroy_cell_sync_to_top(self, mock_destroy, mock_destroy_at_top):
-        self.flags(enable=True, cell_type='compute', group='cells')
-        fake_inst = fake_instance.fake_db_instance(deleted=True)
-        mock_destroy.return_value = fake_inst
-        inst = objects.Instance(context=self.context, id=1,
-                                uuid=uuids.instance)
-        inst.destroy()
-        mock_destroy_at_top.assert_called_once_with(self.context, mock.ANY)
-        actual_inst = mock_destroy_at_top.call_args[0][1]
-        self.assertIsInstance(actual_inst, instance.Instance)
+    def test_destroy_hard(self):
+        values = {'user_id': self.context.user_id,
+                  'project_id': self.context.project_id}
+        db_inst = db.instance_create(self.context, values)
+        inst = objects.Instance(context=self.context, id=db_inst['id'],
+                                uuid=db_inst['uuid'])
+        inst.destroy(hard_delete=True)
+        elevated = self.context.elevated(read_deleted="yes")
+        self.assertRaises(exception.InstanceNotFound,
+                          objects.Instance.get_by_uuid, elevated,
+                          db_inst['uuid'])
 
-    @mock.patch.object(cells_rpcapi.CellsAPI, 'instance_destroy_at_top')
-    @mock.patch.object(db, 'instance_destroy')
-    def test_destroy_no_cell_sync_to_top(self, mock_destroy,
-                                         mock_destroy_at_top):
-        fake_inst = fake_instance.fake_db_instance(deleted=True)
-        mock_destroy.return_value = fake_inst
-        inst = objects.Instance(context=self.context, id=1,
-                                uuid=uuids.instance)
-        inst.destroy()
-        self.assertFalse(mock_destroy_at_top.called)
+    def test_destroy_hard_host_constraint(self):
+        values = {'user_id': self.context.user_id,
+                  'project_id': self.context.project_id,
+                  'host': 'foo'}
+        db_inst = db.instance_create(self.context, values)
+        inst = objects.Instance.get_by_uuid(self.context, db_inst['uuid'])
+        inst.host = None
+        ex = self.assertRaises(exception.ObjectActionError,
+                               inst.destroy, hard_delete=True)
+        self.assertIn('host changed', six.text_type(ex))
 
     def test_name_does_not_trigger_lazy_loads(self):
         values = {'user_id': self.context.user_id,
@@ -1334,13 +1249,13 @@ class _TestInstanceObject(object):
         self.assertIsNotNone(instance.pci_requests)
 
     def test_get_flavor(self):
-        db_flavor = flavors.get_default_flavor()
+        db_flavor = objects.Flavor.get_by_name(self.context, 'm1.small')
         inst = objects.Instance(flavor=db_flavor)
         self.assertEqual(db_flavor['flavorid'],
                          inst.get_flavor().flavorid)
 
     def test_get_flavor_namespace(self):
-        db_flavor = flavors.get_default_flavor()
+        db_flavor = objects.Flavor.get_by_name(self.context, 'm1.small')
         inst = objects.Instance(old_flavor=db_flavor)
         self.assertEqual(db_flavor['flavorid'],
                          inst.get_flavor('old').flavorid)
@@ -1457,7 +1372,7 @@ class _TestInstanceObject(object):
                                                  {"migration_context": None})
 
     def test_mutated_migration_context(self):
-        numa_topology = (test_instance_numa_topology.
+        numa_topology = (test_instance_numa.
                             fake_obj_numa_topology.obj_clone())
         numa_topology.cells[0].memory = 1024
         numa_topology.cells[1].memory = 1024
@@ -1500,8 +1415,7 @@ class _TestInstanceObject(object):
                 self.assertNotIn(attr, inst)
 
     def test_clear_numa_topology(self):
-        numa_topology = (test_instance_numa_topology.
-                            fake_obj_numa_topology.obj_clone())
+        numa_topology = test_instance_numa.fake_obj_numa_topology.obj_clone()
         numa_topology.cells[0].id = 42
         numa_topology.cells[1].id = 43
 
@@ -1605,6 +1519,19 @@ class _TestInstanceObject(object):
         inst1.obj_reset_changes()
         inst1 = inst1.obj_clone()
         self.assertEqual(len(inst1.obj_what_changed()), 0)
+
+    def test_obj_make_compatible(self):
+        inst_obj = objects.Instance(
+            # trusted_certs were added in 2.4
+            trusted_certs=objects.TrustedCerts(ids=[uuids.cert1]),
+            # hidden was added in 2.6
+            hidden=True)
+        versions = ovo_base.obj_tree_get_versions('Instance')
+        data = lambda x: x['nova_object.data']
+        primitive = data(inst_obj.obj_to_primitive(
+            target_version='2.5', version_manifest=versions))
+        self.assertIn('trusted_certs', primitive)
+        self.assertNotIn('hidden', primitive)
 
 
 class TestInstanceObject(test_objects._LocalTest,
@@ -1986,14 +1913,38 @@ class _TestInstanceListObject(object):
         self.assertEqual(2, len(instances))
         self.assertEqual([1, 2], [x.id for x in instances])
 
-    @mock.patch('nova.db.api.instance_get_all_uuids_by_host')
+    @mock.patch('nova.db.api.instance_get_all_uuids_by_hosts')
+    def test_get_uuids_by_host_no_match(self, mock_get_all):
+        mock_get_all.return_value = {}
+        actual_uuids = objects.InstanceList.get_uuids_by_host(
+            self.context, 'b')
+        self.assertEqual([], actual_uuids)
+        mock_get_all.assert_called_once_with(self.context, ['b'])
+
+    @mock.patch('nova.db.api.instance_get_all_uuids_by_hosts')
     def test_get_uuids_by_host(self, mock_get_all):
         fake_instances = [uuids.inst1, uuids.inst2]
-        mock_get_all.return_value = fake_instances
+        mock_get_all.return_value = {
+            'b': fake_instances
+        }
         actual_uuids = objects.InstanceList.get_uuids_by_host(
             self.context, 'b')
         self.assertEqual(fake_instances, actual_uuids)
-        mock_get_all.assert_called_once_with(self.context, 'b')
+        mock_get_all.assert_called_once_with(self.context, ['b'])
+
+    @mock.patch('nova.db.api.instance_get_all_uuids_by_hosts')
+    def test_get_uuids_by_hosts(self, mock_get_all):
+        fake_instances_a = [uuids.inst1, uuids.inst2]
+        fake_instances_b = [uuids.inst3, uuids.inst4]
+        fake_instances = {
+            'a': fake_instances_a,
+            'b': fake_instances_b
+        }
+        mock_get_all.return_value = fake_instances
+        actual_uuids = objects.InstanceList.get_uuids_by_hosts(
+            self.context, ['a', 'b'])
+        self.assertEqual(fake_instances, actual_uuids)
+        mock_get_all.assert_called_once_with(self.context, ['a', 'b'])
 
 
 class TestInstanceListObject(test_objects._LocalTest,
@@ -2006,7 +1957,7 @@ class TestRemoteInstanceListObject(test_objects._RemoteTest,
     pass
 
 
-class TestInstanceObjectMisc(test.TestCase):
+class TestInstanceObjectMisc(test.NoDBTestCase):
     def test_expected_cols(self):
         self.stub_out('nova.objects.instance._INSTANCE_OPTIONAL_JOINED_FIELDS',
                       ['bar'])

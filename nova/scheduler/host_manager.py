@@ -126,6 +126,7 @@ class HostState(object):
         # Additional host information from the compute node stats:
         self.num_instances = 0
         self.num_io_ops = 0
+        self.failed_builds = 0
 
         # Other information
         self.host_ip = None
@@ -192,8 +193,8 @@ class HostState(object):
                       'updated yet.', compute.uuid)
             return
 
-        if (self.updated and compute.updated_at
-                and self.updated > compute.updated_at):
+        if (self.updated and compute.updated_at and
+                self.updated > compute.updated_at):
             return
         all_ram_mb = compute.memory_mb
 
@@ -223,7 +224,9 @@ class HostState(object):
         self.vcpus_total = compute.vcpus
         self.vcpus_used = compute.vcpus_used
         self.updated = compute.updated_at
-        self.numa_topology = compute.numa_topology
+        # the ComputeNode.numa_topology field is a StringField so deserialize
+        self.numa_topology = objects.NUMATopology.obj_from_db_obj(
+            compute.numa_topology) if compute.numa_topology else None
         self.pci_stats = pci_stats.PciDeviceStats(
             stats=compute.pci_device_pools)
 
@@ -292,33 +295,22 @@ class HostState(object):
         else:
             pci_requests = None
 
-        # Calculate the numa usage
-        host_numa_topology, _fmt = hardware.host_topology_and_format_from_host(
-                                self)
-        instance_numa_topology = spec_obj.numa_topology
-        if host_numa_topology and instance_numa_topology:
+        # Calculate the NUMA usage...
+        if self.numa_topology and spec_obj.numa_topology:
             spec_obj.numa_topology = hardware.numa_fit_instance_to_host(
-                host_numa_topology, instance_numa_topology,
+                self.numa_topology, spec_obj.numa_topology,
                 limits=self.limits.get('numa_topology'),
                 pci_requests=pci_requests, pci_stats=self.pci_stats)
+
+            self.numa_topology = hardware.numa_usage_from_instance_numa(
+                self.numa_topology, spec_obj.numa_topology)
+
+        # ...and the PCI usage
         if pci_requests:
             instance_cells = None
             if spec_obj.numa_topology:
                 instance_cells = spec_obj.numa_topology.cells
             self.pci_stats.apply_requests(pci_requests, instance_cells)
-
-        # NOTE(sbauza): Yeah, that's crap. We should get rid of all of those
-        # NUMA helpers because now we're 100% sure that spec_obj.numa_topology
-        # is an InstanceNUMATopology object. Unfortunately, since
-        # HostState.host_numa_topology is still limbo between an NUMATopology
-        # object (when updated by consume_from_request), a ComputeNode object
-        # (when updated by update_from_compute_node), we need to keep the call
-        # to get_host_numa_usage_from_instance until it's fixed (and use a
-        # temporary orphaned Instance object as a proxy)
-        instance = objects.Instance(numa_topology=spec_obj.numa_topology)
-
-        self.numa_topology = hardware.get_host_numa_usage_from_instance(
-                self, instance)
 
         # NOTE(sbauza): By considering all cases when the scheduler is called
         # and when consume_from_request() is run, we can safely say that there
@@ -393,8 +385,8 @@ class HostManager(object):
         # Refreshing the mapping dict to remove all hosts that are no longer
         # part of the aggregate
         for host in self.host_aggregates_map:
-            if (aggregate.id in self.host_aggregates_map[host]
-                    and host not in aggregate.hosts):
+            if (aggregate.id in self.host_aggregates_map[host] and
+                    host not in aggregate.hosts):
                 self.host_aggregates_map[host].remove(aggregate.id)
 
     def delete_aggregate(self, aggregate):
@@ -426,7 +418,7 @@ class HostManager(object):
             count = 0
             if not computes_by_cell:
                 computes_by_cell = {}
-                for cell in self.cells:
+                for cell in self.cells.values():
                     with context_module.target_cell(context, cell) as cctxt:
                         cell_cns = objects.ComputeNodeList.get_all(
                             cctxt).objects
@@ -539,10 +531,29 @@ class HostManager(object):
                          "'force_nodes' value of '%s'", forced_nodes_str)
 
         def _get_hosts_matching_request(hosts, requested_destination):
+            """Get hosts through matching the requested destination.
+
+            We will both set host and node to requested destination object
+            and host will never be None and node will be None in some cases.
+            Starting with API 2.74 microversion, we also can specify the
+            host/node to select hosts to launch a server:
+             - If only host(or only node)(or both host and node) is supplied
+               and we get one node from get_compute_nodes_by_host_or_node which
+               is called in resources_from_request_spec function,
+               the destination will be set both host and node.
+             - If only host is supplied and we get more than one node from
+               get_compute_nodes_by_host_or_node which is called in
+               resources_from_request_spec function, the destination will only
+               include host.
+            """
             (host, node) = (requested_destination.host,
                             requested_destination.node)
-            requested_nodes = [x for x in hosts
-                               if x.host == host and x.nodename == node]
+            if node:
+                requested_nodes = [x for x in hosts
+                                   if x.host == host and x.nodename == node]
+            else:
+                requested_nodes = [x for x in hosts
+                                   if x.host == host]
             if requested_nodes:
                 LOG.info('Host filter only checking host %(host)s and '
                          'node %(node)s', {'host': host, 'node': node})
@@ -630,7 +641,7 @@ class HostManager(object):
         compute_nodes = collections.defaultdict(list)
         services = {}
         for cell_uuid, result in results.items():
-            if result is context_module.raised_exception_sentinel:
+            if isinstance(result, Exception):
                 LOG.warning('Failed to get computes for cell %s', cell_uuid)
             elif result is context_module.did_not_respond_sentinel:
                 LOG.warning('Timeout getting computes for cell %s', cell_uuid)
@@ -640,6 +651,68 @@ class HostManager(object):
                 services.update({service.host: service
                                  for service in _services})
         return compute_nodes, services
+
+    def _get_cell_by_host(self, ctxt, host):
+        '''Get CellMapping object of a cell the given host belongs to.'''
+        try:
+            host_mapping = objects.HostMapping.get_by_host(ctxt, host)
+            return host_mapping.cell_mapping
+        except exception.HostMappingNotFound:
+            LOG.warning('No host-to-cell mapping found for selected '
+                        'host %(host)s.', {'host': host})
+            return
+
+    def get_compute_nodes_by_host_or_node(self, ctxt, host, node, cell=None):
+        '''Get compute nodes from given host or node'''
+        def return_empty_list_for_not_found(func):
+            def wrapper(*args, **kwargs):
+                try:
+                    ret = func(*args, **kwargs)
+                except exception.NotFound:
+                    ret = objects.ComputeNodeList()
+                return ret
+            return wrapper
+
+        @return_empty_list_for_not_found
+        def _get_by_host_and_node(ctxt):
+            compute_node = objects.ComputeNode.get_by_host_and_nodename(
+                ctxt, host, node)
+            return objects.ComputeNodeList(objects=[compute_node])
+
+        @return_empty_list_for_not_found
+        def _get_by_host(ctxt):
+            return objects.ComputeNodeList.get_all_by_host(ctxt, host)
+
+        @return_empty_list_for_not_found
+        def _get_by_node(ctxt):
+            compute_node = objects.ComputeNode.get_by_nodename(ctxt, node)
+            return objects.ComputeNodeList(objects=[compute_node])
+
+        if host and node:
+            target_fnc = _get_by_host_and_node
+        elif host:
+            target_fnc = _get_by_host
+        else:
+            target_fnc = _get_by_node
+
+        if host and not cell:
+            # optimization not to issue queries to every cell DB
+            cell = self._get_cell_by_host(ctxt, host)
+
+        cells = [cell] if cell else self.enabled_cells
+
+        timeout = context_module.CELL_TIMEOUT
+        nodes_by_cell = context_module.scatter_gather_cells(
+            ctxt, cells, timeout, target_fnc)
+
+        # Only one cell should have values for the compute nodes
+        # so we get them here, or return an empty list if no cell
+        # has a value
+        nodes = next(
+            (nodes for nodes in nodes_by_cell.values() if nodes),
+            objects.ComputeNodeList())
+
+        return nodes
 
     def refresh_cells_caches(self):
         # NOTE(tssurya): This function is called from the scheduler manager's
@@ -653,32 +726,41 @@ class HostManager(object):
                 temp_cells.objects.remove(c)
                 # once its done break for optimization
                 break
-        # NOTE(danms, tssurya): global list of cells cached which
-        # will be refreshed every time a SIGHUP is sent to the scheduler.
-        self.cells = temp_cells
+        # NOTE(danms, tssurya): global dict, keyed by cell uuid, of cells
+        # cached which will be refreshed every time a SIGHUP is sent to the
+        # scheduler.
+        self.cells = {cell.uuid: cell for cell in temp_cells}
         LOG.debug('Found %(count)i cells: %(cells)s',
                   {'count': len(self.cells),
-                   'cells': ', '.join([c.uuid for c in self.cells])})
+                   'cells': ', '.join(self.cells)})
         # NOTE(tssurya): Global cache of only the enabled cells. This way
         # scheduling is limited only to the enabled cells. However this
         # cache will be refreshed every time a cell is disabled or enabled
         # or when a new cell is created as long as a SIGHUP signal is sent
         # to the scheduler.
-        self.enabled_cells = [c for c in self.cells if not c.disabled]
+        self.enabled_cells = [c for c in temp_cells if not c.disabled]
         # Filtering the disabled cells only for logging purposes.
-        disabled_cells = [c for c in self.cells if c.disabled]
-        LOG.debug('Found %(count)i disabled cells: %(cells)s',
-                  {'count': len(disabled_cells),
-                   'cells': ', '.join(
-                   [c.identity for c in disabled_cells])})
+        if LOG.isEnabledFor(logging.DEBUG):
+            disabled_cells = [c for c in temp_cells if c.disabled]
+            LOG.debug('Found %(count)i disabled cells: %(cells)s',
+                      {'count': len(disabled_cells),
+                       'cells': ', '.join(
+                       [c.identity for c in disabled_cells])})
+
+        # Dict, keyed by host name, to cell UUID to be used to look up the
+        # cell a particular host is in (used with self.cells).
+        self.host_to_cell_uuid = {}
 
     def get_host_states_by_uuids(self, context, compute_uuids, spec_obj):
 
         if not self.cells:
             LOG.warning("No cells were found")
+        # Restrict to a single cell if and only if the request spec has a
+        # requested cell and allow_cross_cell_move=False.
         if (spec_obj and 'requested_destination' in spec_obj and
                 spec_obj.requested_destination and
-                'cell' in spec_obj.requested_destination):
+                'cell' in spec_obj.requested_destination and
+                not spec_obj.requested_destination.allow_cross_cell_move):
             only_cell = spec_obj.requested_destination.cell
         else:
             only_cell = None
@@ -690,15 +772,6 @@ class HostManager(object):
 
         compute_nodes, services = self._get_computes_for_cells(
             context, cells, compute_uuids=compute_uuids)
-        return self._get_host_states(context, compute_nodes, services)
-
-    def get_all_host_states(self, context):
-        """Returns a generator of HostStates that represents all the hosts
-        the HostManager knows about. Also, each of the consumable resources
-        in HostState are pre-populated and adjusted based on data in the db.
-        """
-        compute_nodes, services = self._get_computes_for_cells(context,
-                                                               self.cells)
         return self._get_host_states(context, compute_nodes, services)
 
     def _get_host_states(self, context, compute_nodes, services):
@@ -744,9 +817,40 @@ class HostManager(object):
         return [self.aggs_by_id[agg_id] for agg_id in
                 self.host_aggregates_map[host]]
 
+    def _get_cell_mapping_for_host(self, context, host_name):
+        """Finds the CellMapping for a particular host name
+
+        Relies on a cache to quickly fetch the CellMapping if we have looked
+        up this host before, otherwise gets the CellMapping via the
+        HostMapping record for the given host name.
+
+        :param context: nova auth request context
+        :param host_name: compute service host name
+        :returns: CellMapping object
+        :raises: HostMappingNotFound if the host is not mapped to a cell
+        """
+        # Check to see if we have the host in our cache.
+        if host_name in self.host_to_cell_uuid:
+            cell_uuid = self.host_to_cell_uuid[host_name]
+            if cell_uuid in self.cells:
+                return self.cells[cell_uuid]
+            # Something is wrong so log a warning and just fall through to
+            # lookup the HostMapping.
+            LOG.warning('Host %s is expected to be in cell %s but that cell '
+                        'uuid was not found in our cache. The service may '
+                        'need to be restarted to refresh the cache.',
+                        host_name, cell_uuid)
+
+        # We have not cached this host yet so get the HostMapping, cache the
+        # result and return the CellMapping.
+        hm = objects.HostMapping.get_by_host(context, host_name)
+        cell_mapping = hm.cell_mapping
+        self.host_to_cell_uuid[host_name] = cell_mapping.uuid
+        return cell_mapping
+
     def _get_instances_by_host(self, context, host_name):
         try:
-            hm = objects.HostMapping.get_by_host(context, host_name)
+            cm = self._get_cell_mapping_for_host(context, host_name)
         except exception.HostMappingNotFound:
             # It's possible to hit this when the compute service first starts
             # up and casts to update_instance_info with an empty list but
@@ -754,7 +858,7 @@ class HostManager(object):
             LOG.info('Host mapping not found for host %s. Not tracking '
                      'instance info for this host.', host_name)
             return {}
-        with context_module.target_cell(context, hm.cell_mapping) as cctxt:
+        with context_module.target_cell(context, cm) as cctxt:
             uuids = objects.InstanceList.get_uuids_by_host(cctxt, host_name)
             # Putting the context in the otherwise fake Instance object at
             # least allows out of tree filters to lazy-load fields.
@@ -763,19 +867,18 @@ class HostManager(object):
     def _get_instance_info(self, context, compute):
         """Gets the host instance info from the compute host.
 
-        Some older compute nodes may not be sending instance change updates to
-        the Scheduler; other sites may disable this feature for performance
-        reasons. In either of these cases, there will either be no information
-        for the host, or the 'updated' value for that host dict will be False.
-        In those cases, we need to grab the current InstanceList instead of
-        relying on the version in _instance_info.
+        Some sites may disable ``track_instance_changes`` for performance or
+        isolation reasons. In either of these cases, there will either be no
+        information for the host, or the 'updated' value for that host dict
+        will be False. In those cases, we need to grab the current InstanceList
+        instead of relying on the version in _instance_info.
         """
         host_name = compute.host
         host_info = self._instance_info.get(host_name)
         if host_info and host_info.get("updated"):
             inst_dict = host_info["instances"]
         else:
-            # Host is running old version, or updates aren't flowing.
+            # Updates aren't flowing from nova-compute.
             inst_dict = self._get_instances_by_host(context, host_name)
         return inst_dict
 

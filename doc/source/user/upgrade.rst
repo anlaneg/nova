@@ -69,10 +69,11 @@ same time.
      version of Nova, either in a venv or a separate control plane node,
      including all the python dependencies.
 
-   * Using the newly installed nova code, run the DB sync.
-     (``nova-manage api_db sync``; ``nova-manage db sync``). These schema
-     change operations should have minimal or no effect on performance, and
-     should not cause any operations to fail.
+   * Using the newly installed nova code, run the DB sync. First run
+     ``nova-manage api_db sync``, then ``nova-manage db sync``. In a multi-cell
+     environment, ``nova-manage db sync`` must currently be run in each cell.
+     These schema change operations should have minimal or no effect on
+     performance, and should not cause any operations to fail.
 
    * At this point, new columns and tables may exist in the database. These
      DB schema changes are done in a way that both the N and N+1 release can
@@ -83,7 +84,7 @@ same time.
    * Several nova services rely on the external placement service being at the
      latest level. Therefore, you must upgrade placement before any nova
      services. See the
-     :ref:`placement upgrade notes <placement-upgrade-notes>` for more
+     :placement-doc:`placement upgrade notes <#upgrade-notes>` for more
      details on upgrading the placement service.
 
    * For maximum safety (no failed API operations), gracefully shutdown all
@@ -140,14 +141,18 @@ same time.
      ``nova-manage db online_data_migrations --max-count <number>``. Note
      that you can use the ``--max-count`` argument to reduce the load this
      operation will place on the database, which allows you to run a
-     small chunk of the migrations until all of the work is done. Each
-     time it is run, it will show a summary of completed and remaining
-     records. You run this command until you see completed and
-     remaining records as zeros. The chunk size you should use depend
-     on your infrastructure and how much additional load you can
-     impose on the database. To reduce load, perform smaller batches
-     with delays between chunks. To reduce time to completion, run
-     larger batches.
+     small chunk of the migrations until all of the work is done. The chunk size
+     you should use depends on your infrastructure and how much additional load
+     you can impose on the database. To reduce load, perform smaller batches
+     with delays between chunks. To reduce time to completion, run larger batches.
+     Each time it is run, the command will show a summary of completed and remaining
+     records. If using the ``--max-count`` option, the command should be rerun
+     while it returns exit status 1 (which indicates that some migrations took
+     effect, and more work may remain to be done), even if some migrations
+     produce errors. If all possible migrations have completed and some are
+     still producing errors, exit status 2 will be returned. In this case, the
+     cause of the errors should be investigated and resolved. Migrations should be
+     considered successfully completed only when the command returns exit status 0.
 
    * At this point, you must also ensure you update the configuration, to stop
      using any deprecated features or options, and perform any required work
@@ -228,7 +233,7 @@ to ease upgrades:
      * `Data migration example
        <http://specs.openstack.org/openstack/nova-specs/specs/kilo/implemented/flavor-from-sysmeta-to-blob.html>`_
      * `Data migration enforcement example
-       <https://review.openstack.org/#/c/174480/15/nova/db/sqlalchemy/migrate_repo/versions/291_enforce_flavors_migrated.py>`_
+       <https://review.opendev.org/#/c/174480/15/nova/db/sqlalchemy/migrate_repo/versions/291_enforce_flavors_migrated.py>`_
        (for sqlalchemy migrate/deprecated scripts):
 
   #. The column can then be removed with a migration at the start of N+2.
@@ -274,10 +279,6 @@ RPC version pinning
     https://wiki.openstack.org/wiki/RpcMajorVersionUpdates
 
     .. note::
-
-      This does not apply to cells v1 deployments since cells v1 does not
-      support rolling upgrades. It is assumed that cells v1 deployments are
-      upgraded in lockstep so n-1 cells compatibility does not work.
 
       The procedure for rolling upgrades with multiple cells v2 cells is not
       yet determined.

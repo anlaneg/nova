@@ -19,6 +19,7 @@ import socket
 
 import mock
 from oslo_utils.fixture import uuidsentinel as uuids
+import six.moves.urllib.parse as urlparse
 
 import nova.conf
 from nova.console.securityproxy import base
@@ -47,6 +48,7 @@ class NovaProxyRequestHandlerDBTestCase(test.TestCase):
         self.wh.msg = mock.MagicMock()
         self.wh.do_proxy = mock.MagicMock()
         self.wh.headers = mock.MagicMock()
+        self.path = urlparse.urlencode({'path': '?token=123-456-789'})
 
     def _fake_console_db(self, **updates):
         console_db = copy.deepcopy(fake_ca.fake_token_dict)
@@ -64,10 +66,9 @@ class NovaProxyRequestHandlerDBTestCase(test.TestCase):
     @mock.patch('nova.objects.ConsoleAuthToken.validate')
     @mock.patch('nova.objects.Instance.get_by_uuid')
     @mock.patch('nova.compute.rpcapi.ComputeAPI.validate_console_port')
-    @mock.patch('nova.consoleauth.rpcapi.ConsoleAuthAPI.check_token')
     def test_new_websocket_client_db(
-            self, mock_ca_check, mock_validate_port, mock_inst_get,
-            mock_validate, internal_access_path=None,
+            self, mock_validate_port, mock_inst_get, mock_validate,
+            internal_access_path=None,
             instance_not_found=False):
 
         db_obj = self._fake_console_db(
@@ -96,7 +97,7 @@ class NovaProxyRequestHandlerDBTestCase(test.TestCase):
             tsock.recv.return_value = "HTTP/1.1 200 OK\r\n\r\n"
             self.wh.socket.return_value = tsock
 
-        self.wh.path = "http://127.0.0.1/?token=123-456-789"
+        self.wh.path = "http://127.0.0.1/?%s" % self.path
         self.wh.headers = self.fake_header
 
         if instance_not_found:
@@ -107,11 +108,10 @@ class NovaProxyRequestHandlerDBTestCase(test.TestCase):
                             return_value=ctxt):
                 self.wh.new_websocket_client()
 
-            mock_validate.called_once_with(ctxt, '123-456-789')
+            mock_validate.assert_called_once_with(ctxt, '123-456-789')
             mock_validate_port.assert_called_once_with(
                 ctxt, mock_inst_get.return_value, str(db_obj['port']),
                 db_obj['console_type'])
-            mock_ca_check.assert_not_called()
 
             self.wh.socket.assert_called_with('node1', 10000, connect=True)
 
@@ -143,6 +143,8 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
         self.wh.msg = mock.MagicMock()
         self.wh.do_proxy = mock.MagicMock()
         self.wh.headers = mock.MagicMock()
+        self.path = urlparse.urlencode({'path': '?token=123-456-789'})
+        self.path_invalid = urlparse.urlencode({'path': '?token=XXX'})
 
     fake_header = {
         'cookie': 'token="123-456-789"',
@@ -197,80 +199,6 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
         'Host': 'example.net:6080',
     }
 
-    @mock.patch('nova.consoleauth.rpcapi.ConsoleAuthAPI.check_token')
-    def test_new_websocket_client_with_server_with_cells(self, check_token):
-        # this test cells enabled, so consoleauth should be used
-        CONF.set_override('enable', True, group='cells')
-        check_token.return_value = {
-            'host': 'node1',
-            'port': '10000',
-            'console_type': 'novnc',
-            'access_url': 'https://example.net:6080'
-        }
-        self.wh.socket.return_value = '<socket>'
-        self.wh.path = "http://127.0.0.1/?token=123-456-789"
-        self.wh.headers = self.fake_header
-
-        self.wh.new_websocket_client()
-
-        check_token.assert_called_with(mock.ANY, token="123-456-789")
-        self.wh.socket.assert_called_with('node1', 10000, connect=True)
-        self.wh.do_proxy.assert_called_with('<socket>')
-
-    @mock.patch('nova.consoleauth.rpcapi.ConsoleAuthAPI.check_token')
-    def test_new_websocket_client_enable_consoleauth(self, check_token):
-        self.flags(enable_consoleauth=True, group='workarounds')
-
-        check_token.return_value = {
-            'host': 'node1',
-            'port': '10000',
-            'console_type': 'novnc',
-            'access_url': 'https://example.net:6080'
-        }
-        self.wh.socket.return_value = '<socket>'
-        self.wh.path = "http://127.0.0.1/?token=123-456-789"
-        self.wh.headers = self.fake_header
-
-        self.wh.new_websocket_client()
-
-        check_token.assert_called_with(mock.ANY, token="123-456-789")
-        self.wh.socket.assert_called_with('node1', 10000, connect=True)
-        self.wh.do_proxy.assert_called_with('<socket>')
-
-    @mock.patch('nova.consoleauth.rpcapi.ConsoleAuthAPI.check_token',
-                return_value=None)
-    @mock.patch('nova.console.websocketproxy.NovaProxyRequestHandlerBase.'
-                '_check_console_port')
-    @mock.patch('nova.objects.ConsoleAuthToken.validate')
-    def test_new_websocket_client_enable_consoleauth_fallback(self, validate,
-                                                              check_port,
-                                                              check_token):
-        # Since consoleauth is enabled, it should be called first before
-        # falling back to the database.
-        self.flags(enable_consoleauth=True, group='workarounds')
-
-        params = {
-            'id': 1,
-            'token': '123-456-789',
-            'instance_uuid': uuids.instance,
-            'host': 'node1',
-            'port': '10000',
-            'console_type': 'novnc',
-            'access_url_base': 'https://example.net:6080'
-        }
-        validate.return_value = objects.ConsoleAuthToken(**params)
-
-        self.wh.socket.return_value = '<socket>'
-        self.wh.path = "http://127.0.0.1/?token=123-456-789"
-        self.wh.headers = self.fake_header
-
-        self.wh.new_websocket_client()
-
-        check_token.assert_called_with(mock.ANY, token="123-456-789")
-        validate.assert_called_with(mock.ANY, "123-456-789")
-        self.wh.socket.assert_called_with('node1', 10000, connect=True)
-        self.wh.do_proxy.assert_called_with('<socket>')
-
     @mock.patch('nova.console.websocketproxy.NovaProxyRequestHandlerBase.'
                 '_check_console_port')
     @mock.patch('nova.objects.ConsoleAuthToken.validate')
@@ -287,7 +215,7 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
         validate.return_value = objects.ConsoleAuthToken(**params)
 
         self.wh.socket.return_value = '<socket>'
-        self.wh.path = "http://127.0.0.1/?token=123-456-789"
+        self.wh.path = "http://127.0.0.1/?%s" % self.path
         self.wh.headers = self.fake_header
 
         self.wh.new_websocket_client()
@@ -312,7 +240,7 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
         validate.return_value = objects.ConsoleAuthToken(**params)
 
         self.wh.socket.return_value = '<socket>'
-        self.wh.path = "http://[2001:db8::1]/?token=123-456-789"
+        self.wh.path = "http://[2001:db8::1]/?%s" % self.path
         self.wh.headers = self.fake_header_ipv6
 
         self.wh.new_websocket_client()
@@ -325,7 +253,7 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
     def test_new_websocket_client_token_invalid(self, validate):
         validate.side_effect = exception.InvalidToken(token='XXX')
 
-        self.wh.path = "http://127.0.0.1/?token=XXX"
+        self.wh.path = "http://127.0.0.1/?%s" % self.path_invalid
         self.wh.headers = self.fake_header_bad_token
 
         self.assertRaises(exception.InvalidToken,
@@ -353,7 +281,7 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
         tsock.recv.return_value = "HTTP/1.1 200 OK\r\n\r\n"
 
         self.wh.socket.return_value = tsock
-        self.wh.path = "http://127.0.0.1/?token=123-456-789"
+        self.wh.path = "http://127.0.0.1/?%s" % self.path
         self.wh.headers = self.fake_header
 
         self.wh.new_websocket_client()
@@ -386,7 +314,7 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
         tsock.recv.return_value = "HTTP/1.1 500 Internal Server Error\r\n\r\n"
 
         self.wh.socket.return_value = tsock
-        self.wh.path = "http://127.0.0.1/?token=123-456-789"
+        self.wh.path = "http://127.0.0.1/?%s" % self.path
         self.wh.headers = self.fake_header
 
         self.assertRaises(exception.InvalidConnectionInfo,
@@ -418,7 +346,7 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
                                   HTTP_RESP]
 
         self.wh.socket.return_value = tsock
-        self.wh.path = "http://127.0.0.1/?token=123-456-789"
+        self.wh.path = "http://127.0.0.1/?%s" % self.path
         self.wh.headers = self.fake_header
 
         self.wh.new_websocket_client()
@@ -448,7 +376,7 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
         validate.return_value = objects.ConsoleAuthToken(**params)
 
         self.wh.socket.return_value = '<socket>'
-        self.wh.path = "http://127.0.0.1/?token=123-456-789"
+        self.wh.path = "http://127.0.0.1/?%s" % self.path
         self.wh.headers = self.fake_header
 
         self.wh.new_websocket_client()
@@ -457,30 +385,12 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
         self.wh.socket.assert_called_with('node1', 10000, connect=True)
         self.wh.do_proxy.assert_called_with('<socket>')
 
-    @mock.patch.object(websocketproxy, 'sys')
-    @mock.patch('nova.consoleauth.rpcapi.ConsoleAuthAPI.check_token')
-    def test_new_websocket_client_py273_special_scheme(
-            self, check_token, mock_sys):
-        mock_sys.version_info = (2, 7, 3)
-        check_token.return_value = {
-            'host': 'node1',
-            'port': '10000',
-            'console_type': 'novnc'
-        }
-        self.wh.socket.return_value = '<socket>'
-        self.wh.path = "ws://127.0.0.1/?token=123-456-789"
-        self.wh.headers = self.fake_header
-
-        self.assertRaises(exception.NovaException,
-                          self.wh.new_websocket_client)
-
     @mock.patch('socket.getfqdn')
     def test_address_string_doesnt_do_reverse_dns_lookup(self, getfqdn):
         request_mock = mock.MagicMock()
-        request_mock.makefile().readline.side_effect = [
-            b'GET /vnc.html?token=123-456-789 HTTP/1.1\r\n',
-            b''
-        ]
+        msg = 'GET /vnc.html?%s HTTP/1.1\r\n' % self.path
+        request_mock.makefile().readline.side_effect = [msg.encode('utf-8'),
+                                                        b'']
         server_mock = mock.MagicMock()
         client_address = ('8.8.8.8', 54321)
 
@@ -631,6 +541,38 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
     @mock.patch('nova.console.websocketproxy.NovaProxyRequestHandlerBase.'
                 '_check_console_port')
     @mock.patch('nova.objects.ConsoleAuthToken.validate')
+    def test_new_websocket_client_http_forwarded_proto_https(self, validate,
+                                                             check_port):
+        params = {
+            'id': 1,
+            'token': '123-456-789',
+            'instance_uuid': uuids.instance,
+            'host': 'node1',
+            'port': '10000',
+            'console_type': 'serial',
+            'access_url_base': 'wss://example.net:6080'
+        }
+        validate.return_value = objects.ConsoleAuthToken(**params)
+
+        header = {
+            'cookie': 'token="123-456-789"',
+            'Origin': 'http://example.net:6080',
+            'Host': 'example.net:6080',
+            'X-Forwarded-Proto': 'https'
+        }
+        self.wh.socket.return_value = '<socket>'
+        self.wh.path = "https://127.0.0.1/"
+        self.wh.headers = header
+
+        self.wh.new_websocket_client()
+
+        validate.assert_called_with(mock.ANY, "123-456-789")
+        self.wh.socket.assert_called_with('node1', 10000, connect=True)
+        self.wh.do_proxy.assert_called_with('<socket>')
+
+    @mock.patch('nova.console.websocketproxy.NovaProxyRequestHandlerBase.'
+                '_check_console_port')
+    @mock.patch('nova.objects.ConsoleAuthToken.validate')
     def test_new_websocket_client_novnc_bad_console_type(self, validate,
                                                          check_port):
         params = {
@@ -674,6 +616,16 @@ class NovaProxyRequestHandlerBaseTestCase(test.NoDBTestCase):
         self.wh.socket.assert_called_with('node1', 10000, connect=True)
         self.wh.do_proxy.assert_called_with('<socket>')
 
+    def test_tcp_rst_no_compute_rpcapi(self):
+        # Tests that we don't create a ComputeAPI object if we receive a
+        # TCP RST message. Simulate by raising the socket.err upon recv.
+        err = socket.error('[Errno 104] Connection reset by peer')
+        self.wh.socket.recv.side_effect = err
+        conn = mock.MagicMock()
+        address = mock.MagicMock()
+        self.wh.server.top_new_client(conn, address)
+        self.assertIsNone(self.wh._compute_rpcapi)
+
 
 class NovaWebsocketSecurityProxyTestCase(test.NoDBTestCase):
 
@@ -692,7 +644,8 @@ class NovaWebsocketSecurityProxyTestCase(test.NoDBTestCase):
         with mock.patch('websockify.ProxyRequestHandler'):
             self.wh = websocketproxy.NovaProxyRequestHandler()
         self.wh.server = self.server
-        self.wh.path = "http://127.0.0.1/?token=123-456-789"
+        path = urlparse.urlencode({'path': '?token=123-456-789'})
+        self.wh.path = "http://127.0.0.1/?%s" % path
         self.wh.socket = mock.MagicMock()
         self.wh.msg = mock.MagicMock()
         self.wh.do_proxy = mock.MagicMock()

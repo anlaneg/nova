@@ -465,24 +465,6 @@ Related options:
 
 * ``use_neutron``
 """),
-    cfg.StrOpt("dhcp_domain",
-        default="novalocal",
-        deprecated_for_removal=True,
-        deprecated_since='15.0.0',
-        deprecated_reason="""
-nova-network is deprecated, as are any related configuration options.
-""",
-        help="""
-This option allows you to specify the domain for the DHCP server.
-
-Possible values:
-
-* Any string that is a valid domain name.
-
-Related options:
-
-* ``use_neutron``
-"""),
     cfg.StrOpt("l3_lib",
         default="nova.network.l3.LinuxNetL3",
         deprecated_for_removal=True,
@@ -874,6 +856,12 @@ Related options:
 
 * iptables_top_regex
 """),
+    # NOTE(sfinucan): While this is predominantly used by nova-network, there
+    # appears to be a very limited use case where iptables rules are also used
+    # with neutron. Namely, when neutron's port filtering is disabled, security
+    # groups are disabled, and the 'firewall_driver' has been set to the
+    # libvirt IPTables driver. We may wish to remove this functionality in
+    # favour of neutron in the future.
     cfg.StrOpt("iptables_drop_action",
         default="DROP",
         deprecated_for_removal=True,
@@ -890,6 +878,32 @@ going on, or LOGDROP in order to record the blocked traffic before DROPping.
 Possible values:
 
 * A string representing an iptables chain. The default is DROP.
+"""),
+    # NOTE(sfinucan): While this is predominantly used by nova-network, there
+    # appears to be a very limited use case where iptables rules are also used
+    # with neutron. Namely, when neutron's port filtering is disabled, security
+    # groups are disabled, and the 'firewall_driver' has been set to the
+    # libvirt IPTables driver. We may wish to remove this functionality in
+    # favour of neutron in the future.
+    cfg.BoolOpt('defer_iptables_apply',
+        default=False,
+        deprecated_for_removal=True,
+        deprecated_since="19.0.0",
+        deprecated_reason="""
+nova-network is deprecated, as are any related configuration options.
+""",
+        help="""
+Defer application of IPTables rules until after init phase.
+
+When a compute service is restarted each instance running on the host has its
+iptables rules built and applied sequentially during the host init stage. The
+impact of this, especially on a host running many instances, can be observed as
+a period where some instances are not accessible as the existing iptables rules
+have been torn down and not yet re-applied.
+
+This is a workaround that prevents the application of the iptables rules until
+all instances on the host had been initialised then the rules for all instances
+are applied all at once preventing a 'blackout' period.
 """),
     cfg.IntOpt("ovs_vsctl_timeout",
         default=120,
@@ -1416,9 +1430,9 @@ nova-network is deprecated, as are any related configuration options.
 ]
 
 
-ALL_DEFAULT_OPTS = (linux_net_opts + network_opts + ldap_dns_opts
-                    + rpcapi_opts + driver_opts + floating_ip_opts
-                    + ipv6_opts + quota_opts + service_opts)
+ALL_DEFAULT_OPTS = (linux_net_opts + network_opts + ldap_dns_opts +
+                    rpcapi_opts + driver_opts + floating_ip_opts +
+                    ipv6_opts + quota_opts + service_opts)
 
 
 def register_opts(conf):

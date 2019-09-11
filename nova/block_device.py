@@ -45,7 +45,7 @@ bdm_new_fields = set(['source_type', 'destination_type',
                      'guest_format', 'device_type', 'disk_bus', 'boot_index',
                      'device_name', 'delete_on_termination', 'snapshot_id',
                      'volume_id', 'volume_size', 'image_id', 'no_device',
-                     'connection_info', 'tag'])
+                     'connection_info', 'tag', 'volume_type'])
 
 
 bdm_db_only_fields = set(['id', 'instance_uuid', 'attachment_id', 'uuid'])
@@ -173,6 +173,7 @@ class BlockDeviceDict(dict):
             source_type = api_dict.get('source_type')
             device_uuid = api_dict.get('uuid')
             destination_type = api_dict.get('destination_type')
+            volume_type = api_dict.get('volume_type')
 
             if source_type == 'blank' and device_uuid:
                 raise exception.InvalidBDMFormat(
@@ -191,11 +192,23 @@ class BlockDeviceDict(dict):
                     boot_index = -1
                 boot_index = int(boot_index)
 
-                # if this bdm is generated from --image ,then
+                # if this bdm is generated from --image, then
                 # source_type = image and destination_type = local is allowed
                 if not (image_uuid_specified and boot_index == 0):
                     raise exception.InvalidBDMFormat(
                         details=_("Mapping image to local is not supported."))
+
+            if destination_type == 'local' and volume_type:
+                raise exception.InvalidBDMFormat(
+                    details=_("Specifying a volume_type with destination_type="
+                              "local is not supported."))
+
+            # Specifying a volume_type with a pre-existing source volume is
+            # not supported.
+            if source_type == 'volume' and volume_type:
+                raise exception.InvalidBDMFormat(
+                    details=_("Specifying volume type to existing volume is "
+                              "not supported."))
 
         api_dict.pop('uuid', None)
         return cls(api_dict)
@@ -406,7 +419,7 @@ def validate_and_default_volume_size(bdm):
                 details=_("Invalid volume_size."))
 
 
-_ephemeral = re.compile('^ephemeral(\d|[1-9]\d+)$')
+_ephemeral = re.compile(r'^ephemeral(\d|[1-9]\d+)$')
 
 
 def is_ephemeral(device_name):
@@ -486,7 +499,7 @@ def strip_prefix(device_name):
     return _pref.sub('', device_name) if device_name else device_name
 
 
-_nums = re.compile('\d+')
+_nums = re.compile(r'\d+')
 
 
 def get_device_letter(device_name):
@@ -494,6 +507,32 @@ def get_device_letter(device_name):
     # NOTE(vish): delete numbers in case we have something like
     #             /dev/sda1
     return _nums.sub('', letter) if device_name else device_name
+
+
+def generate_device_letter(index):
+    """Returns device letter by index (starts by zero)
+       i.e.
+       index   = 0, 1,..., 18277
+       results = a, b,..., zzz
+    """
+    base = ord('z') - ord('a') + 1
+    unit_dev_name = ""
+    while index >= 0:
+        letter = chr(ord('a') + (index % base))
+        unit_dev_name = letter + unit_dev_name
+        index = int(index / base) - 1
+
+    return unit_dev_name
+
+
+def generate_device_name(prefix, index):
+    """Returns device unit name by index (starts by zero)
+       i.e.
+       prefix  = vd
+       index   = 0, 1,..., 18277
+       results = vda, vdb,..., vdzzz
+    """
+    return prefix + generate_device_letter(index)
 
 
 def instance_block_mapping(instance, bdms):

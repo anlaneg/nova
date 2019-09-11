@@ -14,7 +14,7 @@
 
 from nova.api.openstack import wsgi
 from nova import availability_zones
-from nova import compute
+from nova.compute import api as compute
 import nova.conf
 from nova.policies import availability_zone as az_policies
 from nova import servicegroup
@@ -46,7 +46,8 @@ class AvailabilityZoneController(wsgi.Controller):
     def _describe_availability_zones(self, context, **kwargs):
         ctxt = context.elevated()
         available_zones, not_available_zones = \
-            availability_zones.get_availability_zones(ctxt)
+            availability_zones.get_availability_zones(
+                ctxt, self.host_api)
 
         filtered_available_zones = \
             self._get_filtered_availability_zones(available_zones, True)
@@ -57,12 +58,14 @@ class AvailabilityZoneController(wsgi.Controller):
 
     def _describe_availability_zones_verbose(self, context, **kwargs):
         ctxt = context.elevated()
-        available_zones, not_available_zones = \
-            availability_zones.get_availability_zones(ctxt)
 
         # Available services
         enabled_services = self.host_api.service_get_all(
             context, {'disabled': False}, set_zones=True, all_cells=True)
+
+        available_zones, not_available_zones = (
+            availability_zones.get_availability_zones(
+                ctxt, self.host_api, enabled_services=enabled_services))
 
         zone_hosts = {}
         host_services = {}
@@ -72,10 +75,8 @@ class AvailabilityZoneController(wsgi.Controller):
                 # Skip API services in the listing since they are not
                 # maintained in the same way as other services
                 continue
-            zone_hosts.setdefault(service['availability_zone'], [])
-            if service['host'] not in zone_hosts[service['availability_zone']]:
-                zone_hosts[service['availability_zone']].append(
-                    service['host'])
+            zone_hosts.setdefault(service['availability_zone'], set())
+            zone_hosts[service['availability_zone']].add(service['host'])
 
             host_services.setdefault(service['availability_zone'] +
                     service['host'], [])
@@ -90,9 +91,11 @@ class AvailabilityZoneController(wsgi.Controller):
                 for service in host_services[zone + host]:
                     #检查service是否up
                     alive = self.servicegroup_api.service_is_up(service)
-                    hosts[host][service['binary']] = {'available': alive,
-                                      'active': True != service['disabled'],
-                                      'updated_at': service['updated_at']}
+                    hosts[host][service['binary']] = {
+                        'available': alive,
+                        'active': service['disabled'] is not True,
+                        'updated_at': service['updated_at']
+                    }
             result.append({'zoneName': zone,
                            'zoneState': {'available': True},
                            "hosts": hosts})

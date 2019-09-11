@@ -74,77 +74,13 @@ def get_supported_content_types():
     return _SUPPORTED_CONTENT_TYPES
 
 
-# NOTE(rlrossit): This function allows a get on both a dict-like and an
-# object-like object. cache_db_items() is used on both versioned objects and
-# dicts, so the function can't be totally changed over to [] syntax, nor
-# can it be changed over to use getattr().
-def item_get(item, item_key):
-    if hasattr(item, '__getitem__'):
-        return item[item_key]
-    else:
-        return getattr(item, item_key)
-
-
 class Request(wsgi.Request):
     """Add some OpenStack API-specific logic to the base webob.Request."""
 
     def __init__(self, *args, **kwargs):
         super(Request, self).__init__(*args, **kwargs)
-        self._extension_data = {'db_items': {}}
         if not hasattr(self, 'api_version_request'):
             self.api_version_request = api_version.APIVersionRequest()
-
-    def cache_db_items(self, key, items, item_key='id'):
-        """Allow API methods to store objects from a DB query to be
-        used by API extensions within the same API request.
-
-        An instance of this class only lives for the lifetime of a
-        single API request, so there's no need to implement full
-        cache management.
-        """
-        db_items = self._extension_data['db_items'].setdefault(key, {})
-        for item in items:
-            db_items[item_get(item, item_key)] = item
-
-    def get_db_items(self, key):
-        """Allow an API extension to get previously stored objects within
-        the same API request.
-
-        Note that the object data will be slightly stale.
-        """
-        return self._extension_data['db_items'][key]
-
-    def get_db_item(self, key, item_key):
-        """Allow an API extension to get a previously stored object
-        within the same API request.
-
-        Note that the object data will be slightly stale.
-        """
-        return self.get_db_items(key).get(item_key)
-
-    def cache_db_instances(self, instances):
-        self.cache_db_items('instances', instances, 'uuid')
-
-    def cache_db_instance(self, instance):
-        self.cache_db_items('instances', [instance], 'uuid')
-
-    def get_db_instances(self):
-        return self.get_db_items('instances')
-
-    def get_db_instance(self, instance_uuid):
-        return self.get_db_item('instances', instance_uuid)
-
-    def cache_db_flavors(self, flavors):
-        self.cache_db_items('flavors', flavors, 'flavorid')
-
-    def cache_db_flavor(self, flavor):
-        self.cache_db_items('flavors', [flavor], 'flavorid')
-
-    def get_db_flavors(self):
-        return self.get_db_items('flavors')
-
-    def get_db_flavor(self, flavorid):
-        return self.get_db_item('flavors', flavorid)
 
     def best_match_content_type(self):
         """Determine the requested response content-type."""
@@ -160,8 +96,10 @@ class Request(wsgi.Request):
                     content_type = possible_type
 
             if not content_type:
-                content_type = self.accept.best_match(
+                best_matches = self.accept.acceptable_offers(
                     get_supported_content_types())
+                if best_matches:
+                    content_type = best_matches[0][0]
 
             self.environ['nova.best_content_type'] = (content_type or
                                                       'application/json')
@@ -198,8 +136,19 @@ class Request(wsgi.Request):
         """
         if not self.accept_language:
             return None
-        return self.accept_language.best_match(
-                i18n.get_available_languages())
+
+        # NOTE(takashin): To decide the default behavior, 'default' is
+        # preferred over 'default_tag' because that is return as it is when
+        # no match. This is also little tricky that 'default' value cannot be
+        # None. At least one of default_tag or default must be supplied as
+        # an argument to the method, to define the defaulting behavior.
+        # So passing a sentinal value to return None from this function.
+        best_match = self.accept_language.lookup(
+            i18n.get_available_languages(), default='fake_LANG')
+
+        if best_match == 'fake_LANG':
+            best_match = None
+        return best_match
 
     def set_api_version_request(self):
         """Set API version request based on the request header information."""
@@ -325,6 +274,9 @@ class ResponseObject(object):
 
         Utility method for serializing the wrapped object.  Returns a
         webob.Response object.
+
+        Header values are set to the appropriate Python type and
+        encoding demanded by PEP 3333: whatever the native str type is.
         """
 
         serializer = self.serializer
@@ -335,24 +287,24 @@ class ResponseObject(object):
         response = webob.Response(body=body)
         response.status_int = self.code
         for hdr, val in self._headers.items():
-            if not isinstance(val, six.text_type):
-                val = six.text_type(val)
             if six.PY2:
-                # In Py2.X Headers must be byte strings
+                # In Py2.X Headers must be a UTF-8 encode str.
                 response.headers[hdr] = encodeutils.safe_encode(val)
             else:
-                # In Py3.X Headers must be utf-8 strings
+                # In Py3.X Headers must be a str that was first safely
+                # encoded to UTF-8 (to catch any bad encodings) and then
+                # decoded back to a native str.
                 response.headers[hdr] = encodeutils.safe_decode(
                         encodeutils.safe_encode(val))
         # Deal with content_type
         if not isinstance(content_type, six.text_type):
             content_type = six.text_type(content_type)
         if six.PY2:
-            # In Py2.X Headers must be byte strings
+            # In Py2.X Headers must be a UTF-8 encode str.
             response.headers['Content-Type'] = encodeutils.safe_encode(
                 content_type)
         else:
-            # In Py3.X Headers must be utf-8 strings
+            # In Py3.X Headers must be a str.
             response.headers['Content-Type'] = encodeutils.safe_decode(
                     encodeutils.safe_encode(content_type))
         return response
@@ -396,7 +348,7 @@ class ResourceExceptionHandler(object):
     """Context manager to handle Resource exceptions.
 
     Used when processing exceptions generated by API implementation
-    methods (or their extensions).  Converts most exceptions to Fault
+    methods.  Converts most exceptions to Fault
     exceptions, with the appropriate logging.
     """
 
@@ -463,35 +415,12 @@ class Resource(wsgi.Application):
         if controller:
             self.register_actions(controller)
 
-        # Save a mapping of extensions
-        self.wsgi_extensions = {}
-        self.wsgi_action_extensions = {}
-
     def register_actions(self, controller):
         """Registers controller actions with this resource."""
 
         actions = getattr(controller, 'wsgi_actions', {})
         for key, method_name in actions.items():
             self.wsgi_actions[key] = getattr(controller, method_name)
-
-    def register_extensions(self, controller):
-        """Registers controller extensions with this resource."""
-
-        extensions = getattr(controller, 'wsgi_extensions', [])
-        for method_name, action_name in extensions:
-            # Look up the extending method
-            extension = getattr(controller, method_name)
-
-            if action_name:
-                # Extending an action...
-                if action_name not in self.wsgi_action_extensions:
-                    self.wsgi_action_extensions[action_name] = []
-                self.wsgi_action_extensions[action_name].append(extension)
-            else:
-                # Extending a regular method
-                if method_name not in self.wsgi_extensions:
-                    self.wsgi_extensions[method_name] = []
-                self.wsgi_extensions[method_name].append(extension)
 
     def get_action_args(self, request_environment):
         """Parse dictionary created by routes library."""
@@ -525,30 +454,6 @@ class Resource(wsgi.Application):
 
     def deserialize(self, body):
         return JSONDeserializer().deserialize(body)
-
-    def process_extensions(self, extensions, resp_obj, request,
-                           action_args):
-        for ext in extensions:
-            response = None
-            # Regular functions get post-processing...
-            try:
-                with ResourceExceptionHandler():
-                    response = ext(req=request, resp_obj=resp_obj,
-                                   **action_args)
-            except exception.VersionNotFoundForAPIMethod:
-                # If an attached extension (@wsgi.extends) for the
-                # method has no version match its not an error. We
-                # just don't run the extends code
-                continue
-            except Fault as ex:
-                response = ex
-
-            # We had a response return it, to exit early. This is
-            # actually a failure mode. None is success.
-            if response:
-                return response
-
-        return None
 
     def _should_have_body(self, request):
         return request.method in _METHODS_WITH_BODY
@@ -596,8 +501,8 @@ class Resource(wsgi.Application):
 
         # Get the implementing method
         try:
-            meth, extensions = self.get_method(request, action,
-                                               content_type, body)
+            meth = self.get_method(request, action,
+                                   content_type, body)
         except (AttributeError, TypeError):
             return Fault(webob.exc.HTTPNotFound())
         except KeyError as ex:
@@ -660,9 +565,6 @@ class Resource(wsgi.Application):
                 # Do a preserialize to set up the response object
                 if hasattr(meth, 'wsgi_code'):
                     resp_obj._default_code = meth.wsgi_code
-                # Process extensions
-                response = self.process_extensions(extensions, resp_obj,
-                                                        request, action_args)
 
             if resp_obj and not response:
                 response = resp_obj.serialize(request, accept)
@@ -672,10 +574,10 @@ class Resource(wsgi.Application):
                 if not isinstance(val, six.text_type):
                     val = six.text_type(val)
                 if six.PY2:
-                    # In Py2.X Headers must be byte strings
+                    # In Py2.X Headers must be UTF-8 encoded string
                     response.headers[hdr] = encodeutils.safe_encode(val)
                 else:
-                    # In Py3.X Headers must be utf-8 strings
+                    # In Py3.X Headers must be a string
                     response.headers[hdr] = encodeutils.safe_decode(
                             encodeutils.safe_encode(val))
 
@@ -700,36 +602,33 @@ class Resource(wsgi.Application):
         return contents
 
     def get_method(self, request, action, content_type, body):
-        meth, extensions = self._get_method(request,
-                                            action,
-                                            content_type,
-                                            body)
-        return meth, extensions
+        meth = self._get_method(request,
+                                action,
+                                content_type,
+                                body)
+        return meth
 
     def _get_method(self, request, action, content_type, body):
-        """Look up the action-specific method and its extensions."""
+        """Look up the action-specific method."""
         # Look up the method
         try:
             if not self.controller:
                 meth = getattr(self, action)
             else:
                 meth = getattr(self.controller, action)
+            return meth
         except AttributeError:
             if (not self.wsgi_actions or
                     action not in _ROUTES_METHODS + ['action']):
                 # Propagate the error
                 raise
-        else:
-            return meth, self.wsgi_extensions.get(action, [])
-
         if action == 'action':
             action_name = action_peek(body)
         else:
             action_name = action
 
         # Look up the action method
-        return (self.wsgi_actions[action_name],
-                self.wsgi_action_extensions.get(action_name, []))
+        return (self.wsgi_actions[action_name])
 
     def dispatch(self, method, request, action_args):
         """Dispatch a call to the action-specific method."""
@@ -755,35 +654,6 @@ def action(name):
     def decorator(func):
         func.wsgi_action = name
         return func
-    return decorator
-
-
-def extends(*args, **kwargs):
-    """Indicate a function extends an operation.
-
-    Can be used as either::
-
-        @extends
-        def index(...):
-            pass
-
-    or as::
-
-        @extends(action='resize')
-        def _action_resize(...):
-            pass
-    """
-
-    def decorator(func):
-        # Store enough information to find what we're extending
-        func.wsgi_extends = (func.__name__, kwargs.get('action'))
-        return func
-
-    # If we have positional arguments, call the decorator
-    if args:
-        return decorator(*args)
-
-    # OK, return the decorator instead
     return decorator
 
 
@@ -849,7 +719,6 @@ class ControllerMetaclass(type):
 
         # Find all actions
         actions = {}
-        extensions = []
         versioned_methods = None
         # start with wsgi actions from base classes
         for base in bases:
@@ -871,12 +740,9 @@ class ControllerMetaclass(type):
                 continue
             if getattr(value, 'wsgi_action', None):
                 actions[value.wsgi_action] = key
-            elif getattr(value, 'wsgi_extends', None):
-                extensions.append(value.wsgi_extends)
 
-        # Add the actions and extensions to the class dict
+        # Add the actions to the class dict
         cls_dict['wsgi_actions'] = actions
-        cls_dict['wsgi_extensions'] = extensions
         if versioned_methods:
             cls_dict[VER_METHOD_ATTR] = versioned_methods
 
@@ -890,11 +756,9 @@ class Controller(object):
 
     _view_builder_class = None
 
-    def __init__(self, view_builder=None):
+    def __init__(self):
         """Initialize controller with a view builder instance."""
-        if view_builder:
-            self._view_builder = view_builder
-        elif self._view_builder_class:
+        if self._view_builder_class:
             self._view_builder = self._view_builder_class()
         else:
             self._view_builder = None

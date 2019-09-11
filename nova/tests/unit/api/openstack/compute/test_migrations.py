@@ -14,6 +14,7 @@
 
 import datetime
 
+import iso8601
 import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 import six
@@ -54,6 +55,7 @@ fake_migrations = [
         'deleted_at': None,
         'deleted': False,
         'uuid': uuids.migration1,
+        'cross_cell_move': False,
     },
     # non in-progress live migration
     {
@@ -80,6 +82,7 @@ fake_migrations = [
         'deleted_at': None,
         'deleted': False,
         'uuid': uuids.migration2,
+        'cross_cell_move': False,
     },
     # in-progress resize
     {
@@ -106,6 +109,7 @@ fake_migrations = [
         'deleted_at': None,
         'deleted': False,
         'uuid': uuids.migration3,
+        'cross_cell_move': False,
     },
     # non in-progress resize
     {
@@ -132,6 +136,7 @@ fake_migrations = [
         'deleted_at': None,
         'deleted': False,
         'uuid': uuids.migration4,
+        'cross_cell_move': False,
     }
 ]
 
@@ -362,6 +367,44 @@ class MigrationTestCaseV266(MigrationsTestCaseV259):
             version=self.wsgi_api_version, use_admin_context=True)
         self.assertRaises(exception.ValidationError,
                           self.controller.index, req)
+
+    @mock.patch('nova.compute.api.API.get_migrations_sorted',
+                return_value=objects.MigrationList())
+    def test_index_with_changes_since_and_changes_before(
+            self, get_migrations_sorted):
+        changes_since = '2013-10-22T13:42:02Z'
+        changes_before = '2013-10-22T13:42:03Z'
+        req = fakes.HTTPRequest.blank(
+            '/os-migrations?changes-since=%s&changes-before=%s&'
+            'instance_uuid=%s'
+            % (changes_since, changes_before, uuids.instance_uuid),
+            version=self.wsgi_api_version,
+            use_admin_context=True)
+
+        self.controller.index(req)
+        search_opts = {'instance_uuid': uuids.instance_uuid,
+                       'changes-before':
+                           datetime.datetime(2013, 10, 22, 13, 42, 3,
+                                             tzinfo=iso8601.iso8601.UTC),
+                       'changes-since':
+                           datetime.datetime(2013, 10, 22, 13, 42, 2,
+                                             tzinfo=iso8601.iso8601.UTC)}
+        get_migrations_sorted.assert_called_once_with(
+            req.environ['nova.context'], search_opts, sort_dirs=mock.ANY,
+            sort_keys=mock.ANY, limit=1000, marker=None)
+
+    def test_get_migrations_filters_with_distinct_changes_time_bad_request(
+            self):
+        changes_since = '2018-09-04T05:45:27Z'
+        changes_before = '2018-09-03T05:45:27Z'
+        req = fakes.HTTPRequest.blank('/os-migrations?'
+                                      'changes-since=%s&changes-before=%s' %
+                                      (changes_since, changes_before),
+                                      version=self.wsgi_api_version,
+                                      use_admin_context=True)
+        ex = self.assertRaises(exc.HTTPBadRequest, self.controller.index, req)
+        self.assertIn('The value of changes-since must be less than '
+                      'or equal to changes-before', six.text_type(ex))
 
     def test_index_with_changes_before_old_microversion_failed(self):
         """Tests that the changes-before query parameter is an error before

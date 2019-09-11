@@ -42,8 +42,8 @@ class ImagesController(wsgi.Controller):
 
     _view_builder_class = views_images.ViewBuilder
 
-    def __init__(self, **kwargs):
-        super(ImagesController, self).__init__(**kwargs)
+    def __init__(self):
+        super(ImagesController, self).__init__()
         self._image_api = nova.image.API()
 
     def _get_filters(self, req):
@@ -89,7 +89,6 @@ class ImagesController(wsgi.Controller):
             explanation = _("Image not found.")
             raise webob.exc.HTTPNotFound(explanation=explanation)
 
-        req.cache_db_items('images', [image], 'id')
         return self._view_builder.show(req, image)
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
@@ -149,5 +148,4 @@ class ImagesController(wsgi.Controller):
         except exception.Invalid as e:
             raise webob.exc.HTTPBadRequest(explanation=e.format_message())
 
-        req.cache_db_items('images', images, 'id')
         return self._view_builder.detail(req, images)

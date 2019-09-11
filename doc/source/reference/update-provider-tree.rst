@@ -38,7 +38,7 @@ the compute node and its associated providers.
 
 The Method
 ----------
-``update_provider_tree`` accepts two parameters:
+``update_provider_tree`` accepts the following parameters:
 
 * A ``nova.compute.provider_tree.ProviderTree`` object representing all the
   providers in the tree associated with the compute node, and any sharing
@@ -59,6 +59,38 @@ The Method
   use this to help identify the compute node provider in the ProviderTree.
   Drivers managing more than one node (e.g. ironic) may also use it as a cue to
   indicate which node is being processed by the caller.
+* Dictionary of ``allocations`` data of the form:
+
+  .. code::
+
+    { $CONSUMER_UUID: {
+          # The shape of each "allocations" dict below is identical
+          # to the return from GET /allocations/{consumer_uuid}
+          "allocations": {
+              $RP_UUID: {
+                  "generation": $RP_GEN,
+                  "resources": {
+                      $RESOURCE_CLASS: $AMOUNT,
+                      ...
+                  },
+              },
+              ...
+          },
+          "project_id": $PROJ_ID,
+          "user_id": $USER_ID,
+          "consumer_generation": $CONSUMER_GEN,
+      },
+      ...
+    }
+
+  If ``None``, and the method determines that any inventory needs to be moved
+  (from one provider to another and/or to a different resource class), the
+  ``ReshapeNeeded`` exception must be raised. Otherwise, this dict must be
+  edited in place to indicate the desired final state of allocations. Drivers
+  should *only* edit allocation records for providers whose inventories are
+  being affected by the reshape operation. For more information about the
+  reshape operation, refer to the `spec <http://specs.openstack.org/openstack/
+  nova-specs/specs/stein/approved/reshape-provider-tree.html>`_.
 
 The virt driver is expected to update the ProviderTree object with current
 resource provider and inventory information. When the method returns, the
@@ -143,13 +175,20 @@ would become:
 
 .. code::
 
-  def update_provider_tree(self, provider_tree, nodename):
+  def update_provider_tree(self, provider_tree, nodename, allocations=None):
       inv_data = {
           'VCPU': { ... },
           'MEMORY_MB': { ... },
           'DISK_GB': { ... },
       }
       provider_tree.update_inventory(nodename, inv_data)
+
+When reporting inventory for the standard resource classes ``VCPU``,
+``MEMORY_MB`` and ``DISK_GB``, implementors of ``update_provider_tree`` may
+need to set the ``allocation_ratio`` and ``reserved`` values in the
+``inv_data`` dict based on configuration to reflect changes on the compute
+for allocation ratios and reserved resource amounts back to the placement
+service.
 
 Porting from get_traits
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -167,6 +206,33 @@ would become:
 
 .. code::
 
-  def update_provider_tree(self, provider_tree, nodename):
+  def update_provider_tree(self, provider_tree, nodename, allocations=None):
       provider_tree.add_traits(
           nodename, 'HW_CPU_X86_AVX', 'HW_CPU_X86_AVX2', 'CUSTOM_GOLD')
+
+.. _taxonomy_of_traits_and_capabilities:
+
+Taxonomy of traits and capabilities
+-----------------------------------
+
+There are various types of traits:
+
+- Some are standard (registered in
+  `os-traits <https://docs.openstack.org/os-traits/latest/>`_); others
+  are custom.
+
+- Some are owned by the compute service; others can be managed by
+  operators.
+
+- Some come from driver-supported capabilities, via a mechanism which
+  was `introduced <https://review.opendev.org/538498>`_ to convert
+  them to standard traits on the compute node resource provider.  This
+  mechanism is :ref:`documented in the configuration guide
+  <compute-capabilities-as-traits>`.
+
+This diagram may shed further light on how these traits relate to each
+other and how they are managed.
+
+.. figure:: /figures/traits-taxonomy.svg
+   :width: 800
+   :alt: Venn diagram showing taxonomy of traits and capabilities

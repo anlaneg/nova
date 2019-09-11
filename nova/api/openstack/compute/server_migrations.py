@@ -20,7 +20,7 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import server_migrations
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
 from nova.policies import servers_migrations as sm_policies
@@ -59,8 +59,8 @@ class ServerMigrationsController(wsgi.Controller):
     """The server migrations API controller for the OpenStack API."""
 
     def __init__(self):
-        self.compute_api = compute.API()
         super(ServerMigrationsController, self).__init__()
+        self.compute_api = compute.API()
 
     @wsgi.Controller.api_version("2.22")
     @wsgi.response(202)

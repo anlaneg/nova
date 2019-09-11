@@ -107,9 +107,9 @@ class FakeLibvirtTests(test.NoDBTestCase):
         self.assertGreaterEqual(32, res[2], "Active CPU count unusually low.")
         self.assertLessEqual(800, res[3], "CPU speed unusually high.")
         self.assertGreaterEqual(4500, res[3], "CPU speed unusually low.")
-        self.assertLessEqual(res[2], (res[5] * res[6]),
-                             "More active CPUs than "
-                             "num_sockets*cores_per_socket")
+        self.assertEqual(res[2], (res[4] * res[5] * res[6] * res[7]),
+                         "More active CPUs than num_nodes * num_sockets * "
+                         "cores_per_socket * threads_per_core")
 
     def test_createXML_detects_invalid_xml(self):
         self._test_XML_func_detects_invalid_xml('createXML', [0])
@@ -277,6 +277,11 @@ class FakeLibvirtTests(test.NoDBTestCase):
         conn = self.get_openAuth_curry_func()('qemu:///system')
         etree.fromstring(conn.getCapabilities())
 
+    def test_getDomainCapabilities(self):
+        conn = self.get_openAuth_curry_func()('qemu:///system')
+        etree.fromstring(conn.getDomainCapabilities(
+            '/usr/bin/qemu-kvm', 'x86_64', 'q35', 'kvm', 0))
+
     def test_nwfilter_define_undefine(self):
         conn = self.get_openAuth_curry_func()('qemu:///system')
         # Will raise an exception if it's not valid XML
@@ -438,10 +443,10 @@ class FakeLibvirtTests(test.NoDBTestCase):
     <product id='0x1528'>Ethernet Controller 10-Gigabit X540-AT2</product>
     <vendor id='0x8086'>Intel Corporation</vendor>
     <capability type='virt_functions'>
-      <address domain='0x0000' bus='0x81' slot='0x10' function='0x0'/>
+      <address domain='0x0000' bus='0x81' slot='0x0' function='0x1'/>
     </capability>
-    <iommuGroup number='48'>
- <address domain='0x0000' bus='0x81' slot='0x0' function='0x0'/>
+    <iommuGroup number='40'>
+      <address domain='0x0000' bus='0x81' slot='0x0' function='0x0'/>
     </iommuGroup>
     <numa node='0'/>
     <pci-express>
@@ -451,8 +456,8 @@ class FakeLibvirtTests(test.NoDBTestCase):
   </capability>
 </device>"""
         vf_xml = """<device>
-  <name>pci_0000_81_10_0</name>
-  <path>/sys/devices/pci0000:80/0000:80:01.0/0000:81:10.0</path>
+  <name>pci_0000_81_00_1</name>
+  <path>/sys/devices/pci0000:80/0000:80:01.0/0000:81:00.1</path>
   <parent>pci_0000_80_01_0</parent>
   <driver>
     <name>ixgbevf</name>
@@ -460,15 +465,15 @@ class FakeLibvirtTests(test.NoDBTestCase):
   <capability type='pci'>
     <domain>0</domain>
     <bus>129</bus>
-    <slot>16</slot>
-    <function>0</function>
+    <slot>0</slot>
+    <function>1</function>
     <product id='0x1515'>X540 Ethernet Controller Virtual Function</product>
     <vendor id='0x8086'>Intel Corporation</vendor>
     <capability type='phys_function'>
-      <address domain='0x0000' bus='0x81' slot='0x00' function='0x0'/>
+      <address domain='0x0000' bus='0x81' slot='0x0' function='0x0'/>
     </capability>
-    <iommuGroup number='48'>
- <address domain='0x0000' bus='0x81' slot='0x10' function='0x0'/>
+    <iommuGroup number='41'>
+      <address domain='0x0000' bus='0x81' slot='0x0' function='0x1'/>
     </iommuGroup>
     <numa node='0'/>
     <pci-express>
@@ -479,16 +484,16 @@ class FakeLibvirtTests(test.NoDBTestCase):
 </device>"""
 
         # create fake pci devices
-        pci_info = libvirt.HostPciSRIOVDevicesInfo(num_pfs=1, num_vfs=1)
+        pci_info = libvirt.HostPCIDevicesInfo(num_pfs=1, num_vfs=1)
 
         # generate xml for the created pci devices
         gen_pf = pci_info.get_device_by_name('pci_0000_81_00_0')
-        gen_vf = pci_info.get_device_by_name('pci_0000_81_10_0')
+        gen_vf = pci_info.get_device_by_name('pci_0000_81_00_1')
 
-        self.assertEqual(gen_pf.XMLDesc(0), pf_xml)
-        self.assertEqual(gen_vf.XMLDesc(0), vf_xml)
+        self.assertXmlEqual(gen_pf.XMLDesc(0), pf_xml)
+        self.assertXmlEqual(gen_vf.XMLDesc(0), vf_xml)
 
         # parse the generated xml with a libvirt config class and compare
         # device address
         _cmp_pci_dev_addr(pf_xml, '0000:81:00.0')
-        _cmp_pci_dev_addr(vf_xml, '0000:81:10.0')
+        _cmp_pci_dev_addr(vf_xml, '0000:81:00.1')

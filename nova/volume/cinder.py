@@ -126,11 +126,11 @@ def _get_server_version(context, url):
 
         # NOTE(andreykurilin): endpoint URL has at least 2 formats:
         #   1. The classic (legacy) endpoint:
-        #       http://{host}:{optional_port}/v{1 or 2 or 3}/{project-id}
-        #       http://{host}:{optional_port}/v{1 or 2 or 3}
+        #       http://{host}:{optional_port}/v{2 or 3}/{project-id}
+        #       http://{host}:{optional_port}/v{2 or 3}
         #   3. Under wsgi:
-        #       http://{host}:{optional_port}/volume/v{1 or 2 or 3}
-        for ver in ['v1', 'v2', 'v3']:
+        #       http://{host}:{optional_port}/volume/v{2 or 3}
+        for ver in ['v2', 'v3']:
             if u.path.endswith(ver) or "/{0}/".format(ver) in u.path:
                 path = u.path[:u.path.rfind(ver)]
                 version_url = '%s://%s%s' % (u.scheme, u.netloc, path)
@@ -200,9 +200,11 @@ def _get_cinderclient_parameters(context):
     service_type, service_name, interface = CONF.cinder.catalog_info.split(':')
 
     service_parameters = {'service_type': service_type,
-                          'service_name': service_name,
                           'interface': interface,
                           'region_name': CONF.cinder.os_region_name}
+    # Only include the service_name if it's provided.
+    if service_name:
+        service_parameters['service_name'] = service_name
 
     if CONF.cinder.endpoint_template:
         url = CONF.cinder.endpoint_template % context.to_dict()
@@ -325,7 +327,20 @@ def _untranslate_volume_summary_view(context, vol):
         d['shared_targets'] = vol.shared_targets
         d['service_uuid'] = vol.service_uuid
 
+    if hasattr(vol, 'migration_status'):
+        d['migration_status'] = vol.migration_status
+
     return d
+
+
+def _untranslate_volume_type_view(volume_type):
+    """Maps keys for volume type view."""
+    v = {}
+
+    v['id'] = volume_type.id
+    v['name'] = volume_type.name
+
+    return v
 
 
 def _untranslate_snapshot_summary_view(context, snapshot):
@@ -358,8 +373,6 @@ def _translate_attachment_ref(attachment_ref):
         translated_con_info['data'] = connection_info_data
         translated_con_info['status'] = attachment_ref.pop('status', None)
         translated_con_info['instance'] = attachment_ref.pop('instance', None)
-        translated_con_info['attach_mode'] = attachment_ref.pop('attach_mode',
-                                                                None)
         translated_con_info['attached_at'] = attachment_ref.pop('attached_at',
                                                                 None)
         translated_con_info['detached_at'] = attachment_ref.pop('detached_at',
@@ -367,7 +380,8 @@ def _translate_attachment_ref(attachment_ref):
 
         # Now the catch all...
         for k, v in attachment_ref.items():
-            if k != "id":
+            # Keep these as top-level fields on the attachment record.
+            if k not in ("id", "attach_mode"):
                 translated_con_info[k] = v
 
     attachment_ref['connection_info'] = translated_con_info
@@ -412,7 +426,8 @@ def translate_volume_exception(method):
 
 
 def translate_attachment_exception(method):
-    """Transforms the exception for the attachment but keeps its traceback intact.
+    """Transforms the exception for the attachment but keeps its traceback
+    intact.
     """
     def wrapper(self, ctx, attachment_id, *args, **kwargs):
         try:
@@ -492,7 +507,14 @@ class API(object):
             raise exception.InvalidVolume(reason=msg)
 
     def check_availability_zone(self, context, volume, instance=None):
-        """Ensure that the availability zone is the same."""
+        """Ensure that the availability zone is the same.
+
+        :param context: the nova request context
+        :param volume: the volume attached to the instance
+        :param instance: nova.objects.instance.Instance object
+        :raises: InvalidVolume if the instance availability zone does not
+            equal the volume's availability zone
+        """
 
         # TODO(walter-boring): move this check to Cinder as part of
         # the reserve call.
@@ -687,6 +709,16 @@ class API(object):
         cinderclient(context).volume_snapshots.delete(snapshot_id)
 
     @translate_cinder_exception
+    def get_all_volume_types(self, context):
+        items = cinderclient(context).volume_types.list()
+        rvals = []
+
+        for item in items:
+            rvals.append(_untranslate_volume_type_view(item))
+
+        return rvals
+
+    @translate_cinder_exception
     def get_volume_encryption_metadata(self, context, volume_id):
         return cinderclient(context).volumes.get_encryption_metadata(volume_id)
 
@@ -746,12 +778,15 @@ class API(object):
             return _translate_attachment_ref(attachment_ref)
         except cinder_exception.ClientException as ex:
             with excutils.save_and_reraise_exception():
-                LOG.error(('Create attachment failed for volume '
-                           '%(volume_id)s. Error: %(msg)s Code: %(code)s'),
-                          {'volume_id': volume_id,
-                           'msg': six.text_type(ex),
-                           'code': getattr(ex, 'code', None)},
-                          instance_uuid=instance_id)
+                # NOTE: It is unnecessary to output BadRequest(400) error log,
+                # because operators don't need to debug such cases.
+                if getattr(ex, 'code', None) != 400:
+                    LOG.error(('Create attachment failed for volume '
+                               '%(volume_id)s. Error: %(msg)s Code: %(code)s'),
+                              {'volume_id': volume_id,
+                               'msg': six.text_type(ex),
+                               'code': getattr(ex, 'code', None)},
+                              instance_uuid=instance_id)
 
     @translate_attachment_exception
     def attachment_get(self, context, attachment_id):

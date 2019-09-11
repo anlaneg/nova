@@ -49,7 +49,6 @@ from nova.api.openstack.compute import fping
 from nova.api.openstack.compute import hosts
 from nova.api.openstack.compute import hypervisors
 from nova.api.openstack.compute import image_metadata
-from nova.api.openstack.compute import image_size
 from nova.api.openstack.compute import images
 from nova.api.openstack.compute import instance_actions
 from nova.api.openstack.compute import instance_usage_audit_log
@@ -76,13 +75,13 @@ from nova.api.openstack.compute import server_metadata
 from nova.api.openstack.compute import server_migrations
 from nova.api.openstack.compute import server_password
 from nova.api.openstack.compute import server_tags
+from nova.api.openstack.compute import server_topology
 from nova.api.openstack.compute import servers
 from nova.api.openstack.compute import services
 from nova.api.openstack.compute import shelve
 from nova.api.openstack.compute import simple_tenant_usage
 from nova.api.openstack.compute import suspend_server
 from nova.api.openstack.compute import tenant_networks
-from nova.api.openstack.compute import used_limits
 from nova.api.openstack.compute import versionsV21
 from nova.api.openstack.compute import virtual_interfaces
 from nova.api.openstack.compute import volumes
@@ -90,66 +89,60 @@ from nova.api.openstack import wsgi
 from nova.api import wsgi as base_wsgi
 
 
-def _create_controller(main_controller, controller_list,
-                      action_controller_list):
+def _create_controller(main_controller, action_controller_list):
     """This is a helper method to create controller with a
-    list of extended controller. This is for backward compatible
-    with old extension interface. Finally, the controller for the
-    same resource will be merged into single one controller.
+    list of action controller.
     """
 
     controller = wsgi.Resource(main_controller())
-    for ctl in controller_list:
-        controller.register_extensions(ctl())
     for ctl in action_controller_list:
         controller.register_actions(ctl())
     return controller
 
 
 agents_controller = functools.partial(
-    _create_controller, agents.AgentController, [], [])
+    _create_controller, agents.AgentController, [])
 
 
 aggregates_controller = functools.partial(
-    _create_controller, aggregates.AggregateController, [], [])
+    _create_controller, aggregates.AggregateController, [])
 
 
 assisted_volume_snapshots_controller = functools.partial(
     _create_controller,
-    assisted_volume_snapshots.AssistedVolumeSnapshotsController, [], [])
+    assisted_volume_snapshots.AssistedVolumeSnapshotsController, [])
 
 
 availability_zone_controller = functools.partial(
-    _create_controller, availability_zone.AvailabilityZoneController, [], [])
+    _create_controller, availability_zone.AvailabilityZoneController, [])
 
 
 baremetal_nodes_controller = functools.partial(
-    _create_controller, baremetal_nodes.BareMetalNodeController, [], [])
+    _create_controller, baremetal_nodes.BareMetalNodeController, [])
 
 
 cells_controller = functools.partial(
-    _create_controller, cells.CellsController, [], [])
+    _create_controller, cells.CellsController, [])
 
 
 certificates_controller = functools.partial(
-    _create_controller, certificates.CertificatesController, [], [])
+    _create_controller, certificates.CertificatesController, [])
 
 
 cloudpipe_controller = functools.partial(
-    _create_controller, cloudpipe.CloudpipeController, [], [])
+    _create_controller, cloudpipe.CloudpipeController, [])
 
 
 extensions_controller = functools.partial(
-    _create_controller, extension_info.ExtensionInfoController, [], [])
+    _create_controller, extension_info.ExtensionInfoController, [])
 
 
 fixed_ips_controller = functools.partial(_create_controller,
-    fixed_ips.FixedIPController, [], [])
+    fixed_ips.FixedIPController, [])
 
 
 flavor_controller = functools.partial(_create_controller,
     flavors.FlavorsController,
-    [],
     [
         flavor_manage.FlavorManageController,
         flavor_access.FlavorActionController
@@ -158,110 +151,104 @@ flavor_controller = functools.partial(_create_controller,
 
 
 flavor_access_controller = functools.partial(_create_controller,
-    flavor_access.FlavorAccessController, [], [])
+    flavor_access.FlavorAccessController, [])
 
 
 flavor_extraspec_controller = functools.partial(_create_controller,
-    flavors_extraspecs.FlavorExtraSpecsController, [], [])
+    flavors_extraspecs.FlavorExtraSpecsController, [])
 
 
 floating_ip_dns_controller = functools.partial(_create_controller,
-    floating_ip_dns.FloatingIPDNSDomainController, [], [])
+    floating_ip_dns.FloatingIPDNSDomainController, [])
 
 
 floating_ip_dnsentry_controller = functools.partial(_create_controller,
-    floating_ip_dns.FloatingIPDNSEntryController, [], [])
+    floating_ip_dns.FloatingIPDNSEntryController, [])
 
 
 floating_ip_pools_controller = functools.partial(_create_controller,
-    floating_ip_pools.FloatingIPPoolsController, [], [])
+    floating_ip_pools.FloatingIPPoolsController, [])
 
 
 floating_ips_controller = functools.partial(_create_controller,
-    floating_ips.FloatingIPController, [], [])
+    floating_ips.FloatingIPController, [])
 
 
 floating_ips_bulk_controller = functools.partial(_create_controller,
-    floating_ips_bulk.FloatingIPBulkController, [], [])
+    floating_ips_bulk.FloatingIPBulkController, [])
 
 
 fping_controller = functools.partial(_create_controller,
-    fping.FpingController, [], [])
+    fping.FpingController, [])
 
 
 hosts_controller = functools.partial(
-    _create_controller, hosts.HostController, [], [])
+    _create_controller, hosts.HostController, [])
 
 
 hypervisors_controller = functools.partial(
-    _create_controller, hypervisors.HypervisorsController, [], [])
+    _create_controller, hypervisors.HypervisorsController, [])
 
 
 images_controller = functools.partial(
-    _create_controller, images.ImagesController,
-    [image_size.ImageSizeController], [])
+    _create_controller, images.ImagesController, [])
 
 
 image_metadata_controller = functools.partial(
-    _create_controller, image_metadata.ImageMetadataController,
-    [], [])
+    _create_controller, image_metadata.ImageMetadataController, [])
 
 
 instance_actions_controller = functools.partial(_create_controller,
-    instance_actions.InstanceActionsController, [], [])
+    instance_actions.InstanceActionsController, [])
 
 
 instance_usage_audit_log_controller = functools.partial(_create_controller,
-    instance_usage_audit_log.InstanceUsageAuditLogController, [], [])
+    instance_usage_audit_log.InstanceUsageAuditLogController, [])
 
 
 ips_controller = functools.partial(_create_controller,
-    ips.IPsController, [], [])
+    ips.IPsController, [])
 
 
 keypairs_controller = functools.partial(
-    _create_controller, keypairs.KeypairController, [], [])
+    _create_controller, keypairs.KeypairController, [])
 
 
 limits_controller = functools.partial(
-    _create_controller, limits.LimitsController,
-    [
-        used_limits.UsedLimitsController,
-    ],
-    [])
+    _create_controller, limits.LimitsController, [])
 
 
 migrations_controller = functools.partial(_create_controller,
-    migrations.MigrationsController, [], [])
+    migrations.MigrationsController, [])
 
 
 networks_controller = functools.partial(_create_controller,
-    networks.NetworkController, [],
+    networks.NetworkController,
     [networks_associate.NetworkAssociateActionController])
 
 
 quota_classes_controller = functools.partial(_create_controller,
-    quota_classes.QuotaClassSetsController, [], [])
+    quota_classes.QuotaClassSetsController, [])
 
 
 quota_set_controller = functools.partial(_create_controller,
-    quota_sets.QuotaSetsController, [], [])
+    quota_sets.QuotaSetsController, [])
 
 
 security_group_controller = functools.partial(_create_controller,
-    security_groups.SecurityGroupController, [], [])
+    security_groups.SecurityGroupController, [])
 
 
 security_group_default_rules_controller = functools.partial(_create_controller,
-    security_group_default_rules.SecurityGroupDefaultRulesController, [], [])
+    security_group_default_rules.SecurityGroupDefaultRulesController, [])
 
 
 security_group_rules_controller = functools.partial(_create_controller,
-    security_groups.SecurityGroupRulesController, [], [])
+    security_groups.SecurityGroupRulesController, [])
 
 
 server_controller = functools.partial(_create_controller,
-    servers.ServersController, [],
+    servers.ServersController,
     [
         admin_actions.AdminActionsController,
         admin_password.AdminPasswordController,
@@ -284,88 +271,90 @@ server_controller = functools.partial(_create_controller,
 
 
 console_auth_tokens_controller = functools.partial(_create_controller,
-    console_auth_tokens.ConsoleAuthTokensController, [], [])
+    console_auth_tokens.ConsoleAuthTokensController, [])
 
 
 consoles_controller = functools.partial(_create_controller,
-    consoles.ConsolesController, [], [])
+    consoles.ConsolesController, [])
 
 
 server_diagnostics_controller = functools.partial(_create_controller,
-    server_diagnostics.ServerDiagnosticsController, [], [])
+    server_diagnostics.ServerDiagnosticsController, [])
 
 
 server_external_events_controller = functools.partial(_create_controller,
-    server_external_events.ServerExternalEventsController, [], [])
+    server_external_events.ServerExternalEventsController, [])
 
 
 server_groups_controller = functools.partial(_create_controller,
-    server_groups.ServerGroupController, [], [])
+    server_groups.ServerGroupController, [])
 
 
 server_metadata_controller = functools.partial(_create_controller,
-    server_metadata.ServerMetadataController, [], [])
+    server_metadata.ServerMetadataController, [])
 
 
 server_migrations_controller = functools.partial(_create_controller,
-    server_migrations.ServerMigrationsController, [], [])
+    server_migrations.ServerMigrationsController, [])
 
 
 server_os_interface_controller = functools.partial(_create_controller,
-    attach_interfaces.InterfaceAttachmentController, [], [])
+    attach_interfaces.InterfaceAttachmentController, [])
 
 
 server_password_controller = functools.partial(_create_controller,
-    server_password.ServerPasswordController, [], [])
+    server_password.ServerPasswordController, [])
 
 
 server_remote_consoles_controller = functools.partial(_create_controller,
-    remote_consoles.RemoteConsolesController, [], [])
+    remote_consoles.RemoteConsolesController, [])
 
 
 server_security_groups_controller = functools.partial(_create_controller,
-    security_groups.ServerSecurityGroupController, [], [])
+    security_groups.ServerSecurityGroupController, [])
 
 
 server_tags_controller = functools.partial(_create_controller,
-    server_tags.ServerTagsController, [], [])
+    server_tags.ServerTagsController, [])
 
+server_topology_controller = functools.partial(_create_controller,
+    server_topology.ServerTopologyController, [])
 
 server_volume_attachments_controller = functools.partial(_create_controller,
-    volumes.VolumeAttachmentController, [], [])
+    volumes.VolumeAttachmentController, [])
 
 
 services_controller = functools.partial(_create_controller,
-    services.ServiceController, [], [])
+    services.ServiceController, [])
 
 
 simple_tenant_usage_controller = functools.partial(_create_controller,
-    simple_tenant_usage.SimpleTenantUsageController, [], [])
+    simple_tenant_usage.SimpleTenantUsageController, [])
 
 
 snapshots_controller = functools.partial(_create_controller,
-    volumes.SnapshotController, [], [])
+    volumes.SnapshotController, [])
 
 
 tenant_networks_controller = functools.partial(_create_controller,
-    tenant_networks.TenantNetworkController, [], [])
+    tenant_networks.TenantNetworkController, [])
 
 
 version_controller = functools.partial(_create_controller,
-    versionsV21.VersionsController, [], [])
+    versionsV21.VersionsController, [])
 
 
 virtual_interfaces_controller = functools.partial(_create_controller,
-    virtual_interfaces.ServerVirtualInterfaceController, [], [])
+    virtual_interfaces.ServerVirtualInterfaceController, [])
 
 
 volumes_controller = functools.partial(_create_controller,
-    volumes.VolumeController, [], [])
+    volumes.VolumeController, [])
 
 
 # NOTE(alex_xu): This is structure of this route list as below:
 # (
-#     ('Route path': {
+#     ('Route path', {
 #         'HTTP method: [
 #             'Controller',
 #             'The method of controller is used to handle this route'
@@ -845,6 +834,9 @@ ROUTE_LIST = (
         'GET': [server_tags_controller, 'show'],
         'PUT': [server_tags_controller, 'update'],
         'DELETE': [server_tags_controller, 'delete']
+    }),
+    ('/servers/{server_id}/topology', {
+        'GET': [server_topology_controller, 'index']
     }),
 )
 

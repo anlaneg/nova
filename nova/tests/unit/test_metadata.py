@@ -44,7 +44,6 @@ from nova.api.metadata import handler
 from nova.api.metadata import password
 from nova.api.metadata import vendordata_dynamic
 from nova import block_device
-from nova.compute import flavors
 from nova import context
 from nova import exception
 from nova.network import model as network_model
@@ -85,7 +84,7 @@ def fake_inst_obj(context):
         vcpus=1,
         fixed_ips=[],
         root_device_name='/dev/sda1',
-        hostname='test.novadomain',
+        hostname='test',
         display_name='my_displayname',
         metadata={},
         device_metadata=fake_metadata_objects(),
@@ -101,7 +100,7 @@ def fake_inst_obj(context):
     inst.info_cache = objects.InstanceInfoCache(context=context,
                                                 instance_uuid=inst.uuid,
                                                 network_info=nwinfo)
-    inst.flavor = flavors.get_default_flavor()
+    inst.flavor = objects.Flavor.get_by_name(context, 'm1.small')
     return inst
 
 
@@ -310,11 +309,19 @@ class MetadataTestCase(test.TestCase):
         self.flags(use_neutron=True)
         self._test_security_groups()
 
-    def test_local_hostname_fqdn(self):
+    def test_local_hostname(self):
+        self.flags(dhcp_domain=None, group='api')
         md = fake_InstanceMetadata(self, self.instance.obj_clone())
         data = md.get_ec2_metadata(version='2009-04-04')
         self.assertEqual(data['meta-data']['local-hostname'],
-            "%s.%s" % (self.instance['hostname'], CONF.dhcp_domain))
+            self.instance['hostname'])
+
+    def test_local_hostname_fqdn(self):
+        self.flags(dhcp_domain='fakedomain', group='api')
+        md = fake_InstanceMetadata(self, self.instance.obj_clone())
+        data = md.get_ec2_metadata(version='2009-04-04')
+        self.assertEqual('%s.fakedomain' % self.instance['hostname'],
+                         data['meta-data']['local-hostname'])
 
     def test_format_instance_mapping(self):
         # Make sure that _format_instance_mappings works.
@@ -550,15 +557,10 @@ class MetadataTestCase(test.TestCase):
 
     @mock.patch('oslo_serialization.base64.encode_as_text',
                 return_value=FAKE_SEED)
-    @mock.patch('nova.cells.rpcapi.CellsAPI.get_keypair_at_top')
     @mock.patch.object(jsonutils, 'dump_as_bytes')
     def _test_as_json_with_options(self, mock_json_dump_as_bytes,
-                          mock_cells_keypair, mock_base64,
-                          is_cells=False, os_version=base.GRIZZLY):
-        if is_cells:
-            self.flags(enable=True, group='cells')
-            self.flags(cell_type='compute', group='cells')
-
+                          mock_base64,
+                          os_version=base.GRIZZLY):
         instance = self.instance
         keypair = self.keypair
         md = fake_InstanceMetadata(self, instance)
@@ -596,44 +598,13 @@ class MetadataTestCase(test.TestCase):
             expose_trusted = md._check_os_version(base.ROCKY, os_version)
             expected_metadata['devices'] = fake_metadata_dicts(
                 True, expose_trusted)
-        mock_cells_keypair.return_value = keypair
         md._metadata_as_json(os_version, 'non useless path parameter')
-        if instance.key_name:
-            if is_cells:
-                mock_cells_keypair.assert_called_once_with(mock.ANY,
-                                                           instance.user_id,
-                                                           instance.key_name)
-                self.assertIsInstance(mock_cells_keypair.call_args[0][0],
-                                      context.RequestContext)
         self.assertEqual(md.md_mimetype, base.MIME_TYPE_APPLICATION_JSON)
         mock_json_dump_as_bytes.assert_called_once_with(expected_metadata)
 
     def test_as_json(self):
         for os_version in base.OPENSTACK_VERSIONS:
             self._test_as_json_with_options(os_version=os_version)
-
-    def test_as_json_with_cells_mode(self):
-        for os_version in base.OPENSTACK_VERSIONS:
-            self._test_as_json_with_options(is_cells=True,
-                                            os_version=os_version)
-
-    @mock.patch('nova.cells.rpcapi.CellsAPI.get_keypair_at_top',
-                side_effect=exception.KeypairNotFound(
-                name='key', user_id='fake_user'))
-    @mock.patch.object(objects.Instance, 'get_by_uuid')
-    def test_as_json_deleted_keypair_in_cells_mode(self,
-                                                   mock_get_keypair_at_top,
-                                                   mock_inst_get_by_uuid):
-        self.flags(enable=True, group='cells')
-        self.flags(cell_type='compute', group='cells')
-
-        instance = self.instance.obj_clone()
-        delattr(instance, 'keypairs')
-        md = fake_InstanceMetadata(self, instance)
-        meta = md._metadata_as_json(base.OPENSTACK_VERSIONS[-1], path=None)
-        meta = jsonutils.loads(meta)
-        self.assertNotIn('keys', meta)
-        self.assertNotIn('public_keys', meta)
 
     @mock.patch.object(objects.Instance, 'get_by_uuid')
     def test_metadata_as_json_deleted_keypair(self, mock_inst_get_by_uuid):
@@ -1425,7 +1396,7 @@ class MetadataHandlerTestCase(test.TestCase):
         # with X-Metadata-Provider
         proxy_lb_id = 'edge-x'
 
-        mock_client = mock_get_client()
+        mock_client = mock_get_client.return_value
         mock_client.list_ports.return_value = {
             'ports': [{'device_id': 'a-b-c-d', 'tenant_id': 'test'}]}
         mock_client.list_subnets.return_value = {
@@ -1440,6 +1411,52 @@ class MetadataHandlerTestCase(test.TestCase):
                      'X-Metadata-Provider': proxy_lb_id})
 
         self.assertEqual(200, response.status_int)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def _metadata_handler_with_provider_id(self, hnd, mock_get_client):
+        # with X-Metadata-Provider
+        proxy_lb_id = 'edge-x'
+
+        mock_client = mock_get_client.return_value
+        mock_client.list_ports.return_value = {
+            'ports': [{'device_id': 'a-b-c-d', 'tenant_id': 'test'}]}
+        mock_client.list_subnets.return_value = {
+            'subnets': [{'network_id': 'f-f-f-f'}]}
+
+        response = fake_request(
+            self, self.mdinst,
+            relpath="/2009-04-04/user-data",
+            address="192.192.192.2",
+            app=hnd,
+            headers={'X-Forwarded-For': '192.192.192.2',
+                     'X-Metadata-Provider': proxy_lb_id})
+
+        self.assertEqual(200, response.status_int)
+        self.assertEqual(base64.decode_as_bytes(self.instance['user_data']),
+                         response.body)
+
+    @mock.patch.object(base, 'get_metadata_by_instance_id')
+    def _test__handler_with_provider_id(self,
+                                        expected_calls,
+                                        get_by_uuid):
+        get_by_uuid.return_value = self.mdinst
+        hnd = handler.MetadataRequestHandler()
+        with mock.patch.object(hnd, '_get_instance_id_from_lb',
+                               return_value=('a-b-c-d',
+                                             'test')) as _get_id_from_lb:
+            self._metadata_handler_with_provider_id(hnd)
+            self._metadata_handler_with_provider_id(hnd)
+            self.assertEqual(expected_calls, _get_id_from_lb.call_count)
+
+    def test_metadata_handler_with_provider_id(self):
+        self.flags(service_metadata_proxy=True, group='neutron')
+        self.flags(metadata_cache_expiration=15, group='api')
+        self._test__handler_with_provider_id(1)
+
+    def test_metadata_handler_with_provider_id_no_cache(self):
+        self.flags(service_metadata_proxy=True, group='neutron')
+        self.flags(metadata_cache_expiration=0, group='api')
+        self._test__handler_with_provider_id(2)
 
     @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
     def test_metadata_lb_proxy_chain(self, mock_get_client):
@@ -1461,7 +1478,7 @@ class MetadataHandlerTestCase(test.TestCase):
                 return {'ports':
                         []}
 
-        mock_client = mock_get_client()
+        mock_client = mock_get_client.return_value
         mock_client.list_ports.side_effect = fake_list_ports
         mock_client.list_subnets.return_value = {
             'subnets': [{'network_id': 'f-f-f-f'}]}
@@ -1494,7 +1511,7 @@ class MetadataHandlerTestCase(test.TestCase):
             encodeutils.to_utf8(proxy_lb_id),
             hashlib.sha256).hexdigest()
 
-        mock_client = mock_get_client()
+        mock_client = mock_get_client.return_value
         mock_client.list_ports.return_value = {
             'ports': [{'device_id': 'a-b-c-d', 'tenant_id': 'test'}]}
         mock_client.list_subnets.return_value = {
@@ -1510,6 +1527,34 @@ class MetadataHandlerTestCase(test.TestCase):
                      'X-Metadata-Provider-Signature': signature})
 
         self.assertEqual(200, response.status_int)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_metadata_lb_proxy_not_signed(self, mock_get_client):
+
+        shared_secret = "testing1234"
+        self.flags(
+            metadata_proxy_shared_secret=shared_secret,
+            service_metadata_proxy=True, group='neutron')
+
+        self.expected_instance_id = b'a-b-c-d'
+
+        # with X-Metadata-Provider
+        proxy_lb_id = 'edge-x'
+
+        mock_client = mock_get_client.return_value
+        mock_client.list_ports.return_value = {
+            'ports': [{'device_id': 'a-b-c-d', 'tenant_id': 'test'}]}
+        mock_client.list_subnets.return_value = {
+            'subnets': [{'network_id': 'f-f-f-f'}]}
+
+        response = fake_request(
+            self, self.mdinst,
+            relpath="/2009-04-04/user-data",
+            address="192.192.192.2",
+            fake_get_metadata_by_instance_id=self._fake_x_get_metadata,
+            headers={'X-Forwarded-For': '192.192.192.2',
+                     'X-Metadata-Provider': proxy_lb_id})
+        self.assertEqual(403, response.status_int)
 
     @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
     def test_metadata_lb_proxy_signed_fail(self, mock_get_client):
@@ -1530,7 +1575,7 @@ class MetadataHandlerTestCase(test.TestCase):
             encodeutils.to_utf8(proxy_lb_id),
             hashlib.sha256).hexdigest()
 
-        mock_client = mock_get_client()
+        mock_client = mock_get_client.return_value
         mock_client.list_ports.return_value = {
             'ports': [{'device_id': 'a-b-c-d', 'tenant_id': 'test'}]}
         mock_client.list_subnets.return_value = {
@@ -1617,6 +1662,23 @@ class MetadataHandlerTestCase(test.TestCase):
         mock_get_im.assert_called_once_with(ctxt, 'foo')
         imd.assert_called_once_with(inst, 'bar')
 
+    @mock.patch.object(objects.Instance, 'get_by_uuid')
+    @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
+    def test_get_metadata_by_instance_id_with_local_meta(self, mock_get_im,
+                                                         mock_get_inst):
+        # Test that if local_metadata_per_cell is set to True, we don't
+        # query API DB for instance mapping.
+        self.flags(local_metadata_per_cell=True, group='api')
+        ctxt = context.RequestContext()
+        inst = objects.Instance()
+        mock_get_inst.return_value = inst
+
+        with mock.patch.object(base, 'InstanceMetadata') as imd:
+            base.get_metadata_by_instance_id('foo', 'bar', ctxt=ctxt)
+
+        mock_get_im.assert_not_called()
+        imd.assert_called_once_with(inst, 'bar')
+
 
 class MetadataPasswordTestCase(test.TestCase):
     def setUp(self):
@@ -1655,7 +1717,10 @@ class MetadataPasswordTestCase(test.TestCase):
 
     @mock.patch('nova.objects.InstanceMapping.get_by_instance_uuid')
     @mock.patch('nova.objects.Instance.get_by_uuid')
-    def _try_set_password(self, get_by_uuid, get_mapping, val=b'bar'):
+    def _try_set_password(self, get_by_uuid, get_mapping, val=b'bar',
+                          use_local_meta=False):
+        if use_local_meta:
+            self.flags(local_metadata_per_cell=True, group='api')
         request = webob.Request.blank('')
         request.method = 'POST'
         request.body = val
@@ -1667,11 +1732,18 @@ class MetadataPasswordTestCase(test.TestCase):
             save.assert_called_once_with()
 
         self.assertIn('password_0', self.instance.system_metadata)
-        get_mapping.assert_called_once_with(mock.ANY, self.instance.uuid)
+        if use_local_meta:
+            get_mapping.assert_not_called()
+        else:
+            get_mapping.assert_called_once_with(mock.ANY, self.instance.uuid)
 
     def test_set_password(self):
         self.mdinst.password = ''
         self._try_set_password()
+
+    def test_set_password_local_meta(self):
+        self.mdinst.password = ''
+        self._try_set_password(use_local_meta=True)
 
     def test_conflict(self):
         self.mdinst.password = 'foo'

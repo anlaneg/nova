@@ -25,6 +25,7 @@ import shutil
 import tempfile
 import time
 
+from openstack import exceptions as sdk_exc
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_service import loopingcall
@@ -45,8 +46,8 @@ from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
 from nova import objects
+from nova.objects import external_event as external_event_obj
 from nova.objects import fields as obj_fields
-from nova import rc_fields
 from nova import servicegroup
 from nova import utils
 from nova.virt import configdrive
@@ -131,6 +132,27 @@ def _log_ironic_polling(what, node, instance):
               instance=instance)
 
 
+def _check_peer_list():
+    # these configs are mutable; need to check at runtime and init
+    if CONF.ironic.partition_key is not None:
+        peer_list = set(CONF.ironic.peer_list)
+        if not peer_list:
+            LOG.error('FATAL: Peer list is not configured in the '
+                      '[ironic]/peer_list option; cannot map '
+                      'ironic nodes to compute services.')
+            raise exception.InvalidPeerList(host=CONF.host)
+        if CONF.host not in peer_list:
+            LOG.error('FATAL: Peer list does not contain this '
+                      'compute service hostname (%s); add it to '
+                      'the [ironic]/peer_list option.', CONF.host)
+            raise exception.InvalidPeerList(host=CONF.host)
+        if set([CONF.host]) == peer_list:
+            LOG.warning('This compute service (%s) is the only service '
+                        'present in the [ironic]/peer_list option. '
+                        'Are you sure this should not include more '
+                        'hosts?', CONF.host)
+
+
 class IronicDriver(virt_driver.ComputeDriver):
     """Hypervisor driver for Ironic - bare metal provisioning."""
 
@@ -140,6 +162,18 @@ class IronicDriver(virt_driver.ComputeDriver):
                     "supports_attach_interface": True,
                     "supports_multiattach": False,
                     "supports_trusted_certs": False,
+
+                    # Image type support flags
+                    "supports_image_type_aki": False,
+                    "supports_image_type_ami": False,
+                    "supports_image_type_ari": False,
+                    "supports_image_type_iso": False,
+                    "supports_image_type_qcow2": True,
+                    "supports_image_type_raw": True,
+                    "supports_image_type_vdi": False,
+                    "supports_image_type_vhd": False,
+                    "supports_image_type_vhdx": False,
+                    "supports_image_type_vmdk": False,
                     }
 
     # This driver is capable of rebalancing nodes between computes.
@@ -164,20 +198,35 @@ class IronicDriver(virt_driver.ComputeDriver):
         self.servicegroup_api = servicegroup.API()
 
         self.ironicclient = client_wrapper.IronicClientWrapper()
+        self._ironic_connection = None
 
         # This is needed for the instance flavor migration in Pike, and should
         # be removed in Queens. Since this will run several times in the life
         # of the driver, track the instances that have already been migrated.
         self._migrated_instance_uuids = set()
 
-    def _get_node(self, node_uuid):
+    @property
+    def ironic_connection(self):
+        if self._ironic_connection is None:
+            # Ask get_sdk_adapter to raise ServiceUnavailable if the baremetal
+            # service isn't ready yet. Consumers of ironic_connection are set
+            # up to handle this and raise VirtDriverNotReady as appropriate.
+            self._ironic_connection = utils.get_sdk_adapter(
+                'baremetal', check_service=True)
+        return self._ironic_connection
+
+    def _get_node(self, node_id):
         """Get a node by its UUID.
 
            Some methods pass in variables named nodename, but are
            actually UUID's.
         """
-        return self.ironicclient.call('node.get', node_uuid,
-                                      fields=_NODE_FIELDS)
+        node = self.ironic_connection.get_node(node_id, fields=_NODE_FIELDS)
+        # TODO(dustinc): Make consumers use the right fields and remove this
+        node.uuid = node.id
+        node.instance_uuid = node.instance_id
+        node.maintenance = node.is_maintenance
+        return node
 
     def _validate_instance_and_node(self, instance):
         """Get the node associated with the instance.
@@ -185,11 +234,25 @@ class IronicDriver(virt_driver.ComputeDriver):
         Check with the Ironic service that this instance is associated with a
         node, and return the node.
         """
-        try:
-            return self.ironicclient.call('node.get_by_instance_uuid',
-                                          instance.uuid, fields=_NODE_FIELDS)
-        except ironic.exc.NotFound:
+        nodes = list(self.ironic_connection.nodes(
+            instance_id=instance.uuid, fields=_NODE_FIELDS))
+        if not nodes:
             raise exception.InstanceNotFound(instance_id=instance.uuid)
+        if len(nodes) > 1:
+            # This indicates a programming error so fail.
+            raise exception.NovaException(
+                _('Ironic returned more than one node for a query '
+                  'that can only return zero or one: %s') % nodes)
+
+        node = nodes[0]
+        # TODO(dustinc): Make consumers use the right fields and remove
+        if hasattr(node, "id"):
+            node.uuid = node.id
+        if hasattr(node, "instance_id"):
+            node.instance_uuid = node.instance_id
+        if hasattr(node, "is_maintenance"):
+            node.maintenance = node.is_maintenance
+        return node
 
     def _node_resources_unavailable(self, node_obj):
         """Determine whether the node's resources are in an acceptable state.
@@ -323,20 +386,17 @@ class IronicDriver(virt_driver.ComputeDriver):
     def _stop_firewall(self, instance, network_info):
         self.firewall_driver.unfilter_instance(instance, network_info)
 
-    def _set_instance_uuid(self, node, instance):
-
-        patch = [{'path': '/instance_uuid', 'op': 'add',
-                  'value': instance.uuid}]
+    def _set_instance_id(self, node, instance):
         try:
-            # NOTE(TheJulia): Assert an instance UUID to lock the node
+            # NOTE(TheJulia): Assert an instance ID to lock the node
             # from other deployment attempts while configuration is
             # being set.
-            self.ironicclient.call('node.update', node.uuid, patch,
-                                   retry_on_conflict=False)
-        except ironic.exc.BadRequest:
+            self.ironic_connection.update_node(node, retry_on_conflict=False,
+                                               instance_id=instance.uuid)
+        except sdk_exc.SDKException:
             msg = (_("Failed to reserve node %(node)s "
                      "when provisioning the instance %(instance)s")
-                   % {'node': node.uuid, 'instance': instance.uuid})
+                   % {'node': node.id, 'instance': instance.uuid})
             LOG.error(msg)
             raise exception.InstanceDeployFailure(msg)
 
@@ -348,7 +408,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                 _("Ironic node uuid not supplied to "
                   "driver for instance %s.") % instance.uuid)
         node = self._get_node(node_uuid)
-        self._set_instance_uuid(node, instance)
+        self._set_instance_id(node, instance)
 
     def failed_spawn_cleanup(self, instance):
         LOG.debug('Failed spawn cleanup called for instance',
@@ -454,17 +514,21 @@ class IronicDriver(virt_driver.ComputeDriver):
                              'reason': e},
                             instance=instance)
 
-    def _cleanup_deploy(self, node, instance, network_info=None):
+    def _cleanup_deploy(self, node, instance, network_info=None,
+                        remove_instance_info=True):
         self._cleanup_volume_target_info(instance)
         self._unplug_vifs(node, instance, network_info)
         self._stop_firewall(instance, network_info)
-        self._remove_instance_info_from_node(node, instance)
+        if remove_instance_info:
+            self._remove_instance_info_from_node(node, instance)
 
     def _wait_for_active(self, instance):
         """Wait for the node to be marked as ACTIVE in Ironic."""
         instance.refresh()
-        if (instance.task_state == task_states.DELETING or
-            instance.vm_state in (vm_states.ERROR, vm_states.DELETED)):
+        # Ignore REBUILD_SPAWNING when rebuilding from ERROR state.
+        if (instance.task_state != task_states.REBUILD_SPAWNING and
+                (instance.task_state == task_states.DELETING or
+                 instance.vm_state in (vm_states.ERROR, vm_states.DELETED))):
             raise exception.InstanceDeployFailure(
                 _("Instance %s provisioning was aborted") % instance.uuid)
 
@@ -512,7 +576,7 @@ class IronicDriver(virt_driver.ComputeDriver):
 
     @staticmethod
     def _pike_flavor_migration_for_node(ctx, node_rc, instance_uuid):
-        normalized_rc = rc_fields.ResourceClass.normalize_name(node_rc)
+        normalized_rc = utils.normalize_rc_name(node_rc)
         instance = objects.Instance.get_by_uuid(ctx, instance_uuid,
                                                 expected_attrs=["flavor"])
         specs = instance.flavor.extra_specs
@@ -583,27 +647,47 @@ class IronicDriver(virt_driver.ComputeDriver):
         except exception.InstanceNotFound:
             return False
 
-    def _get_node_list(self, **kwargs):
-        """Helper function to return the list of nodes.
+    def _get_node_list(self, return_generator=False, **kwargs):
+        """Helper function to return a list or generator of nodes.
 
-        If unable to connect ironic server, an empty list is returned.
-
-        :returns: a list of raw node from ironic
+        :param return_generator: If True, returns a generator of nodes. This
+          generator will only have SDK attribute names.
+        :returns: a list or generator of raw nodes from ironic
         :raises: VirtDriverNotReady
-
         """
-        node_list = []
         try:
-            node_list = self.ironicclient.call("node.list", **kwargs)
-        except exception.NovaException as e:
-            LOG.error("Failed to get the list of nodes from the Ironic "
-                      "inventory. Error: %s", e)
+            # NOTE(dustinc): The generator returned by the SDK can only be
+            # interated once. Since there are cases where it needs to be
+            # iterated more than once, we should return it as a list. In the
+            # future it may be worth refactoring these other usages so it can
+            # be returned as a generator.
+            node_generator = self.ironic_connection.nodes(**kwargs)
+        except sdk_exc.InvalidResourceQuery as e:
+            LOG.error("Invalid parameters in the provided search query."
+                      "Error: %s", six.text_type(e))
             raise exception.VirtDriverNotReady()
         except Exception as e:
             LOG.error("An unknown error has occurred when trying to get the "
-                      "list of nodes from the Ironic inventory. Error: %s", e)
+                      "list of nodes from the Ironic inventory. Error: %s",
+                      six.text_type(e))
             raise exception.VirtDriverNotReady()
-        return node_list
+        if return_generator:
+            return node_generator
+        else:
+            node_list = []
+            # TODO(dustinc): Update all usages to use SDK attributes then stop
+            #  copying values to PythonClient attributes.
+            for node in node_generator:
+                # NOTE(dustinc): There are usages that filter out these fields
+                #  which forces us to check for the attributes.
+                if hasattr(node, "id"):
+                    node.uuid = node.id
+                if hasattr(node, "instance_id"):
+                    node.instance_uuid = node.instance_id
+                if hasattr(node, "is_maintenance"):
+                    node.maintenance = node.is_maintenance
+                node_list.append(node)
+            return node_list
 
     def list_instances(self):
         """Return the names of all the instances provisioned.
@@ -612,27 +696,25 @@ class IronicDriver(virt_driver.ComputeDriver):
         :raises: VirtDriverNotReady
 
         """
-        # NOTE(lucasagomes): limit == 0 is an indicator to continue
-        # pagination until there're no more values to be returned.
-        node_list = self._get_node_list(associated=True,
-                                        fields=['instance_uuid'], limit=0)
+        # NOTE(dustinc): The SDK returns an object with instance_id,
+        #  but the Ironic API expects instance_uuid in query.
         context = nova_context.get_admin_context()
-        return [objects.Instance.get_by_uuid(context,
-                                             i.instance_uuid).name
-                for i in node_list]
+        return [objects.Instance.get_by_uuid(context, i.instance_id).name
+                for i in self._get_node_list(return_generator=True,
+                                             associated=True,
+                                             fields=['instance_uuid'])]
 
     def list_instance_uuids(self):
-        """Return the UUIDs of all the instances provisioned.
+        """Return the IDs of all the instances provisioned.
 
-        :returns: a list of instance UUIDs.
+        :returns: a list of instance IDs.
         :raises: VirtDriverNotReady
 
         """
-        # NOTE(lucasagomes): limit == 0 is an indicator to continue
-        # pagination until there're no more values to be returned.
-        node_list = self._get_node_list(associated=True,
-                                        fields=['instance_uuid'], limit=0)
-        return list(n.instance_uuid for n in node_list)
+        # NOTE(dustinc): The SDK returns an object with instance_id,
+        #  but the Ironic API expects instance_uuid in query.
+        return [node.instance_id for node in self._get_node_list(
+            return_generator=True, associated=True, fields=['instance_uuid'])]
 
     def node_is_available(self, nodename):
         """Confirms a Nova hypervisor node exists in the Ironic inventory.
@@ -663,17 +745,44 @@ class IronicDriver(virt_driver.ComputeDriver):
             # nodename is the ironic node's UUID.
             self._get_node(nodename)
             return True
-        except ironic.exc.NotFound:
+        except sdk_exc.ResourceNotFound:
             return False
 
     def _refresh_hash_ring(self, ctxt):
+        peer_list = None
+        # NOTE(jroll) if this is set, we need to limit the set of other
+        # compute services in the hash ring to hosts that are currently up
+        # and specified in the peer_list config option, as there's no way
+        # to check which partition_key other compute services are using.
+        if CONF.ironic.partition_key is not None:
+            try:
+                # NOTE(jroll) first we need to make sure the Ironic API can
+                # filter by conductor_group. If it cannot, limiting to
+                # peer_list could end up with a node being managed by multiple
+                # compute services.
+                self._can_send_version(min_version='1.46')
+
+                peer_list = set(CONF.ironic.peer_list)
+                # these configs are mutable; need to check at runtime and init.
+                # luckily, we run this method from init_host.
+                _check_peer_list()
+                LOG.debug('Limiting peer list to %s', peer_list)
+            except exception.IronicAPIVersionNotAvailable:
+                pass
+
+        # TODO(jroll) optimize this to limit to the peer_list
         service_list = objects.ServiceList.get_all_computes_by_hv_type(
             ctxt, self._get_hypervisor_type())
         services = set()
         for svc in service_list:
-            is_up = self.servicegroup_api.service_is_up(svc)
-            if is_up:
-                services.add(svc.host)
+            # NOTE(jroll) if peer_list is None, we aren't partitioning by
+            # conductor group, so we check all compute services for liveness.
+            # if we have a peer_list, don't check liveness for compute
+            # services that aren't in the list.
+            if peer_list is None or svc.host in peer_list:
+                is_up = self.servicegroup_api.service_is_up(svc)
+                if is_up:
+                    services.add(svc.host)
         # NOTE(jroll): always make sure this service is in the list, because
         # only services that have something registered in the compute_nodes
         # table will be here so far, and we might be brand new.
@@ -683,14 +792,36 @@ class IronicDriver(virt_driver.ComputeDriver):
                                             partitions=_HASH_RING_PARTITIONS)
 
     def _refresh_cache(self):
-        # NOTE(lucasagomes): limit == 0 is an indicator to continue
-        # pagination until there're no more values to be returned.
         ctxt = nova_context.get_admin_context()
         self._refresh_hash_ring(ctxt)
         instances = objects.InstanceList.get_uuids_by_host(ctxt, CONF.host)
         node_cache = {}
 
-        for node in self._get_node_list(fields=_NODE_FIELDS, limit=0):
+        def _get_node_list(**kwargs):
+            return self._get_node_list(fields=_NODE_FIELDS, **kwargs)
+
+        # NOTE(jroll) if partition_key is set, we need to limit nodes that
+        # can be managed to nodes that have a matching conductor_group
+        # attribute. If the API isn't new enough to support conductor groups,
+        # we fall back to managing all nodes. If it is new enough, we can
+        # filter it in the API.
+        partition_key = CONF.ironic.partition_key
+        if partition_key is not None:
+            try:
+                self._can_send_version(min_version='1.46')
+                nodes = _get_node_list(conductor_group=partition_key)
+                LOG.debug('Limiting manageable ironic nodes to conductor '
+                          'group %s', partition_key)
+            except exception.IronicAPIVersionNotAvailable:
+                LOG.error('Required Ironic API version 1.46 is not '
+                          'available to filter nodes by conductor group. '
+                          'All nodes will be eligible to be managed by '
+                          'this compute service.')
+                nodes = _get_node_list()
+        else:
+            nodes = _get_node_list()
+
+        for node in nodes:
             # NOTE(jroll): we always manage the nodes for instances we manage
             if node.instance_uuid in instances:
                 node_cache[node.uuid] = node
@@ -817,7 +948,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         if rc_name is None:
             raise exception.NoResourceClass(node=nodename)
 
-        norm_name = rc_fields.ResourceClass.normalize_name(rc_name)
+        norm_name = utils.normalize_rc_name(rc_name)
         if norm_name is not None:
             result[norm_name] = {
                 'total': 1,
@@ -877,15 +1008,30 @@ class IronicDriver(virt_driver.ComputeDriver):
                 return node
         return _sync_node_from_cache()
 
-    def get_info(self, instance):
+    def get_info(self, instance, use_cache=True):
         """Get the current state and resource usage for this instance.
 
         If the instance is not found this method returns (a dictionary
         with) NOSTATE and all resources == 0.
 
         :param instance: the instance object.
+        :param use_cache: boolean to indicate if the driver should be allowed
+                          to use cached data to return instance status.
+                          If false, pull fresh data from ironic.
         :returns: an InstanceInfo object
         """
+        def _fetch_from_ironic(self, instance):
+            try:
+                node = self._validate_instance_and_node(instance)
+                return hardware.InstanceInfo(
+                    state=map_power_state(node.power_state))
+            except exception.InstanceNotFound:
+                return hardware.InstanceInfo(
+                    state=map_power_state(ironic_states.NOSTATE))
+
+        if not use_cache:
+            return _fetch_from_ironic(self, instance)
+
         # we should already have a cache for our nodes, refreshed on every
         # RT loop. but if we don't have a cache, generate it.
         if not self.node_cache:
@@ -896,26 +1042,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                 break
         else:
             # if we can't find the instance, fall back to ironic
-            try:
-                node = self._validate_instance_and_node(instance)
-            except exception.InstanceNotFound:
-                return hardware.InstanceInfo(
-                    state=map_power_state(ironic_states.NOSTATE))
-
-        properties = self._parse_node_properties(node)
-        memory_kib = properties['memory_mb'] * 1024
-        if memory_kib == 0:
-            LOG.warning("Warning, memory usage is 0 for "
-                        "%(instance)s on baremetal node %(node)s.",
-                        {'instance': instance.uuid,
-                         'node': instance.node})
-
-        num_cpu = properties['cpus']
-        if num_cpu == 0:
-            LOG.warning("Warning, number of cpus is 0 for "
-                        "%(instance)s on baremetal node %(node)s.",
-                        {'instance': instance.uuid,
-                         'node': instance.node})
+            return _fetch_from_ironic(self, instance)
 
         return hardware.InstanceInfo(state=map_power_state(node.power_state))
 
@@ -1030,7 +1157,7 @@ class IronicDriver(virt_driver.ComputeDriver):
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
         """Deploy an instance.
 
         :param context: The security context.
@@ -1047,6 +1174,8 @@ class IronicDriver(virt_driver.ComputeDriver):
         :param network_info: Instance network information.
         :param block_device_info: Instance block device
             information.
+        :param power_on: True if the instance should be powered on, False
+                         otherwise
         """
         LOG.debug('Spawn called for instance', instance=instance)
 
@@ -1083,9 +1212,9 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         # validate we are ready to do the deploy
         validate_chk = self.ironicclient.call("node.validate", node_uuid)
-        if (not validate_chk.deploy.get('result')
-                or not validate_chk.power.get('result')
-                or not validate_chk.storage.get('result')):
+        if (not validate_chk.deploy.get('result') or
+                not validate_chk.power.get('result') or
+                not validate_chk.storage.get('result')):
             # something is wrong. undo what we have done
             self._cleanup_deploy(node, instance, network_info)
             raise exception.ValidationError(_(
@@ -1257,7 +1386,12 @@ class IronicDriver(virt_driver.ComputeDriver):
                 #                removed from ironic node.
                 self._remove_instance_info_from_node(node, instance)
         finally:
-            self._cleanup_deploy(node, instance, network_info)
+            # NOTE(mgoddard): We don't need to remove instance info at this
+            # point since we will have already done it. The destroy will only
+            # succeed if this method returns without error, so we will end up
+            # removing the instance info eventually.
+            self._cleanup_deploy(node, instance, network_info,
+                                 remove_instance_info=False)
 
         LOG.info('Successfully unprovisioned Ironic node %s',
                  node.uuid, instance=instance)
@@ -1387,6 +1521,26 @@ class IronicDriver(virt_driver.ComputeDriver):
         timer.start(interval=CONF.ironic.api_retry_interval).wait()
         LOG.info('Successfully powered on Ironic node %s',
                  node.uuid, instance=instance)
+
+    def power_update_event(self, instance, target_power_state):
+        """Update power, vm and task states of the specified instance in
+        the nova DB.
+        """
+        LOG.info('Power update called for instance with '
+                 'target power state %s.', target_power_state,
+                 instance=instance)
+        if target_power_state == external_event_obj.POWER_ON:
+            instance.power_state = power_state.RUNNING
+            instance.vm_state = vm_states.ACTIVE
+            instance.task_state = None
+            expected_task_state = task_states.POWERING_ON
+        else:
+            # It's POWER_OFF
+            instance.power_state = power_state.SHUTDOWN
+            instance.vm_state = vm_states.STOPPED
+            instance.task_state = None
+            expected_task_state = task_states.POWERING_OFF
+        instance.save(expected_task_state=expected_task_state)
 
     def trigger_crash_dump(self, instance):
         """Trigger crash dump mechanism on the given instance.
@@ -2062,15 +2216,9 @@ class IronicDriver(virt_driver.ComputeDriver):
                           reason=node.last_error)
 
         try:
-            self._can_send_version(min_version='1.38')
             self.ironicclient.call("node.set_provision_state",
                                    node_uuid, ironic_states.RESCUE,
                                    rescue_password=rescue_password)
-        except exception.IronicAPIVersionNotAvailable as e:
-            LOG.error('Required Ironic API version %(version)s is not '
-                      'available for rescuing.',
-                      version='1.38', instance=instance)
-            raise exception.InstanceRescueFailure(reason=six.text_type(e))
         except Exception as e:
             raise exception.InstanceRescueFailure(reason=six.text_type(e))
 
@@ -2106,14 +2254,8 @@ class IronicDriver(virt_driver.ComputeDriver):
                           reason=node.last_error)
 
         try:
-            self._can_send_version(min_version='1.38')
             self.ironicclient.call("node.set_provision_state",
                                    node_uuid, ironic_states.UNRESCUE)
-        except exception.IronicAPIVersionNotAvailable as e:
-            LOG.error('Required Ironic API version %(version)s is not '
-                       'available for unrescuing.',
-                       version='1.38', instance=instance)
-            raise exception.InstanceUnRescueFailure(reason=six.text_type(e))
         except Exception as e:
             raise exception.InstanceUnRescueFailure(reason=six.text_type(e))
 
@@ -2121,3 +2263,8 @@ class IronicDriver(virt_driver.ComputeDriver):
         timer.start(interval=CONF.ironic.api_retry_interval).wait()
         LOG.info('Successfully unrescued Ironic node %(node)s',
                  {'node': node_uuid}, instance=instance)
+
+    def manages_network_binding_host_id(self):
+        """IronicDriver manages port bindings for baremetal instances.
+        """
+        return True

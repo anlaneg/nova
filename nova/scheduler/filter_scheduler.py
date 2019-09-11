@@ -24,12 +24,14 @@ import random
 from oslo_log import log as logging
 from six.moves import range
 
+from nova.compute import utils as compute_utils
 import nova.conf
 from nova import exception
 from nova.i18n import _
 from nova import objects
+from nova.objects import fields as fields_obj
 from nova import rpc
-from nova.scheduler import client
+from nova.scheduler.client import report
 from nova.scheduler import driver
 from nova.scheduler import utils
 
@@ -42,8 +44,7 @@ class FilterScheduler(driver.Scheduler):
     def __init__(self, *args, **kwargs):
         super(FilterScheduler, self).__init__(*args, **kwargs)
         self.notifier = rpc.get_notifier('scheduler')
-        scheduler_client = client.SchedulerClient()
-        self.placement_client = scheduler_client.reportclient
+        self.placement_client = report.SchedulerReportClient()
 
     def select_destinations(self, context, spec_obj, instance_uuids,
             alloc_reqs_by_rp_uuid, provider_summaries,
@@ -85,6 +86,10 @@ class FilterScheduler(driver.Scheduler):
         self.notifier.info(
             context, 'scheduler.select_destinations.start',
             dict(request_spec=spec_obj.to_legacy_request_spec_dict()))
+        compute_utils.notify_about_scheduler_action(
+            context=context, request_spec=spec_obj,
+            action=fields_obj.NotificationAction.SELECT_DESTINATIONS,
+            phase=fields_obj.NotificationPhase.START)
 
         host_selections = self._schedule(context, spec_obj, instance_uuids,
                 alloc_reqs_by_rp_uuid, provider_summaries,
@@ -92,6 +97,10 @@ class FilterScheduler(driver.Scheduler):
         self.notifier.info(
             context, 'scheduler.select_destinations.end',
             dict(request_spec=spec_obj.to_legacy_request_spec_dict()))
+        compute_utils.notify_about_scheduler_action(
+            context=context, request_spec=spec_obj,
+            action=fields_obj.NotificationAction.SELECT_DESTINATIONS,
+            phase=fields_obj.NotificationPhase.END)
         return host_selections
 
     def _schedule(self, context, spec_obj, instance_uuids,
@@ -164,10 +173,10 @@ class FilterScheduler(driver.Scheduler):
         if (instance_uuids is None or
                 not self.USES_ALLOCATION_CANDIDATES or
                 alloc_reqs_by_rp_uuid is None):
-            # We need to support the caching scheduler, which doesn't use the
-            # placement API (and has USES_ALLOCATION_CANDIDATE = False) and
-            # therefore we skip all the claiming logic for that scheduler
-            # driver. Also, if there was a problem communicating with the
+            # We still support external scheduler drivers that don't use the
+            # placement API (and set USES_ALLOCATION_CANDIDATE = False) and
+            # therefore we skip all the claiming logic for those scheduler
+            # drivers. Also, if there was a problem communicating with the
             # placement API, alloc_reqs_by_rp_uuid will be None, so we skip
             # claiming in that case as well. In the case where instance_uuids
             # is None, that indicates an older conductor, so we need to return
@@ -215,8 +224,8 @@ class FilterScheduler(driver.Scheduler):
                 cn_uuid = host.uuid
                 if cn_uuid not in alloc_reqs_by_rp_uuid:
                     msg = ("A host state with uuid = '%s' that did not have a "
-                          "matching allocation_request was encountered while "
-                          "scheduling. This host was skipped.")
+                           "matching allocation_request was encountered while "
+                           "scheduling. This host was skipped.")
                     LOG.debug(msg, cn_uuid)
                     continue
 
@@ -308,11 +317,6 @@ class FilterScheduler(driver.Scheduler):
         """
         # The list of hosts selected for each instance
         selected_hosts = []
-        # This the overall list of values to be returned. There will be one
-        # item per instance, and each item will be a list of Selection objects
-        # representing the selected host along with zero or more alternates
-        # from the same cell.
-        selections_to_return = []
 
         for num in range(num_instances):
             instance_uuid = instance_uuids[num] if instance_uuids else None
@@ -336,6 +340,10 @@ class FilterScheduler(driver.Scheduler):
         # raise a NoValidHost exception.
         self._ensure_sufficient_hosts(context, selected_hosts, num_instances)
 
+        # This the overall list of values to be returned. There will be one
+        # item per instance, and each item will be a list of Selection objects
+        # representing the selected host along with zero or more alternates
+        # from the same cell.
         selections_to_return = self._get_alternate_hosts(selected_hosts,
                 spec_obj, hosts, num, num_alts)
         return selections_to_return
@@ -449,10 +457,11 @@ class FilterScheduler(driver.Scheduler):
                           if w.weight == weighed_hosts[0].weight]
             random.shuffle(best_hosts)
             weighed_hosts = best_hosts + weighed_hosts[len(best_hosts):]
+        # Log the weighed hosts before stripping off the wrapper class so that
+        # the weight value gets logged.
+        LOG.debug("Weighed %(hosts)s", {'hosts': weighed_hosts})
         # Strip off the WeighedHost wrapper class...
         weighed_hosts = [h.obj for h in weighed_hosts]
-
-        LOG.debug("Weighed %(hosts)s", {'hosts': weighed_hosts})
 
         # We randomize the first element in the returned list to alleviate
         # congestion where the same host is consistently selected among
@@ -470,7 +479,8 @@ class FilterScheduler(driver.Scheduler):
         """Template method, so a subclass can implement caching."""
         # NOTE(jaypipes): provider_summaries being None is treated differently
         # from an empty dict. provider_summaries is None when we want to grab
-        # all compute nodes, for instance when using the caching scheduler.
+        # all compute nodes, for instance when using a scheduler driver that
+        # sets USES_ALLOCATION_CANDIDATES=False.
         # The provider_summaries variable will be an empty dict when the
         # Placement API found no providers that match the requested
         # constraints, which in turn makes compute_uuids an empty list and

@@ -19,47 +19,42 @@
 import os
 import sys
 
-from nova.version import version_info
-
 # If extensions (or modules to document with autodoc) are in another directory,
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
-sys.path.insert(0, os.path.abspath('../../'))
 sys.path.insert(0, os.path.abspath('../'))
-sys.path.insert(0, os.path.abspath('./'))
 
 # -- General configuration ----------------------------------------------------
 
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom ones.
 
-extensions = ['sphinx.ext.autodoc',
-              'sphinx.ext.todo',
-              'openstackdocstheme',
-              'sphinx.ext.coverage',
-              'sphinx.ext.graphviz',
-              'sphinx_feature_classification.support_matrix',
-              'oslo_config.sphinxconfiggen',
-              'oslo_config.sphinxext',
-              'oslo_policy.sphinxpolicygen',
-              'oslo_policy.sphinxext',
-              'ext.versioned_notifications',
-              'ext.feature_matrix',
-              'sphinxcontrib.actdiag',
-              'sphinxcontrib.seqdiag',
-              ]
+extensions = [
+    'sphinx.ext.autodoc',
+    'sphinx.ext.todo',
+    'sphinx.ext.graphviz',
+    'openstackdocstheme',
+    'sphinx_feature_classification.support_matrix',
+    'oslo_config.sphinxconfiggen',
+    'oslo_config.sphinxext',
+    'oslo_policy.sphinxpolicygen',
+    'oslo_policy.sphinxext',
+    'ext.versioned_notifications',
+    'ext.feature_matrix',
+    'sphinxcontrib.actdiag',
+    'sphinxcontrib.seqdiag',
+]
 
 # openstackdocstheme options
 repository_name = 'openstack/nova'
 bug_project = 'nova'
-bug_tag = ''
+bug_tag = 'doc'
 
 config_generator_config_file = '../../etc/nova/nova-config-generator.conf'
 sample_config_basename = '_static/nova'
 
 policy_generator_config_file = [
     ('../../etc/nova/nova-policy-generator.conf', '_static/nova'),
-    ('../../etc/nova/placement-policy-generator.conf', '_static/placement')
 ]
 
 actdiag_html_image_format = 'SVG'
@@ -70,46 +65,14 @@ seqdiag_antialias = True
 
 todo_include_todos = True
 
-# The suffix of source filenames.
-source_suffix = '.rst'
-
 # The master toctree document.
 master_doc = 'index'
 
 # General information about the project.
-project = u'nova'
 copyright = u'2010-present, OpenStack Foundation'
-
-# The version info for the project you're documenting, acts as replacement for
-# |version| and |release|, also used in various other places throughout the
-# built documents.
-#
-# The full version, including alpha/beta/rc tags.
-release = version_info.release_string()
-# The short X.Y version.
-version = version_info.version_string()
-
-# A list of glob-style patterns that should be excluded when looking for
-# source files. They are matched against the source file names relative to the
-# source directory, using slashes as directory separators on all platforms.
-exclude_patterns = [
-    'api/nova.wsgi.nova-*',
-    'api/nova.tests.*',
-]
-
-# If true, the current module name will be prepended to all description
-# unit titles (such as .. function::).
-add_module_names = False
-
-# If true, sectionauthor and moduleauthor directives will be shown in the
-# output. They are ignored by default.
-show_authors = False
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = 'sphinx'
-
-# A list of ignored prefixes for module index sorting.
-modindex_common_prefix = ['nova.']
 
 # -- Options for man page output ----------------------------------------------
 
@@ -120,10 +83,8 @@ _man_pages = [
     ('nova-api-metadata', u'Cloud controller fabric'),
     ('nova-api-os-compute', u'Cloud controller fabric'),
     ('nova-api', u'Cloud controller fabric'),
-    ('nova-cells', u'Cloud controller fabric'),
     ('nova-compute', u'Cloud controller fabric'),
     ('nova-console', u'Cloud controller fabric'),
-    ('nova-consoleauth', u'Cloud controller fabric'),
     ('nova-dhcpbridge', u'Cloud controller fabric'),
     ('nova-manage', u'Cloud controller fabric'),
     ('nova-network', u'Cloud controller fabric'),
@@ -155,9 +116,6 @@ html_static_path = ['_static']
 # robots.txt.
 html_extra_path = ['_extra']
 
-# If not '', a 'Last updated on:' timestamp is inserted at every page bottom,
-# using the given strftime format.
-html_last_updated_fmt = '%Y-%m-%d %H:%M'
 
 # -- Options for LaTeX output -------------------------------------------------
 
@@ -169,9 +127,13 @@ latex_documents = [
      u'OpenStack Foundation', 'manual'),
 ]
 
+
 # -- Options for openstackdocstheme -------------------------------------------
 
 # keep this ordered to keep mriedem happy
+#
+# NOTE(stephenfin): Projects that don't have a release branch, like TripleO and
+# reno, should not be included here
 openstack_projects = [
     'ceilometer',
     'cinder',
@@ -185,12 +147,20 @@ openstack_projects = [
     'oslo.messaging',
     'oslo.i18n',
     'oslo.versionedobjects',
+    'placement',
     'python-novaclient',
     'python-openstackclient',
-    'reno',
     'watcher',
 ]
 # -- Custom extensions --------------------------------------------------------
+
+# NOTE(mdbooth): (2019-03-20) Sphinx loads policies defined in setup.cfg, which
+# includes the placement policy at nova/api/openstack/placement/policies.py.
+# Loading this imports nova/api/openstack/__init__.py, which imports
+# nova.monkey_patch, which will do eventlet monkey patching to the sphinx
+# process. As well as being unnecessary and a bad idea, this breaks on
+# python3.6 (but not python3.7), so don't do that.
+os.environ['OS_NOVA_DISABLE_EVENTLET_PATCHING'] = '1'
 
 
 def monkey_patch_blockdiag():

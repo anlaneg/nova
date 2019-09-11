@@ -21,10 +21,11 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import evacuate
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 import nova.conf
 from nova import exception
 from nova.i18n import _
+from nova import network
 from nova.policies import evacuate as evac_policies
 from nova import utils
 
@@ -32,10 +33,11 @@ CONF = nova.conf.CONF
 
 
 class EvacuateController(wsgi.Controller):
-    def __init__(self, *args, **kwargs):
-        super(EvacuateController, self).__init__(*args, **kwargs)
+    def __init__(self):
+        super(EvacuateController, self).__init__()
         self.compute_api = compute.API()
         self.host_api = compute.HostAPI()
+        self.network_api = network.API()
 
     def _get_on_shared_storage(self, req, evacuate_body):
         if api_version_request.is_supported(req, min_version='2.14'):
@@ -73,7 +75,8 @@ class EvacuateController(wsgi.Controller):
     @wsgi.action('evacuate')
     @validation.schema(evacuate.evacuate, "2.0", "2.13")
     @validation.schema(evacuate.evacuate_v214, "2.14", "2.28")
-    @validation.schema(evacuate.evacuate_v2_29, "2.29")
+    @validation.schema(evacuate.evacuate_v2_29, "2.29", "2.67")
+    @validation.schema(evacuate.evacuate_v2_68, "2.68")
     def _evacuate(self, req, id, body):
         """Permit admins to evacuate a server from a failed host
         to a new one.
@@ -114,11 +117,21 @@ class EvacuateController(wsgi.Controller):
             msg = _("The target host can't be the same one.")
             raise exc.HTTPBadRequest(explanation=msg)
 
+        # We could potentially move this check to conductor and avoid the
+        # extra API call to neutron when we support move operations with ports
+        # having resource requests.
+        if (common.instance_has_port_with_resource_request(
+                    context, instance.uuid, self.network_api) and not
+                common.supports_port_resource_request_during_move(req)):
+            msg = _("The evacuate action on a server with ports having "
+                    "resource requests, like a port with a QoS minimum "
+                    "bandwidth policy, is not supported with this "
+                    "microversion")
+            raise exc.HTTPBadRequest(explanation=msg)
+
         try:
             self.compute_api.evacuate(context, instance, host,
                                       on_shared_storage, password, force)
-        except exception.InstanceUnknownCell as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'evacuate', id)

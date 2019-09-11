@@ -27,6 +27,7 @@ the raw libvirt API. These APIs are then used by all
 the other libvirt related classes
 """
 
+from collections import defaultdict
 import operator
 import os
 import socket
@@ -56,6 +57,7 @@ from nova import utils
 from nova.virt import event as virtevent
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt import guest as libvirt_guest
+from nova.virt.libvirt import utils as libvirt_utils
 
 libvirt = None
 
@@ -72,6 +74,9 @@ CONF = nova.conf.CONF
 # This is *not* the complete list of supported hypervisor drivers.
 HV_DRIVER_QEMU = "QEMU"
 HV_DRIVER_XEN = "Xen"
+
+SEV_KERNEL_PARAM_FILE = '/sys/module/kvm_amd/parameters/sev'
+
 
 #封装与libvrit的连接，实现对某个机器的hypervisor层的抽象
 class Host(object):
@@ -93,6 +98,7 @@ class Host(object):
         self._conn_event_handler_queue = six.moves.queue.Queue()
         self._lifecycle_event_handler = lifecycle_event_handler
         self._caps = None
+        self._domain_caps = None
         self._hostname = None
 
         self._wrapped_conn = None
@@ -107,6 +113,11 @@ class Host(object):
         self._lifecycle_delay = 15
 
         self._initialized = False
+
+        # AMD SEV is conditional on support in the hardware, kernel,
+        # qemu, and libvirt.  This is determined on demand and
+        # memoized by the supports_amd_sev property below.
+        self._supports_amd_sev = None
 
     def _native_thread(self):
         """Receives async events coming in from libvirtd.
@@ -182,21 +193,13 @@ class Host(object):
             #启动
             transition = virtevent.EVENT_LIFECYCLE_STARTED
         elif event == libvirt.VIR_DOMAIN_EVENT_SUSPENDED:
-            # NOTE(siva_krishnan): We have to check if
-            # VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY and
-            # VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED exist since the current
-            # minimum version of libvirt (1.3.1) don't have those attributes.
-            # This check can be removed once MIN_LIBVIRT_VERSION is bumped to
-            # at least 1.3.3.
-            if (hasattr(libvirt, 'VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY') and
-                    detail == libvirt.VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY):
+            if detail == libvirt.VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY:
                 transition = virtevent.EVENT_LIFECYCLE_POSTCOPY_STARTED
             # FIXME(mriedem): VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED is also sent
             # when live migration of the guest fails, so we cannot simply rely
             # on the event itself but need to check if the job itself was
             # successful.
-            # elif (hasattr(libvirt, 'VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED') and
-            #         detail == libvirt.VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED):
+            # elif detail == libvirt.VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED:
             #     transition = virtevent.EVENT_LIFECYCLE_MIGRATION_COMPLETED
             else:
             	#挂起
@@ -697,8 +700,9 @@ class Host(object):
             self._caps.parse_str(xmlstr)
             # NOTE(mriedem): Don't attempt to get baseline CPU features
             # if libvirt can't determine the host cpu model.
-            if (hasattr(libvirt, 'VIR_CONNECT_BASELINE_CPU_EXPAND_FEATURES')
-                and self._caps.host.cpu.model is not None):
+            if (hasattr(libvirt,
+                        'VIR_CONNECT_BASELINE_CPU_EXPAND_FEATURES') and
+                    self._caps.host.cpu.model is not None):
                 try:
                     xml_str = self._caps.host.cpu.to_xml()
                     if six.PY3 and isinstance(xml_str, six.binary_type):
@@ -719,6 +723,222 @@ class Host(object):
                     else:
                         raise
         return self._caps
+
+    def get_domain_capabilities(self):
+        """Returns the capabilities you can request when creating a
+        domain (VM) with that hypervisor, for various combinations of
+        architecture and machine type.
+
+        In this context the fuzzy word "hypervisor" implies QEMU
+        binary, libvirt itself and the host config.  libvirt provides
+        this in order that callers can determine what the underlying
+        emulator and/or libvirt is capable of, prior to creating a domain
+        (for instance via virDomainCreateXML or virDomainDefineXML).
+        However nova needs to know the capabilities much earlier, when
+        the host's compute service is first initialised, in order that
+        placement decisions can be made across many compute hosts.
+        Therefore this is expected to be called during the init_host()
+        phase of the driver lifecycle rather than just before booting
+        an instance.
+
+        This causes an additional complication since the Python
+        binding for this libvirt API call requires the architecture
+        and machine type to be provided.  So in order to gain a full
+        picture of the hypervisor's capabilities, technically we need
+        to call it with the right parameters, once for each
+        (architecture, machine_type) combination which we care about.
+        However the libvirt experts have advised us that in practice
+        the domain capabilities do not (yet, at least) vary enough
+        across machine types to justify the cost of calling
+        getDomainCapabilities() once for every single (architecture,
+        machine_type) combination.  In particular, SEV support isn't
+        reported per-machine type, and since there are usually many
+        machine types, we heed the advice of the experts that it's
+        typically sufficient to call it once per host architecture:
+
+            https://bugzilla.redhat.com/show_bug.cgi?id=1683471#c7
+
+        However, that's not quite sufficient in the context of nova,
+        because SEV guests typically require a q35 machine type, as do
+        KVM/QEMU guests that want Secure Boot, whereas the current
+        default machine type for x86_64 is 'pc'.  So we need results
+        from the getDomainCapabilities API for at least those two.
+        Fortunately we can take advantage of the results from the
+        getCapabilities API which marks selected machine types as
+        canonical, e.g.:
+
+            <machine canonical='pc-i440fx-2.11' maxCpus='255'>pc</machine>
+            <machine canonical='pc-q35-2.11' maxCpus='288'>q35</machine>
+
+        So for now, we call getDomainCapabilities for these canonical
+        machine types of each architecture, plus for the
+        architecture's default machine type, if that is not one of the
+        canonical types.
+
+        Future domain capabilities might report SEV in a more
+        fine-grained manner, and we also expect to use this method to
+        detect other features, such as for gracefully handling machine
+        types and potentially for detecting OVMF binaries.  Therefore
+        we memoize the results of the API calls in a nested dict where
+        the top-level keys are architectures, and second-level keys
+        are machine types, in order to allow easy expansion later.
+
+        Whenever libvirt/QEMU are updated, cached domCapabilities
+        would get outdated (because QEMU will contain new features and
+        the capabilities will vary).  However, this should not be a
+        problem here, because when libvirt/QEMU gets updated, the
+        nova-compute agent also needs restarting, at which point the
+        memoization will vanish because it's not persisted to disk.
+
+        Note: The result is cached in the member attribute
+        _domain_caps.
+
+        :returns: a nested dict of dicts which maps architectures to
+        machine types to instances of config.LibvirtConfigDomainCaps
+        representing the domain capabilities of the host for that arch
+        and machine type:
+
+        { arch:
+          { machine_type: LibvirtConfigDomainCaps }
+        }
+        """
+        if self._domain_caps:
+            return self._domain_caps
+
+        domain_caps = defaultdict(dict)
+        caps = self.get_capabilities()
+        virt_type = CONF.libvirt.virt_type
+
+        for guest in caps.guests:
+            arch = guest.arch
+            domain = guest.domains.get(virt_type, guest.default_domain)
+
+            for machine_type in self._get_machine_types(arch, domain):
+                # It is expected that if there are multiple <guest>
+                # elements, each will have a different architecture;
+                # for example, on x86 hosts one <guest> will contain
+                # <arch name='i686'> and one will contain <arch
+                # name='x86_64'>. But it doesn't hurt to add a safety
+                # net to avoid needlessly calling libvirt's API more
+                # times than we need.
+                if machine_type and machine_type in domain_caps[arch]:
+                    continue
+                self._add_to_domain_capabilities(domain.emulator, arch,
+                                                 domain_caps, machine_type,
+                                                 virt_type)
+
+        # NOTE(aspiers): Use a temporary variable to update the
+        # instance variable atomically, otherwise if some API
+        # calls succeeded and then one failed, we might
+        # accidentally memoize a partial result.
+        self._domain_caps = domain_caps
+
+        return self._domain_caps
+
+    def _get_machine_types(self, arch, domain):
+        """Get the machine types for this architecture for which we need to
+        call getDomainCapabilities, i.e. the canonical machine types,
+        and the default machine type (if it's not one of the canonical
+        machine types).
+
+        See the docstring for get_domain_capabilities() for an explanation
+        of why we choose this set of machine types.
+        """
+        # NOTE(aspiers): machine_type could be None here if nova
+        # doesn't have a default machine type for this architecture.
+        # See _add_to_domain_capabilities() below for how this is handled.
+        mtypes = set([libvirt_utils.get_default_machine_type(arch)])
+        mtypes.update(domain.aliases.keys())
+        LOG.debug("Getting domain capabilities for %(arch)s via "
+                  "machine types: %(mtypes)s",
+                  {'arch': arch, 'mtypes': mtypes})
+        return mtypes
+
+    def _add_to_domain_capabilities(self, emulator_bin, arch, domain_caps,
+                                    machine_type, virt_type):
+        # NOTE(aspiers): machine_type could be None here if nova
+        # doesn't have a default machine type for this architecture.
+        # In that case we pass a machine_type of None to the libvirt
+        # API and rely on it choosing a sensible default which will be
+        # returned in the <machine> element.  It could also be an
+        # alias like 'pc' rather than a full machine type.
+        #
+        # NOTE(kchamart): Prior to libvirt v4.7.0 libvirt picked its
+        # default machine type for x86, 'pc', as reported by QEMU's
+        # default.  From libvirt v4.7.0 onwards, libvirt _explicitly_
+        # declared the "preferred" default for x86 as 'pc' (and
+        # appropriate values for other architectures), and only uses
+        # QEMU's reported default (whatever that may be) if 'pc' does
+        # not exist.  This was done "to isolate applications from
+        # hypervisor changes that may cause incompatibilities" --
+        # i.e. if, or when, QEMU changes its default machine type to
+        # something else.  Refer to this libvirt commit:
+        #
+        #   https://libvirt.org/git/?p=libvirt.git;a=commit;h=26cfb1a3
+        try:
+            cap_obj = self._get_domain_capabilities(
+                emulator_bin=emulator_bin, arch=arch,
+                machine_type=machine_type, virt_type=virt_type)
+        except libvirt.libvirtError as ex:
+            # NOTE(sean-k-mooney): This can happen for several
+            # reasons, but one common example is if you have
+            # multiple QEMU emulators installed and you set
+            # virt-type=kvm. In this case any non-native emulator,
+            # e.g. AArch64 on an x86 host, will (correctly) raise
+            # an exception as KVM cannot be used to accelerate CPU
+            # instructions for non-native architectures.
+            error_code = ex.get_error_code()
+            LOG.debug(
+                "Error from libvirt when retrieving domain capabilities "
+                "for arch %(arch)s / virt_type %(virt_type)s / "
+                "machine_type %(mach_type)s: "
+                "[Error Code %(error_code)s]: %(exception)s",
+                {'arch': arch, 'virt_type': virt_type,
+                 'mach_type': machine_type, 'error_code': error_code,
+                 'exception': ex})
+            # Remove archs added by default dict lookup when checking
+            # if the machine type has already been recoded.
+            if arch in domain_caps:
+                domain_caps.pop(arch)
+            return
+
+        # Register the domain caps using the expanded form of
+        # machine type returned by libvirt in the <machine>
+        # element (e.g. pc-i440fx-2.11)
+        if cap_obj.machine_type:
+            domain_caps[arch][cap_obj.machine_type] = cap_obj
+        else:
+            # NOTE(aspiers): In theory this should never happen,
+            # but better safe than sorry.
+            LOG.warning(
+                "libvirt getDomainCapabilities("
+                "emulator_bin=%(emulator_bin)s, arch=%(arch)s, "
+                "machine_type=%(machine_type)s, virt_type=%(virt_type)s) "
+                "returned null <machine> type",
+                {'emulator_bin': emulator_bin, 'arch': arch,
+                 'machine_type': machine_type, 'virt_type': virt_type}
+            )
+
+        # And if we passed an alias, register the domain caps
+        # under that too.
+        if machine_type and machine_type != cap_obj.machine_type:
+            domain_caps[arch][machine_type] = cap_obj
+            cap_obj.machine_type_alias = machine_type
+
+    def _get_domain_capabilities(self, emulator_bin=None, arch=None,
+                                 machine_type=None, virt_type=None, flags=0):
+        xmlstr = self.get_connection().getDomainCapabilities(
+            emulator_bin,
+            arch,
+            machine_type,
+            virt_type,
+            flags
+        )
+        LOG.debug("Libvirt host hypervisor capabilities for arch=%s and "
+                  "machine_type=%s:\n%s", arch, machine_type, xmlstr)
+        caps = vconfig.LibvirtConfigDomainCaps()
+        caps.parse_str(xmlstr)
+        return caps
 
     def get_driver_type(self):
         """Get hypervisor type.
@@ -848,7 +1068,7 @@ class Host(object):
         for guest in self.list_guests(only_guests=False):
             try:
                 # TODO(sahid): Use get_info...
-                dom_mem = int(guest._get_domain_info(self)[2])
+                dom_mem = int(guest._get_domain_info()[2])
             except libvirt.libvirtError as e:
                 LOG.warning("couldn't obtain the memory from domain:"
                             " %(uuid)s, exception: %(ex)s",
@@ -987,3 +1207,52 @@ class Host(object):
                 return False
         except IOError:
             return False
+
+    def _kernel_supports_amd_sev(self):
+        if not os.path.exists(SEV_KERNEL_PARAM_FILE):
+            LOG.debug("%s does not exist", SEV_KERNEL_PARAM_FILE)
+            return False
+
+        with open(SEV_KERNEL_PARAM_FILE) as f:
+            contents = f.read()
+            LOG.debug("%s contains [%s]", SEV_KERNEL_PARAM_FILE, contents)
+            return contents == "1\n"
+
+    @property
+    def supports_amd_sev(self):
+        """Returns a boolean indicating whether AMD SEV (Secure Encrypted
+        Virtualization) is supported.  This is conditional on support
+        in the hardware, kernel, qemu, and libvirt.
+
+        The result is memoized, since it is not expected to change
+        during the lifetime of a running nova-compute service; if the
+        hypervisor stack is changed or reconfigured in a way which
+        would affect the support, nova-compute should be restarted
+        anyway.
+        """
+        if self._supports_amd_sev is None:
+            self._set_amd_sev_support()
+        return self._supports_amd_sev
+
+    def _set_amd_sev_support(self):
+        self._supports_amd_sev = False
+
+        if not self._kernel_supports_amd_sev():
+            LOG.info("kernel doesn't support AMD SEV")
+            self._supports_amd_sev = False
+            return
+
+        domain_caps = self.get_domain_capabilities()
+        for arch in domain_caps:
+            for machine_type in domain_caps[arch]:
+                LOG.debug("Checking SEV support for arch %s "
+                          "and machine type %s", arch, machine_type)
+                for feature in domain_caps[arch][machine_type].features:
+                    feature_is_sev = isinstance(
+                        feature, vconfig.LibvirtConfigDomainCapsFeatureSev)
+                    if (feature_is_sev and feature.supported):
+                        LOG.info("AMD SEV support detected")
+                        self._supports_amd_sev = True
+                        return
+
+        LOG.debug("No AMD SEV support detected for any (arch, machine_type)")

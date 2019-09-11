@@ -19,7 +19,8 @@ This document covers live migrations using the
 .. note::
 
    Not all Compute service hypervisor drivers support live-migration, or
-   support all live-migration features.
+   support all live-migration features. Similarly not all compute service
+   features are supported.
 
    Consult :doc:`/user/support-matrix` to determine which hypervisors
    support live-migration.
@@ -73,10 +74,6 @@ using the KVM and XenServer hypervisors.
 
 KVM-libvirt
 ~~~~~~~~~~~
-
-.. :ref:`_configuring-migrations-kvm-general`
-.. :ref:`_configuring-migrations-kvm-block-and-volume-migration`
-.. :ref:`_configuring-migrations-kvm-shared-storage`
 
 .. _configuring-migrations-kvm-general:
 
@@ -135,13 +132,29 @@ the instructions below:
 
       Be mindful of the security risks introduced by opening ports.
 
+.. _`configuring-migrations-securing-live-migration-streams`:
+
+Securing live migration streams
+-------------------------------
+
+If your compute nodes have at least libvirt 4.4.0 and QEMU 2.11.0, it is
+strongly recommended to secure all your live migration streams by taking
+advantage of the "QEMU-native TLS" feature.  This requires a
+pre-existing PKI (Public Key Infrastructure) setup.  For further details
+on how to set this all up, refer to the
+:doc:`secure-live-migration-with-qemu-native-tls` document.
+
+
 .. _configuring-migrations-kvm-block-and-volume-migration:
 
 Block migration, volume-based live migration
 --------------------------------------------
 
-No additional configuration is required for block migration and volume-backed
-live migration.
+If your environment satisfies the requirements for "QEMU-native TLS",
+then block migration requires some setup; refer to the above section,
+`Securing live migration streams`_, for details.  Otherwise, no
+additional configuration is required for block migration and
+volume-backed live migration.
 
 Be aware that block migration adds load to the network and storage subsystems.
 
@@ -227,9 +240,9 @@ memory-intensive instances succeed.
    ephemeral storage in GiB is added.
 
    The timeout in seconds is the instance size multiplied by the configurable
-   parameter ``live_migration_completion_timeout``, whose default is 800. For
-   example, shared-storage live migration of an instance with 8GiB memory will
-   time out after 6400 seconds.
+   parameter :oslo.config:option:`libvirt.live_migration_completion_timeout`,
+   whose default is 800. For example, shared-storage live migration of an
+   instance with 8GiB memory will time out after 6400 seconds.
 
 #. **Instance downtime**
 
@@ -382,3 +395,16 @@ Block migration
 
      - Block migration works only with EXT local storage storage repositories,
        and the server must not have any volumes attached.
+
+VMware
+~~~~~~
+
+.. :ref:`_configuring-migrations-vmware`
+
+.. _configuring-migrations-vmware:
+
+vSphere configuration
+---------------------
+
+Enable vMotion on all ESX hosts which are managed by Nova by following the
+instructions in `this <https://kb.vmware.com/s/article/2054994>`_ KB article.

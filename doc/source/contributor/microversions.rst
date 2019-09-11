@@ -44,7 +44,7 @@ responses from the server.
    providing microversion ``2.27`` must use the older form.
 
 For full details please read the `Kilo spec for microversions
-<http://git.openstack.org/cgit/openstack/nova-specs/tree/specs/kilo/implemented/api-microversions.rst>`_
+<https://opendev.org/openstack/nova-specs/src/branch/master/specs/kilo/implemented/api-microversions.rst>`_
 and `Microversion Specification
 <http://specs.openstack.org/openstack/api-wg/guidelines/microversion_specification.html>`_.
 
@@ -226,7 +226,7 @@ A microversion is not needed in the following situation:
 
 **Footnotes**
 
-.. [#f3] https://review.openstack.org/#/c/523194/
+.. [#f3] https://review.opendev.org/#/c/523194/
 
 In Code
 -------
@@ -368,6 +368,8 @@ necessary to add changes to other places which describe your change:
 
 * Make a new commit to python-novaclient and update corresponding
   files to enable the newly added microversion API.
+  See :python-novaclient-doc:`Adding support for a new microversion
+  <contributor/microversions>` in python-novaclient for more details.
 
 * If the microversion changes the response schema, a new schema and test for
   the microversion must be added to Tempest.
@@ -375,7 +377,7 @@ necessary to add changes to other places which describe your change:
 * Update the `API Reference`_ documentation as appropriate.  The source is
   located under `api-ref/source/`.
 
-.. _API Reference: https://developer.openstack.org/api-ref/compute/
+.. _API Reference: https://docs.openstack.org/api-ref/compute/
 
 Allocating a microversion
 -------------------------

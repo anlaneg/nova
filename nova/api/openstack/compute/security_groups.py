@@ -25,7 +25,7 @@ from nova.api.openstack.compute.schemas import security_groups as \
                                                   schema_security_groups
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
 from nova.network.security_group import openstack_driver
@@ -47,6 +47,7 @@ class SecurityGroupControllerBase(object):
     """Base class for Security Group controllers."""
 
     def __init__(self):
+        super(SecurityGroupControllerBase, self).__init__()
         self.security_group_api = (
             openstack_driver.get_openstack_security_group_driver())
         self.compute_api = compute.API(
@@ -405,8 +406,8 @@ class ServerSecurityGroupController(SecurityGroupControllerBase):
 
 
 class SecurityGroupActionController(wsgi.Controller):
-    def __init__(self, *args, **kwargs):
-        super(SecurityGroupActionController, self).__init__(*args, **kwargs)
+    def __init__(self):
+        super(SecurityGroupActionController, self).__init__()
         self.security_group_api = (
             openstack_driver.get_openstack_security_group_driver())
         self.compute_api = compute.API(

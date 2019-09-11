@@ -40,9 +40,10 @@ class NbdMount(api.Mount):
     mode = 'nbd'
 
     #提取系统所有nbd设备
-    def _detect_nbd_devices(self):
+    @staticmethod
+    def _detect_nbd_devices():
         """Detect nbd device files."""
-        return filter(NBD_DEVICE_RE.match, os.listdir('/sys/block/'))
+        return list(filter(NBD_DEVICE_RE.match, os.listdir('/sys/block/')))
 
     #获得未被占用的nbd设备
     def _find_unused(self, devices):

@@ -16,7 +16,6 @@
 import copy
 import datetime
 
-import iso8601
 import mock
 from oslo_utils import fixture as utils_fixture
 from oslo_utils.fixture import uuidsentinel
@@ -26,8 +25,7 @@ import webob.exc
 from nova.api.openstack.compute import services as services_v21
 from nova.api.openstack import wsgi as os_wsgi
 from nova import availability_zones
-from nova.cells import utils as cells_utils
-from nova import compute
+from nova.compute import api as compute
 from nova import context
 from nova import exception
 from nova import objects
@@ -121,7 +119,7 @@ fake_services_list = [
 
 def fake_service_get_all(services):
     def service_get_all(context, filters=None, set_zones=False,
-                        all_cells=False):
+                        all_cells=False, cell_down_support=False):
         if set_zones or 'availability_zone' in filters:
             return availability_zones.set_availability_zones(context,
                                                              services)
@@ -197,6 +195,12 @@ class ServicesTestV21(test.TestCase):
         self.stub_out('nova.db.api.service_update',
                       fake_db_service_update(fake_services_list))
 
+        # NOTE(gibi): enable / disable a compute service tries to call
+        # the compute service via RPC to update placement. However in these
+        # tests the compute services are faked. So stub out the RPC call to
+        # avoid waiting for the RPC timeout.
+        self.stub_out("nova.compute.rpcapi.ComputeAPI.set_host_enabled",
+                      lambda *args, **kwargs: None)
         self.req = fakes.HTTPRequest.blank('')
         self.useFixture(fixtures.SingleCellSimple())
 
@@ -614,7 +618,7 @@ class ServicesTestV21(test.TestCase):
 
     def test_services_enable_with_invalid_binary(self):
         body = {'host': 'host1', 'binary': 'invalid'}
-        self.assertRaises(webob.exc.HTTPNotFound,
+        self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.update,
                           self.req,
                           "enable",
@@ -637,7 +641,7 @@ class ServicesTestV21(test.TestCase):
 
     def test_services_disable_with_invalid_binary(self):
         body = {'host': 'host1', 'binary': 'invalid'}
-        self.assertRaises(webob.exc.HTTPNotFound,
+        self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.update,
                           self.req,
                           "disable",
@@ -703,35 +707,43 @@ class ServicesTestV21(test.TestCase):
             self.assertRaises(webob.exc.HTTPBadRequest,
                               self.controller.delete, self.req, 1234)
 
-    @mock.patch('nova.objects.InstanceList.get_uuids_by_host',
-                return_value=objects.InstanceList())
+    @mock.patch('nova.objects.InstanceList.get_count_by_hosts',
+                return_value=0)
     @mock.patch('nova.objects.HostMapping.get_by_host',
                 side_effect=exception.HostMappingNotFound(name='host1'))
     @mock.patch('nova.objects.Service.destroy')
     def test_compute_service_delete_host_mapping_not_found(
-            self, service_delete, get_instances, get_hm):
+            self, service_delete, get_hm, get_count_by_hosts):
         """Tests that we are still able to successfully delete a nova-compute
         service even if the HostMapping is not found.
         """
+        @mock.patch('nova.objects.ComputeNodeList.get_all_by_host',
+                    return_value=objects.ComputeNodeList(objects=[
+                        objects.ComputeNode(host='host1',
+                                            hypervisor_hostname='node1'),
+                        objects.ComputeNode(host='host1',
+                                            hypervisor_hostname='node2')]))
         @mock.patch.object(self.controller.host_api, 'service_get_by_id',
                            return_value=objects.Service(
-                               host='host1', binary='nova-compute',
-                               compute_node=objects.ComputeNode()))
+                               host='host1', binary='nova-compute'))
         @mock.patch.object(self.controller.aggregate_api,
                            'get_aggregates_by_host',
                            return_value=objects.AggregateList())
         @mock.patch.object(self.controller.placementclient,
                            'delete_resource_provider')
         def _test(delete_resource_provider,
-                  get_aggregates_by_host, service_get_by_id):
+                  get_aggregates_by_host, service_get_by_id,
+                  cn_get_all_by_host):
             self.controller.delete(self.req, 2)
             ctxt = self.req.environ['nova.context']
             service_get_by_id.assert_called_once_with(ctxt, 2)
-            get_instances.assert_called_once_with(ctxt, 'host1')
+            get_count_by_hosts.assert_called_once_with(ctxt, ['host1'])
             get_aggregates_by_host.assert_called_once_with(ctxt, 'host1')
-            delete_resource_provider.assert_called_once_with(
-                ctxt, service_get_by_id.return_value.compute_node,
-                cascade=True)
+            self.assertEqual(2, delete_resource_provider.call_count)
+            nodes = cn_get_all_by_host.return_value
+            delete_resource_provider.assert_has_calls([
+                mock.call(ctxt, node, cascade=True) for node in nodes
+            ], any_order=True)
             get_hm.assert_called_once_with(ctxt, 'host1')
             service_delete.assert_called_once_with()
         _test()
@@ -1079,6 +1091,16 @@ class ServicesTestV211(ServicesTestV21):
         self.assertRaises(exception.ValidationError,
             self.controller.update, req, 'force-down', body=req_body)
 
+    def test_update_forced_down_invalid_service(self):
+        req = fakes.HTTPRequest.blank('/fake/services',
+                                      use_admin_context=True,
+                                      version=self.wsgi_api_version)
+        req_body = {"forced_down": True,
+                    "host": "host1", "binary": "nova-scheduler"}
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self.controller.update, req, 'force-down',
+                          body=req_body)
+
 
 class ServicesTestV252(ServicesTestV211):
     """This is a boundary test to ensure that 2.52 behaves the same as 2.11."""
@@ -1307,76 +1329,25 @@ class ServicesTestV253(test.TestCase):
                          six.text_type(ex))
 
 
-class ServicesCellsTestV21(test.TestCase):
+class ServicesTestV275(test.TestCase):
+    wsgi_api_version = '2.75'
 
     def setUp(self):
-        super(ServicesCellsTestV21, self).setUp()
-
-        host_api = compute.cells_api.HostAPI()
-
-        self._set_up_controller()
-        self.controller.host_api = host_api
-
-        self.useFixture(utils_fixture.TimeFixture(fake_utcnow()))
-
-        services_list = []
-        for service in fake_services_list:
-            service = service.copy()
-            del service['version']
-            service_obj = objects.Service(**service)
-            service_proxy = cells_utils.ServiceProxy(service_obj, 'cell1')
-            services_list.append(service_proxy)
-
-        host_api.cells_rpcapi.service_get_all = (
-            mock.Mock(side_effect=fake_service_get_all(services_list)))
-
-    def _set_up_controller(self):
+        super(ServicesTestV275, self).setUp()
         self.controller = services_v21.ServiceController()
 
-    def _process_out(self, res_dict):
-        for res in res_dict['services']:
-            res.pop('disabled_reason')
+    def test_services_list_with_additional_filter_old_version(self):
+        url = '/fake/services?host=host1&binary=nova-compute&unknown=abc'
+        req = fakes.HTTPRequest.blank(url, use_admin_context=True,
+                                      version='2.74')
+        self.controller.index(req)
 
-    def test_services_detail(self):
-        req = fakes.HTTPRequest.blank('/fake/services',
-                                      use_admin_context=True)
-        res_dict = self.controller.index(req)
-        utc = iso8601.UTC
-        response = {'services': [
-                    {'id': 'cell1@1',
-                     'binary': 'nova-scheduler',
-                     'host': 'cell1@host1',
-                     'zone': 'internal',
-                     'status': 'disabled',
-                     'state': 'up',
-                     'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 2,
-                                                     tzinfo=utc)},
-                    {'id': 'cell1@2',
-                     'binary': 'nova-compute',
-                     'host': 'cell1@host1',
-                     'zone': 'nova',
-                     'status': 'disabled',
-                     'state': 'up',
-                     'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 5,
-                                                     tzinfo=utc)},
-                    {'id': 'cell1@3',
-                     'binary': 'nova-scheduler',
-                     'host': 'cell1@host2',
-                     'zone': 'internal',
-                     'status': 'enabled',
-                     'state': 'down',
-                     'updated_at': datetime.datetime(2012, 9, 19, 6, 55, 34,
-                                                     tzinfo=utc)},
-                    {'id': 'cell1@4',
-                     'binary': 'nova-compute',
-                     'host': 'cell1@host2',
-                     'zone': 'nova',
-                     'status': 'disabled',
-                     'state': 'down',
-                     'updated_at': datetime.datetime(2012, 9, 18, 8, 3, 38,
-                                                     tzinfo=utc)}]}
-        self._process_out(res_dict)
-        self.assertEqual(response, res_dict)
+    def test_services_list_with_additional_filter(self):
+        url = '/fake/services?host=host1&binary=nova-compute&unknown=abc'
+        req = fakes.HTTPRequest.blank(url, use_admin_context=True,
+                                      version=self.wsgi_api_version)
+        self.assertRaises(exception.ValidationError,
+            self.controller.index, req)
 
 
 class ServicesPolicyEnforcementV21(test.NoDBTestCase):

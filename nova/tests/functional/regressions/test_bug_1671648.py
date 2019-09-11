@@ -18,11 +18,11 @@ import nova.compute.resource_tracker
 from nova import exception
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.unit import cast_as_call
 from nova.tests.unit import fake_network
 import nova.tests.unit.image.fake
 from nova.tests.unit import policy_fixture
-from nova.virt import fake
 
 
 class TestRetryBetweenComputeNodeBuilds(test.TestCase):
@@ -50,7 +50,7 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
 
         # We need the computes reporting into placement for the filter
         # scheduler to pick a host.
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -62,26 +62,13 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
         nova.tests.unit.image.fake.stub_out_image_service(self)
 
         self.start_service('conductor')
-        self.start_service('consoleauth')
 
         # We start two compute services because we're going to fake one
         # of them to fail the build so we can trigger the retry code.
-        # set_nodes() is needed to have each compute service return a
-        # different nodename, so we get two hosts in the list of candidates
-        # for scheduling. Otherwise both hosts will have the same default
-        # nodename "fake-mini". The host passed to start_service controls the
-        # "host" attribute and set_nodes() sets the "nodename" attribute.
-        # We set_nodes() to make host and nodename the same for each compute.
-        fake.set_nodes(['host1'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host1')
-        fake.set_nodes(['host2'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host2')
 
-        # Start the scheduler after the compute nodes are created in the DB
-        # in the case of using the CachingScheduler.
-        self.start_service('scheduler')
+        self.scheduler_service = self.start_service('scheduler')
 
         self.useFixture(cast_as_call.CastAsCall(self))
 
@@ -96,8 +83,9 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
         # We can't stub nova.compute.claims.Claims.__init__ because there is
         # a race where nova.compute.claims.NopClaim will be used instead,
         # see for details:
-        #   https://github.com/openstack/nova/blob/bb02d11/nova/compute/
-        #   resource_tracker.py#L121-L130
+        #   https://opendev.org/openstack/nova/src/commit/
+        #   bb02d1110a9529217a5e9b1e1fe8ca25873cac59/
+        #   nova/compute/resource_tracker.py#L121-L130
         real_instance_claim =\
                 nova.compute.resource_tracker.ResourceTracker.instance_claim
 
@@ -153,9 +141,14 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
         self.assertEqual(2, self.attempts)
 
 
-class TestRetryBetweenComputeNodeBuildsCachingScheduler(
+class TestRetryBetweenComputeNodeBuildsNoAllocations(
         TestRetryBetweenComputeNodeBuilds):
-    """Tests the reschedule scenario using the CachingScheduler."""
+    """Tests the reschedule scenario using a scheduler driver which does
+    not use Placement.
+    """
     def setUp(self):
-        self.flags(driver='caching_scheduler', group='scheduler')
-        super(TestRetryBetweenComputeNodeBuildsCachingScheduler, self).setUp()
+        super(TestRetryBetweenComputeNodeBuildsNoAllocations, self).setUp()
+        # We need to mock the FilterScheduler to not use Placement so that
+        # allocations won't be created during scheduling.
+        self.scheduler_service.manager.driver.USES_ALLOCATION_CANDIDATES = \
+            False

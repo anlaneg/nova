@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
 import datetime
 
 import iso8601
@@ -142,7 +143,7 @@ class SimpleTenantUsageController(wsgi.Controller):
         instances = self._get_instances_all_cells(context, period_start,
                                                   period_stop, tenant_id,
                                                   limit, marker)
-        rval = {}
+        rval = collections.OrderedDict()
         flavors = {}
         all_server_usages = []
 
@@ -262,7 +263,8 @@ class SimpleTenantUsageController(wsgi.Controller):
         return (period_start, period_stop, detailed)
 
     @wsgi.Controller.api_version("2.40")
-    @validation.query_schema(schema.index_query_v240)
+    @validation.query_schema(schema.index_query_275, '2.75')
+    @validation.query_schema(schema.index_query_v240, '2.40', '2.74')
     @wsgi.expected_errors(400)
     def index(self, req):
         """Retrieve tenant_usage for all tenants."""
@@ -276,7 +278,8 @@ class SimpleTenantUsageController(wsgi.Controller):
         return self._index(req)
 
     @wsgi.Controller.api_version("2.40")
-    @validation.query_schema(schema.show_query_v240)
+    @validation.query_schema(schema.show_query_275, '2.75')
+    @validation.query_schema(schema.show_query_v240, '2.40', '2.74')
     @wsgi.expected_errors(400)
     def show(self, req, id):
         """Retrieve tenant_usage for a specified tenant."""

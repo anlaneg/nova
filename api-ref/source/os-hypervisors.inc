@@ -121,7 +121,7 @@ Response
   - service.host: host_name_body
   - service.id: service_id_body_2_52
   - service.id: service_id_body_2_53
-  - service.disable_reason: service_disable_reason
+  - service.disabled_reason: service_disable_reason
   - vcpus: hypervisor_vcpus
   - vcpus_used: hypervisor_vcpus_used
   - hypervisor_links: hypervisor_links
@@ -146,6 +146,15 @@ Shows summary statistics for all enabled hypervisors over all compute nodes.
 Policy defaults enable only users with the administrative role to perform
 this operation. Cloud providers can change these permissions through
 the ``policy.json`` file.
+
+.. note::
+
+   As noted, some of the parameters in the response representing totals do not
+   take allocation ratios into account. This can result in a disparity between
+   the totals and the usages. A more accurate representation of state can be
+   obtained using `placement`__.
+
+   __ https://docs.openstack.org/api-ref/placement/#list-resource-provider-usages
 
 Normal response codes: 200
 
@@ -185,6 +194,15 @@ Shows details for a given hypervisor.
 Policy defaults enable only users with the administrative role to perform
 this operation. Cloud providers can change these permissions through
 the ``policy.json`` file.
+
+.. note::
+
+   As noted, some of the parameters in the response representing totals do not
+   take allocation ratios into account. This can result in a disparity between
+   the totals and the usages. A more accurate representation of state can be
+   obtained using `placement`__.
+
+   __ https://docs.openstack.org/api-ref/placement/#show-resource-provider-usages
 
 Normal response codes: 200
 
@@ -230,7 +248,7 @@ Response
   - service.host: host_name_body
   - service.id: service_id_body_2_52
   - service.id: service_id_body_2_53
-  - service.disable_reason: service_disable_reason
+  - service.disabled_reason: service_disable_reason
   - vcpus: hypervisor_vcpus
   - vcpus_used: hypervisor_vcpus_used
 

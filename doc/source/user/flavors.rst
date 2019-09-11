@@ -88,6 +88,11 @@ Extra Specs
   options.  For more information on the standardized extra specs available,
   :ref:`see below <flavors-extra-specs>`
 
+Description
+  A free form description of the flavor. Limited to 65535 characters in length.
+  Only printable characters are allowed. Available starting in
+  microversion 2.55.
+
 .. _flavors-extra-specs:
 
 Extra Specs
@@ -101,6 +106,8 @@ Extra Specs
    A lot of these need investigation - for example, I can find no reference to
    the ``cpu_shares_level`` option outside of documentation and (possibly)
    useless tests. We should assess which drivers each option actually apply to.
+
+.. _extra-specs-CPU-limits:
 
 CPU limits
   You can configure the CPU limits with control parameters. For example, to
@@ -156,6 +163,8 @@ CPU limits
     In this example, an instance of ``FLAVOR-NAME`` can only consume a maximum
     of 50% CPU of a physical CPU computing capability.
 
+.. _extra-specs-memory-limits:
+
 Memory limits
   For VMware, you can configure the memory limits with control parameters.
 
@@ -186,6 +195,8 @@ Memory limits
        $ openstack flavor set FLAVOR-NAME \
            --property quota:memory_shares_level=custom \
            --property quota:memory_shares_share=15
+
+.. _extra-specs-disk-io-limits:
 
 Disk I/O limits
   For VMware, you can configure the resource limits for disk with control
@@ -218,6 +229,8 @@ Disk I/O limits
        $ openstack flavor set FLAVOR-NAME \
            --property quota:disk_io_reservation=2000
 
+.. _extra-specs-disk-tuning:
+
 Disk tuning
   Using disk I/O quotas, you can set maximum disk write to 10 MB per second for
   a VM user. For example:
@@ -235,6 +248,8 @@ Disk tuning
   - ``disk_write_iops_sec``
   - ``disk_total_bytes_sec``
   - ``disk_total_iops_sec``
+
+.. _extra-specs-bandwidth-io:
 
 Bandwidth I/O
   The vif I/O options are:
@@ -295,15 +310,23 @@ Bandwidth I/O
      using `Data rate units on Wikipedia
      <https://en.wikipedia.org/wiki/Data_rate_units>`_.
 
+.. _extra-specs-hardware-video-ram:
+
 Hardware video RAM
   Specify ``hw_video:ram_max_mb`` to control the maximum RAM for the video
   image. Used in conjunction with the ``hw_video_ram`` image property.
   ``hw_video_ram`` must be less than or equal to ``hw_video:ram_max_mb``.
 
-  This is currently only supported by the libvirt driver.
+  This is currently supported by the libvirt and the vmware drivers.
 
   See https://libvirt.org/formatdomain.html#elementsVideo for more information
   on how this is used to set the ``vram`` attribute with the libvirt driver.
+
+  See https://pubs.vmware.com/vi-sdk/visdk250/ReferenceGuide/vim.vm.device.VirtualVideoCard.html
+  for more information on how this is used to set the ``videoRamSizeInKB`` attribute with
+  the vmware driver.
+
+.. _extra-specs-watchdog-behavior:
 
 Watchdog behavior
   For the libvirt driver, you can enable and set the behavior of a virtual
@@ -331,6 +354,8 @@ Watchdog behavior
      Watchdog behavior set using a specific image's properties will override
      behavior set using flavors.
 
+.. _extra-specs-random-number-generator:
+
 Random-number generator
   If a random-number generator device has been added to the instance through
   its image properties, the device can be enabled and configured using:
@@ -347,6 +372,30 @@ Random-number generator
   - RATE-BYTES: (integer) Allowed amount of bytes that the guest can read from
     the host's entropy per period.
   - RATE-PERIOD: (integer) Duration of the read period in seconds.
+
+.. _extra-specs-performance-monitoring-unit:
+
+Performance Monitoring Unit (vPMU)
+  If nova is deployed with the libvirt virt driver and
+  :oslo.config:option:`libvirt.virt_type` is set to ``qemu`` or ``kvm``, a
+  vPMU can be enabled or disabled for an instance using the ``hw:pmu``
+  extra_spec or the ``hw_pmu`` image property.
+  The supported values are ``True`` or ``False``. If the vPMU is not
+  explicitly enabled or disabled via the flavor or image, its presence is left
+  to QEMU to decide.
+
+  .. code-block:: console
+
+     $ openstack flavor set FLAVOR-NAME --property hw:pmu=True|False
+
+  The vPMU is used by tools like ``perf`` in the guest to provide more accurate
+  information for profiling application and monitoring guest performance.
+  For realtime workloads, the emulation of a vPMU can introduce additional
+  latency which may be undesirable. If the telemetry it provides is not
+  required, such workloads should set ``hw:pmu=False``. For most workloads
+  the default of unset or enabling the vPMU ``hw:pmu=True`` will be correct.
+
+.. _extra-specs-cpu-topology:
 
 CPU topology
   For the libvirt driver, you can define the topology of the processors in the
@@ -540,6 +589,8 @@ CPU real-time policy
      The ``hw:cpu_realtime_mask`` option is only valid if ``hw:cpu_realtime``
      is set to ``yes``.
 
+.. _extra-specs-emulator-threads-policy:
+
 Emulator threads policy
   For the libvirt driver, you can assign a separate pCPU to an instance that
   will be used for emulator threads, which are emulator processes not directly
@@ -557,15 +608,29 @@ Emulator threads policy
      $ openstack flavor set FLAVOR-NAME \
          --property hw:emulator_threads_policy=THREAD-POLICY
 
-  Valid THREAD-POLICY values are:
+  The expected behavior of emulator threads depends on the value of the
+  ``hw:emulator_threads_policy`` flavor extra spec and the value of
+  :oslo.config:option:`compute.cpu_shared_set`. It is presented in the
+  following table:
 
-  - ``share``: (default) The emulator threads float across the pCPUs
-    associated to the guest. To place a workload's emulator threads on
-    a set of isolated physical CPUs, set ``share``` and
-    ``[compute]/cpu_shared_set`` configuration option to the set of
-    host CPUs that should be used for best-effort CPU resources.
+  .. list-table::
+     :header-rows: 1
+     :stub-columns: 1
 
-  - ``isolate``: The emulator threads are isolated on a single pCPU.
+     * -
+       - :oslo.config:option:`compute.cpu_shared_set` set
+       - :oslo.config:option:`compute.cpu_shared_set` unset
+     * - ``hw:emulator_treads_policy`` unset (default)
+       - Pinned to all of the instance's pCPUs
+       - Pinned to all of the instance's pCPUs
+     * - ``hw:emulator_threads_policy`` = ``share``
+       - Pinned to :oslo.config:option:`compute.cpu_shared_set`
+       - Pinned to all of the instance's pCPUs
+     * - ``hw:emulator_threads_policy`` = ``isolate``
+       - Pinned to a single pCPU distinct from the instance's pCPUs
+       - Pinned to a single pCPU distinct from the instance's pCPUs
+
+.. _extra-specs-large-pages-allocation:
 
 Large pages allocation
   You can configure the size of large pages used to back the VMs.
@@ -597,6 +662,8 @@ Large pages allocation
      backed by huge pages. Otherwise, the guest OS will not be getting the
      performance benefit it is expecting.
 
+.. _extra-spec-pci-passthrough:
+
 PCI passthrough
   You can assign PCI devices to a guest by specifying them in the flavor.
 
@@ -609,9 +676,11 @@ PCI passthrough
 
   - ALIAS: (string) The alias which correspond to a particular PCI device class
     as configured in the nova configuration file (see
-    :doc:`/configuration/config`).
+    :oslo.config:option:`pci.alias`).
   - COUNT: (integer) The amount of PCI devices of type ALIAS to be assigned to
     a guest.
+
+.. _extra-specs-hiding-hypervisor-signature:
 
 Hiding hypervisor signature
   Some hypervisors add a signature to their guests. While the presence
@@ -635,6 +704,8 @@ Hiding hypervisor signature
   - VALUE: (string) 'true' or 'false'. 'false' is equivalent to the
     property not existing.
 
+.. _extra-specs-secure-boot:
+
 Secure Boot
   When your Compute services use the Hyper-V hypervisor, you can enable secure
   boot for Windows and Linux instances.
@@ -650,6 +721,29 @@ Secure Boot
   - ``disabled`` or ``optional``: (default) Disable Secure Boot for instances
     running with this flavor.
 
+.. _extra-specs-required-resources:
+
+Custom resource classes and standard resource classes to override
+    Added in the 16.0.0 Pike release.
+
+    Specify custom resource classes to require or override quantity values of
+    standard resource classes.
+
+    The syntax of the extra spec is ``resources:<resource_class_name>=VALUE``
+    (``VALUE`` is integer).
+    The name of custom resource classes must start with ``CUSTOM_``.
+    Standard resource classes to override are ``VCPU``, ``MEMORY_MB`` or
+    ``DISK_GB``. In this case, you can disable scheduling based on standard
+    resource classes by setting the value to ``0``.
+
+    For example:
+
+    - resources:CUSTOM_BAREMETAL_SMALL=1
+    - resources:VCPU=0
+
+    See :ironic-doc:`Create flavors for use with the Bare Metal service
+    <install/configure-nova-flavors>` for more examples.
+
 .. _extra-specs-required-traits:
 
 Required traits
@@ -659,7 +753,7 @@ Required traits
     the set of traits specified in the flavor. The traits are associated with
     the resource provider that represents the compute node in the Placement
     API. See the resource provider traits API reference for more details:
-    https://developer.openstack.org/api-ref/placement/#resource-provider-traits
+    https://docs.openstack.org/api-ref/placement/#resource-provider-traits
 
     The syntax of the extra spec is ``trait:<trait_name>=required``, for
     example:
@@ -700,3 +794,60 @@ Forbidden traits
     Traits can be managed using the `osc-placement plugin`_.
 
 .. _osc-placement plugin: https://docs.openstack.org/osc-placement/latest/index.html
+
+.. _extra-specs-numbered-resource-groupings:
+
+Numbered groupings of resource classes and traits
+    Added in the 18.0.0 Rocky release.
+
+    Specify numbered groupings of resource classes and traits.
+
+    The syntax is as follows (``N`` and ``VALUE`` are integers):
+
+    .. parsed-literal::
+
+      resources\ *N*:*<resource_class_name>*\ =\ *VALUE*
+      trait\ *N*:*<trait_name>*\ =required
+
+    A given numbered ``resources`` or ``trait`` key may be repeated to
+    specify multiple resources/traits in the same grouping,
+    just as with the un-numbered syntax.
+
+    Specify inter-group affinity policy via the ``group_policy`` key,
+    which may have the following values:
+
+    * ``isolate``: Different numbered request groups will be satisfied by
+      *different* providers.
+    * ``none``: Different numbered request groups may be satisfied
+      by different providers *or* common providers.
+
+    .. note::
+
+        If more than one group is specified then the ``group_policy`` is
+        mandatory in the request. However such groups might come from other
+        sources than flavor extra_spec (e.g. from Neutron ports with QoS
+        minimum bandwidth policy). If the flavor does not specify any groups
+        and ``group_policy`` but more than one group is coming from other
+        sources then nova will default the ``group_policy`` to ``none`` to
+        avoid scheduler failure.
+
+    For example, to create a server with the following VFs:
+
+    * One SR-IOV virtual function (VF) on NET1 with bandwidth 10000 bytes/sec
+    * One SR-IOV virtual function (VF) on NET2 with bandwidth 20000 bytes/sec
+      on a *different* NIC with SSL acceleration
+
+    It is specified in the extra specs as follows::
+
+      resources1:SRIOV_NET_VF=1
+      resources1:NET_EGRESS_BYTES_SEC=10000
+      trait1:CUSTOM_PHYSNET_NET1=required
+      resources2:SRIOV_NET_VF=1
+      resources2:NET_EGRESS_BYTES_SEC:20000
+      trait2:CUSTOM_PHYSNET_NET2=required
+      trait2:HW_NIC_ACCEL_SSL=required
+      group_policy=isolate
+
+    See `Granular Resource Request Syntax`_ for more details.
+
+.. _Granular Resource Request Syntax: https://specs.openstack.org/openstack/nova-specs/specs/rocky/implemented/granular-resource-requests.html

@@ -30,7 +30,7 @@ Verify operation of the Compute service.
 
    .. note::
 
-      This output should indicate three service components enabled on the
+      This output should indicate two service components enabled on the
       controller node and one service component enabled on the compute node.
 
 #. List API endpoints in the Identity service to verify connectivity with the
@@ -95,7 +95,8 @@ Verify operation of the Compute service.
       | 9a76d9f9-9620-4f2e-8c69-6c5691fae163 | cirros      | active      |
       +--------------------------------------+-------------+-------------+
 
-#. Check the cells and placement API are working successfully:
+#. Check the cells and placement API are working successfully and that other
+   necessary prerequisites are in place:
 
    .. _verify-install-nova-status:
 
@@ -103,18 +104,22 @@ Verify operation of the Compute service.
 
       # nova-status upgrade check
 
-      +---------------------------+
-      | Upgrade Check Results     |
-      +---------------------------+
-      | Check: Cells v2           |
-      | Result: Success           |
-      | Details: None             |
-      +---------------------------+
-      | Check: Placement API      |
-      | Result: Success           |
-      | Details: None             |
-      +---------------------------+
-      | Check: Resource Providers |
-      | Result: Success           |
-      | Details: None             |
-      +---------------------------+
+      +--------------------------------------------------------------------+
+      | Upgrade Check Results                                              |
+      +--------------------------------------------------------------------+
+      | Check: Cells v2                                                    |
+      | Result: Success                                                    |
+      | Details: None                                                      |
+      +--------------------------------------------------------------------+
+      | Check: Placement API                                               |
+      | Result: Success                                                    |
+      | Details: None                                                      |
+      +--------------------------------------------------------------------+
+      | Check: Ironic Flavor Migration                                     |
+      | Result: Success                                                    |
+      | Details: None                                                      |
+      +--------------------------------------------------------------------+
+      | Check: Cinder API                                                  |
+      | Result: Success                                                    |
+      | Details: None                                                      |
+      +--------------------------------------------------------------------+

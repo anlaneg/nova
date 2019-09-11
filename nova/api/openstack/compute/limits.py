@@ -66,7 +66,8 @@ class LimitsController(wsgi.Controller):
 
     @wsgi.Controller.api_version('2.57')  # noqa
     @wsgi.expected_errors(())
-    @validation.query_schema(limits.limits_query_schema)
+    @validation.query_schema(limits.limits_query_schema_275, '2.75')
+    @validation.query_schema(limits.limits_query_schema, '2.57', '2.74')
     def index(self, req):
         return self._index(req, FILTERED_LIMITS_2_57, max_image_meta=False)
 
@@ -76,9 +77,7 @@ class LimitsController(wsgi.Controller):
         context.can(limits_policies.BASE_POLICY_NAME)
         project_id = req.params.get('tenant_id', context.project_id)
         quotas = QUOTAS.get_project_quotas(context, project_id,
-                                           usages=False)
-        abs_limits = {k: v['limit'] for k, v in quotas.items()}
-
+                                           usages=True)
         builder = limits_views.ViewBuilder()
-        return builder.build(abs_limits, filtered_limits=filtered_limits,
+        return builder.build(req, quotas, filtered_limits=filtered_limits,
                              max_image_meta=max_image_meta)
