@@ -1449,6 +1449,7 @@ class Connection(object):
 
     def listDevices(self, cap, flags):
         if cap == 'pci':
+            #列出所有pci设备
             return self.pci_info.get_all_devices()
         if cap == 'mdev':
             return self.mdev_info.get_all_devices()

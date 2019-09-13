@@ -145,6 +145,11 @@ def _get_sysfs_netdev_path(pci_addr, pf_interface):
     return "/sys/bus/pci/devices/%s/net" % pci_addr
 
 
+#[root@host net]# pwd
+#/sys/bus/pci/devices/0000:02:00.3/net
+#[root@host net]# ls
+#enp2s0f3
+#[root@host net]#
 def get_ifname_by_pci_address(pci_addr, pf_interface=False):
     """Get the interface name based on a VF's pci address.
 
@@ -154,20 +159,23 @@ def get_ifname_by_pci_address(pci_addr, pf_interface=False):
     dev_path = _get_sysfs_netdev_path(pci_addr, pf_interface)
     try:
         dev_info = os.listdir(dev_path)
+        #仅一个文件夹，返回其名称
         return dev_info.pop()
     except Exception:
         raise exception.PciDeviceNotFoundById(id=pci_addr)
 
-
+# 取pci对应的mac地址
 def get_mac_by_pci_address(pci_addr, pf_interface=False):
     """Get the MAC address of the nic based on its PCI address.
 
     Raises PciDeviceNotFoundById in case the pci device is not a NIC
     """
     dev_path = _get_sysfs_netdev_path(pci_addr, pf_interface)
+    #通过pci号获得接口名称
     if_name = get_ifname_by_pci_address(pci_addr, pf_interface)
     addr_file = os.path.join(dev_path, if_name, 'address')
 
+    #取接口if_name对应的mac地址
     try:
         with open(addr_file) as f:
             mac = next(f).strip()
@@ -201,7 +209,7 @@ def get_vf_num_by_pci_address(pci_addr):
         raise exception.PciDeviceNotFoundById(id=pci_addr)
     return vf_num
 
-
+##取pci地址对应的mac,ifname (要求接口已适配成网络设备）
 def get_net_name_by_vf_pci_address(vfaddress):
     """Given the VF PCI address, returns the net device name.
 
@@ -216,6 +224,7 @@ def get_net_name_by_vf_pci_address(vfaddress):
     network capabilities associated to this device.
     """
     try:
+        #取pci地址对应的mac,ifname
         mac = get_mac_by_pci_address(vfaddress).split(':')
         ifname = get_ifname_by_pci_address(vfaddress)
         return ("net_%(ifname)s_%(mac)s" %

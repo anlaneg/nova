@@ -6139,6 +6139,7 @@ class LibvirtDriver(driver.ComputeDriver):
         """Returns a dict of NET device."""
         devname = pci_utils.get_net_name_by_vf_pci_address(vf_address)
         if not devname:
+            # pci网络设备信息获取失败
             return
 
         virtdev = self._host.device_lookup_by_name(devname)
@@ -6148,6 +6149,7 @@ class LibvirtDriver(driver.ComputeDriver):
         return {'name': cfgdev.name,
                 'capabilities': cfgdev.pci_capability.features}
 
+    #获取devname对应的pci设备信息
     def _get_pcidev_info(self, devname):
         """Returns a dict of PCI device."""
 
@@ -6198,6 +6200,7 @@ class LibvirtDriver(driver.ComputeDriver):
             appends this information to the device's dictionary.
             """
             if device.get('dev_type') == fields.PciDeviceType.SRIOV_VF:
+                #针对pci vf设备，取netinfo
                 pcinet_info = self._get_pcinet_info(address)
                 if pcinet_info:
                     return {'capabilities':
@@ -6209,12 +6212,14 @@ class LibvirtDriver(driver.ComputeDriver):
         cfgdev = vconfig.LibvirtConfigNodeDevice()
         cfgdev.parse_str(xmlstr)
 
+        #构造pci地址
         address = "%04x:%02x:%02x.%1x" % (
             cfgdev.pci_capability.domain,
             cfgdev.pci_capability.bus,
             cfgdev.pci_capability.slot,
             cfgdev.pci_capability.function)
 
+        #构造pci设备其本信息
         device = {
             "dev_id": cfgdev.name,
             "address": address,
@@ -6222,6 +6227,7 @@ class LibvirtDriver(driver.ComputeDriver):
             "vendor_id": "%04x" % cfgdev.pci_capability.vendor_id,
             }
 
+        #设备位于哪个node
         device["numa_node"] = cfgdev.pci_capability.numa_node
 
         # requirement by DataBase Model
@@ -6265,6 +6271,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 raise
 
         pci_info = []
+        # 遍历所有pci设备，收集pci信息
         for name in dev_names:
             pci_info.append(self._get_pcidev_info(name))
 

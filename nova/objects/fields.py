@@ -686,7 +686,9 @@ class PciDeviceType(BaseNovaEnum):
     # NOTE(jaypipes): It's silly that the word "type-" is in these constants,
     # but alas, these were the original constant strings used...
     STANDARD = "type-PCI"
+    #sriov的pf设备
     SRIOV_PF = "type-PF"
+    #sriov的vf设备
     SRIOV_VF = "type-VF"
 
     ALL = (STANDARD, SRIOV_PF, SRIOV_VF)
