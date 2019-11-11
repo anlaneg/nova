@@ -20,6 +20,7 @@ import sys
 import traceback
 
 import os_resource_classes as orc
+import os_traits
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from six.moves.urllib import parse
@@ -32,10 +33,11 @@ from nova import exception
 from nova.i18n import _
 from nova import objects
 from nova.objects import base as obj_base
+from nova.objects import fields as obj_fields
 from nova.objects import instance as obj_instance
 from nova import rpc
 from nova.scheduler.filters import utils as filters_utils
-import nova.virt.hardware as hw
+from nova.virt import hardware
 
 
 LOG = logging.getLogger(__name__)
@@ -55,7 +57,7 @@ class ResourceRequest(object):
     XS_KEYPAT = re.compile(r"^(%s)([1-9][0-9]*)?:(.*)$" %
                            '|'.join((XS_RES_PREFIX, XS_TRAIT_PREFIX)))
 
-    def __init__(self, request_spec):
+    def __init__(self, request_spec, enable_pinning_translate=True):
         """Create a new instance of ResourceRequest from a RequestSpec.
 
         Examines the flavor, flavor extra specs, and (optional) image metadata
@@ -80,6 +82,8 @@ class ResourceRequest(object):
         overridden by flavor extra specs.
 
         :param request_spec: An instance of ``objects.RequestSpec``.
+        :param enable_pinning_translate: True if the CPU policy extra specs
+            should be translated to placement resources and traits.
         """
         # { ident: RequestGroup }
         self._rg_by_id = {}
@@ -91,8 +95,11 @@ class ResourceRequest(object):
         # TODO(efried): Handle member_of[$N], which will need to be reconciled
         # with destination.aggregates handling in resources_from_request_spec
 
-        image = (request_spec.image if 'image' in request_spec
-                 else objects.ImageMeta(properties=objects.ImageMetaProps()))
+        # request_spec.image is nullable
+        if 'image' in request_spec and request_spec.image:
+            image = request_spec.image
+        else:
+            image = objects.ImageMeta(properties=objects.ImageMetaProps())
 
         # Parse the flavor extra specs
         self._process_extra_specs(request_spec.flavor)
@@ -102,12 +109,21 @@ class ResourceRequest(object):
         # Now parse the (optional) image metadata
         self._process_image_meta(image)
 
+        # TODO(stephenfin): Remove this parameter once we drop support for
+        # 'vcpu_pin_set'
+        self.cpu_pinning_requested = False
+
+        if enable_pinning_translate:
+            # Next up, let's handle those pesky CPU pinning policies
+            self._translate_pinning_policies(request_spec.flavor, image)
+
         # Finally, parse the flavor itself, though we'll only use these fields
         # if they don't conflict with something already provided by the flavor
         # extra specs. These are all added to the unnumbered request group.
         merged_resources = self.merged_resources()
 
-        if orc.VCPU not in merged_resources:
+        if (orc.VCPU not in merged_resources and
+                orc.PCPU not in merged_resources):
             self._add_resource(None, orc.VCPU, request_spec.vcpus)
 
         if orc.MEMORY_MB not in merged_resources:
@@ -123,6 +139,8 @@ class ResourceRequest(object):
                 self._add_resource(None, orc.DISK_GB, disk)
 
         self._translate_memory_encryption(request_spec.flavor, image)
+
+        self._translate_vpmems_request(request_spec.flavor)
 
         self.strip_zeros()
 
@@ -171,13 +189,79 @@ class ResourceRequest(object):
         # NOTE(aspiers): In theory this could raise FlavorImageConflict,
         # but we already check it in the API layer, so that should never
         # happen.
-        if not hw.get_mem_encryption_constraint(flavor, image):
+        if not hardware.get_mem_encryption_constraint(flavor, image):
             # No memory encryption required, so no further action required.
             return
 
         self._add_resource(None, orc.MEM_ENCRYPTION_CONTEXT, 1)
         LOG.debug("Added %s=1 to requested resources",
                   orc.MEM_ENCRYPTION_CONTEXT)
+
+    def _translate_vpmems_request(self, flavor):
+        """When the hw:pmem extra spec is present, require hosts which can
+        provide enough vpmem resources.
+        """
+        vpmem_labels = hardware.get_vpmems(flavor)
+        if not vpmem_labels:
+            # No vpmems required
+            return
+        amount_by_rc = collections.defaultdict(int)
+        for vpmem_label in vpmem_labels:
+            resource_class = orc.normalize_name(
+                "PMEM_NAMESPACE_" + vpmem_label)
+            amount_by_rc[resource_class] += 1
+        for resource_class, amount in amount_by_rc.items():
+            self._add_resource(None, resource_class, amount)
+            LOG.debug("Added resource %s=%d to requested resources",
+                      resource_class, amount)
+
+    def _translate_pinning_policies(self, flavor, image):
+        """Translate the legacy pinning policies to resource requests."""
+        # NOTE(stephenfin): These can raise exceptions but these have already
+        # been validated by 'nova.virt.hardware.numa_get_constraints' in the
+        # API layer (see change I06fad233006c7bab14749a51ffa226c3801f951b).
+        # This call also handles conflicts between explicit VCPU/PCPU
+        # requests and implicit 'hw:cpu_policy'-based requests, mismatches
+        # between the number of CPUs in the flavor and explicit VCPU/PCPU
+        # requests, etc.
+        cpu_policy = hardware.get_cpu_policy_constraint(
+            flavor, image)
+        cpu_thread_policy = hardware.get_cpu_thread_policy_constraint(
+            flavor, image)
+        emul_thread_policy = hardware.get_emulator_thread_policy_constraint(
+            flavor)
+
+        # We don't need to worry about handling 'SHARED' - that will result in
+        # VCPUs which we include by default
+        if cpu_policy == obj_fields.CPUAllocationPolicy.DEDICATED:
+            # TODO(stephenfin): Remove when we drop support for 'vcpu_pin_set'
+            self.cpu_pinning_requested = True
+
+            # Switch VCPU -> PCPU
+            cpus = flavor.vcpus
+
+            LOG.debug('Translating request for %(vcpu_rc)s=%(cpus)d to '
+                      '%(vcpu_rc)s=0,%(pcpu_rc)s=%(cpus)d',
+                      {'vcpu_rc': orc.VCPU, 'pcpu_rc': orc.PCPU,
+                       'cpus': cpus})
+
+            if emul_thread_policy == 'isolate':
+                cpus += 1
+
+                LOG.debug('Adding additional %(pcpu_rc)s to account for '
+                          'emulator threads', {'pcpu_rc': orc.PCPU})
+
+            self._add_resource(None, orc.PCPU, cpus)
+
+        trait = {
+            obj_fields.CPUThreadAllocationPolicy.ISOLATE: 'forbidden',
+            obj_fields.CPUThreadAllocationPolicy.REQUIRE: 'required',
+        }.get(cpu_thread_policy)
+        if trait:
+            LOG.debug('Adding %(trait)s=%(value)s trait',
+                      {'trait': os_traits.HW_CPU_HYPERTHREADING,
+                       'value': trait})
+            self._add_trait(None, os_traits.HW_CPU_HYPERTHREADING, trait)
 
     @property
     def group_policy(self):
@@ -304,6 +388,7 @@ class ResourceRequest(object):
             forbidden_traits = request_group.forbidden_traits
             aggregates = request_group.aggregates
             in_tree = request_group.in_tree
+            forbidden_aggregates = request_group.forbidden_aggregates
 
             resource_query = ",".join(
                 sorted("%s:%s" % (rc, amount)
@@ -327,6 +412,12 @@ class ResourceRequest(object):
                 qs_params.extend(sorted(aggs))
             if in_tree:
                 qs_params.append(('in_tree%s' % suffix, in_tree))
+            if forbidden_aggregates:
+                # member_ofN is a list of aggregate uuids. We need a
+                # tuple of ('member_ofN, '!in:uuid,uuid,...').
+                forbidden_aggs = '!in:' + ','.join(
+                    sorted(forbidden_aggregates))
+                qs_params.append(('member_of%s' % suffix, forbidden_aggs))
             return qs_params
 
         if self._limit is not None:
@@ -436,18 +527,21 @@ def resources_from_flavor(instance, flavor):
     return res_req.merged_resources()
 
 
-def resources_from_request_spec(ctxt, spec_obj, host_manager):
+def resources_from_request_spec(ctxt, spec_obj, host_manager,
+        enable_pinning_translate=True):
     """Given a RequestSpec object, returns a ResourceRequest of the resources,
     traits, and aggregates it represents.
 
     :param context: The request context.
     :param spec_obj: A RequestSpec object.
     :param host_manager: A HostManager object.
+    :param enable_pinning_translate: True if the CPU policy extra specs should
+        be translated to placement resources and traits.
 
     :return: A ResourceRequest object.
     :raises NoValidHost: If the specified host/node is not found in the DB.
     """
-    res_req = ResourceRequest(spec_obj)
+    res_req = ResourceRequest(spec_obj, enable_pinning_translate)
 
     requested_resources = (spec_obj.requested_resources
                            if 'requested_resources' in spec_obj and
@@ -479,6 +573,9 @@ def resources_from_request_spec(ctxt, spec_obj, host_manager):
                 #     [['aggA', 'aggB'], ['aggC']]
                 grp.aggregates = [ored.split(',')
                                   for ored in destination.aggregates]
+            if destination.forbidden_aggregates:
+                grp = res_req.get_request_group(None)
+                grp.forbidden_aggregates |= destination.forbidden_aggregates
 
     if 'force_hosts' in spec_obj and spec_obj.force_hosts:
         # Prioritize the value from requested_destination just in case
@@ -678,7 +775,7 @@ def set_vm_state_and_notify(context, instance_uuid, service, method, updates,
         This becomes part of the publisher_id for the notification payload.
     :param method: The method that failed, e.g. 'migrate_server'.
     :param updates: dict of updates for the instance object, typically a
-        vm_state and/or task_state value.
+        vm_state and task_state value.
     :param ex: An exception which occurred during the given method.
     :param request_spec: Optional request spec.
     """
@@ -693,6 +790,9 @@ def set_vm_state_and_notify(context, instance_uuid, service, method, updates,
     else:
         request_spec = {}
 
+    # TODO(mriedem): We should make vm_state optional since not all callers
+    # of this method want to change the vm_state, e.g. the Exception block
+    # in ComputeTaskManager._cold_migrate.
     vm_state = updates['vm_state']
     properties = request_spec.get('instance_properties', {})
     notifier = rpc.get_notifier(service)
@@ -1136,6 +1236,33 @@ def fill_provider_mapping(
     ar = jsonutils.loads(host_selection.allocation_request)
     allocs = ar['allocations']
 
+    fill_provider_mapping_based_on_allocation(
+        context, report_client, request_spec, allocs)
+
+
+def fill_provider_mapping_based_on_allocation(
+        context, report_client, request_spec, allocation):
+    """Fills out the request group - resource provider mapping in the
+    request spec based on the current allocation of the instance.
+
+    The fill_provider_mapping() variant is expected to be called in every
+    scenario when a Selection object is available from the scheduler. However
+    in case of revert operations such Selection does not exists. In this case
+    the mapping is calculated based on the allocation of the source host the
+    move operation is reverting to.
+
+    :param context: The security context
+    :param report_client: SchedulerReportClient instance to be used to
+        communicate with placement
+    :param request_spec: The RequestSpec object associated with the
+        operation
+    :param allocation: allocation dict of the instance, keyed by RP UUID.
+    """
+
+    # Exit early if this request spec does not require mappings.
+    if not request_spec.maps_requested_resources:
+        return
+
     # NOTE(gibi): Getting traits from placement for each instance in a
     # instance multi-create scenario is unnecessarily expensive. But
     # instance multi-create cannot be used with pre-created neutron ports
@@ -1148,9 +1275,9 @@ def fill_provider_mapping(
     provider_traits = {
         rp_uuid: report_client.get_provider_traits(
             context, rp_uuid).traits
-        for rp_uuid in allocs}
-    # NOTE(gibi): The allocs dict is in the format of the PUT /allocations
+        for rp_uuid in allocation}
+    # NOTE(gibi): The allocation dict is in the format of the PUT /allocations
     # and that format can change. The current format can be detected from
-    # host_selection.allocation_request_version
+    # allocation_request_version key of the Selection object.
     request_spec.map_requested_resources_to_providers(
-        allocs, provider_traits)
+        allocation, provider_traits)

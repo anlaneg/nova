@@ -287,14 +287,6 @@ class MultiattachNotSupportedOldMicroversion(Invalid):
                 'compute API version 2.60.')
 
 
-class VolumeTypeSupportNotYetAvailable(NovaException):
-    # This exception indicates the deployment is not yet new enough to support
-    # volume type, so a 409 HTTPConflict response is generally used
-    # for handling this in the API.
-    msg_fmt = _("Volume type support is not yet available.")
-    code = 409
-
-
 class MultiattachToShelvedNotSupported(Invalid):
     msg_fmt = _("Attaching multiattach volumes is not supported for "
                 "shelved-offloaded instances.")
@@ -533,6 +525,12 @@ class UnableToMigrateToSelf(Invalid):
                 "to current host (%(host)s).")
 
 
+class OperationNotSupportedForSEV(NovaException):
+    msg_fmt = _("Operation '%(operation)s' not supported for SEV-enabled "
+                "instance (%(instance_uuid)s).")
+    code = 409
+
+
 class InvalidHypervisorType(Invalid):
     msg_fmt = _("The supplied hypervisor type of is invalid.")
 
@@ -607,6 +605,11 @@ class ImageUnacceptable(Invalid):
 class ImageBadRequest(Invalid):
     msg_fmt = _("Request of image %(image_id)s got BadRequest response: "
                 "%(response)s")
+
+
+class ImageQuotaExceeded(NovaException):
+    msg_fmt = _("Quota exceeded or out of space for image %(image_id)s "
+                "in the image service.")
 
 
 class InstanceUnacceptable(Invalid):
@@ -1197,12 +1200,6 @@ class InvalidMigrationState(Invalid):
     msg_fmt = _("Migration %(migration_id)s state of instance "
                 "%(instance_uuid)s is %(state)s. Cannot %(method)s while the "
                 "migration is in this state.")
-
-
-class AbortQueuedLiveMigrationNotYetSupported(NovaException):
-    msg_fmt = _("Aborting live migration %(migration_id)s with status "
-                "%(status)s is not yet supported for this instance.")
-    code = 409
 
 
 class ConsoleLogOutputException(NovaException):
@@ -2460,6 +2457,11 @@ class FlavorImageConflict(NovaException):
                 "(%(flavor_val)s) and the image (%(image_val)s).")
 
 
+class MissingDomainCapabilityFeatureException(NovaException):
+    msg_fmt = _("Guest config could not be built without domain capabilities "
+                "including <%(feature)s> feature.")
+
+
 class HealPortAllocationException(NovaException):
     msg_fmt = _("Healing port allocation failed.")
 
@@ -2508,3 +2510,21 @@ class UnableToRollbackPortUpdates(HealPortAllocationException):
                 "nova-manage.html#placement. If you re-run the script without "
                 "the manual fix then the missing allocation for these ports "
                 "will not be healed in placement.")
+
+
+class AssignedResourceNotFound(NovaException):
+    msg_fmt = _("Assigned resources not found: %(reason)s")
+
+
+class PMEMNamespaceConfigInvalid(NovaException):
+    msg_fmt = _("The pmem_namespaces configuration is invalid: %(reason)s, "
+                "please check your conf file. ")
+
+
+class GetPMEMNamespaceFailed(NovaException):
+    msg_fmt = _("Get PMEM namespaces on host failed: %(reason)s.")
+
+
+class VPMEMCleanupFailed(NovaException):
+    msg_fmt = _("Failed to clean up the vpmem backend device %(dev)s: "
+                "%(error)s")

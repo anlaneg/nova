@@ -32,7 +32,7 @@ class TestListServersIpFilter(test.TestCase):
         self.neutron = self.useFixture(
             nova_fixtures.NeutronFixture(self))
         # Add a 2nd port to the neutron fixture to have multiple ports
-        self.neutron.create_port(self.neutron.port_2)
+        self.neutron.create_port({'port': self.neutron.port_2})
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
         self.api = api_fixture.api
@@ -115,4 +115,4 @@ class TestListServersIpFilter(test.TestCase):
                              self.neutron.port_2['fixed_ips'][0]['ip_address'],
                              servers))
         self.assertEqual(self.neutron.port_2['fixed_ips'][0]['ip_address'],
-                         servers[0]['addresses']['private-network'][0]['addr'])
+                         servers[0]['addresses']['private'][0]['addr'])

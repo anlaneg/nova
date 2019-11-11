@@ -32,19 +32,6 @@ LOG = logging.getLogger(__name__)
 CONF = nova.conf.CONF
 
 
-def supports_extended_port_binding(context, host):
-    """Checks if the compute host service is new enough to support the neutron
-    port binding-extended details.
-
-    :param context: The user request context.
-    :param host: The nova-compute host to check.
-    :returns: True if the compute host is new enough to support extended
-              port binding information, False otherwise.
-    """
-    svc = objects.Service.get_by_host_and_binary(context, host, 'nova-compute')
-    return svc.version >= 35
-
-
 def supports_vif_related_pci_allocations(context, host):
     """Checks if the compute host service is new enough to support
     VIF related PCI allocation during live migration
@@ -70,6 +57,7 @@ class LiveMigrationTask(base.TaskBase):
         self.migration = migration
         self.source = instance.host
         self.migrate_data = None
+        self.limits = None
 
         self.compute_rpcapi = compute_rpcapi
         self.servicegroup_api = servicegroup_api
@@ -99,7 +87,7 @@ class LiveMigrationTask(base.TaskBase):
             # wants the scheduler to pick a destination host, or a host was
             # specified but is not forcing it, so they want the scheduler
             # filters to run on the specified host, like a scheduler hint.
-            self.destination, dest_node = self._find_destination()
+            self.destination, dest_node, self.limits = self._find_destination()
         else:
             # This is the case that the user specified the 'force' flag when
             # live migrating with a specific destination host so the scheduler
@@ -152,7 +140,7 @@ class LiveMigrationTask(base.TaskBase):
                 migration=self.migration,
                 migrate_data=self.migrate_data)
 
-    def rollback(self):
+    def rollback(self, ex):
         # TODO(johngarbutt) need to implement the clean up operation
         # but this will make sense only once we pull in the compute
         # calls, since this class currently makes no state changes,
@@ -174,7 +162,9 @@ class LiveMigrationTask(base.TaskBase):
                     method='live migrate')
 
     def _check_instance_has_no_numa(self):
-        """Prevent live migrations of instances with NUMA topologies."""
+        """Prevent live migrations of instances with NUMA topologies.
+        TODO(artom) Remove this check in compute RPC 6.0.
+        """
         if not self.instance.numa_topology:
             return
 
@@ -188,17 +178,32 @@ class LiveMigrationTask(base.TaskBase):
         if hypervisor_type.lower() != obj_fields.HVType.QEMU:
             return
 
-        msg = ('Instance has an associated NUMA topology. '
-               'Instance NUMA topologies, including related attributes '
-               'such as CPU pinning, huge page and emulator thread '
-               'pinning information, are not currently recalculated on '
-               'live migration. See bug #1289064 for more information.'
-               )
+        # We're fully upgraded to a version that supports NUMA live
+        # migration, carry on.
+        if objects.Service.get_minimum_version(
+                self.context, 'nova-compute') >= 40:
+            return
 
         if CONF.workarounds.enable_numa_live_migration:
-            LOG.warning(msg, instance=self.instance)
+            LOG.warning(
+                'Instance has an associated NUMA topology, cell contains '
+                'compute nodes older than train, but the '
+                'enable_numa_live_migration workaround is enabled. Live '
+                'migration will not be NUMA-aware. The instance NUMA '
+                'topology, including related attributes such as CPU pinning, '
+                'huge page and emulator thread pinning information, will not '
+                'be recalculated. See bug #1289064 for more information.',
+                instance=self.instance)
         else:
-            raise exception.MigrationPreCheckError(reason=msg)
+            raise exception.MigrationPreCheckError(
+                reason='Instance has an associated NUMA topology, cell '
+                       'contains compute nodes older than train, and the '
+                       'enable_numa_live_migration workaround is disabled. '
+                       'Refusing to perform the live migration, as the '
+                       'instance NUMA topology, including related attributes '
+                       'such as CPU pinning, huge page and emulator thread '
+                       'pinning information, cannot be recalculated. See '
+                       'bug #1289064 for more information.')
 
     def _check_can_migrate_pci(self, src_host, dest_host):
         """Checks that an instance can migrate with PCI requests.
@@ -319,18 +324,15 @@ class LiveMigrationTask(base.TaskBase):
         try:
             self.migrate_data = self.compute_rpcapi.\
                 check_can_live_migrate_destination(self.context, self.instance,
-                    destination, self.block_migration, self.disk_over_commit)
+                    destination, self.block_migration, self.disk_over_commit,
+                    self.migration, self.limits)
         except messaging.MessagingTimeout:
             msg = _("Timeout while checking if we can live migrate to host: "
                     "%s") % destination
             raise exception.MigrationPreCheckError(msg)
 
-        # Check to see that neutron supports the binding-extended API and
-        # check to see that both the source and destination compute hosts
-        # are new enough to support the new port binding flow.
-        if (self.network_api.supports_port_binding_extension(self.context) and
-                supports_extended_port_binding(self.context, self.source) and
-                supports_extended_port_binding(self.context, destination)):
+        # Check to see that neutron supports the binding-extended API.
+        if self.network_api.supports_port_binding_extension(self.context):
             if 'vifs' not in self.migrate_data:
                 # migrate data vifs were not constructed in dest compute
                 # during check_can_live_migrate_destination, construct a
@@ -489,7 +491,9 @@ class LiveMigrationTask(base.TaskBase):
                 # those before moving on.
                 self._remove_host_allocations(host, selection.nodename)
                 host = None
-        return selection.service_host, selection.nodename
+        # TODO(artom) We should probably just return the whole selection object
+        # at this point.
+        return (selection.service_host, selection.nodename, selection.limits)
 
     def _remove_host_allocations(self, host, node):
         """Removes instance allocations against the given host from Placement

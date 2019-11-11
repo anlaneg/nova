@@ -13,6 +13,7 @@
 import ddt
 import mock
 import os_resource_classes as orc
+from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
 import six
 
@@ -57,17 +58,6 @@ class TestUtilsBase(test.NoDBTestCase):
 
 @ddt.ddt
 class TestUtils(TestUtilsBase):
-    @staticmethod
-    def _get_image_with_traits():
-        image_prop = {
-            'properties': {
-                'trait:CUSTOM_IMAGE_TRAIT1': 'required',
-                'trait:CUSTOM_IMAGE_TRAIT2': 'required',
-            },
-            'id': 'c8b1790e-a07d-4971-b137-44f2432936cd'
-        }
-        image = objects.ImageMeta.from_dict(image_prop)
-        return image
 
     def _test_resources_from_request_spec(self, expected, flavor, image=None):
         if image is None:
@@ -95,8 +85,33 @@ class TestUtils(TestUtilsBase):
         )
         self._test_resources_from_request_spec(expected_resources, flavor)
 
+    def test_resources_from_request_spec_flavor_req_traits(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={'trait:CUSTOM_FLAVOR_TRAIT': 'required'})
+        expected_resources = FakeResourceRequest()
+        expected_resources._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            required_traits=set(['CUSTOM_FLAVOR_TRAIT'])
+        )
+        resources = self._test_resources_from_request_spec(
+            expected_resources, flavor)
+        expected_result = set(['CUSTOM_FLAVOR_TRAIT'])
+        self.assertEqual(expected_result, resources.all_required_traits)
+
     def test_resources_from_request_spec_flavor_and_image_traits(self):
-        image = self._get_image_with_traits()
+        image = objects.ImageMeta.from_dict({
+            'properties': {
+                'trait:CUSTOM_IMAGE_TRAIT1': 'required',
+                'trait:CUSTOM_IMAGE_TRAIT2': 'required',
+            },
+            'id': 'c8b1790e-a07d-4971-b137-44f2432936cd',
+        })
         flavor = objects.Flavor(vcpus=1,
                                 memory_mb=1024,
                                 root_gb=10,
@@ -409,6 +424,49 @@ class TestUtils(TestUtilsBase):
         req = utils.resources_from_request_spec(
                 self.context, reqspec, self.mock_host_manager)
         self.assertEqual([], req.get_request_group(None).aggregates)
+
+    def test_resources_from_request_spec_forbidden_aggregates(self):
+        flavor = objects.Flavor(vcpus=1, memory_mb=1024,
+                                root_gb=1, ephemeral_gb=0,
+                                swap=0)
+        reqspec = objects.RequestSpec(
+            flavor=flavor,
+            requested_destination=objects.Destination(
+                forbidden_aggregates=set(['foo', 'bar'])))
+
+        req = utils.resources_from_request_spec(self.context, reqspec,
+                                                self.mock_host_manager)
+        self.assertEqual(set(['foo', 'bar']),
+                         req.get_request_group(None).forbidden_aggregates)
+
+    def test_resources_from_request_spec_no_forbidden_aggregates(self):
+        flavor = objects.Flavor(vcpus=1, memory_mb=1024,
+                                root_gb=1, ephemeral_gb=0,
+                                swap=0)
+        reqspec = objects.RequestSpec(flavor=flavor)
+
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
+        self.assertEqual(set([]), req.get_request_group(None).
+                         forbidden_aggregates)
+
+        reqspec.requested_destination = None
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
+        self.assertEqual(set([]), req.get_request_group(None).
+                         forbidden_aggregates)
+
+        reqspec.requested_destination = objects.Destination()
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
+        self.assertEqual(set([]), req.get_request_group(None).
+                         forbidden_aggregates)
+
+        reqspec.requested_destination.forbidden_aggregates = None
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
+        self.assertEqual(set([]), req.get_request_group(None).
+                         forbidden_aggregates)
 
     def test_process_extra_specs_granular_called(self):
         flavor = objects.Flavor(vcpus=1,
@@ -861,6 +919,58 @@ class TestUtils(TestUtilsBase):
         )
         self.assertEqual(expected_querystring, rr.to_querystring())
 
+    def _test_resource_request_init_with_legacy_extra_specs(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={
+                'hw:cpu_policy': 'dedicated',
+                'hw:cpu_thread_policy': 'isolate',
+                'hw:emulator_threads_policy': 'isolate',
+            })
+
+        return objects.RequestSpec(flavor=flavor, is_bfv=False)
+
+    def test_resource_request_init_with_legacy_extra_specs(self):
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                # we should have two PCPUs, one due to hw:cpu_policy and the
+                # other due to hw:cpu_thread_policy
+                'PCPU': 2,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            forbidden_traits={
+                # we should forbid hyperthreading due to hw:cpu_thread_policy
+                'HW_CPU_HYPERTHREADING',
+            },
+        )
+        rs = self._test_resource_request_init_with_legacy_extra_specs()
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
+        self.assertTrue(rr.cpu_pinning_requested)
+
+    def test_resource_request_init_with_legacy_extra_specs_no_translate(self):
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                # we should have a VCPU despite hw:cpu_policy because
+                # enable_pinning_translate=False
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            # we should not require hyperthreading despite hw:cpu_thread_policy
+            # because enable_pinning_translate=False
+            forbidden_traits=set(),
+        )
+        rs = self._test_resource_request_init_with_legacy_extra_specs()
+        rr = utils.ResourceRequest(rs, enable_pinning_translate=False)
+        self.assertResourceRequestsEqual(expected, rr)
+        self.assertFalse(rr.cpu_pinning_requested)
+
     def test_resource_request_init_with_image_props(self):
         flavor = objects.Flavor(
             vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0)
@@ -887,6 +997,58 @@ class TestUtils(TestUtilsBase):
         rr = utils.ResourceRequest(rs)
         self.assertResourceRequestsEqual(expected, rr)
 
+    def _test_resource_request_init_with_legacy_image_props(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0)
+        image = objects.ImageMeta.from_dict({
+            'properties': {
+                'hw_cpu_policy': 'dedicated',
+                'hw_cpu_thread_policy': 'require',
+            },
+            'id': 'c8b1790e-a07d-4971-b137-44f2432936cd',
+        })
+        return objects.RequestSpec(flavor=flavor, image=image, is_bfv=False)
+
+    def test_resource_request_init_with_legacy_image_props(self):
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                # we should have a PCPU due to hw_cpu_policy
+                'PCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            required_traits={
+                # we should require hyperthreading due to hw_cpu_thread_policy
+                'HW_CPU_HYPERTHREADING',
+            },
+        )
+        rs = self._test_resource_request_init_with_legacy_image_props()
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
+        self.assertTrue(rr.cpu_pinning_requested)
+
+    def test_resource_request_init_with_legacy_image_props_no_translate(self):
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                # we should have a VCPU despite hw_cpu_policy because
+                # enable_pinning_translate=False
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            # we should not require hyperthreading despite hw_cpu_thread_policy
+            # because enable_pinning_translate=False
+            required_traits=set(),
+        )
+        rs = self._test_resource_request_init_with_legacy_image_props()
+        rr = utils.ResourceRequest(rs, enable_pinning_translate=False)
+        self.assertResourceRequestsEqual(expected, rr)
+        self.assertFalse(rr.cpu_pinning_requested)
+
     def test_resource_request_init_is_bfv(self):
         flavor = objects.Flavor(
             vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=1555)
@@ -903,6 +1065,26 @@ class TestUtils(TestUtilsBase):
             },
         )
         rs = objects.RequestSpec(flavor=flavor, is_bfv=True)
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
+
+    def test_resource_request_with_vpmems(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={'hw:pmem': '4GB, 4GB,SMALL'})
+
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+                'CUSTOM_PMEM_NAMESPACE_4GB': 2,
+                'CUSTOM_PMEM_NAMESPACE_SMALL': 1
+            },
+        )
+        rs = objects.RequestSpec(flavor=flavor, is_bfv=False)
         rr = utils.ResourceRequest(rs)
         self.assertResourceRequestsEqual(expected, rr)
 
@@ -1162,6 +1344,88 @@ class TestUtils(TestUtilsBase):
             1.8,
             utils.get_weight_multiplier(host1, 'cpu_weight_multiplier', 1.0)
         )
+
+    @mock.patch('nova.scheduler.utils.'
+                'fill_provider_mapping_based_on_allocation')
+    def test_fill_provider_mapping_returns_early_if_nothing_to_do(
+            self, mock_fill_provider):
+        context = nova_context.RequestContext()
+        request_spec = objects.RequestSpec()
+        # set up the request that there is nothing to do
+        request_spec.requested_resources = []
+        report_client = mock.sentinel.report_client
+        selection = objects.Selection()
+
+        utils.fill_provider_mapping(
+            context, report_client, request_spec, selection)
+
+        mock_fill_provider.assert_not_called()
+
+    @mock.patch('nova.scheduler.utils.'
+                'fill_provider_mapping_based_on_allocation')
+    def test_fill_provider_mapping(self, mock_fill_provider):
+        context = nova_context.RequestContext()
+        request_spec = objects.RequestSpec()
+        request_spec.requested_resources = [objects.RequestGroup()]
+        report_client = mock.sentinel.report_client
+        allocs = {
+            uuids.rp_uuid: {
+                'resources': {
+                    'NET_BW_EGR_KILOBIT_PER_SEC': 1,
+                }
+            }
+        }
+        allocation_req = {'allocations': allocs}
+        selection = objects.Selection(
+            allocation_request=jsonutils.dumps(allocation_req))
+
+        utils.fill_provider_mapping(
+            context, report_client, request_spec, selection)
+
+        mock_fill_provider.assert_called_once_with(
+            context, report_client, request_spec, allocs)
+
+    @mock.patch.object(objects.RequestSpec,
+                       'map_requested_resources_to_providers')
+    def test_fill_provider_mapping_based_on_allocation_returns_early(
+            self, mock_map):
+        context = nova_context.RequestContext()
+        request_spec = objects.RequestSpec()
+        # set up the request that there is nothing to do
+        request_spec.requested_resources = []
+        report_client = mock.sentinel.report_client
+        allocation = mock.sentinel.allocation
+
+        utils.fill_provider_mapping_based_on_allocation(
+            context, report_client, request_spec, allocation)
+
+        mock_map.assert_not_called()
+
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient')
+    @mock.patch.object(objects.RequestSpec,
+                       'map_requested_resources_to_providers')
+    def test_fill_provider_mapping_based_on_allocation(
+            self, mock_map, mock_report_client):
+        context = nova_context.RequestContext()
+        request_spec = objects.RequestSpec()
+        # set up the request that there is nothing to do
+        request_spec.requested_resources = [objects.RequestGroup()]
+        allocation = {
+            uuids.rp_uuid: {
+                'resources': {
+                    'NET_BW_EGR_KILOBIT_PER_SEC': 1,
+                }
+            }
+        }
+        traits = ['CUSTOM_PHYSNET1', 'CUSTOM_VNIC_TYPE_NORMAL']
+        mock_report_client.get_provider_traits.return_value = report.TraitInfo(
+            traits=['CUSTOM_PHYSNET1', 'CUSTOM_VNIC_TYPE_NORMAL'],
+            generation=0)
+
+        utils.fill_provider_mapping_based_on_allocation(
+            context, mock_report_client, request_spec, allocation)
+
+        mock_map.assert_called_once_with(allocation, {uuids.rp_uuid: traits})
 
 
 class TestEncryptedMemoryTranslation(TestUtilsBase):

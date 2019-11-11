@@ -75,6 +75,7 @@ def fake_db_instance(**updates):
                   'vcpu_model': None,
                   'device_metadata': None,
                   'trusted_certs': None,
+                  'resources': None,
                  },
         'tags': [],
         'services': []
@@ -138,6 +139,7 @@ def fake_instance_obj(context, obj_instance_class=None, **updates):
             inst.instance_type_id = flavor.id
     inst.old_flavor = None
     inst.new_flavor = None
+    inst.resources = None
     inst.obj_reset_changes()
     return inst
 

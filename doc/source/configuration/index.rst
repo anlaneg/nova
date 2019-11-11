@@ -17,8 +17,30 @@ Configuration
 * :doc:`Config Reference <config>`: A complete reference of all
   configuration options available in the ``nova.conf`` file.
 
-* :doc:`Sample Config File <sample-config>`: A sample config
-  file with inline documentation.
+.. only:: html
+
+   * :doc:`Sample Config File <sample-config>`: A sample config
+     file with inline documentation.
+
+.. # NOTE(mriedem): This is the section where we hide things that we don't
+   # actually want in the table of contents but sphinx build would fail if
+   # they aren't in the toctree somewhere.
+.. # NOTE(amotoki): toctree needs to be placed at the end of the secion to
+   # keep the document structure in the PDF doc.
+.. toctree::
+   :hidden:
+
+   config
+
+.. # NOTE(amotoki): Sample files are only available in HTML document.
+   # Inline sample files with literalinclude hit LaTeX processing error
+   # like TeX capacity exceeded and direct links are discouraged in PDF doc.
+.. only:: html
+
+   .. toctree::
+      :hidden:
+
+      sample-config
 
 Policy
 ------
@@ -29,16 +51,27 @@ permissions on REST API actions.
 * :doc:`Policy Reference <policy>`: A complete reference of all
   policy points in nova and what they impact.
 
-* :doc:`Sample Policy File <sample-policy>`: A sample nova
-  policy file with inline documentation.
+.. only:: html
+
+   * :doc:`Sample Policy File <sample-policy>`: A sample nova
+     policy file with inline documentation.
 
 .. # NOTE(mriedem): This is the section where we hide things that we don't
    # actually want in the table of contents but sphinx build would fail if
    # they aren't in the toctree somewhere.
+.. # NOTE(amotoki): toctree needs to be placed at the end of the secion to
+   # keep the document structure in the PDF doc.
 .. toctree::
    :hidden:
 
-   config
-   sample-config
    policy
-   sample-policy
+
+.. # NOTE(amotoki): Sample files are only available in HTML document.
+   # Inline sample files with literalinclude hit LaTeX processing error
+   # like TeX capacity exceeded and direct links are discouraged in PDF doc.
+.. only:: html
+
+   .. toctree::
+      :hidden:
+
+      sample-policy

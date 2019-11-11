@@ -206,7 +206,6 @@ migration to complete added::
 
 From this version of the API users can get the migration summary list by
 index API or the information of a specific migration by get API.
-And the old top-level resource ``/os-migrations`` won't be extended anymore.
 Add ``migration_type`` for old ``/os-migrations`` API, also add ``ref`` link to
 the ``/servers/{uuid}/migrations/{id}`` for it when the migration is an
 in-progress live-migration.
@@ -1012,8 +1011,11 @@ The default behavior is configurable using two new policies:
 * ``compute:server:topology:index``
 * ``compute:server:topology:host:index``
 
-2.79
-----
+.. Keep a reference for python-novaclient releasenotes
+.. _id71:
+
+2.79 (Maximum in Train)
+-----------------------
 
 API microversion 2.79 adds support for specifying the ``delete_on_termination``
 field in the request body when attaching a volume to a server, to support
@@ -1026,3 +1028,28 @@ The affected APIs are as follows:
 * ``POST /servers/{server_id}/os-volume_attachments``
 * ``GET /servers/{server_id}/os-volume_attachments``
 * ``GET /servers/{server_id}/os-volume_attachments/{volume_id}``
+
+2.80
+----
+
+Microversion 2.80 changes the list migrations APIs and the os-migrations API.
+
+Expose the ``user_id`` and ``project_id`` fields in the following APIs:
+
+* ``GET /os-migrations``
+* ``GET /servers/{server_id}/migrations``
+* ``GET /servers/{server_id}/migrations/{migration_id}``
+
+The ``GET /os-migrations`` API will also have optional ``user_id`` and
+``project_id`` query parameters for filtering migrations by user and/or
+project, for example:
+
+* ``GET /os-migrations?user_id=ef9d34b4-45d0-4530-871b-3fb535988394``
+* ``GET /os-migrations?project_id=011ee9f4-8f16-4c38-8633-a254d420fd54``
+* ``GET /os-migrations?user_id=ef9d34b4-45d0-4530-871b-3fb535988394&project_id=011ee9f4-8f16-4c38-8633-a254d420fd54``
+
+2.81
+----
+
+Adds support for image cache management by aggregate by adding
+``POST /os-aggregates/{aggregate_id}/images``.

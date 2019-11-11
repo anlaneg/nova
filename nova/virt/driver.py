@@ -171,6 +171,7 @@ class ComputeDriver(object):
         "supports_extend_volume": False,
         "supports_multiattach": False,
         "supports_trusted_certs": False,
+        "supports_pcpus": False,
 
         # Image type support flags
         "supports_image_type_aki": False,
@@ -1246,6 +1247,22 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    def post_claim_migrate_data(self, context, instance, migrate_data, claim):
+        """Returns migrate_data augmented with any information obtained from
+        the claim. Intended to run on the destination of a live-migration
+        operation, after resources have been claimed on it.
+
+        :param context: The request context.
+        :param instance: The instance being live-migrated.
+        :param migrate_data: The existing LiveMigrateData object for this live
+                             migration.
+        :param claim: The MoveClaim that was made on the destination for this
+                      live migration.
+        :returns: A LiveMigrateData object augmented with information obtained
+                  from the Claim.
+        """
+        return migrate_data
+
     def cleanup_live_migration_destination_check(self, context,
                                                  dest_check_data):
         """Do required cleanup on dest host after check_can_live_migrate calls
@@ -1565,6 +1582,22 @@ class ComputeDriver(object):
         :param all_instances: nova.objects.instance.InstanceList
         """
         pass
+
+    def cache_image(self, context, image_id):
+        """Download an image into the cache.
+
+        Used by the compute manager in response to a request to pre-cache
+        an image on the compute node. If the driver implements an image cache,
+        it should implement this method as well and perform the same action
+        as it does during an on-demand base image fetch in response to a
+        spawn.
+
+        :returns: A boolean indicating whether or not the image was fetched.
+                  True if it was fetched, or False if it already exists in
+                  the cache.
+        :raises: An Exception on error
+        """
+        raise NotImplementedError()
 
     def add_to_aggregate(self, context, aggregate, host, **kwargs):
         """Add a compute host to an aggregate.

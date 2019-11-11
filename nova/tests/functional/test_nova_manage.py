@@ -880,6 +880,25 @@ class TestNovaManagePlacementHealPortAllocations(
             self.output.getvalue())
         self.assertEqual(0, result)
 
+    def test_heal_port_allocation_dry_run(self):
+        server, ports = self._create_server_with_missing_port_alloc(
+            [self.neutron.port_1])
+
+        # let's trigger a heal
+        result = self.cli.heal_allocations(
+            verbose=True, max_count=2, dry_run=True)
+
+        self._assert_placement_not_updated(server)
+        self._assert_ports_not_updated(ports)
+
+        self.assertIn(
+            '[dry-run] Update allocations for instance',
+            self.output.getvalue())
+        # Note that we had a issues by printing defaultdicts directly to the
+        # user in the past. So let's assert it does not happen any more.
+        self.assertNotIn('defaultdict', self.output.getvalue())
+        self.assertEqual(4, result)
+
     def test_no_healing_is_needed(self):
         """Test that the instance has a port that has allocations
         so nothing to be healed.
@@ -1206,7 +1225,7 @@ class TestNovaManagePlacementHealPortAllocations(
         rollback of the second port update to fail.
         """
         port2 = self.neutron.create_port()['port']
-        port3 = self.neutron.create_port(port2)['port']
+        port3 = self.neutron.create_port()['port']
         server, _ = self._create_server_with_missing_port_alloc(
             [self.neutron.port_1, port2, port3])
 
@@ -1379,7 +1398,6 @@ class TestNovaManagePlacementSyncAggregates(
 
 class TestDBArchiveDeletedRows(integrated_helpers._IntegratedTestBase):
     """Functional tests for the "nova-manage db archive_deleted_rows" CLI."""
-    USE_NEUTRON = True
     api_major_version = 'v2.1'
     _image_ref_parameter = 'imageRef'
     _flavor_ref_parameter = 'flavorRef'

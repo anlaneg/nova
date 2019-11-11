@@ -27,7 +27,9 @@ import webob.multidict
 from nova.api.openstack import common
 from nova.compute import task_states
 from nova.compute import vm_states
+from nova import context
 from nova import exception
+from nova import network
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 
@@ -449,6 +451,23 @@ class MiscFunctionsTest(test.TestCase):
         self.assertRaises(exception.InvalidInput, common.is_all_tenants,
                           search_opts)
 
+    def test_instance_has_port_with_resource_request(self):
+        network_api = mock.Mock(spec=network.API())
+        network_api.list_ports.return_value = {'ports': [
+            {'resource_request': mock.sentinel.request}
+        ]}
+        res = common.instance_has_port_with_resource_request(
+            mock.sentinel.uuid, network_api)
+
+        self.assertTrue(res)
+        network_api.list_ports.assert_called_once_with(
+            test.MatchType(context.RequestContext),
+            device_id=mock.sentinel.uuid, fields=['resource_request'])
+        # assert that the neutron call uses an admin context
+        ctxt = network_api.mock_calls[0][1][0]
+        self.assertTrue(ctxt.is_admin)
+        self.assertIsNone(ctxt.auth_token)
+
 
 class TestCollectionLinks(test.NoDBTestCase):
     """Tests the _get_collection_links method."""
@@ -578,7 +597,7 @@ class UrlJoinTest(test.NoDBTestCase):
 
 
 class ViewBuilderLinkTest(test.NoDBTestCase):
-    project_id = "fake"
+    project_id = fakes.FAKE_PROJECT_ID
     api_version = "2.1"
 
     def setUp(self):

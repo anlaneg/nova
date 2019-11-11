@@ -1760,7 +1760,7 @@ def instance_create(context, values):
     values - dict containing column values.
     """
 
-    security_group_ensure_default(context)
+    default_group = security_group_ensure_default(context)
 
     values = values.copy()
     #将metadata变换为InstanceMetadata类型的数组
@@ -1790,29 +1790,26 @@ def instance_create(context, values):
          'pci_requests': None,
          'vcpu_model': None,
          'trusted_certs': None,
-         'vpmems': None,
+         'resources': None,
          })
     instance_ref['extra'].update(values.pop('extra', {}))
     # 更新instances表
     instance_ref.update(values)
 
-    def _get_sec_group_models(security_groups):
-        models = []
-        default_group = _security_group_ensure_default(context)
-        if 'default' in security_groups:
-            models.append(default_group)
-            # Generate a new list, so we don't modify the original
-            security_groups = [x for x in security_groups if x != 'default']
-        if security_groups:
-            models.extend(_security_group_get_by_names(
-                context, security_groups))
-        return models
+    # Gather the security groups for the instance
+    sg_models = []
+    if 'default' in security_groups:
+        sg_models.append(default_group)
+        # Generate a new list, so we don't modify the original
+        security_groups = [x for x in security_groups if x != 'default']
+    if security_groups:
+        sg_models.extend(_security_group_get_by_names(
+            context, security_groups))
 
     #检查instance唯一名称
     if 'hostname' in values:
         _validate_unique_server_name(context, values['hostname'])
-    
-    instance_ref.security_groups = _get_sec_group_models(security_groups)
+    instance_ref.security_groups = sg_models
     context.session.add(instance_ref)
 
     # create the instance uuid to ec2_id mapping entry for instance
@@ -2678,28 +2675,28 @@ def instance_get_all_by_host(context, host, columns_to_join=None):
 
 
 def _instance_get_all_uuids_by_hosts(context, hosts):
-    """Return a dict, keyed by hostname, of a list of the instance uuids on the
-    host for each supplied hostname.
-
-    Returns a dict, keyed by hostname, of a list of UUIDs, not Instance model
-    objects.
-    """
     itbl = models.Instance.__table__
     default_deleted_value = itbl.c.deleted.default.arg
     sel = sql.select([itbl.c.host, itbl.c.uuid])
     sel = sel.where(sql.and_(
             itbl.c.deleted == default_deleted_value,
-            itbl.c.host.in_(hosts)))
+            itbl.c.host.in_(sa.bindparam('hosts', expanding=True))))
 
     # group the instance UUIDs by hostname
     res = collections.defaultdict(list)
-    for rec in context.session.execute(sel).fetchall():
+    for rec in context.session.execute(sel, {'hosts': hosts}).fetchall():
         res[rec[0]].append(rec[1])
     return res
 
 
 @pick_context_manager_reader
 def instance_get_all_uuids_by_hosts(context, hosts):
+    """Return a dict, keyed by hostname, of a list of the instance uuids on the
+    host for each supplied hostname, not Instance model objects.
+
+    The dict is a defaultdict of list, thus inspecting the dict for a host not
+    in the dict will return an empty list not a KeyError.
+    """
     return _instance_get_all_uuids_by_hosts(context, hosts)
 
 
@@ -3085,7 +3082,7 @@ def instance_extra_get_by_instance_uuid(context, instance_uuid,
         filter_by(instance_uuid=instance_uuid)
     if columns is None:
         columns = ['numa_topology', 'pci_requests', 'flavor', 'vcpu_model',
-                   'trusted_certs', 'vpmems', 'migration_context']
+                   'trusted_certs', 'resources', 'migration_context']
     for column in columns:
         query = query.options(undefer(column))
     instance_extra = query.first()
@@ -4438,10 +4435,10 @@ def migration_get_in_progress_by_host_and_node(context, host, node):
                             models.Migration.source_node == node),
                        and_(models.Migration.dest_compute == host,
                             models.Migration.dest_node == node))).\
-            filter(~models.Migration.status.in_(['accepted', 'confirmed',
-                                                 'reverted', 'error',
-                                                 'failed', 'completed',
-                                                 'cancelled', 'done'])).\
+            filter(~models.Migration.status.in_(['confirmed', 'reverted',
+                                                 'error', 'failed',
+                                                 'completed', 'cancelled',
+                                                 'done'])).\
             options(_joinedload_all('instance.system_metadata')).\
             all()
 
@@ -4503,6 +4500,13 @@ def migration_get_all_by_filters(context, filters,
     if "instance_uuid" in filters:
         instance_uuid = filters["instance_uuid"]
         query = query.filter(models.Migration.instance_uuid == instance_uuid)
+    if 'user_id' in filters:
+        user_id = filters['user_id']
+        query = query.filter(models.Migration.user_id == user_id)
+    if 'project_id' in filters:
+        project_id = filters['project_id']
+        query = query.filter(models.Migration.project_id == project_id)
+
     if marker:
         try:
             marker = migration_get_by_uuid(context, marker)

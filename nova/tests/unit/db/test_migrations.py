@@ -185,6 +185,7 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
         # placeholders per cycle since the rate of DB changes has dropped
         # significantly
         stein_placeholders = list(range(392, 397))
+        train_placeholders = list(range(403, 408))
 
         return (special +
                 havana_placeholders +
@@ -197,7 +198,8 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
                 ocata_placeholders +
                 pike_placeholders +
                 queens_placeholders +
-                stein_placeholders)
+                stein_placeholders +
+                train_placeholders)
 
     def migrate_up(self, version, with_data=False):
         if with_data:
@@ -788,7 +790,10 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
         def removed_column(element):
             # Define a whitelist of columns that would be removed from the
             # DB at a later release.
-            column_whitelist = {'instances': ['internal_id']}
+            # NOTE(Luyao) The vpmems column was added to the schema in train,
+            # and removed from the model in train.
+            column_whitelist = {'instances': ['internal_id'],
+                                'instance_extra': ['vpmems']}
 
             if element[0] != 'remove_column':
                 return False
@@ -1040,6 +1045,17 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
         # NOTE(mriedem): This is a dummy migration that just does a consistency
         # check. The actual test for 400 is in TestServicesUUIDCheck.
         pass
+
+    def _check_401(self, engine, data):
+        for prefix in ('', 'shadow_'):
+            self.assertColumnExists(
+                engine, '%smigrations' % prefix, 'user_id')
+            self.assertColumnExists(
+                engine, '%smigrations' % prefix, 'project_id')
+
+    def _check_402(self, engine, data):
+        self.assertColumnExists(engine, 'instance_extra', 'resources')
+        self.assertColumnExists(engine, 'shadow_instance_extra', 'resources')
 
 
 class TestNovaMigrationsSQLite(NovaMigrationsCheckers,

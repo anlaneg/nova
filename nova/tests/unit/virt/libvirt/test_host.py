@@ -18,6 +18,7 @@ import os
 
 import eventlet
 from eventlet import greenthread
+from eventlet import tpool
 import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
@@ -911,11 +912,6 @@ class HostTestCase(test.NoDBTestCase):
         mock_find_secret.return_value = None
         self.host.delete_secret("rbd", "rbdvol")
 
-    def test_get_cpu_count(self):
-        with mock.patch.object(host.Host, "get_connection") as mock_conn:
-            mock_conn().getInfo.return_value = ['zero', 'one', 'two']
-            self.assertEqual('two', self.host.get_cpu_count())
-
     def test_get_memory_total(self):
         with mock.patch.object(host.Host, "get_connection") as mock_conn:
             mock_conn().getInfo.return_value = ['zero', 'one', 'two']
@@ -1107,10 +1103,10 @@ Active:          8381604 kB
         self.host.device_lookup_by_name("foo")
         mock_nodeDeviceLookupByName.assert_called_once_with("foo")
 
-    @mock.patch.object(fakelibvirt.virConnect, "listDevices")
-    def test_list_pci_devices(self, mock_listDevices):
-        self.host.list_pci_devices(8)
-        mock_listDevices.assert_called_once_with('pci', 8)
+    def test_list_pci_devices(self):
+        with mock.patch.object(self.host, "_list_devices") as mock_listDevices:
+            self.host.list_pci_devices(8)
+        mock_listDevices.assert_called_once_with('pci', flags=8)
 
     def test_list_mdev_capable_devices(self):
         with mock.patch.object(self.host, "_list_devices") as mock_listDevices:
@@ -1170,6 +1166,56 @@ cg /cgroup/memory cg opt1,opt2 0 0
     def test_is_cpu_control_policy_capable_ioerror(self, mock_open):
         self.assertFalse(self.host.is_cpu_control_policy_capable())
 
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.getCapabilities')
+    def test_has_hyperthreading__true(self, mock_cap):
+        mock_cap.return_value = """
+        <capabilities>
+          <host>
+            <uuid>1f71d34a-7c89-45cf-95ce-3df20fc6b936</uuid>
+            <cpu>
+            </cpu>
+            <topology>
+              <cells num='1'>
+                <cell id='0'>
+                  <cpus num='4'>
+                    <cpu id='0' socket_id='0' core_id='0' siblings='0,2'/>
+                    <cpu id='1' socket_id='0' core_id='1' siblings='1,3'/>
+                    <cpu id='2' socket_id='0' core_id='0' siblings='0,2'/>
+                    <cpu id='3' socket_id='0' core_id='1' siblings='1,3'/>
+                  </cpus>
+                </cell>
+              </cells>
+            </topology>
+          </host>
+        </capabilities>
+        """
+        self.assertTrue(self.host.has_hyperthreading)
+
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.getCapabilities')
+    def test_has_hyperthreading__false(self, mock_cap):
+        mock_cap.return_value = """
+        <capabilities>
+          <host>
+            <uuid>1f71d34a-7c89-45cf-95ce-3df20fc6b936</uuid>
+            <cpu>
+            </cpu>
+            <topology>
+              <cells num='1'>
+                <cell id='0'>
+                  <cpus num='4'>
+                    <cpu id='0' socket_id='0' core_id='0' siblings='0'/>
+                    <cpu id='1' socket_id='0' core_id='1' siblings='1'/>
+                    <cpu id='2' socket_id='0' core_id='2' siblings='2'/>
+                    <cpu id='3' socket_id='0' core_id='3' siblings='3'/>
+                  </cpus>
+                </cell>
+              </cells>
+            </topology>
+          </host>
+        </capabilities>
+        """
+        self.assertFalse(self.host.has_hyperthreading)
+
 
 vc = fakelibvirt.virConnect
 
@@ -1227,3 +1273,56 @@ class TestLibvirtSEVSupported(TestLibvirtSEV):
                        new=vc._domain_capability_features_with_SEV)
     def test_supported_with_feature(self, fake_exists):
         self.assertTrue(self.host.supports_amd_sev)
+
+
+class LibvirtTpoolProxyTestCase(test.NoDBTestCase):
+    def setUp(self):
+        super(LibvirtTpoolProxyTestCase, self).setUp()
+
+        self.useFixture(fakelibvirt.FakeLibvirtFixture())
+        self.host = host.Host("qemu:///system")
+
+        def _stub_xml(uuid):
+            return ("<domain>"
+                    "  <uuid>" + uuid + "</uuid>"
+                    "  <name>" + uuid + "</name>"
+                    "</domain>")
+
+        self.conn = self.host.get_connection()
+        self.conn.defineXML(_stub_xml(uuids.vm1)).create()
+        self.conn.defineXML(_stub_xml(uuids.vm2)).create()
+
+    def test_get_libvirt_proxy_classes(self):
+        proxy_classes = host.Host._get_libvirt_proxy_classes(host.libvirt)
+
+        # Assert the classes we're using currently
+        # NOTE(mdbooth): We're obviously asserting the wrong classes here
+        # because we're explicitly asserting the faked versions. This is a
+        # concession to avoid a test dependency on libvirt.
+        self.assertIn(fakelibvirt.virDomain, proxy_classes)
+        self.assertIn(fakelibvirt.virConnect, proxy_classes)
+        self.assertIn(fakelibvirt.virNodeDevice, proxy_classes)
+        self.assertIn(fakelibvirt.virSecret, proxy_classes)
+        self.assertIn(fakelibvirt.virNWFilter, proxy_classes)
+
+        # Assert that we filtered out libvirtError
+        self.assertNotIn(fakelibvirt.libvirtError, proxy_classes)
+
+    def test_tpool_get_connection(self):
+        # Test that Host.get_connection() returns a tpool.Proxy
+        self.assertIsInstance(self.conn, tpool.Proxy)
+
+    def test_tpool_instance_lookup(self):
+        # Test that domains returns by our libvirt connection are also proxied
+        dom = self.conn.lookupByUUIDString(uuids.vm1)
+        self.assertIsInstance(dom, tpool.Proxy)
+
+    def test_tpool_list_all_connections(self):
+        # Test that Host.list_all_connections() returns a list of proxied
+        # virDomain objects
+
+        domains = self.host.list_instance_domains()
+        self.assertEqual(2, len(domains))
+        for domain in domains:
+            self.assertIsInstance(domain, tpool.Proxy)
+            self.assertIn(domain.UUIDString(), (uuids.vm1, uuids.vm2))

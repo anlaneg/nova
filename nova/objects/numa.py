@@ -21,34 +21,19 @@ from nova.objects import fields as obj_fields
 from nova.virt import hardware
 
 
-def all_things_equal(obj_a, obj_b):
-    if obj_b is None:
-        return False
-
-    for name in obj_a.fields:
-        set_a = name in obj_a
-        set_b = name in obj_b
-        if set_a != set_b:
-            return False
-        elif not set_a:
-            continue
-
-        if getattr(obj_a, name) != getattr(obj_b, name):
-            return False
-    return True
-
-
 @base.NovaObjectRegistry.register
 class NUMACell(base.NovaObject):
     # Version 1.0: Initial version
     # Version 1.1: Added pinned_cpus and siblings fields
     # Version 1.2: Added mempages field
     # Version 1.3: Add network_metadata field
-    VERSION = '1.3'
+    # Version 1.4: Add pcpuset
+    VERSION = '1.4'
 
     fields = {
         'id': obj_fields.IntegerField(read_only=True),
         'cpuset': obj_fields.SetOfIntegersField(),
+        'pcpuset': obj_fields.SetOfIntegersField(),
         'memory': obj_fields.IntegerField(),
         'cpu_usage': obj_fields.IntegerField(default=0),
         'memory_usage': obj_fields.IntegerField(default=0),
@@ -61,27 +46,31 @@ class NUMACell(base.NovaObject):
     def obj_make_compatible(self, primitive, target_version):
         super(NUMACell, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 4):
+            primitive.pop('pcpuset', None)
         if target_version < (1, 3):
             primitive.pop('network_metadata', None)
 
     def __eq__(self, other):
-        return all_things_equal(self, other)
+        return base.all_things_equal(self, other)
 
     def __ne__(self, other):
         return not (self == other)
 
     @property
-    def free_cpus(self):
-        return self.cpuset - self.pinned_cpus or set()
+    def free_pcpus(self):
+        """Return available dedicated CPUs."""
+        return self.pcpuset - self.pinned_cpus or set()
 
     @property
     def free_siblings(self):
-        return [sibling_set & self.free_cpus
-                for sibling_set in self.siblings]
+        """Return available dedicated CPUs in their sibling set form."""
+        return [sibling_set & self.free_pcpus for sibling_set in self.siblings]
 
     @property
-    def avail_cpus(self):
-        return len(self.free_cpus)
+    def avail_pcpus(self):
+        """Return number of available dedicated CPUs."""
+        return len(self.free_pcpus)
 
     @property
     def avail_memory(self):
@@ -93,23 +82,27 @@ class NUMACell(base.NovaObject):
         return any(len(sibling_set) > 1 for sibling_set in self.siblings)
 
     def pin_cpus(self, cpus):
-        if cpus - self.cpuset:
+        if cpus - self.pcpuset:
             raise exception.CPUPinningUnknown(requested=list(cpus),
-                                              available=list(self.cpuset))
+                                              available=list(self.pcpuset))
+
         if self.pinned_cpus & cpus:
+            available = list(self.pcpuset - self.pinned_cpus)
             raise exception.CPUPinningInvalid(requested=list(cpus),
-                                              available=list(self.cpuset -
-                                                             self.pinned_cpus))
+                                              available=available)
+
         self.pinned_cpus |= cpus
 
     def unpin_cpus(self, cpus):
-        if cpus - self.cpuset:
+        if cpus - self.pcpuset:
             raise exception.CPUUnpinningUnknown(requested=list(cpus),
-                                                available=list(self.cpuset))
+                                                available=list(self.pcpuset))
+
         if (self.pinned_cpus & cpus) != cpus:
             raise exception.CPUUnpinningInvalid(requested=list(cpus),
                                                 available=list(
                                                     self.pinned_cpus))
+
         self.pinned_cpus -= cpus
 
     def pin_cpus_with_siblings(self, cpus):
@@ -179,7 +172,7 @@ class NUMAPagesTopology(base.NovaObject):
             primitive.pop('reserved', None)
 
     def __eq__(self, other):
-        return all_things_equal(self, other)
+        return base.all_things_equal(self, other)
 
     def __ne__(self, other):
         return not (self == other)
@@ -216,7 +209,7 @@ class NUMATopology(base.NovaObject):
     }
 
     def __eq__(self, other):
-        return all_things_equal(self, other)
+        return base.all_things_equal(self, other)
 
     def __ne__(self, other):
         return not (self == other)

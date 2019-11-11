@@ -31,10 +31,12 @@ from nova import test
 from nova.tests.unit import fake_instance
 
 
+fake_limits1 = objects.SchedulerLimits()
 fake_selection1 = objects.Selection(service_host="host1", nodename="node1",
-        cell_uuid=uuids.cell)
+        cell_uuid=uuids.cell, limits=fake_limits1)
+fake_limits2 = objects.SchedulerLimits()
 fake_selection2 = objects.Selection(service_host="host2", nodename="node2",
-        cell_uuid=uuids.cell)
+        cell_uuid=uuids.cell, limits=fake_limits2)
 
 
 class LiveMigrationTaskTestCase(test.NoDBTestCase):
@@ -150,7 +152,7 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             mock.patch('nova.conductor.tasks.migrate.'
                        'replace_allocation_with_migration'),
         ) as (mock_check, mock_find, mock_mig, mock_save, mock_alloc):
-            mock_find.return_value = ("found_host", "found_node")
+            mock_find.return_value = ("found_host", "found_node", None)
             mock_mig.return_value = "bob"
             mock_alloc.return_value = (mock.MagicMock(), mock.MagicMock())
 
@@ -185,7 +187,7 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
         self.flags(enable_numa_live_migration=False, group='workarounds')
         self.task.instance.numa_topology = None
         mock_get.return_value = objects.ComputeNode(
-            uuid=uuids.cn1, hypervisor_type='kvm')
+            uuid=uuids.cn1, hypervisor_type='qemu')
         self.task._check_instance_has_no_numa()
 
     @mock.patch.object(objects.ComputeNode, 'get_by_host_and_nodename')
@@ -199,25 +201,47 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
         self.task._check_instance_has_no_numa()
 
     @mock.patch.object(objects.ComputeNode, 'get_by_host_and_nodename')
-    def test_check_instance_has_no_numa_passes_workaround(self, mock_get):
+    @mock.patch.object(objects.Service, 'get_minimum_version',
+                       return_value=39)
+    def test_check_instance_has_no_numa_passes_workaround(
+            self, mock_get_min_ver, mock_get):
         self.flags(enable_numa_live_migration=True, group='workarounds')
         self.task.instance.numa_topology = objects.InstanceNUMATopology(
             cells=[objects.InstanceNUMACell(id=0, cpuset=set([0]),
                                             memory=1024)])
         mock_get.return_value = objects.ComputeNode(
-            uuid=uuids.cn1, hypervisor_type='kvm')
+            uuid=uuids.cn1, hypervisor_type='qemu')
         self.task._check_instance_has_no_numa()
+        mock_get_min_ver.assert_called_once_with(self.context, 'nova-compute')
 
     @mock.patch.object(objects.ComputeNode, 'get_by_host_and_nodename')
-    def test_check_instance_has_no_numa_fails(self, mock_get):
+    @mock.patch.object(objects.Service, 'get_minimum_version',
+                       return_value=39)
+    def test_check_instance_has_no_numa_fails(self, mock_get_min_ver,
+                                              mock_get):
         self.flags(enable_numa_live_migration=False, group='workarounds')
         mock_get.return_value = objects.ComputeNode(
-            uuid=uuids.cn1, hypervisor_type='QEMU')
+            uuid=uuids.cn1, hypervisor_type='qemu')
         self.task.instance.numa_topology = objects.InstanceNUMATopology(
             cells=[objects.InstanceNUMACell(id=0, cpuset=set([0]),
                                             memory=1024)])
         self.assertRaises(exception.MigrationPreCheckError,
                           self.task._check_instance_has_no_numa)
+        mock_get_min_ver.assert_called_once_with(self.context, 'nova-compute')
+
+    @mock.patch.object(objects.ComputeNode, 'get_by_host_and_nodename')
+    @mock.patch.object(objects.Service, 'get_minimum_version',
+                       return_value=40)
+    def test_check_instance_has_no_numa_new_svc_passes(self, mock_get_min_ver,
+                                                       mock_get):
+        self.flags(enable_numa_live_migration=False, group='workarounds')
+        mock_get.return_value = objects.ComputeNode(
+            uuid=uuids.cn1, hypervisor_type='qemu')
+        self.task.instance.numa_topology = objects.InstanceNUMATopology(
+            cells=[objects.InstanceNUMACell(id=0, cpuset=set([0]),
+                                            memory=1024)])
+        self.task._check_instance_has_no_numa()
+        mock_get_min_ver.assert_called_once_with(self.context, 'nova-compute')
 
     @mock.patch.object(objects.Service, 'get_by_compute_host')
     @mock.patch.object(servicegroup.API, 'service_is_up')
@@ -264,6 +288,7 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             ram_allocation_ratio=1.0)
         mock_get_info.return_value = hypervisor_details
         mock_check.return_value = "migrate_data"
+        self.task.limits = fake_limits1
 
         with test.nested(
             mock.patch.object(self.task.network_api,
@@ -280,7 +305,8 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
                           mock.call(self.destination)],
                          mock_get_info.call_args_list)
         mock_check.assert_called_once_with(self.context, self.instance,
-            self.destination, self.block_migration, self.disk_over_commit)
+            self.destination, self.block_migration, self.disk_over_commit,
+            self.task.migration, fake_limits1)
 
     def test_check_requested_destination_fails_with_same_dest(self):
         self.task.destination = "same"
@@ -392,7 +418,8 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
     @mock.patch.object(scheduler_utils, 'setup_instance_group')
     def test_find_destination_works(self, mock_setup, mock_reset, mock_select,
                                     mock_check, mock_call):
-        self.assertEqual(("host1", "node1"), self.task._find_destination())
+        self.assertEqual(("host1", "node1", fake_limits1),
+                         self.task._find_destination())
 
         # Make sure the request_spec was updated to include the cell
         # mapping.
@@ -422,7 +449,8 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
                                              mock_check, mock_call):
         self.instance['image_ref'] = ''
 
-        self.assertEqual(("host1", "node1"), self.task._find_destination())
+        self.assertEqual(("host1", "node1", fake_limits1),
+                         self.task._find_destination())
 
         mock_setup.assert_called_once_with(self.context, self.fake_spec)
         mock_select.assert_called_once_with(
@@ -445,7 +473,8 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             mock_remove):
         mock_check.side_effect = [error, None]
 
-        self.assertEqual(("host2", "node2"), self.task._find_destination())
+        self.assertEqual(("host2", "node2", fake_limits2),
+                         self.task._find_destination())
         # Should have removed allocations for the first host.
         mock_remove.assert_called_once_with('host1', 'node1')
         mock_setup.assert_called_once_with(self.context, self.fake_spec)
@@ -479,7 +508,8 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
         self.flags(migrate_max_retries=1)
         mock_call.side_effect = [exception.Invalid(), None]
 
-        self.assertEqual(("host2", "node2"), self.task._find_destination())
+        self.assertEqual(("host2", "node2", fake_limits2),
+                         self.task._find_destination())
         # Should have removed allocations for the first host.
         mock_remove.assert_called_once_with('host1', 'node1')
         mock_setup.assert_called_once_with(self.context, self.fake_spec)
@@ -506,7 +536,8 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
         mock_call.side_effect = [exception.MigrationPreCheckError('reason'),
                                  None]
 
-        self.assertEqual(("host2", "node2"), self.task._find_destination())
+        self.assertEqual(("host2", "node2", fake_limits2),
+                         self.task._find_destination())
         # Should have removed allocations for the first host.
         mock_remove.assert_called_once_with('host1', 'node1')
         mock_setup.assert_called_once_with(self.context, self.fake_spec)
@@ -581,9 +612,7 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             self.assertRaises(exception.MigrationPreCheckError,
                               self.task._call_livem_checks_on_host, {})
 
-    @mock.patch('nova.conductor.tasks.live_migrate.'
-                'supports_extended_port_binding', return_value=True)
-    def test_call_livem_checks_on_host_bind_ports(self, mock_supports_ext):
+    def test_call_livem_checks_on_host_bind_ports(self):
         data = objects.LibvirtLiveMigrateData()
         bindings = {
             uuids.port1: {'host': 'dest-host'},

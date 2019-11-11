@@ -25,6 +25,7 @@ from oslo_log import log as logging
 from nova.compute import power_state
 import nova.conf
 from nova import exception
+from nova.virt import hardware
 from nova.virt.libvirt import config as vconfig
 
 LOG = logging.getLogger(__name__)
@@ -88,7 +89,50 @@ def get_updated_guest_xml(guest, migrate_data, get_volume_config,
     xml_doc = _update_memory_backing_xml(xml_doc, migrate_data)
     if get_vif_config is not None:
         xml_doc = _update_vif_xml(xml_doc, migrate_data, get_vif_config)
+    if 'dst_numa_info' in migrate_data:
+        xml_doc = _update_numa_xml(xml_doc, migrate_data)
     return etree.tostring(xml_doc, encoding='unicode')
+
+
+def _update_numa_xml(xml_doc, migrate_data):
+    LOG.debug('_update_numa_xml input xml=%s',
+              etree.tostring(xml_doc, encoding='unicode', pretty_print=True))
+    info = migrate_data.dst_numa_info
+    # NOTE(artom) cpu_pins, cell_pins and emulator_pins should always come
+    # together, or not at all.
+    if ('cpu_pins' in info and
+          'cell_pins' in info and
+          'emulator_pins' in info):
+        for guest_id, host_ids in info.cpu_pins.items():
+            vcpupin = xml_doc.find(
+                './cputune/vcpupin[@vcpu="%d"]' % int(guest_id))
+            vcpupin.set('cpuset',
+                        hardware.format_cpu_spec(host_ids))
+
+        emulatorpin = xml_doc.find('./cputune/emulatorpin')
+        emulatorpin.set('cpuset',
+                        hardware.format_cpu_spec(info.emulator_pins))
+
+        all_cells = []
+        for guest_id, host_ids in info.cell_pins.items():
+            all_cells.extend(host_ids)
+            memnode = xml_doc.find(
+                './numatune/memnode[@cellid="%d"]' % int(guest_id))
+            memnode.set('nodeset',
+                        hardware.format_cpu_spec(host_ids))
+
+        memory = xml_doc.find('./numatune/memory')
+        memory.set('nodeset', hardware.format_cpu_spec(set(all_cells)))
+
+    if 'sched_vcpus' and 'sched_priority' in info:
+        vcpusched = xml_doc.find('./cputune/vcpusched')
+        vcpusched.set('vcpus', hardware.format_cpu_spec(info.sched_vcpus))
+        vcpusched.set('priority', str(info.sched_priority))
+
+    LOG.debug('_update_numa_xml output xml=%s',
+              etree.tostring(xml_doc, encoding='unicode', pretty_print=True))
+
+    return xml_doc
 
 
 def _update_graphics_xml(xml_doc, migrate_data):
@@ -405,39 +449,6 @@ def should_trigger_timeout_action(instance, elapsed, completion_timeout,
                     completion_timeout, instance=instance)
         return True
 
-    return False
-
-
-def should_switch_to_postcopy(memory_iteration, current_data_remaining,
-                              previous_data_remaining, migration_status):
-    """Determine if the migration should be switched to postcopy mode
-
-    :param memory_iteration: Number of memory iterations during the migration
-    :param current_data_remaining: amount of memory to be transferred
-    :param previous_data_remaining: previous memory to be transferred
-    :param migration_status: current status of the migration
-
-    Check the progress after the first memory iteration to determine if the
-    migration should be switched to post-copy mode
-
-    Avoid post-copy switch if already running in post-copy mode
-
-    :returns: True if migration should be switched to postcopy mode,
-    False otherwise
-    """
-    if (migration_status == 'running (post-copy)' or
-        previous_data_remaining <= 0):
-        return False
-
-    if memory_iteration > 1:
-        progress_percentage = round((previous_data_remaining -
-                                     current_data_remaining) *
-                                    100 / previous_data_remaining)
-        # If migration progress is less than 10% per iteration after the
-        # first memory page copying pass, the migration is switched to
-        # postcopy mode
-        if progress_percentage < 10:
-            return True
     return False
 
 

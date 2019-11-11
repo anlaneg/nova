@@ -122,7 +122,8 @@ class HypervisorsSampleJson233Tests(api_sample_base.ApiSampleTestBaseV21):
         subs = {
             'hypervisor_id': '2',
             'host': 'host1',
-            'host_name': 'host1'
+            'host_name': 'host1',
+            'service_id': '[0-9]+',
         }
         response = self._do_get('os-hypervisors/detail?limit=1&marker=1')
         self._verify_response('hypervisors-detail-resp', subs, response, 200)

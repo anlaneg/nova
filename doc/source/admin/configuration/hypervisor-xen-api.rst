@@ -4,6 +4,14 @@
 XenServer (and other XAPI based Xen variants)
 =============================================
 
+.. deprecated:: 20.0.0
+
+   The xenapi driver is deprecated and may be removed in a future release.
+   The driver is not tested by the OpenStack project nor does it have clear
+   maintainer(s) and thus its quality can not be ensured. If you are using
+   the driver in production please let us know in freenode IRC and/or the
+   openstack-discuss mailing list.
+
 .. todo::
 
   os-xenapi version is 0.3.1 currently.
@@ -41,9 +49,8 @@ XAPI
 XAPI is one of the toolstacks that could control a Xen based hypervisor.
 XAPI's role is similar to libvirt's in the KVM world.  The API provided by XAPI
 is called XenAPI.  To learn more about the provided interface, look at `XenAPI
-Object Model Overview <http://docs.vmd.citrix.com/XenServer/
-6.2.0/1.0/en_gb/sdk.html#object_model_overview>`_ for definitions of XAPI
-specific terms such as SR, VDI, VIF and PIF.
+Object Model Overview <https://xapi-project.github.io/xen-api/overview.html>`_
+for definitions of XAPI specific terms such as SR, VDI, VIF and PIF.
 
 OpenStack has a compute driver which talks to XAPI, therefore all XAPI managed
 servers could be used with OpenStack.
@@ -116,7 +123,7 @@ XenAPI deployment architecture
 A basic OpenStack deployment on a XAPI-managed server, assuming that the
 network provider is neutron network, looks like this:
 
-.. figure:: /figures/xenserver_architecture.png
+.. figure:: /_static/images/xenserver_architecture.png
    :width: 100%
 
 Key things to note:

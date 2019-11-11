@@ -864,6 +864,24 @@ class Domain(object):
                     })
             devices['hostdevs'] = hostdev_info
 
+            vpmem_info = []
+            vpmems = device_nodes.findall('./memory')
+            for vpmem in vpmems:
+                model = vpmem.get('model')
+                if model == 'nvdimm':
+                    source = vpmem.find('./source')
+                    target = vpmem.find('./target')
+                    path = source.find('./path').text
+                    alignsize = source.find('./alignsize').text
+                    size = target.find('./size').text
+                    node = target.find('./node').text
+                    vpmem_info.append({
+                        'path': path,
+                        'size': size,
+                        'alignsize': alignsize,
+                        'node': node})
+            devices['vpmems'] = vpmem_info
+
         definition['devices'] = devices
 
         return definition
@@ -1023,6 +1041,25 @@ class Domain(object):
     </hostdev>
             ''' % hostdev  # noqa
 
+        vpmems = ''
+        for vpmem in self._def['devices']['vpmems']:
+            vpmems += '''
+    <memory model='nvdimm' access='shared'>
+      <source>
+        <path>%(path)s</path>
+        <alignsize>%(alignsize)s</alignsize>
+        <pmem/>
+      </source>
+      <target>
+        <size>%(size)s</size>
+        <node>%(node)s</node>
+        <label>
+          <size>2097152</size>
+        </label>
+      </target>
+    </memory>
+            ''' % vpmem
+
         return '''<domain type='kvm'>
   <name>%(name)s</name>
   <uuid>%(uuid)s</uuid>
@@ -1079,6 +1116,7 @@ class Domain(object):
                function='0x0'/>
     </memballoon>
     %(hostdevs)s
+    %(vpmems)s
   </devices>
 </domain>''' % {'name': self._def['name'],
                 'uuid': self._def['uuid'],
@@ -1087,7 +1125,8 @@ class Domain(object):
                 'arch': self._def['os']['arch'],
                 'disks': disks,
                 'nics': nics,
-                'hostdevs': hostdevs}
+                'hostdevs': hostdevs,
+                'vpmems': vpmems}
 
     def managedSave(self, flags):
         self._connection._mark_not_running(self)
@@ -1174,10 +1213,17 @@ class DomainSnapshot(object):
         del self._domain._snapshots[self._name]
 
 
+class Secret(object):
+    """A stub Secret class. Not currently returned by any test, but required to
+    exist for introspection.
+    """
+    pass
+
+
 class Connection(object):
     def __init__(self, uri=None, readonly=False, version=FAKE_LIBVIRT_VERSION,
                  hv_version=FAKE_QEMU_VERSION, host_info=None, pci_info=None,
-                 mdev_info=None):
+                 mdev_info=None, hostname=None):
         if not uri or uri == '':
             if allow_default_uri_connection:
                 uri = 'qemu:///session'
@@ -1215,6 +1261,7 @@ class Connection(object):
                                                        num_pfs=0,
                                                        num_vfs=0)
         self.mdev_info = mdev_info or []
+        self.hostname = hostname or 'compute1'
 
     def _add_filter(self, nwfilter):
         self._nwfilters[nwfilter._name] = nwfilter
@@ -1316,7 +1363,7 @@ class Connection(object):
         return self.fakeVersion
 
     def getHostname(self):
-        return 'compute1'
+        return self.hostname
 
     #为事件eventid注册回调callback及其对应的参数
     def domainEventRegisterAny(self, dom, eventid, callback, opaque):
@@ -1347,6 +1394,67 @@ class Connection(object):
 
         raise Exception("fakelibvirt doesn't support getDomainCapabilities "
                         "for %s architecture" % arch)
+
+    def getCPUModelNames(self, arch):
+        mapping = {
+            'x86_64': [
+                '486',
+                'pentium',
+                'pentium2',
+                'pentium3',
+                'pentiumpro',
+                'coreduo',
+                'n270',
+                'core2duo',
+                'qemu32',
+                'kvm32',
+                'cpu64-rhel5',
+                'cpu64-rhel6',
+                'qemu64',
+                'kvm64',
+                'Conroe',
+                'Penryn',
+                'Nehalem',
+                'Nehalem-IBRS',
+                'Westmere',
+                'Westmere-IBRS',
+                'SandyBridge',
+                'SandyBridge-IBRS',
+                'IvyBridge',
+                'IvyBridge-IBRS',
+                'Haswell-noTSX',
+                'Haswell-noTSX-IBRS',
+                'Haswell',
+                'Haswell-IBRS',
+                'Broadwell-noTSX',
+                'Broadwell-noTSX-IBRS',
+                'Broadwell',
+                'Broadwell-IBRS',
+                'Skylake-Client',
+                'Skylake-Client-IBRS',
+                'Skylake-Server',
+                'Skylake-Server-IBRS',
+                'Cascadelake-Server',
+                'Icelake-Client',
+                'Icelake-Server',
+                'athlon',
+                'phenom',
+                'Opteron_G1',
+                'Opteron_G2',
+                'Opteron_G3',
+                'Opteron_G4',
+                'Opteron_G5',
+                'EPYC',
+                'EPYC-IBPB'],
+            'ppc64': [
+                'POWER6',
+                'POWER7',
+                'POWER8',
+                'POWER9',
+                'POWERPC_e5500',
+                'POWERPC_e6500']
+        }
+        return mapping.get(arch, [])
 
     # Features are kept separately so that the tests can patch this
     # class variable with alternate values.
@@ -1388,6 +1496,14 @@ class Connection(object):
 
         model_node = tree.find('./model')
         if model_node is not None:
+            # arch_node may not present, therefore query all cpu models.
+            if model_node.text not in self.getCPUModelNames('x86_64') and \
+                model_node.text not in self.getCPUModelNames('ppc64'):
+                raise make_libvirtError(
+                    libvirtError,
+                    "internal error: Unknown CPU model %s" % model_node.text,
+                    error_code = VIR_ERR_INTERNAL_ERROR,
+                    error_domain=VIR_FROM_QEMU)
             if model_node.text != self.host_info.cpu_model:
                 return VIR_CPU_COMPARE_INCOMPATIBLE
 
@@ -1539,6 +1655,8 @@ virDomain = Domain
 virNodeDevice = NodeDevice
 
 virConnect = Connection
+virSecret = Secret
+virNWFilter = NWFilter
 
 
 class FakeLibvirtFixture(fixtures.Fixture):
@@ -1571,6 +1689,11 @@ class FakeLibvirtFixture(fixtures.Fixture):
         self.useFixture(fixtures.MockPatch(
             'nova.virt.libvirt.driver.LibvirtDriver'
             '._get_host_sysinfo_serial_os', return_value=uuids.machine_id))
+
+        # Stub out _log_host_capabilities since it logs a giant string at INFO
+        # and we don't want that to blow up the subunit parser in test runs.
+        self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.host.Host._log_host_capabilities'))
 
         disable_event_thread(self)
 

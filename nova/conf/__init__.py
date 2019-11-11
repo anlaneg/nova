@@ -35,6 +35,7 @@ from nova.conf import ephemeral_storage
 from nova.conf import glance
 from nova.conf import guestfs
 from nova.conf import hyperv
+from nova.conf import imagecache
 from nova.conf import ironic
 from nova.conf import key_manager
 from nova.conf import keystone
@@ -45,7 +46,6 @@ from nova.conf import network
 from nova.conf import neutron
 from nova.conf import notifications
 from nova.conf import novnc
-from nova.conf import osapi_v21
 from nova.conf import paths
 from nova.conf import pci
 from nova.conf import placement
@@ -89,6 +89,7 @@ glance.register_opts(CONF)
 guestfs.register_opts(CONF)
 hyperv.register_opts(CONF)
 mks.register_opts(CONF)
+imagecache.register_opts(CONF)
 ironic.register_opts(CONF)
 key_manager.register_opts(CONF)
 keystone.register_opts(CONF)
@@ -98,7 +99,6 @@ network.register_opts(CONF)
 neutron.register_opts(CONF)
 notifications.register_opts(CONF)
 novnc.register_opts(CONF)
-osapi_v21.register_opts(CONF)
 paths.register_opts(CONF)
 pci.register_opts(CONF)
 placement.register_opts(CONF)

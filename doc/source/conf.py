@@ -43,6 +43,7 @@ extensions = [
     'ext.feature_matrix',
     'sphinxcontrib.actdiag',
     'sphinxcontrib.seqdiag',
+    'sphinxcontrib.rsvgconverter',
 ]
 
 # openstackdocstheme options
@@ -80,21 +81,22 @@ pygments_style = 'sphinx'
 # List of tuples 'sourcefile', 'target', u'title', u'Authors name', 'manual'
 
 _man_pages = [
+    ('nova-api', u'Cloud controller fabric'),
     ('nova-api-metadata', u'Cloud controller fabric'),
     ('nova-api-os-compute', u'Cloud controller fabric'),
-    ('nova-api', u'Cloud controller fabric'),
     ('nova-compute', u'Cloud controller fabric'),
+    ('nova-conductor', u'Cloud controller fabric'),
     ('nova-console', u'Cloud controller fabric'),
     ('nova-dhcpbridge', u'Cloud controller fabric'),
     ('nova-manage', u'Cloud controller fabric'),
     ('nova-network', u'Cloud controller fabric'),
     ('nova-novncproxy', u'Cloud controller fabric'),
-    ('nova-spicehtml5proxy', u'Cloud controller fabric'),
-    ('nova-serialproxy', u'Cloud controller fabric'),
     ('nova-rootwrap', u'Cloud controller fabric'),
     ('nova-scheduler', u'Cloud controller fabric'),
+    ('nova-serialproxy', u'Cloud controller fabric'),
+    ('nova-spicehtml5proxy', u'Cloud controller fabric'),
+    ('nova-status', u'Cloud controller fabric'),
     ('nova-xvpvncproxy', u'Cloud controller fabric'),
-    ('nova-conductor', u'Cloud controller fabric'),
 ]
 
 man_pages = [
@@ -123,10 +125,23 @@ html_extra_path = ['_extra']
 # (source start file, target name, title, author, documentclass
 # [howto/manual]).
 latex_documents = [
-    ('index', 'Nova.tex', u'Nova Documentation',
+    ('index', 'doc-nova.tex', u'Nova Documentation',
      u'OpenStack Foundation', 'manual'),
 ]
 
+# Allow deeper levels of nesting for \begin...\end stanzas
+latex_elements = {
+    'maxlistdepth': 10,
+    'extraclassoptions': 'openany,oneside',
+    'preamble': r'''
+\setcounter{tocdepth}{3}
+\setcounter{secnumdepth}{3}
+''',
+}
+
+# Disable use of xindy since that's another binary dependency that's not
+# available on all platforms
+latex_use_xindy = False
 
 # -- Options for openstackdocstheme -------------------------------------------
 

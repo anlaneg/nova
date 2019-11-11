@@ -394,7 +394,9 @@ class InstanceExtra(BASE, NovaBase, models.SoftDeleteMixin):
     migration_context = orm.deferred(Column(Text))
     keypairs = orm.deferred(Column(Text))
     trusted_certs = orm.deferred(Column(Text))
-    vpmems = orm.deferred(Column(Text))
+    # NOTE(Luyao): 'vpmems' is still in the database
+    # and can be removed in the future release.
+    resources = orm.deferred(Column(Text))
     instance = orm.relationship(Instance,
                             backref=orm.backref('extra',
                                                 uselist=False),
@@ -799,6 +801,9 @@ class Migration(BASE, NovaBase, models.SoftDeleteMixin):
     disk_processed = Column(BigInteger, nullable=True)
     disk_remaining = Column(BigInteger, nullable=True)
     cross_cell_move = Column(Boolean, default=False)
+
+    user_id = Column(String(255), nullable=True)
+    project_id = Column(String(255), nullable=True)
 
     instance = orm.relationship("Instance", foreign_keys=instance_uuid,
                             primaryjoin='and_(Migration.instance_uuid == '

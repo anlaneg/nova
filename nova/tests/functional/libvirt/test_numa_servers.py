@@ -53,6 +53,7 @@ class NUMAServersTestBase(base.ServersTestBase):
 class NUMAServersTest(NUMAServersTestBase):
 
     def _run_build_test(self, flavor_id, end_status='ACTIVE',
+                        filter_called_on_error=True,
                         expected_usage=None):
 
         # NOTE(bhagyashris): Always use host as 'compute1' so that it's
@@ -86,22 +87,41 @@ class NUMAServersTest(NUMAServersTestBase):
         server_ids = [s['id'] for s in servers]
         self.assertIn(created_server_id, server_ids)
 
-        # Validate that NUMATopologyFilter has been called
-        self.assertTrue(self.mock_filter.called)
+        # Validate the quota usage
+        if filter_called_on_error and end_status == 'ACTIVE':
+            quota_details = self.api.get_quota_detail()
+            expected_core_usages = expected_usage.get(
+                'VCPU', expected_usage.get('PCPU', 0))
+            self.assertEqual(expected_core_usages,
+                             quota_details['cores']['in_use'])
+
+        # Validate that NUMATopologyFilter has been called or not called,
+        # depending on whether this is expected to make it past placement or
+        # not (hint: if it's a lack of VCPU/PCPU resources, it won't)
+        if filter_called_on_error:
+            self.assertTrue(self.mock_filter.called)
+        else:
+            self.assertFalse(self.mock_filter.called)
 
         found_server = self._wait_for_state_change(found_server, 'BUILD')
 
         if expected_usage:
             compute_usage = self.placement_api.get(
                 '/resource_providers/%s/usages' % compute_rp_uuid).body[
-                'usages']
+                    'usages']
             self.assertEqual(expected_usage, compute_usage)
 
         self.assertEqual(end_status, found_server['status'])
+
         self.addCleanup(self._delete_server, created_server_id)
         return created_server
 
     def test_create_server_with_numa_topology(self):
+        """Create a server with two NUMA nodes.
+
+        This should pass and result in a guest NUMA topology with two NUMA
+        nodes.
+        """
 
         host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
                                          cpu_cores=2, cpu_threads=2,
@@ -109,14 +129,44 @@ class NUMAServersTest(NUMAServersTestBase):
         fake_connection = self._get_connection(host_info=host_info)
         self.mock_conn.return_value = fake_connection
 
-        # Create a flavor
         extra_spec = {'hw:numa_nodes': '2'}
-        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        flavor_id = self._create_flavor(vcpu=2, extra_spec=extra_spec)
         expected_usage = {'DISK_GB': 20, 'MEMORY_MB': 2048, 'VCPU': 2}
 
-        self._run_build_test(flavor_id, expected_usage=expected_usage)
+        server = self._run_build_test(flavor_id, expected_usage=expected_usage)
 
-    def test_create_server_with_pinning(self):
+        ctx = nova_context.get_admin_context()
+        inst = objects.Instance.get_by_uuid(ctx, server['id'])
+        self.assertEqual(2, len(inst.numa_topology.cells))
+        self.assertNotIn('cpu_topology', inst.numa_topology.cells[0])
+        self.assertNotIn('cpu_topology', inst.numa_topology.cells[1])
+
+    def test_create_server_with_numa_fails(self):
+        """Create a two NUMA node instance on a host with only one node.
+
+        This should fail because each guest NUMA node must be placed on a
+        separate host NUMA node.
+        """
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=1, cpu_sockets=1,
+                                         cpu_cores=2, kB_mem=15740000)
+        fake_connection = self._get_connection(host_info=host_info)
+        self.mock_conn.return_value = fake_connection
+
+        extra_spec = {'hw:numa_nodes': '2'}
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+
+        self._run_build_test(flavor_id, end_status='ERROR')
+
+    def test_create_server_with_legacy_pinning_policy(self):
+        """Create a server using the legacy 'hw:cpu_policy' extra spec.
+
+        This should pass and result in a guest NUMA topology with pinned CPUs.
+        """
+
+        self.flags(cpu_dedicated_set='0-9', cpu_shared_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
 
         host_info = fakelibvirt.HostInfo(cpu_nodes=1, cpu_sockets=1,
                                          cpu_cores=5, cpu_threads=2,
@@ -124,13 +174,12 @@ class NUMAServersTest(NUMAServersTestBase):
         fake_connection = self._get_connection(host_info=host_info)
         self.mock_conn.return_value = fake_connection
 
-        # Create a flavor
         extra_spec = {
             'hw:cpu_policy': 'dedicated',
             'hw:cpu_thread_policy': 'prefer',
         }
         flavor_id = self._create_flavor(vcpu=5, extra_spec=extra_spec)
-        expected_usage = {'DISK_GB': 20, 'MEMORY_MB': 2048, 'VCPU': 5}
+        expected_usage = {'DISK_GB': 20, 'MEMORY_MB': 2048, 'PCPU': 5}
 
         server = self._run_build_test(flavor_id, expected_usage=expected_usage)
 
@@ -139,18 +188,608 @@ class NUMAServersTest(NUMAServersTestBase):
         self.assertEqual(1, len(inst.numa_topology.cells))
         self.assertEqual(5, inst.numa_topology.cells[0].cpu_topology.cores)
 
-    def test_create_server_with_numa_fails(self):
+    def test_create_server_with_legacy_pinning_policy_old_configuration(self):
+        """Create a server using the legacy extra spec and configuration.
 
-        host_info = fakelibvirt.HostInfo(cpu_nodes=1, cpu_sockets=1,
-                                         cpu_cores=2, kB_mem=15740000)
+        This should pass and result in a guest NUMA topology with pinned CPUs,
+        though we'll still be consuming VCPUs (which would in theory be fixed
+        during a later reshape).
+        """
+
+        self.flags(cpu_dedicated_set=None, cpu_shared_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set='0-7')
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
         fake_connection = self._get_connection(host_info=host_info)
         self.mock_conn.return_value = fake_connection
 
-        # Create a flavor
-        extra_spec = {'hw:numa_nodes': '2'}
+        extra_spec = {
+            'hw:cpu_policy': 'dedicated',
+            'hw:cpu_thread_policy': 'prefer',
+        }
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        expected_usage = {'DISK_GB': 20, 'MEMORY_MB': 2048, 'VCPU': 2}
+
+        self._run_build_test(flavor_id, expected_usage=expected_usage)
+
+    def test_create_server_with_legacy_pinning_policy_fails(self):
+        """Create a pinned instance on a host with no PCPUs.
+
+        This should fail because we're translating the extra spec and the host
+        isn't reporting the PCPUs we need.
+        """
+
+        self.flags(cpu_shared_set='0-9', cpu_dedicated_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=1, cpu_sockets=1,
+                                         cpu_cores=5, cpu_threads=2,
+                                         kB_mem=15740000)
+        fake_connection = self._get_connection(host_info=host_info)
+        self.mock_conn.return_value = fake_connection
+
+        extra_spec = {
+            'hw:cpu_policy': 'dedicated',
+            'hw:cpu_thread_policy': 'prefer',
+        }
+        flavor_id = self._create_flavor(vcpu=5, extra_spec=extra_spec)
+        self._run_build_test(flavor_id, end_status='ERROR')
+
+    def test_create_server_with_legacy_pinning_policy_quota_fails(self):
+        """Create a pinned instance on a host with PCPUs but not enough quota.
+
+        This should fail because the quota request should fail.
+        """
+        self.flags(cpu_dedicated_set='0-7', cpu_shared_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
+        fake_connection = self._get_connection(host_info=host_info)
+        self.mock_conn.return_value = fake_connection
+
+        extra_spec = {
+            'hw:cpu_policy': 'dedicated',
+            'hw:cpu_thread_policy': 'prefer',
+        }
+        flavor_id = self._create_flavor(vcpu=2, extra_spec=extra_spec)
+
+        # Update the core quota less than we requested
+        self.api.update_quota({'cores': 1})
+
+        # NOTE(bhagyashris): Always use host as 'compute1' so that it's
+        # possible to get resource provider information for verifying
+        # compute usages. This host name 'compute1' is hard coded in
+        # Connection class in fakelibvirt.py.
+        # TODO(stephenfin): Remove the hardcoded limit, possibly overridding
+        # 'start_service' to make sure there isn't a mismatch
+        self.compute = self.start_service('compute', host='compute1')
+
+        post = {'server': self._build_server(flavor_id)}
+
+        ex = self.assertRaises(client.OpenStackApiException,
+            self.api.post_server, post)
+        self.assertEqual(403, ex.response.status_code)
+
+    def test_create_server_with_pcpu(self):
+        """Create a server using an explicit 'resources:PCPU' request.
+
+        This should pass and result in a guest NUMA topology with pinned CPUs.
+        """
+
+        self.flags(cpu_dedicated_set='0-7', cpu_shared_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
+        fake_connection = self._get_connection(host_info=host_info)
+        self.mock_conn.return_value = fake_connection
+
+        extra_spec = {'resources:PCPU': '2'}
+        flavor_id = self._create_flavor(vcpu=2, extra_spec=extra_spec)
+        expected_usage = {'DISK_GB': 20, 'MEMORY_MB': 2048, 'PCPU': 2}
+
+        server = self._run_build_test(flavor_id, expected_usage=expected_usage)
+
+        ctx = nova_context.get_admin_context()
+        inst = objects.Instance.get_by_uuid(ctx, server['id'])
+        self.assertEqual(1, len(inst.numa_topology.cells))
+        self.assertEqual(1, inst.numa_topology.cells[0].cpu_topology.cores)
+        self.assertEqual(2, inst.numa_topology.cells[0].cpu_topology.threads)
+
+    def test_create_server_with_pcpu_fails(self):
+        """Create a pinned instance on a host with no PCPUs.
+
+        This should fail because we're explicitly requesting PCPUs and the host
+        isn't reporting them.
+        """
+
+        self.flags(cpu_shared_set='0-9', cpu_dedicated_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=1, cpu_sockets=1,
+                                         cpu_cores=5, cpu_threads=2,
+                                         kB_mem=15740000)
+        fake_connection = self._get_connection(host_info=host_info)
+        self.mock_conn.return_value = fake_connection
+
+        extra_spec = {'resources:PCPU': 2}
+        flavor_id = self._create_flavor(vcpu=2, extra_spec=extra_spec)
+        self._run_build_test(flavor_id, end_status='ERROR',
+                             filter_called_on_error=False)
+
+    def test_create_server_with_pcpu_quota_fails(self):
+        """Create a pinned instance on a host with PCPUs but not enough quota.
+
+        This should fail because the quota request should fail.
+        """
+        self.flags(cpu_dedicated_set='0-7', cpu_shared_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
+        fake_connection = self._get_connection(host_info=host_info)
+        self.mock_conn.return_value = fake_connection
+
+        extra_spec = {'resources:PCPU': '2'}
+        flavor_id = self._create_flavor(vcpu=2, extra_spec=extra_spec)
+
+        # Update the core quota less than we requested
+        self.api.update_quota({'cores': 1})
+
+        # NOTE(bhagyashris): Always use host as 'compute1' so that it's
+        # possible to get resource provider information for verifying
+        # compute usages. This host name 'compute1' is hard coded in
+        # Connection class in fakelibvirt.py.
+        # TODO(stephenfin): Remove the hardcoded limit, possibly overridding
+        # 'start_service' to make sure there isn't a mismatch
+        self.compute = self.start_service('compute', host='compute1')
+
+        post = {'server': self._build_server(flavor_id)}
+
+        ex = self.assertRaises(client.OpenStackApiException,
+            self.api.post_server, post)
+        self.assertEqual(403, ex.response.status_code)
+
+    def test_resize_vcpu_to_pcpu(self):
+        """Create an unpinned instance and resize it to a flavor with pinning.
+
+        This should pass and result in a guest NUMA topology with pinned CPUs.
+        """
+
+        self.flags(cpu_dedicated_set='0-3', cpu_shared_set='4-7',
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
+
+        # Start services
+        self.computes = {}
+        self.compute_rp_uuids = {}
+        for host in ['test_compute0', 'test_compute1']:
+            fake_connection = self._get_connection(
+                host_info=host_info, hostname=host)
+
+            # This is fun. Firstly we need to do a global'ish mock so we can
+            # actually start the service.
+            with mock.patch('nova.virt.libvirt.host.Host.get_connection',
+                            return_value=fake_connection):
+                compute = self.start_service('compute', host=host)
+
+            # Once that's done, we need to do some tweaks to each individual
+            # compute "service" to make sure they return unique objects
+            compute.driver._host.get_connection = lambda: fake_connection
+            self.computes[host] = compute
+
+            # and save the UUIDs for the corresponding resource providers
+            self.compute_rp_uuids[host] = self.placement_api.get(
+                '/resource_providers?name=%s' % host).body[
+                'resource_providers'][0]['uuid']
+
+        # Create server
+        flavor_a_id = self._create_flavor(extra_spec={})
+        good_server = self._build_server(flavor_a_id)
+
+        post = {'server': good_server}
+
+        created_server = self.api.post_server(post)
+        server = self._wait_for_state_change(created_server, 'BUILD')
+
+        self.assertEqual('ACTIVE', server['status'])
+
+        original_host = server['OS-EXT-SRV-ATTR:host']
+
+        for host, compute_rp_uuid in self.compute_rp_uuids.items():
+            if host == original_host:  # the host with the instance
+                expected_usage = {'VCPU': 2, 'PCPU': 0, 'DISK_GB': 20,
+                                  'MEMORY_MB': 2048}
+            else:  # the other host
+                expected_usage = {'VCPU': 0, 'PCPU': 0, 'DISK_GB': 0,
+                                  'MEMORY_MB': 0}
+
+            compute_usage = self.placement_api.get(
+                '/resource_providers/%s/usages' % compute_rp_uuid).body[
+                    'usages']
+            self.assertEqual(expected_usage, compute_usage)
+
+        # We reset mock_filter because we want to ensure it's called as part of
+        # the *migration*
+        self.mock_filter.reset_mock()
+        self.assertEqual(0, len(self.mock_filter.call_args_list))
+
+        extra_spec = {'hw:cpu_policy': 'dedicated'}
+        flavor_b_id = self._create_flavor(extra_spec=extra_spec)
+
+        # TODO(stephenfin): The mock of 'migrate_disk_and_power_off' should
+        # probably be less...dumb
+        with mock.patch('nova.virt.libvirt.driver.LibvirtDriver'
+                        '.migrate_disk_and_power_off', return_value='{}'):
+            post = {'resize': {'flavorRef': flavor_b_id}}
+            self.api.post_server_action(server['id'], post)
+
+        server = self._wait_for_state_change(server, 'VERIFY_RESIZE')
+
+        new_host = server['OS-EXT-SRV-ATTR:host']
+        self.assertNotEqual(original_host, new_host)
+
+        # We don't confirm the resize yet as we expect this to have landed and
+        # all we want to know is whether the filter was correct and the
+        # resource usage has been updated
+
+        for host, compute_rp_uuid in self.compute_rp_uuids.items():
+            if host == original_host:
+                # the host that had the instance should still have allocations
+                # since the resize hasn't been confirmed
+                expected_usage = {'VCPU': 2, 'PCPU': 0, 'DISK_GB': 20,
+                                  'MEMORY_MB': 2048}
+            else:
+                # the other host should have the new allocations replete with
+                # PCPUs
+                expected_usage = {'VCPU': 0, 'PCPU': 2, 'DISK_GB': 20,
+                                  'MEMORY_MB': 2048}
+
+            compute_usage = self.placement_api.get(
+                '/resource_providers/%s/usages' % compute_rp_uuid).body[
+                    'usages']
+            self.assertEqual(expected_usage, compute_usage)
+
+        self.assertEqual(1, len(self.mock_filter.call_args_list))
+        args, kwargs = self.mock_filter.call_args_list[0]
+        self.assertEqual(2, len(args))
+        self.assertEqual({}, kwargs)
+
+        # Now confirm the resize and ensure our inventories update
+
+        post = {'confirmResize': None}
+        self.api.post_server_action(server['id'], post)
+
+        server = self._wait_for_state_change(server, 'ACTIVE')
+
+        for host, compute_rp_uuid in self.compute_rp_uuids.items():
+            if host == original_host:
+                # the host that had the instance should no longer have
+                # alocations since the resize has been confirmed
+                expected_usage = {'VCPU': 0, 'PCPU': 0, 'DISK_GB': 0,
+                                  'MEMORY_MB': 0}
+            else:
+                # the other host should still have the new allocations replete
+                # with PCPUs
+                expected_usage = {'VCPU': 0, 'PCPU': 2, 'DISK_GB': 20,
+                                  'MEMORY_MB': 2048}
+
+            compute_usage = self.placement_api.get(
+                '/resource_providers/%s/usages' % compute_rp_uuid).body[
+                    'usages']
+            self.assertEqual(expected_usage, compute_usage)
+
+
+class NUMAServerTestWithCountingQuotaFromPlacement(NUMAServersTest):
+
+    def setUp(self):
+        self.flags(count_usage_from_placement=True, group='quota')
+        super(NUMAServersTest, self).setUp()
+
+
+class ReshapeForPCPUsTest(NUMAServersTestBase):
+
+    api_major_version = 'v2.1'
+
+    # TODO(stephenfin): We're using this because we want to be able to force
+    # the host during scheduling. We should instead look at overriding policy
+    ADMIN_API = True
+
+    def test_vcpu_to_pcpu_reshape(self):
+        """Verify that VCPU to PCPU reshape works.
+
+        This rather complex test checks that everything is wired up properly
+        by the reshape operation.
+
+        1) create two pinned servers with an old tree where the compute
+           provider is reporting VCPUs and the servers are consuming the same
+        2) start a migration of one of these servers to another host but don't
+           confirm it
+        3) trigger a reshape
+        4) check that the allocations of both the servers and the migration
+           record on the host are updated
+        5) create another server now against the new tree
+        """
+
+        # we need to use the 'host' parameter when creating servers
+        self.api.microversion = '2.74'
+
+        # we need to configure the legacy 'vcpu_pin_set' config option, rather
+        # than the new ones, to ensure the reshape doesn't happen yet
+
+        self.flags(cpu_dedicated_set=None, cpu_shared_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set='0-7')
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
+
+        # Start services
+        self.computes = {}
+        self.compute_rp_uuids = {}
+        for host in ['test_compute0', 'test_compute1']:
+            fake_connection = self._get_connection(
+                host_info=host_info, hostname=host)
+
+            # This is fun. Firstly we need to do a global'ish mock so we can
+            # actually start the service.
+            with mock.patch('nova.virt.libvirt.host.Host.get_connection',
+                            return_value=fake_connection):
+                compute = self.start_service('compute', host=host)
+
+            # Once that's done, we need to do some tweaks to each individual
+            # compute "service" to make sure they return unique objects
+            compute.driver._host.get_connection = lambda: fake_connection
+            self.computes[host] = compute
+
+            # and save the UUIDs for the corresponding resource providers
+            self.compute_rp_uuids[host] = self.placement_api.get(
+                '/resource_providers?name=%s' % host).body[
+                'resource_providers'][0]['uuid']
+
+        # ensure there is no PCPU inventory being reported
+
+        for host, compute_rp_uuid in self.compute_rp_uuids.items():
+            compute_inventory = self.placement_api.get(
+                '/resource_providers/%s/inventories' % compute_rp_uuid).body[
+                    'inventories']
+            self.assertEqual(8, compute_inventory['VCPU']['total'])
+            self.assertNotIn('PCPU', compute_inventory)
+
+        # now we boot two servers with pinning, which should boot even without
+        # PCPUs since we're not doing the translation yet
+
+        extra_spec = {'hw:cpu_policy': 'dedicated'}
         flavor_id = self._create_flavor(extra_spec=extra_spec)
 
-        self._run_build_test(flavor_id, end_status='ERROR')
+        server_req = self._build_server(flavor_id)
+        server_req['host'] = 'test_compute0'
+        server_req['networks'] = 'auto'
+
+        created_server1 = self.api.post_server({'server': server_req})
+        # _wait_for_state_change waits for the status to go from BUILD which
+        # should then be ACTIVE.
+        server1 = self._wait_for_state_change(created_server1, 'BUILD')
+        self.assertEqual('ACTIVE', server1['status'])
+
+        created_server2 = self.api.post_server({'server': server_req})
+        server2 = self._wait_for_state_change(created_server2, 'BUILD')
+        self.assertEqual('ACTIVE', server2['status'])
+
+        # sanity check usages
+
+        compute_rp_uuid = self.compute_rp_uuids['test_compute0']
+
+        compute_inventory = self.placement_api.get(
+            '/resource_providers/%s/inventories' % compute_rp_uuid).body[
+                'inventories']
+        compute_usages = self.placement_api.get(
+            '/resource_providers/%s/usages' % compute_rp_uuid).body[
+                'usages']
+        self.assertEqual(4, compute_usages['VCPU'])
+
+        compute_rp_uuid = self.compute_rp_uuids['test_compute1']
+
+        compute_inventory = self.placement_api.get(
+            '/resource_providers/%s/inventories' % compute_rp_uuid).body[
+                'inventories']
+        compute_usages = self.placement_api.get(
+            '/resource_providers/%s/usages' % compute_rp_uuid).body[
+                'usages']
+        self.assertEqual(0, compute_usages['VCPU'])
+
+        # now initiate the migration process for one of the servers
+
+        # FIXME(stephenfin): This is a hack due to the poor behavior of the
+        # '_wait_for_state_change' implementation here, which doesn't actually
+        # wait for a transition _to_ a state. I'll be fixing this real soon.
+        import time
+        time.sleep(0.5)
+
+        with mock.patch('nova.virt.libvirt.driver.LibvirtDriver'
+                        '.migrate_disk_and_power_off', return_value='{}'):
+            post = {'migrate': None}
+            self.api.post_server_action(server2['id'], post)
+
+        # _wait_for_state_change waits for the status to go from ACTIVE which
+        # should then be VERIFY_RESIZE.
+        server2 = self._wait_for_state_change(server2, 'ACTIVE')
+        self.assertEqual('VERIFY_RESIZE', server2['status'])
+
+        # verify that the inventory, usages and allocation are correct before
+        # the reshape. Note that the value of 8 VCPUs is derived from
+        # fakelibvirt.HostInfo with our overridden values
+
+        # first, check 'test_compute0', which should have the allocations for
+        # server1 (the one that hasn't been migrated) and for the migration
+        # record of server2 (the one that has been migrated)
+
+        compute_rp_uuid = self.compute_rp_uuids['test_compute0']
+
+        compute_inventory = self.placement_api.get(
+            '/resource_providers/%s/inventories' % compute_rp_uuid).body[
+                'inventories']
+        self.assertEqual(8, compute_inventory['VCPU']['total'])
+        self.assertNotIn('PCPU', compute_inventory)
+        compute_usages = self.placement_api.get(
+            '/resource_providers/%s/usages' % compute_rp_uuid).body[
+                'usages']
+        self.assertEqual(4, compute_usages['VCPU'])
+        self.assertNotIn('PCPU', compute_usages)
+
+        allocations = self.placement_api.get(
+            '/allocations/%s' % server1['id']).body['allocations']
+        # the flavor has disk=10 and ephemeral=10
+        self.assertEqual(
+            {'DISK_GB': 20, 'MEMORY_MB': 2048, 'VCPU': 2},
+            allocations[compute_rp_uuid]['resources'])
+
+        # then check 'test_compute1', which should have the allocations for
+        # server2 (the one that has been migrated)
+
+        compute_rp_uuid = self.compute_rp_uuids['test_compute1']
+
+        compute_inventory = self.placement_api.get(
+            '/resource_providers/%s/inventories' % compute_rp_uuid).body[
+                'inventories']
+        self.assertEqual(8, compute_inventory['VCPU']['total'])
+        self.assertNotIn('PCPU', compute_inventory)
+        compute_usages = self.placement_api.get(
+            '/resource_providers/%s/usages' % compute_rp_uuid).body[
+                'usages']
+        self.assertEqual(2, compute_usages['VCPU'])
+        self.assertNotIn('PCPU', compute_usages)
+
+        allocations = self.placement_api.get(
+            '/allocations/%s' % server2['id']).body['allocations']
+        # the flavor has disk=10 and ephemeral=10
+        self.assertEqual(
+            {'DISK_GB': 20, 'MEMORY_MB': 2048, 'VCPU': 2},
+            allocations[compute_rp_uuid]['resources'])
+
+        # set the new config options on the compute services and restart them,
+        # meaning the compute services will now report PCPUs and reshape
+        # existing inventory to use them
+
+        self.flags(cpu_dedicated_set='0-7', group='compute')
+        self.flags(vcpu_pin_set=None)
+
+        for host in ['test_compute0', 'test_compute1']:
+            self.computes[host].stop()
+
+            fake_connection = self._get_connection(
+                host_info=host_info, hostname=host)
+
+            # This is fun. Firstly we need to do a global'ish mock so we can
+            # actually start the service.
+            with mock.patch('nova.virt.libvirt.host.Host.get_connection',
+                            return_value=fake_connection):
+                compute = self.start_service('compute', host=host)
+
+            # Once that's done, we need to do some tweaks to each individual
+            # compute "service" to make sure they return unique objects
+            compute.driver._host.get_connection = lambda: fake_connection
+            self.computes[host] = compute
+
+        # verify that the inventory, usages and allocation are correct after
+        # the reshape
+
+        # first, check 'test_compute0', which should have the allocations for
+        # server1 (the one that hasn't been migrated) and for the migration
+        # record of server2 (the one that has been migrated)
+
+        compute_rp_uuid = self.compute_rp_uuids['test_compute0']
+
+        compute_inventory = self.placement_api.get(
+            '/resource_providers/%s/inventories' % compute_rp_uuid).body[
+                'inventories']
+        self.assertEqual(8, compute_inventory['PCPU']['total'])
+        self.assertNotIn('VCPU', compute_inventory)
+        compute_usages = self.placement_api.get(
+            '/resource_providers/%s/usages' % compute_rp_uuid).body[
+                'usages']
+        self.assertEqual(4, compute_usages['PCPU'])
+        self.assertNotIn('VCPU', compute_usages)
+
+        allocations = self.placement_api.get(
+            '/allocations/%s' % server1['id']).body['allocations']
+        # the flavor has disk=10 and ephemeral=10
+        self.assertEqual(
+            {'DISK_GB': 20, 'MEMORY_MB': 2048, 'PCPU': 2},
+            allocations[compute_rp_uuid]['resources'])
+
+        # then check 'test_compute1', which should have the allocations for
+        # server2 (the one that has been migrated)
+
+        compute_rp_uuid = self.compute_rp_uuids['test_compute1']
+
+        compute_inventory = self.placement_api.get(
+            '/resource_providers/%s/inventories' % compute_rp_uuid).body[
+                'inventories']
+        self.assertEqual(8, compute_inventory['PCPU']['total'])
+        self.assertNotIn('VCPU', compute_inventory)
+        compute_usages = self.placement_api.get(
+            '/resource_providers/%s/usages' % compute_rp_uuid).body[
+                'usages']
+        self.assertEqual(2, compute_usages['PCPU'])
+        self.assertNotIn('VCPU', compute_usages)
+
+        allocations = self.placement_api.get(
+            '/allocations/%s' % server2['id']).body['allocations']
+        # the flavor has disk=10 and ephemeral=10
+        self.assertEqual(
+            {'DISK_GB': 20, 'MEMORY_MB': 2048, 'PCPU': 2},
+            allocations[compute_rp_uuid]['resources'])
+
+        # now create one more instance with pinned instances against the
+        # reshaped tree which should result in PCPU allocations
+
+        created_server = self.api.post_server({'server': server_req})
+        server3 = self._wait_for_state_change(created_server, 'BUILD')
+        self.assertEqual('ACTIVE', server3['status'])
+
+        compute_rp_uuid = self.compute_rp_uuids['test_compute0']
+
+        compute_inventory = self.placement_api.get(
+            '/resource_providers/%s/inventories' % compute_rp_uuid).body[
+                'inventories']
+        self.assertEqual(8, compute_inventory['PCPU']['total'])
+        self.assertNotIn('VCPU', compute_inventory)
+        compute_usages = self.placement_api.get(
+            '/resource_providers/%s/usages' % compute_rp_uuid).body[
+                'usages']
+        self.assertEqual(6, compute_usages['PCPU'])
+        self.assertNotIn('VCPU', compute_usages)
+
+        # check the allocations for this server specifically
+
+        allocations = self.placement_api.get(
+            '/allocations/%s' % server3['id']).body[
+                'allocations']
+        self.assertEqual(
+            {'DISK_GB': 20, 'MEMORY_MB': 2048, 'PCPU': 2},
+            allocations[compute_rp_uuid]['resources'])
+
+        self._delete_server(server1['id'])
+        self._delete_server(server2['id'])
+        self._delete_server(server3['id'])
 
 
 class NUMAServersWithNetworksTest(NUMAServersTestBase):
@@ -320,8 +959,8 @@ class NUMAServersWithNetworksTest(NUMAServersTestBase):
         # Start services
         self.computes = {}
         for host in ['test_compute0', 'test_compute1']:
-            fake_connection = self._get_connection(host_info=host_info)
-            fake_connection.getHostname = lambda: host
+            fake_connection = self._get_connection(
+                host_info=host_info, hostname=host)
 
             # This is fun. Firstly we need to do a global'ish mock so we can
             # actually start the service.
@@ -375,61 +1014,3 @@ class NUMAServersWithNetworksTest(NUMAServersTestBase):
         network_metadata = args[1].network_metadata
         self.assertIsNotNone(network_metadata)
         self.assertEqual(set(['foo']), network_metadata.physnets)
-
-    def test_cold_migrate_with_physnet_fails(self):
-        host_infos = [
-            # host 1 has room on both nodes
-            fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
-                                 cpu_cores=2, cpu_threads=2,
-                                 kB_mem=15740000),
-            # host 2 has no second node, where the desired physnet is
-            # reported to be attached
-            fakelibvirt.HostInfo(cpu_nodes=1, cpu_sockets=1,
-                                 cpu_cores=1, cpu_threads=1,
-                                 kB_mem=15740000),
-        ]
-
-        # Start services
-        self.computes = {}
-        for host in ['test_compute0', 'test_compute1']:
-            host_info = host_infos.pop(0)
-            fake_connection = self._get_connection(host_info=host_info)
-            fake_connection.getHostname = lambda: host
-
-            # This is fun. Firstly we need to do a global'ish mock so we can
-            # actually start the service.
-            with mock.patch('nova.virt.libvirt.host.Host.get_connection',
-                            return_value=fake_connection):
-                compute = self.start_service('compute', host=host)
-
-            # Once that's done, we need to do some tweaks to each individual
-            # compute "service" to make sure they return unique objects
-            compute.driver._host.get_connection = lambda: fake_connection
-            self.computes[host] = compute
-
-        # Create server
-        extra_spec = {'hw:numa_nodes': '1'}
-        flavor_id = self._create_flavor(extra_spec=extra_spec)
-        networks = [
-            {'uuid': base.LibvirtNeutronFixture.network_1['id']},
-        ]
-
-        good_server = self._build_server(flavor_id)
-        good_server['networks'] = networks
-        post = {'server': good_server}
-
-        created_server = self.api.post_server(post)
-        server = self._wait_for_state_change(created_server, 'BUILD')
-
-        self.assertEqual('ACTIVE', server['status'])
-
-        # TODO(stephenfin): The mock of 'migrate_disk_and_power_off' should
-        # probably be less...dumb
-        with mock.patch('nova.virt.libvirt.driver.LibvirtDriver'
-                        '.migrate_disk_and_power_off', return_value='{}'):
-            ex = self.assertRaises(client.OpenStackApiException,
-                                   self.api.post_server_action,
-                                   server['id'], {'migrate': None})
-
-        self.assertEqual(400, ex.response.status_code)
-        self.assertIn('No valid host', six.text_type(ex))

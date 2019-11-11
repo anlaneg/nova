@@ -41,9 +41,9 @@ from nova import utils
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 WARN_EVERY = 10
+NEGATIVE_MEMBER_OF_VERSION = '1.32'
 RESHAPER_VERSION = '1.30'
 CONSUMER_GENERATION_VERSION = '1.28'
-INTREE_AC_VERSION = '1.31'
 ALLOW_RESERVED_EQUAL_TOTAL_INVENTORY_VERSION = '1.26'
 POST_RPS_RETURNS_PAYLOAD_API_VERSION = '1.20'
 AGGREGATE_GENERATION_VERSION = '1.19'
@@ -291,7 +291,7 @@ class SchedulerReportClient(object):
         """
         # Note that claim_resources() will use this version as well to
         # make allocations by `PUT /allocations/{consumer_uuid}`
-        version = INTREE_AC_VERSION
+        version = NEGATIVE_MEMBER_OF_VERSION
         qparams = resources.to_querystring()
         url = "/allocation_candidates?%s" % qparams
         resp = self.get(url, version=version,
@@ -389,7 +389,7 @@ class SchedulerReportClient(object):
         :return: The name of the RP
         :raise: ResourceProviderRetrievalFailed if the RP is not in the cache
             and the communication with the placement is failed.
-        :raise: ResourceProviderNotFound if the RP does not exists.
+        :raise: ResourceProviderNotFound if the RP does not exist.
         """
 
         try:
@@ -667,7 +667,6 @@ class SchedulerReportClient(object):
 
         return uuid
 
-    @safe_connect
     def _delete_provider(self, rp_uuid, global_request_id=None):
         resp = self.delete('/resource_providers/%s' % rp_uuid,
                            global_request_id=global_request_id)
@@ -1293,6 +1292,8 @@ class SchedulerReportClient(object):
                  reshape (see below).
         :raises: ReshapeFailed if a reshape was signaled (allocations not None)
                  and it fails for any reason.
+        :raises: keystoneauth1.exceptions.base.ClientException on failure to
+                 communicate with the placement API
         """
         # NOTE(efried): We currently do not handle the "rename" case.  This is
         # where new_tree contains a provider named Y whose UUID already exists
@@ -1913,8 +1914,6 @@ class SchedulerReportClient(object):
                      'text': r.text})
         return r.status_code == 204
 
-    # TODO(gibi): kill safe_connect
-    @safe_connect
     @retries
     def put_allocations(self, context, consumer_uuid, payload):
         """Creates allocation records for the supplied consumer UUID based on
@@ -1926,12 +1925,18 @@ class SchedulerReportClient(object):
             PUT /allocations/{consumer_uuid} API
         :returns: True if the allocations were created, False otherwise.
         :raises: Retry if the operation should be retried due to a concurrent
-                 resource provider update.
+            resource provider update.
         :raises: AllocationUpdateFailed if placement returns a consumer
-                                        generation conflict
+            generation conflict
+        :raises: PlacementAPIConnectFailure on failure to communicate with the
+            placement API
         """
 
-        r = self._put_allocations(context, consumer_uuid, payload)
+        try:
+            r = self._put_allocations(context, consumer_uuid, payload)
+        except ks_exc.ClientException:
+            raise exception.PlacementAPIConnectFailure()
+
         if r.status_code != 204:
             err = r.json()['errors'][0]
             # NOTE(jaypipes): Yes, it sucks doing string comparison like this
@@ -1996,7 +2001,7 @@ class SchedulerReportClient(object):
         if allocations['allocations'] == {}:
             # the consumer did not exist in the first place
             LOG.debug('Cannot delete allocation for %s consumer in placement '
-                      'as consumer does not exists', uuid)
+                      'as consumer does not exist', uuid)
             return False
 
         # removing all resources from the allocation will auto delete the
@@ -2127,8 +2132,9 @@ class SchedulerReportClient(object):
         :param compute_node: The nova.objects.ComputeNode object that is the
                              resource provider being deleted.
         :param cascade: Boolean value that, when True, will first delete any
-                        associated Allocation and Inventory records for the
-                        compute node
+                        associated Allocation records for the compute node
+        :raises: keystoneauth1.exceptions.base.ClientException on failure to
+                 communicate with the placement API
         """
         nodename = compute_node.hypervisor_hostname
         host = compute_node.host
@@ -2332,6 +2338,15 @@ class SchedulerReportClient(object):
         :raises: `exception.UsagesRetrievalFailed` if a placement API call
                  fails
         """
+        def _get_core_usages(usages):
+            """For backward-compatible with existing behavior, the quota limit
+            on flavor.vcpus. That included the shared and dedicated CPU. So
+            we need to count both the orc.VCPU and orc.PCPU at here.
+            """
+            vcpus = usages['usages'].get(orc.VCPU, 0)
+            pcpus = usages['usages'].get(orc.PCPU, 0)
+            return vcpus + pcpus
+
         total_counts = {'project': {}}
         # First query counts across all users of a project
         LOG.debug('Getting usages for project_id %s from placement',
@@ -2341,7 +2356,7 @@ class SchedulerReportClient(object):
             data = resp.json()
             # The response from placement will not contain a resource class if
             # there is no usage. We can consider a missing class to be 0 usage.
-            cores = data['usages'].get(orc.VCPU, 0)
+            cores = _get_core_usages(data)
             ram = data['usages'].get(orc.MEMORY_MB, 0)
             total_counts['project'] = {'cores': cores, 'ram': ram}
         else:
@@ -2353,7 +2368,7 @@ class SchedulerReportClient(object):
             resp = self._get_usages(context, project_id, user_id=user_id)
             if resp:
                 data = resp.json()
-                cores = data['usages'].get(orc.VCPU, 0)
+                cores = _get_core_usages(data)
                 ram = data['usages'].get(orc.MEMORY_MB, 0)
                 total_counts['user'] = {'cores': cores, 'ram': ram}
             else:

@@ -16,6 +16,7 @@ from oslo_serialization import jsonutils
 from nova import availability_zones
 from nova.compute import utils as compute_utils
 from nova.conductor.tasks import base
+from nova.conductor.tasks import cross_cell_migrate
 from nova import exception
 from nova.i18n import _
 from nova import objects
@@ -65,9 +66,9 @@ def replace_allocation_with_migration(context, instance, migration):
                   instance=instance)
         return None, None
 
-    # FIXME(danms): This method is flawed in that it asssumes allocations
-    # against only one provider. So, this may overwite allocations against
-    # a shared provider, if we had one.
+    # FIXME(gibi): This method is flawed in that it does not handle allocations
+    # against sharing providers in any special way. This leads to duplicate
+    # allocations against the sharing provider during migration.
     success = reportclient.move_allocations(context, instance.uuid,
                                             migration.uuid)
     if not success:
@@ -93,9 +94,9 @@ def revert_allocation_for_migration(context, source_cn, instance, migration):
 
     reportclient = report.SchedulerReportClient()
 
-    # FIXME(danms): This method is flawed in that it asssumes allocations
-    # against only one provider. So, this may overwite allocations against
-    # a shared provider, if we had one.
+    # FIXME(gibi): This method is flawed in that it does not handle allocations
+    # against sharing providers in any special way. This leads to duplicate
+    # allocations against the sharing provider during migration.
     success = reportclient.move_allocations(context, migration.uuid,
                                             instance.uuid)
     if not success:
@@ -161,37 +162,71 @@ class MigrationTask(base.TaskBase):
 
         return migration
 
-    def _restrict_request_spec_to_cell(self, legacy_props):
-        # NOTE(danms): Right now we only support migrate to the same
-        # cell as the current instance, so request that the scheduler
-        # limit thusly.
+    def _set_requested_destination_cell(self, legacy_props):
         instance_mapping = objects.InstanceMapping.get_by_instance_uuid(
             self.context, self.instance.uuid)
-        LOG.debug('Requesting cell %(cell)s while migrating',
-                  {'cell': instance_mapping.cell_mapping.identity},
-                  instance=self.instance)
-        if ('requested_destination' in self.request_spec and
+        if not ('requested_destination' in self.request_spec and
                 self.request_spec.requested_destination):
-            self.request_spec.requested_destination.cell = (
-                instance_mapping.cell_mapping)
-            # NOTE(takashin): In the case that the target host is specified,
-            # if the migration is failed, it is not necessary to retry
-            # the cold migration to the same host. So make sure that
-            # reschedule will not occur.
-            if 'host' in self.request_spec.requested_destination:
-                legacy_props.pop('retry', None)
-                self.request_spec.retry = None
+            self.request_spec.requested_destination = objects.Destination()
+        targeted = 'host' in self.request_spec.requested_destination
+        # NOTE(mriedem): If the user is allowed to perform a cross-cell resize
+        # then add the current cell to the request spec as "preferred" so the
+        # scheduler will (by default) weigh hosts within the current cell over
+        # hosts in another cell, all other things being equal. If the user is
+        # not allowed to perform cross-cell resize, then we limit the request
+        # spec and tell the scheduler to only look at hosts in the current
+        # cell.
+        cross_cell_allowed = (
+            self.request_spec.requested_destination.allow_cross_cell_move)
+        self.request_spec.requested_destination.cell = (
+            instance_mapping.cell_mapping)
+
+        # NOTE(takashin): In the case that the target host is specified,
+        # if the migration is failed, it is not necessary to retry
+        # the cold migration to the same host. So make sure that
+        # reschedule will not occur.
+        if targeted:
+            legacy_props.pop('retry', None)
+            self.request_spec.retry = None
+
+        # Log our plan before calling the scheduler.
+        if cross_cell_allowed:
+            LOG.debug('Allowing migration from cell %(cell)s',
+                      {'cell': instance_mapping.cell_mapping.identity},
+                      instance=self.instance)
         else:
-            self.request_spec.requested_destination = objects.Destination(
-                cell=instance_mapping.cell_mapping)
+            LOG.debug('Restricting to cell %(cell)s while migrating',
+                      {'cell': instance_mapping.cell_mapping.identity},
+                      instance=self.instance)
+
+    def _is_selected_host_in_source_cell(self, selection):
+        """Checks if the given Selection is in the same cell as the instance
+
+        :param selection: Selection object returned from the scheduler
+            ``select_destinations`` method.
+        :returns: True if the host Selection is in the same cell as the
+            instance, False otherwise.
+        """
+        # Note that the context is already targeted to the current cell in
+        # which the instance exists.
+        same_cell = selection.cell_uuid == self.context.cell_uuid
+        if not same_cell:
+            LOG.debug('Selected target host %s is in cell %s and instance is '
+                      'in cell: %s', selection.service_host,
+                      selection.cell_uuid, self.context.cell_uuid,
+                      instance=self.instance)
+        return same_cell
 
     def _support_resource_request(self, selection):
         """Returns true if the host is new enough to support resource request
-        during migration.
+        during migration and that the RPC API version is not pinned during
+        rolling upgrade.
         """
         svc = objects.Service.get_by_host_and_binary(
             self.context, selection.service_host, 'nova-compute')
-        return svc.version >= 39
+        return (svc.version >= 39 and
+                self.compute_rpcapi.supports_resize_with_qos_port(
+                    self.context))
 
     # TODO(gibi): Remove this compat code when nova doesn't need to support
     # Train computes any more.
@@ -226,7 +261,8 @@ class MigrationTask(base.TaskBase):
         LOG.debug(
             'Scheduler returned host %(host)s as a possible migration target '
             'but that host is not new enough to support the migration with '
-            'resource request %(request)s. Trying alternate hosts.',
+            'resource request %(request)s or the compute RPC is pinned to '
+            'less than 5.2. Trying alternate hosts.',
             {'host': selection_list[0].service_host,
              'request': self.request_spec.requested_resources},
             instance=self.instance)
@@ -267,7 +303,8 @@ class MigrationTask(base.TaskBase):
                 LOG.debug(
                     'Scheduler returned alternate host %(host)s as a possible '
                     'migration target but that host is not new enough to '
-                    'support the migration with resource request %(request)s. '
+                    'support the migration with resource request %(request)s '
+                    'or the compute RPC is pinned to less than 5.2. '
                     'Trying another alternate.',
                     {'host': selection.service_host,
                      'request': self.request_spec.requested_resources},
@@ -281,6 +318,13 @@ class MigrationTask(base.TaskBase):
         raise exception.MaxRetriesExceeded(reason=reason)
 
     def _execute(self):
+        # NOTE(sbauza): Force_hosts/nodes needs to be reset if we want to make
+        # sure that the next destination is not forced to be the original host.
+        # This needs to be done before the populate_retry call otherwise
+        # retries will be disabled if the server was created with a forced
+        # host/node.
+        self.request_spec.reset_forced_destinations()
+
         # TODO(sbauza): Remove once all the scheduler.utils methods accept a
         # RequestSpec object in the signature.
         legacy_props = self.request_spec.to_legacy_filter_properties_dict()
@@ -293,11 +337,6 @@ class MigrationTask(base.TaskBase):
             scheduler_utils.populate_retry(legacy_props,
                                            self.instance.uuid)
 
-        # NOTE(sbauza): Force_hosts/nodes needs to be reset
-        # if we want to make sure that the next destination
-        # is not forced to be the original host
-        self.request_spec.reset_forced_destinations()
-
         port_res_req = self.network_api.get_requested_resource_for_instance(
             self.context, self.instance.uuid)
         # NOTE(gibi): When cyborg or other module wants to handle similar
@@ -305,7 +344,7 @@ class MigrationTask(base.TaskBase):
         # resource requests in a single list and add them to the RequestSpec.
         self.request_spec.requested_resources = port_res_req
 
-        self._restrict_request_spec_to_cell(legacy_props)
+        self._set_requested_destination_cell(legacy_props)
 
         # Once _preallocate_migration() is done, the source node allocation is
         # moved from the instance consumer to the migration record consumer,
@@ -333,7 +372,18 @@ class MigrationTask(base.TaskBase):
         # pass the remaining alternates to the compute.
         if self.host_list is None:
             selection = self._schedule()
-
+            if not self._is_selected_host_in_source_cell(selection):
+                # If the selected host is in another cell, we need to execute
+                # another task to do the cross-cell migration.
+                LOG.info('Executing cross-cell resize task starting with '
+                         'target host: %s', selection.service_host,
+                         instance=self.instance)
+                task = cross_cell_migrate.CrossCellMigrationTask(
+                    self.context, self.instance, self.flavor,
+                    self.request_spec, self._migration, self.compute_rpcapi,
+                    selection, self.host_list)
+                task.execute()
+                return
         else:
             # This is a reschedule that will use the supplied alternate hosts
             # in the host_list as destinations.
@@ -345,9 +395,14 @@ class MigrationTask(base.TaskBase):
 
         (host, node) = (selection.service_host, selection.nodename)
 
-        self.instance.availability_zone = (
-            availability_zones.get_host_availability_zone(
-                self.context, host))
+        # The availability_zone field was added in v1.1 of the Selection
+        # object so make sure to handle the case where it is missing.
+        if 'availability_zone' in selection:
+            self.instance.availability_zone = selection.availability_zone
+        else:
+            self.instance.availability_zone = (
+                availability_zones.get_host_availability_zone(
+                    self.context, host))
 
         LOG.debug("Calling prep_resize with selected host: %s; "
                   "Selected node: %s; Alternates: %s", host, node,
@@ -432,7 +487,7 @@ class MigrationTask(base.TaskBase):
             raise exception.MaxRetriesExceeded(reason=reason)
         return selection
 
-    def rollback(self):
+    def rollback(self, ex):
         if self._migration:
             self._migration.status = 'error'
             self._migration.save()

@@ -42,6 +42,7 @@ from nova import context
 from nova.db import api as db
 from nova import exception
 from nova.image import api as image_api
+from nova.network import model
 from nova.network.neutronv2 import api as neutron_api
 from nova.network.neutronv2 import constants
 from nova import objects
@@ -1649,16 +1650,22 @@ class _ComputeAPIUnitTestMixIn(object):
     def test_confirm_resize_with_migration_ref(self):
         self._test_confirm_resize(mig_ref_passed=True)
 
+    @mock.patch('nova.network.neutronv2.api.API.'
+                'get_requested_resource_for_instance',
+                return_value=mock.sentinel.res_req)
     @mock.patch('nova.availability_zones.get_host_availability_zone',
                 return_value='nova')
     @mock.patch('nova.objects.Quotas.check_deltas')
     @mock.patch('nova.objects.Migration.get_by_instance_and_status')
     @mock.patch('nova.context.RequestContext.elevated')
     @mock.patch('nova.objects.RequestSpec.get_by_instance_uuid')
-    def _test_revert_resize(self, mock_get_reqspec, mock_elevated,
-                            mock_get_migration, mock_check, mock_get_host_az):
+    def _test_revert_resize(
+            self, mock_get_reqspec, mock_elevated, mock_get_migration,
+            mock_check, mock_get_host_az, mock_get_requested_resources):
         params = dict(vm_state=vm_states.RESIZED)
         fake_inst = self._create_instance_obj(params=params)
+        fake_inst.info_cache.network_info = model.NetworkInfo([
+            model.VIF(id=uuids.port1, profile={'allocation': uuids.rp})])
         fake_inst.old_flavor = fake_inst.flavor
         fake_mig = objects.Migration._from_db_object(
                 self.context, objects.Migration(),
@@ -1696,21 +1703,29 @@ class _ComputeAPIUnitTestMixIn(object):
             mock_revert_resize.assert_called_once_with(
                 self.context, fake_inst, fake_mig, 'compute-dest',
                 mock_get_reqspec.return_value)
+            mock_get_requested_resources.assert_called_once_with(
+                self.context, fake_inst.uuid)
+            self.assertEqual(
+                mock.sentinel.res_req,
+                mock_get_reqspec.return_value.requested_resources)
 
     def test_revert_resize(self):
         self._test_revert_resize()
 
+    @mock.patch('nova.network.neutronv2.api.API.'
+                'get_requested_resource_for_instance')
     @mock.patch('nova.availability_zones.get_host_availability_zone',
                 return_value='nova')
     @mock.patch('nova.objects.Quotas.check_deltas')
     @mock.patch('nova.objects.Migration.get_by_instance_and_status')
     @mock.patch('nova.context.RequestContext.elevated')
     @mock.patch('nova.objects.RequestSpec')
-    def test_revert_resize_concurrent_fail(self, mock_reqspec, mock_elevated,
-                                           mock_get_migration, mock_check,
-                                           mock_get_host_az):
+    def test_revert_resize_concurrent_fail(
+            self, mock_reqspec, mock_elevated, mock_get_migration, mock_check,
+            mock_get_host_az, mock_get_requested_resources):
         params = dict(vm_state=vm_states.RESIZED)
         fake_inst = self._create_instance_obj(params=params)
+        fake_inst.info_cache.network_info = model.NetworkInfo([])
         fake_inst.old_flavor = fake_inst.flavor
         fake_mig = objects.Migration._from_db_object(
                 self.context, objects.Migration(),
@@ -1735,6 +1750,7 @@ class _ComputeAPIUnitTestMixIn(object):
             mock_get_migration.assert_called_once_with(
                 self.context, fake_inst['uuid'], 'finished')
             mock_inst_save.assert_called_once_with(expected_task_state=[None])
+            mock_get_requested_resources.assert_not_called()
 
     @mock.patch('nova.compute.utils.is_volume_backed_instance',
                 return_value=False)
@@ -4106,7 +4122,8 @@ class _ComputeAPIUnitTestMixIn(object):
                           'disk_remaining': None, 'deleted': False,
                           'hidden': False, 'created_at': None,
                           'updated_at': None, 'deleted_at': None,
-                          'cross_cell_move': False}
+                          'cross_cell_move': False, 'user_id': None,
+                          'project_id': None}
 
         def migration_get(context, id):
             return migrations[id]
@@ -4188,23 +4205,62 @@ class _ComputeAPIUnitTestMixIn(object):
                           self.context,
                           bdms, legacy_bdm=True)
 
+    def test_get_volumes_for_bdms_errors(self):
+        """Simple test to make sure _get_volumes_for_bdms raises up errors."""
+        # Use a mix of pre-existing and source_type=image volumes to test the
+        # filtering logic in the method.
+        bdms = objects.BlockDeviceMappingList(objects=[
+            objects.BlockDeviceMapping(source_type='image', volume_id=None),
+            objects.BlockDeviceMapping(source_type='volume',
+                                       volume_id=uuids.volume_id)])
+        for exc in (
+            exception.VolumeNotFound(volume_id=uuids.volume_id),
+            exception.CinderConnectionFailed(reason='gremlins'),
+            exception.Forbidden()
+        ):
+            with mock.patch.object(self.compute_api.volume_api, 'get',
+                                   side_effect=exc) as mock_vol_get:
+                self.assertRaises(type(exc),
+                                  self.compute_api._get_volumes_for_bdms,
+                                  self.context, bdms)
+            mock_vol_get.assert_called_once_with(self.context, uuids.volume_id)
+
+    @ddt.data(True, False)
+    def test_validate_vol_az_for_create_multiple_vols_diff_az(self, cross_az):
+        """Tests cross_az_attach=True|False scenarios where the volumes are
+        in different zones.
+        """
+        self.flags(cross_az_attach=cross_az, group='cinder')
+        volumes = [{'availability_zone': str(x)} for x in range(2)]
+        if cross_az:
+            # Since cross_az_attach=True (the default) we do not care that the
+            # volumes are in different zones.
+            self.assertIsNone(self.compute_api._validate_vol_az_for_create(
+                None, volumes))
+        else:
+            # In this case the volumes cannot be in different zones.
+            ex = self.assertRaises(
+                exception.MismatchVolumeAZException,
+                self.compute_api._validate_vol_az_for_create, None, volumes)
+            self.assertIn('Volumes are in different availability zones: 0,1',
+                          six.text_type(ex))
+
+    def test_validate_vol_az_for_create_vol_az_matches_default_cpu_az(self):
+        """Tests the scenario that the instance is not being created in a
+        specific zone and the volume's zone matches
+        CONF.default_availabilty_zone so None is returned indicating the
+        RequestSpec.availability_zone does not need to be updated.
+        """
+        self.flags(cross_az_attach=False, group='cinder')
+        volumes = [{'availability_zone': CONF.default_availability_zone}]
+        self.assertIsNone(self.compute_api._validate_vol_az_for_create(
+            None, volumes))
+
     @mock.patch.object(cinder.API, 'get_snapshot',
              side_effect=exception.CinderConnectionFailed(reason='error'))
-    @mock.patch.object(cinder.API, 'get',
-             side_effect=exception.CinderConnectionFailed(reason='error'))
-    def test_validate_bdm_with_cinder_down(self, mock_get, mock_get_snapshot):
+    def test_validate_bdm_with_cinder_down(self, mock_get_snapshot):
         instance = self._create_instance_obj()
         instance_type = self._create_flavor()
-        bdm = [objects.BlockDeviceMapping(
-                **fake_block_device.FakeDbBlockDeviceDict(
-                {
-                 'id': 1,
-                 'volume_id': 1,
-                 'source_type': 'volume',
-                 'destination_type': 'volume',
-                 'device_name': 'vda',
-                 'boot_index': 0,
-                 }))]
         bdms = [objects.BlockDeviceMapping(
                 **fake_block_device.FakeDbBlockDeviceDict(
                 {
@@ -4215,20 +4271,15 @@ class _ComputeAPIUnitTestMixIn(object):
                  'device_name': 'vda',
                  'boot_index': 0,
                  }))]
+        image_cache = volumes = {}
         self.assertRaises(exception.CinderConnectionFailed,
                           self.compute_api._validate_bdm,
                           self.context,
-                          instance, instance_type, bdm)
-        self.assertRaises(exception.CinderConnectionFailed,
-                          self.compute_api._validate_bdm,
-                          self.context,
-                          instance, instance_type, bdms)
+                          instance, instance_type, bdms, image_cache, volumes)
 
-    @mock.patch.object(cinder.API, 'get')
     @mock.patch.object(cinder.API, 'attachment_create',
                        side_effect=exception.InvalidInput(reason='error'))
-    def test_validate_bdm_with_error_volume_new_flow(self, mock_attach_create,
-                                                     mock_get):
+    def test_validate_bdm_with_error_volume_new_flow(self, mock_attach_create):
         # Tests that an InvalidInput exception raised from
         # volume_api.attachment_create due to the volume status not being
         # 'available' results in _validate_bdm re-raising InvalidVolume.
@@ -4239,7 +4290,6 @@ class _ComputeAPIUnitTestMixIn(object):
         volume_info = {'status': 'error',
                        'attach_status': 'detached',
                        'id': volume_id, 'multiattach': False}
-        mock_get.return_value = volume_info
         bdms = [objects.BlockDeviceMapping(
                 **fake_block_device.FakeDbBlockDeviceDict(
                 {
@@ -4253,9 +4303,9 @@ class _ComputeAPIUnitTestMixIn(object):
         self.assertRaises(exception.InvalidVolume,
                           self.compute_api._validate_bdm,
                           self.context,
-                          instance, instance_type, bdms)
+                          instance, instance_type, bdms, {},
+                          {volume_id: volume_info})
 
-        mock_get.assert_called_once_with(self.context, volume_id)
         mock_attach_create.assert_called_once_with(
             self.context, volume_id, instance.uuid)
 
@@ -4266,17 +4316,14 @@ class _ComputeAPIUnitTestMixIn(object):
             objects.BlockDeviceMapping(
                 boot_index=None, image_id=uuids.image_id,
                 source_type='image', destination_type='volume')])
+        image_cache = volumes = {}
         self.assertRaises(exception.InvalidBDMBootSequence,
                           self.compute_api._validate_bdm,
                           self.context, objects.Instance(), objects.Flavor(),
-                          bdms)
+                          bdms, image_cache, volumes)
 
-    @mock.patch.object(objects.service, 'get_minimum_version_all_cells',
-                       return_value=compute_api.MIN_COMPUTE_VOLUME_TYPE)
-    def test_validate_bdm_with_volume_type_name_is_specified(
-            self, mock_get_min_version):
-        """Test _check_requested_volume_type and
-        _check_compute_supports_volume_type methods are used.
+    def test_validate_bdm_with_volume_type_name_is_specified(self):
+        """Test _check_requested_volume_type method is used.
         """
         instance = self._create_instance_obj()
         instance_type = self._create_flavor()
@@ -4313,15 +4360,14 @@ class _ComputeAPIUnitTestMixIn(object):
                 mock.patch.object(cinder.API, 'get_all_volume_types',
                                   return_value=volume_types),
                 mock.patch.object(compute_api.API,
-                                  '_check_compute_supports_volume_type'),
-                mock.patch.object(compute_api.API,
                                   '_check_requested_volume_type')) as (
-                get_all_vol_types, vol_type_supported, vol_type_requested):
+                get_all_vol_types, vol_type_requested):
 
+            image_cache = volumes = {}
             self.compute_api._validate_bdm(self.context, instance,
-                                           instance_type, bdms)
+                                           instance_type, bdms, image_cache,
+                                           volumes)
 
-            vol_type_supported.assert_called_once_with(self.context)
             get_all_vol_types.assert_called_once_with(self.context)
 
             vol_type_requested.assert_any_call(bdms[0], volume_type,
@@ -4341,10 +4387,11 @@ class _ComputeAPIUnitTestMixIn(object):
                 source_type='image', destination_type='volume',
                 volume_type=None, snapshot_id=None, volume_id=None,
                 volume_size=None)])
+        image_cache = volumes = {}
         self.assertRaises(exception.InvalidBDM,
                           self.compute_api._validate_bdm,
                           self.context, instance, objects.Flavor(),
-                          bdms)
+                          bdms, image_cache, volumes)
         self.assertEqual(0, mock_get_image.call_count)
         # then we test the case of instance.image_ref != bdm.image_id
         image_id = uuids.image_id
@@ -4357,13 +4404,10 @@ class _ComputeAPIUnitTestMixIn(object):
         self.assertRaises(exception.InvalidBDM,
                           self.compute_api._validate_bdm,
                           self.context, instance, objects.Flavor(),
-                          bdms)
+                          bdms, image_cache, volumes)
         mock_get_image.assert_called_once_with(self.context, image_id)
 
-    @mock.patch.object(objects.service, 'get_minimum_version_all_cells',
-                       return_value=compute_api.MIN_COMPUTE_VOLUME_TYPE)
-    def test_the_specified_volume_type_id_assignment_to_name(
-            self, mock_get_min_version):
+    def test_the_specified_volume_type_id_assignment_to_name(self):
         """Test _check_requested_volume_type method is called, if the user
         is using the volume type ID, assign volume_type to volume type name.
         """
@@ -4480,6 +4524,7 @@ class _ComputeAPIUnitTestMixIn(object):
                                               mock_br, mock_rs):
         fake_keypair = objects.KeyPair(name='test')
 
+        @mock.patch.object(self.compute_api, '_get_volumes_for_bdms')
         @mock.patch.object(self.compute_api,
                            '_create_reqspec_buildreq_instmapping',
                            new=mock.MagicMock())
@@ -4489,7 +4534,7 @@ class _ComputeAPIUnitTestMixIn(object):
                            'create_db_entry_for_new_instance')
         @mock.patch.object(self.compute_api,
                            '_bdm_validate_set_size_and_instance')
-        def do_test(mock_bdm_v, mock_cdb, mock_sg, mock_cniq):
+        def do_test(mock_bdm_v, mock_cdb, mock_sg, mock_cniq, mock_get_vols):
             mock_cniq.return_value = 1
             self.compute_api._provision_instances(self.context,
                                                   mock.sentinel.flavor,
@@ -4516,6 +4561,7 @@ class _ComputeAPIUnitTestMixIn(object):
         do_test()
 
     def test_provision_instances_creates_build_request(self):
+        @mock.patch.object(self.compute_api, '_get_volumes_for_bdms')
         @mock.patch.object(self.compute_api,
                            '_create_reqspec_buildreq_instmapping')
         @mock.patch.object(objects.Instance, 'create')
@@ -4525,7 +4571,7 @@ class _ComputeAPIUnitTestMixIn(object):
         @mock.patch.object(objects.RequestSpec, 'from_components')
         def do_test(mock_req_spec_from_components, _mock_ensure_default,
                     mock_check_num_inst_quota, mock_inst_create,
-                    mock_create_rs_br_im):
+                    mock_create_rs_br_im, mock_get_volumes):
 
             min_count = 1
             max_count = 2
@@ -4588,7 +4634,8 @@ class _ComputeAPIUnitTestMixIn(object):
                         instance_tags, trusted_certs, False)
             validate_bdm.assert_has_calls([mock.call(
                 ctxt, test.MatchType(objects.Instance), flavor,
-                block_device_mappings, False)] * max_count)
+                block_device_mappings, {}, mock_get_volumes.return_value,
+                False)] * max_count)
 
             for rs, br, im in instances_to_build:
                 self.assertIsInstance(br.instance, objects.Instance)
@@ -4602,6 +4649,7 @@ class _ComputeAPIUnitTestMixIn(object):
         do_test()
 
     def test_provision_instances_creates_instance_mapping(self):
+        @mock.patch.object(self.compute_api, '_get_volumes_for_bdms')
         @mock.patch.object(self.compute_api,
                            '_create_reqspec_buildreq_instmapping',
                            new=mock.MagicMock())
@@ -4614,7 +4662,8 @@ class _ComputeAPIUnitTestMixIn(object):
         @mock.patch.object(objects.RequestSpec, 'from_components',
                 mock.MagicMock())
         @mock.patch('nova.objects.InstanceMapping')
-        def do_test(mock_inst_mapping, mock_check_num_inst_quota):
+        def do_test(mock_inst_mapping, mock_check_num_inst_quota,
+                    mock_get_vols):
             inst_mapping_mock = mock.MagicMock()
 
             mock_check_num_inst_quota.return_value = 1
@@ -5013,8 +5062,10 @@ class _ComputeAPIUnitTestMixIn(object):
                         block_device_mapping)))
 
         with mock.patch.object(self.compute_api, '_validate_bdm'):
+            image_cache = volumes = {}
             bdms = self.compute_api._bdm_validate_set_size_and_instance(
-                self.context, instance, instance_type, block_device_mapping)
+                self.context, instance, instance_type, block_device_mapping,
+                image_cache, volumes)
 
         expected = [{'device_name': '/dev/sda1',
                      'source_type': 'snapshot', 'destination_type': 'volume',
@@ -5207,16 +5258,10 @@ class _ComputeAPIUnitTestMixIn(object):
     @mock.patch('nova.compute.api.API._record_action_start')
     @mock.patch.object(compute_rpcapi.ComputeAPI, 'live_migration_abort')
     @mock.patch.object(objects.Migration, 'get_by_id_and_instance')
-    @mock.patch.object(objects.Service, 'get_by_compute_host')
     def test_live_migrate_abort_in_queue_succeeded(self,
-                                                   mock_get_service,
                                                    mock_get_migration,
                                                    mock_lm_abort,
                                                    mock_rec_action):
-        service_obj = objects.Service()
-        service_obj.version = (
-                compute_api.MIN_COMPUTE_ABORT_QUEUED_LIVE_MIGRATION)
-        mock_get_service.return_value = service_obj
         instance = self._create_instance_obj()
         instance.task_state = task_states.MIGRATING
         for migration_status in ('queued', 'preparing'):
@@ -5246,23 +5291,6 @@ class _ComputeAPIUnitTestMixIn(object):
                           self.compute_api.live_migrate_abort, self.context,
                           instance, migration.id,
                           support_abort_in_queue=False)
-
-    @mock.patch.object(objects.Migration, 'get_by_id_and_instance')
-    @mock.patch.object(objects.Service, 'get_by_compute_host')
-    def test_live_migration_abort_in_queue_old_compute_conflict(
-            self, mock_get_service, mock_get_migration):
-        service_obj = objects.Service()
-        service_obj.version = (
-                compute_api.MIN_COMPUTE_ABORT_QUEUED_LIVE_MIGRATION - 1)
-        mock_get_service.return_value = service_obj
-        instance = self._create_instance_obj()
-        instance.task_state = task_states.MIGRATING
-        migration = self._get_migration(21, 'queued', 'live-migration')
-        mock_get_migration.return_value = migration
-        self.assertRaises(exception.AbortQueuedLiveMigrationNotYetSupported,
-                          self.compute_api.live_migrate_abort, self.context,
-                          instance, migration.id,
-                          support_abort_in_queue=True)
 
     @mock.patch.object(objects.Migration, 'get_by_id_and_instance')
     def test_live_migration_abort_wrong_migration_status(self,
@@ -6378,22 +6406,7 @@ class ComputeAPIUnitTestCase(_ComputeAPIUnitTestMixIn, test.NoDBTestCase):
                               self.compute_api.attach_volume,
                               self.context, instance, uuids.volumeid)
 
-    @mock.patch('nova.objects.service.get_minimum_version_all_cells',
-                return_value=compute_api.MIN_COMPUTE_VOLUME_TYPE - 1)
-    def test_check_compute_supports_volume_type_new_inst_old_compute(
-            self, get_min_version):
-        """Tests that _check_compute_supports_volume_type fails if trying to
-        specify a volume type to create a new instance but the nova-compute
-        service version are not all upgraded yet.
-        """
-        self.assertRaises(exception.VolumeTypeSupportNotYetAvailable,
-                          self.compute_api._check_compute_supports_volume_type,
-                          self.context)
-
-    @mock.patch('nova.objects.service.get_minimum_version_all_cells',
-                return_value=compute_api.MIN_COMPUTE_VOLUME_TYPE)
-    def test_validate_bdm_check_volume_type_raise_not_found(
-            self, get_min_version):
+    def test_validate_bdm_check_volume_type_raise_not_found(self):
         """Tests that _validate_bdm will fail if the requested volume type
         name or id does not match the volume types in Cinder.
         """

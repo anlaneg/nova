@@ -18,9 +18,21 @@ However the following API operations are still not supported in nova:
 * Attaching Neutron ports and networks having QoS minimum bandwidth rule is not
   supported.
 
+Also the following API operations are not supported in the 19.0.0 (Stein)
+version of nova:
+
 * Moving (resizing, migrating, live-migrating, evacuating, unshelving after
   shelve offload) servers with ports having resource request is not yet
   supported.
+
+As of 20.0.0 (Train), nova supports cold migrating and resizing servers with
+neutron ports having resource requests if both the source and destination
+compute services are upgraded to 20.0.0 (Train) and the
+``[upgrade_levels]/compute`` configuration does not prevent the computes from
+using the latest RPC version.
+
+As of 21.0.0 (Ussuri), nova supports evacuating servers with neutron ports
+having resource requests.
 
 See :nova-doc:`the admin guide <admin/port_with_resource_request.html>` for
 administrative details.

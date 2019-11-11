@@ -103,8 +103,7 @@ AGGREGATE_ACTION_UPDATE = 'Update'
 AGGREGATE_ACTION_UPDATE_META = 'UpdateMeta'
 AGGREGATE_ACTION_DELETE = 'Delete'
 AGGREGATE_ACTION_ADD = 'Add'
-MIN_COMPUTE_ABORT_QUEUED_LIVE_MIGRATION = 34
-MIN_COMPUTE_VOLUME_TYPE = 36
+
 MIN_COMPUTE_SYNC_COMPUTE_STATUS_DISABLED = 38
 
 # FIXME(danms): Keep a global cache of the cells we find the
@@ -203,6 +202,24 @@ def check_instance_lock(function):
             raise exception.InstanceIsLocked(instance_uuid=instance.uuid)
         return function(self, context, instance, *args, **kwargs)
     return inner
+
+
+def reject_sev_instances(operation):
+    """Decorator.  Raise OperationNotSupportedForSEV if instance has SEV
+    enabled.
+    """
+
+    def outer(f):
+        @six.wraps(f)
+        def inner(self, context, instance, *args, **kw):
+            if hardware.get_mem_encryption_constraint(instance.flavor,
+                                                      instance.image_meta):
+                raise exception.OperationNotSupportedForSEV(
+                    instance_uuid=instance.uuid,
+                    operation=operation)
+            return f(self, context, instance, *args, **kw)
+        return inner
+    return outer
 
 
 def _diff_dict(orig, new):
@@ -1017,6 +1034,104 @@ class API(base.Base):
             except exception.ResourceProviderNotFound:
                 raise exception.ComputeHostNotFound(host=hypervisor_hostname)
 
+    def _get_volumes_for_bdms(self, context, bdms):
+        """Get the pre-existing volumes from cinder for the list of BDMs.
+
+        :param context: nova auth RequestContext
+        :param bdms: BlockDeviceMappingList which has zero or more BDMs with
+            a pre-existing volume_id specified.
+        :return: dict, keyed by volume id, of volume dicts
+        :raises: VolumeNotFound - if a given volume does not exist
+        :raises: CinderConnectionFailed - if there are problems communicating
+            with the cinder API
+        :raises: Forbidden - if the user token does not have authority to see
+            a volume
+        """
+        volumes = {}
+        for bdm in bdms:
+            if bdm.volume_id:
+                volumes[bdm.volume_id] = self.volume_api.get(
+                    context, bdm.volume_id)
+        return volumes
+
+    @staticmethod
+    def _validate_vol_az_for_create(instance_az, volumes):
+        """Performs cross_az_attach validation for the instance and volumes.
+
+        If [cinder]/cross_az_attach=True (default) this method is a no-op.
+
+        If [cinder]/cross_az_attach=False, this method will validate that:
+
+        1. All volumes are in the same availability zone.
+        2. The volume AZ matches the instance AZ. If the instance is being
+           created without a specific AZ (either via the user request or the
+           [DEFAULT]/default_schedule_zone option), and the volume AZ matches
+           [DEFAULT]/default_availability_zone for compute services, then the
+           method returns the volume AZ so it can be set in the RequestSpec as
+           if the user requested the zone explicitly.
+
+        :param instance_az: Availability zone for the instance. In this case
+            the host is not yet selected so the instance AZ value should come
+            from one of the following cases:
+
+            * The user requested availability zone.
+            * [DEFAULT]/default_schedule_zone (defaults to None) if the request
+              does not specify an AZ (see parse_availability_zone).
+        :param volumes: iterable of dicts of cinder volumes to be attached to
+            the server being created
+        :returns: None or volume AZ to set in the RequestSpec for the instance
+        :raises: MismatchVolumeAZException if the instance and volume AZ do
+            not match
+        """
+        if CONF.cinder.cross_az_attach:
+            return
+
+        if not volumes:
+            return
+
+        # First make sure that all of the volumes are in the same zone.
+        vol_zones = [vol['availability_zone'] for vol in volumes]
+        if len(set(vol_zones)) > 1:
+            msg = (_("Volumes are in different availability zones: %s")
+                   % ','.join(vol_zones))
+            raise exception.MismatchVolumeAZException(reason=msg)
+
+        volume_az = vol_zones[0]
+        # In this case the instance.host should not be set so the instance AZ
+        # value should come from instance.availability_zone which will be one
+        # of the following cases:
+        # * The user requested availability zone.
+        # * [DEFAULT]/default_schedule_zone (defaults to None) if the request
+        #   does not specify an AZ (see parse_availability_zone).
+
+        # If the instance is not being created with a specific AZ (the AZ is
+        # input via the API create request *or* [DEFAULT]/default_schedule_zone
+        # is not None), then check to see if we should use the default AZ
+        # (which by default matches the default AZ in Cinder, i.e. 'nova').
+        if instance_az is None:
+            # Check if the volume AZ is the same as our default AZ for compute
+            # hosts (nova) and if so, assume we are OK because the user did not
+            # request an AZ and will get the same default. If the volume AZ is
+            # not the same as our default, return the volume AZ so the caller
+            # can put it into the request spec so the instance is scheduled
+            # to the same zone as the volume. Note that we are paranoid about
+            # the default here since both nova and cinder's default backend AZ
+            # is "nova" and we do not want to pin the server to that AZ since
+            # it's special, i.e. just like we tell users in the docs to not
+            # specify availability_zone='nova' when creating a server since we
+            # might not be able to migrate it later.
+            if volume_az != CONF.default_availability_zone:
+                return volume_az  # indication to set in request spec
+            # The volume AZ is the same as the default nova AZ so we will be OK
+            return
+
+        if instance_az != volume_az:
+            msg = _("Server and volumes are not in the same availability "
+                    "zone. Server is in: %(instance_az)s. Volumes are in: "
+                    "%(volume_az)s") % {
+                'instance_az': instance_az, 'volume_az': volume_az}
+            raise exception.MismatchVolumeAZException(reason=msg)
+
     def _provision_instances(self, context, instance_type, min_count,
             max_count, base_options, boot_meta, security_groups,
             block_device_mapping, shutdown_terminate,
@@ -1042,8 +1157,23 @@ class API(base.Base):
                 security_groups)
         self.security_group_api.ensure_default(context)
         port_resource_requests = base_options.pop('port_resource_requests')
-        LOG.debug("Going to run %s instances...", num_instances)
         instances_to_build = []
+        # We could be iterating over several instances with several BDMs per
+        # instance and those BDMs could be using a lot of the same images so
+        # we want to cache the image API GET results for performance.
+        image_cache = {}  # dict of image dicts keyed by image id
+        # Before processing the list of instances get all of the requested
+        # pre-existing volumes so we can do some validation here rather than
+        # down in the bowels of _validate_bdm.
+        volumes = self._get_volumes_for_bdms(context, block_device_mapping)
+        volume_az = self._validate_vol_az_for_create(
+            base_options['availability_zone'], volumes.values())
+        if volume_az:
+            # This means the instance is not being created in a specific zone
+            # but needs to match the zone that the volumes are in so update
+            # base_options to match the volume zone.
+            base_options['availability_zone'] = volume_az
+        LOG.debug("Going to run %s instances...", num_instances)
         try:
             for i in range(num_instances):
                 # Create a uuid for the instance so we can store the
@@ -1097,7 +1227,7 @@ class API(base.Base):
                 block_device_mapping = (
                     self._bdm_validate_set_size_and_instance(context,
                         instance, instance_type, block_device_mapping,
-                        supports_multiattach))
+                        image_cache, volumes, supports_multiattach))
                 instance_tags = self._transform_tags(tags, instance.uuid)
 
                 build_request = objects.BuildRequest(context,
@@ -1457,17 +1587,29 @@ class API(base.Base):
     def _bdm_validate_set_size_and_instance(self, context, instance,
                                             instance_type,
                                             block_device_mapping,
+                                            image_cache, volumes,
                                             supports_multiattach=False):
         """Ensure the bdms are valid, then set size and associate with instance
 
         Because this method can be called multiple times when more than one
         instance is booted in a single request it makes a copy of the bdm list.
+
+        :param context: nova auth RequestContext
+        :param instance: Instance object
+        :param instance_type: Flavor object - used for swap and ephemeral BDMs
+        :param block_device_mapping: BlockDeviceMappingList object
+        :param image_cache: dict of image dicts keyed by id which is used as a
+            cache in case there are multiple BDMs in the same request using
+            the same image to avoid redundant GET calls to the image service
+        :param volumes: dict, keyed by volume id, of volume dicts from cinder
+        :param supports_multiattach: True if the request supports multiattach
+            volumes, False otherwise
         """
         LOG.debug("block_device_mapping %s", list(block_device_mapping),
                   instance_uuid=instance.uuid)
         self._validate_bdm(
             context, instance, instance_type, block_device_mapping,
-            supports_multiattach)
+            image_cache, volumes, supports_multiattach)
         instance_block_device_mapping = block_device_mapping.obj_clone()
         for bdm in instance_block_device_mapping:
             bdm.volume_size = self._volume_size(instance_type, bdm)
@@ -1494,18 +1636,22 @@ class API(base.Base):
             raise exception.VolumeTypeNotFound(
                 id_or_name=volume_type_id_or_name)
 
-    @staticmethod
-    def _check_compute_supports_volume_type(context):
-        # NOTE(brinzhang): Checking the minimum nova-compute service
-        # version across the deployment. Just make sure the volume
-        # type can be supported when the bdm.volume_type is requested.
-        min_compute_version = objects.service.get_minimum_version_all_cells(
-            context, ['nova-compute'])
-        if min_compute_version < MIN_COMPUTE_VOLUME_TYPE:
-            raise exception.VolumeTypeSupportNotYetAvailable()
-
     def _validate_bdm(self, context, instance, instance_type,
-                      block_device_mappings, supports_multiattach=False):
+                      block_device_mappings, image_cache, volumes,
+                      supports_multiattach=False):
+        """Validate requested block device mappings.
+
+        :param context: nova auth RequestContext
+        :param instance: Instance object
+        :param instance_type: Flavor object - used for swap and ephemeral BDMs
+        :param block_device_mappings: BlockDeviceMappingList object
+        :param image_cache: dict of image dicts keyed by id which is used as a
+            cache in case there are multiple BDMs in the same request using
+            the same image to avoid redundant GET calls to the image service
+        :param volumes: dict, keyed by volume id, of volume dicts from cinder
+        :param supports_multiattach: True if the request supports multiattach
+            volumes, False otherwise
+        """
         # Make sure that the boot indexes make sense.
         # Setting a negative value or None indicates that the device should not
         # be used for booting.
@@ -1525,22 +1671,9 @@ class API(base.Base):
             raise exception.InvalidBDMBootSequence()
 
         volume_types = None
-        volume_type_is_supported = False
         for bdm in block_device_mappings:
             volume_type = bdm.volume_type
             if volume_type:
-                if not volume_type_is_supported:
-                    # The following method raises
-                    # VolumeTypeSupportNotYetAvailable if the minimum
-                    # nova-compute service version across the deployment is
-                    # not new enough to support creating volumes with a
-                    # specific type.
-                    self._check_compute_supports_volume_type(context)
-                    # Set the flag to avoid calling
-                    # _check_compute_supports_volume_type more than once in
-                    # this for loop.
-                    volume_type_is_supported = True
-
                 if not volume_types:
                     # In order to reduce the number of hit cinder APIs,
                     # initialize our cache of volume types.
@@ -1557,9 +1690,14 @@ class API(base.Base):
             volume_id = bdm.volume_id
             image_id = bdm.image_id
             if image_id is not None:
-                if image_id != instance.get('image_ref'):
+                if (image_id != instance.get('image_ref') and
+                        image_id not in image_cache):
                     try:
-                        self._get_image(context, image_id)
+                        # Cache the results of the image GET so we do not make
+                        # the same request for the same image if processing
+                        # multiple BDMs or multiple servers with the same image
+                        image_cache[image_id] = self._get_image(
+                            context, image_id)
                     except Exception:
                         raise exception.InvalidBDMImage(id=image_id)
                 if (bdm.source_type == 'image' and
@@ -1570,24 +1708,22 @@ class API(base.Base):
                         "size specified"))
             elif volume_id is not None:
                 try:
-                    volume = self.volume_api.get(context, volume_id)
+                    volume = volumes[volume_id]
+                    # We do not validate the instance and volume AZ here
+                    # because that is done earlier by _provision_instances.
                     self._check_attach_and_reserve_volume(
-                        context, volume, instance, bdm, supports_multiattach)
+                        context, volume, instance, bdm, supports_multiattach,
+                        validate_az=False)
                     bdm.volume_size = volume.get('size')
-
-                    # NOTE(mnaser): If we end up reserving the volume, it will
-                    #               not have an attachment_id which is needed
-                    #               for cleanups.  This can be removed once
-                    #               all calls to reserve_volume are gone.
-                    if 'attachment_id' not in bdm:
-                        bdm.attachment_id = None
                 except (exception.CinderConnectionFailed,
                         exception.InvalidVolume,
                         exception.MultiattachNotSupportedOldMicroversion):
                     raise
                 except exception.InvalidInput as exc:
                     raise exception.InvalidVolume(reason=exc.format_message())
-                except Exception:
+                except Exception as e:
+                    LOG.info('Failed validating volume %s. Error: %s',
+                             volume_id, e)
                     raise exception.InvalidBDMVolume(id=volume_id)
             elif snapshot_id is not None:
                 try:
@@ -3456,6 +3592,25 @@ class API(base.Base):
         reqspec.flavor = instance.old_flavor
         reqspec.save()
 
+        # NOTE(gibi): This is a performance optimization. If the network info
+        # cache does not have ports with allocations in the binding profile
+        # then we can skip reading port resource request from neutron below.
+        # If a port has resource request then that would have already caused
+        # that the finish_resize call put allocation in the binding profile
+        # during the resize.
+        if instance.get_network_info().has_port_with_allocation():
+            # TODO(gibi): do not directly overwrite the
+            # RequestSpec.requested_resources as others like cyborg might added
+            # to things there already
+            # NOTE(gibi): We need to collect the requested resource again as it
+            # is intentionally not persisted in nova. Note that this needs to
+            # be done here as the nova API code directly calls revert on the
+            # dest compute service skipping the conductor.
+            port_res_req = (
+                self.network_api.get_requested_resource_for_instance(
+                    context, instance.uuid))
+            reqspec.requested_resources = port_res_req
+
         instance.task_state = task_states.RESIZE_REVERTING
         instance.save(expected_task_state=[None])
 
@@ -3800,6 +3955,7 @@ class API(base.Base):
         return self.compute_rpcapi.get_instance_diagnostics(context,
                                                             instance=instance)
 
+    @reject_sev_instances(instance_actions.SUSPEND)
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE])
     def suspend(self, context, instance):
@@ -4049,10 +4205,26 @@ class API(base.Base):
             pass
 
     def _check_attach_and_reserve_volume(self, context, volume, instance,
-                                         bdm, supports_multiattach=False):
+                                         bdm, supports_multiattach=False,
+                                         validate_az=True):
+        """Perform checks against the instance and volume before attaching.
+
+        If validation succeeds, the bdm is updated with an attachment_id which
+        effectively reserves it during the attach process in cinder.
+
+        :param context: nova auth RequestContext
+        :param volume: volume dict from cinder
+        :param instance: Instance object
+        :param bdm: BlockDeviceMapping object
+        :param supports_multiattach: True if the request supports multiattach
+            volumes, i.e. microversion >= 2.60, False otherwise
+        :param validate_az: True if the instance and volume availability zones
+            should be validated for cross_az_attach, False to not validate AZ
+        """
         volume_id = volume['id']
-        self.volume_api.check_availability_zone(context, volume,
-                                                instance=instance)
+        if validate_az:
+            self.volume_api.check_availability_zone(context, volume,
+                                                    instance=instance)
         # If volume.multiattach=True and the microversion to
         # support multiattach is not used, fail the request.
         if volume['multiattach'] and not supports_multiattach:
@@ -4463,6 +4635,7 @@ class API(base.Base):
                                                      diff=diff)
         return _metadata
 
+    @reject_sev_instances(instance_actions.LIVE_MIGRATION)
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.PAUSED])
     def live_migrate(self, context, instance, block_migration,
@@ -4578,15 +4751,6 @@ class API(base.Base):
             # compute service hosting the instance is new enough to support
             # aborting a queued/preparing live migration, so we check the
             # service version here.
-            # TODO(Kevin_Zheng): This service version check can be removed in
-            # Stein (at the earliest) when the API only supports Rocky or
-            # newer computes.
-            if migration.status in queued_states:
-                service = objects.Service.get_by_compute_host(
-                    context, instance.host)
-                if service.version < MIN_COMPUTE_ABORT_QUEUED_LIVE_MIGRATION:
-                    raise exception.AbortQueuedLiveMigrationNotYetSupported(
-                        migration_id=migration_id, status=migration.status)
             allowed_states.extend(queued_states)
 
         if migration.status not in allowed_states:

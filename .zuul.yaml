@@ -1,11 +1,12 @@
 # See https://docs.openstack.org/infra/manual/drivers.html#naming-with-zuul-v3
 # for job naming conventions.
 - job:
-    name: nova-dsvm-base
-    parent: legacy-dsvm-base
+    name: nova-dsvm-multinode-base
+    parent: legacy-dsvm-base-multinode
     description: |
-      The base job definition for nova devstack/tempest jobs.
-      Contains common configuration.
+      Base job for multinode nova devstack/tempest jobs.
+      Will setup firewall rules on all the nodes allowing them to talk to
+      each other.
     timeout: 10800
     required-projects:
       - openstack/devstack-gate
@@ -28,20 +29,6 @@
       - ^tox.ini$
 
 - job:
-    name: nova-dsvm-multinode-base
-    parent: legacy-dsvm-base-multinode
-    description: |
-      Base job for multinode nova devstack/tempest jobs.
-      Will setup firewall rules on all the nodes allowing them to talk to
-      each other.
-    timeout: 10800
-    required-projects:
-      - openstack/devstack-gate
-      - openstack/nova
-      - openstack/tempest
-    irrelevant-files: *dsvm-irrelevant-files
-
-- job:
     name: nova-tox-functional
     parent: openstack-tox
     description: |
@@ -58,7 +45,7 @@
     irrelevant-files: &functional-irrelevant-files
       - ^.*\.rst$
       - ^api-.*$
-      - ^doc/source/.*$
+      - ^doc/(source|test)/.*$
       - ^nova/locale/.*$
       - ^releasenotes/.*$
     vars:
@@ -136,8 +123,8 @@
     description: |
       Run tempest compute API tests using LVM image backend. This only runs
       against nova/virt/libvirt/* changes.
-    # Copy irrelevant-files from nova-dsvm-base and then exclude anything
-    # that is not in nova/virt/libvirt/* or nova/privsep/*.
+    # Copy irrelevant-files from nova-dsvm-multinode-base and then exclude
+    # anything that is not in nova/virt/libvirt/* or nova/privsep/*.
     irrelevant-files:
       - ^(?!.zuul.yaml)(?!nova/virt/libvirt/)(?!nova/privsep/).*$
       - ^api-.*$
@@ -186,7 +173,7 @@
 
 - job:
     name: nova-next
-    parent: devstack-tempest
+    parent: tempest-multinode-full-py3
     description: |
       This job was added in Newton when placement and cellsv2
       were optional. Placement and cellsv2 are required starting in Ocata. In
@@ -198,6 +185,7 @@
       Starting in Stein, the job was changed to run with python 3 and enabled
       volume multi-attach testing.
       Starting in Train, the job enabled counting quota usage from placement.
+      Starting in Ussuri, the job was changed to multinode.
       Runs all tempest compute API and most scenario tests concurrently.
     irrelevant-files: *dsvm-irrelevant-files
     # Run post-tempest tests like for nova-manage commands.
@@ -229,6 +217,11 @@
             scheduler:
               # Added in Train.
               query_placement_for_image_type_support: True
+          "/$NEUTRON_CORE_PLUGIN_CONF":
+            # Needed for QoS port heal allocation testing.
+            ovs:
+              bridge_mappings: public:br-ex
+              resource_provider_bandwidths: br-ex:1000000:1000000
       devstack_localrc:
         # Added in Pike.
         NOVA_USE_SERVICE_TOKEN: True
@@ -236,13 +229,25 @@
         # the tls-proxy service to be enabled. Added in Queens.
         NOVA_CONSOLE_PROXY_COMPUTE_TLS: True
         # Added in Stein.
-        USE_PYTHON3: True
-        # Added in Stein.
         ENABLE_VOLUME_MULTIATTACH: True
       devstack_services:
         tls-proxy: true
+        # neutron-* needed for QoS port heal allocation testing.
+        neutron-placement: true
+        neutron-qos: true
         # Disable non-essential services that we don't need for this job.
         c-bak: false
+      devstack_plugins:
+        # Needed for QoS port heal allocation testing.
+        neutron: https://opendev.org/openstack/neutron
+    group-vars:
+      subnode:
+        devstack_localrc:
+          NOVA_USE_SERVICE_TOKEN: True
+          NOVA_CONSOLE_PROXY_COMPUTE_TLS: True
+        devstack_services:
+          tls-proxy: true
+          c-bak: false
 
 - job:
     name: nova-tempest-v2-api
@@ -374,7 +379,7 @@
         - ironic-tempest-ipa-wholedisk-bios-agent_ipmitool-tinyipa:
             voting: false
             irrelevant-files: *dsvm-irrelevant-files
-        - devstack-plugin-ceph-tempest:
+        - devstack-plugin-ceph-tempest-py3:
             voting: false
             irrelevant-files: *dsvm-irrelevant-files
         - neutron-grenade-multinode:
@@ -395,8 +400,6 @@
         - nova-tox-functional-py36
         - tempest-integrated-compute:
             irrelevant-files: *dsvm-irrelevant-files
-        - tempest-slow-py3:
-            irrelevant-files: *dsvm-irrelevant-files
         - grenade-py3:
             irrelevant-files: *dsvm-irrelevant-files
         - tempest-ipv6-only:
@@ -411,8 +414,6 @@
         - nova-next
         - tempest-integrated-compute:
             irrelevant-files: *dsvm-irrelevant-files
-        - tempest-slow-py3:
-            irrelevant-files: *dsvm-irrelevant-files
         - grenade-py3:
             irrelevant-files: *dsvm-irrelevant-files
         - tempest-ipv6-only:
@@ -425,14 +426,12 @@
             irrelevant-files: *dsvm-irrelevant-files
         - barbican-simple-crypto-devstack-tempest:
             irrelevant-files: *dsvm-irrelevant-files
-        - devstack-plugin-ceph-tempest-py3:
-            irrelevant-files: *dsvm-irrelevant-files
         - legacy-grenade-dsvm-neutron-multinode-zero-downtime:
             irrelevant-files: *dsvm-irrelevant-files
         - legacy-tempest-dsvm-full-devstack-plugin-nfs:
             irrelevant-files: *dsvm-irrelevant-files
         - nova-osprofiler-redis
-        - tempest-full-py3-opensuse150:
+        - tempest-full-py3-opensuse15:
             irrelevant-files: *dsvm-irrelevant-files
         - tempest-pg-full:
             irrelevant-files: *dsvm-irrelevant-files

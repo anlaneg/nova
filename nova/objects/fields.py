@@ -90,6 +90,24 @@ IPV4Network = fields.IPV4Network
 IPV6Network = fields.IPV6Network
 
 
+class ResourceClass(fields.StringPattern):
+
+    PATTERN = r"^[A-Z0-9_]+$"
+    _REGEX = re.compile(PATTERN)
+
+    @staticmethod
+    def coerce(obj, attr, value):
+        if isinstance(value, six.string_types):
+            uppered = value.upper()
+            if ResourceClass._REGEX.match(uppered):
+                return uppered
+        raise ValueError(_("Malformed Resource Class %s") % value)
+
+
+class ResourceClassField(AutoTypedField):
+    AUTO_TYPE = ResourceClass()
+
+
 class SetOfStringsField(AutoTypedField):
     AUTO_TYPE = Set(fields.String())
 
@@ -319,6 +337,8 @@ class CPUFeaturePolicy(BaseNovaEnum):
 
 class DiskBus(BaseNovaEnum):
 
+    # NOTE(aspiers): If you change this, don't forget to update the
+    # docs and metadata for hw_*_bus in glance.
     FDC = "fdc"
     IDE = "ide"
     SATA = "sata"
@@ -750,8 +770,9 @@ class NotificationPhase(BaseNovaEnum):
     START = 'start'
     END = 'end'
     ERROR = 'error'
+    PROGRESS = 'progress'
 
-    ALL = (START, END, ERROR)
+    ALL = (START, END, ERROR, PROGRESS)
 
 
 class NotificationSource(BaseNovaEnum):
@@ -846,6 +867,7 @@ class NotificationAction(BaseNovaEnum):
     BUILD_INSTANCES = 'build_instances'
     MIGRATE_SERVER = 'migrate_server'
     REBUILD_SERVER = 'rebuild_server'
+    IMAGE_CACHE = 'cache_images'
 
     ALL = (UPDATE, EXCEPTION, DELETE, PAUSE, UNPAUSE, RESIZE, VOLUME_SWAP,
            SUSPEND, POWER_ON, REBOOT, SHUTDOWN, SNAPSHOT, INTERFACE_ATTACH,
@@ -859,7 +881,7 @@ class NotificationAction(BaseNovaEnum):
            REMOVE_HOST, ADD_MEMBER, UPDATE_METADATA, LOCK, UNLOCK,
            REBUILD_SCHEDULED, UPDATE_PROP, LIVE_MIGRATION_FORCE_COMPLETE,
            CONNECT, USAGE, BUILD_INSTANCES, MIGRATE_SERVER, REBUILD_SERVER,
-           SELECT_DESTINATIONS)
+           SELECT_DESTINATIONS, IMAGE_CACHE)
 
 
 # TODO(rlrossit): These should be changed over to be a StateMachine enum from
@@ -1256,7 +1278,7 @@ class InstancePowerStateField(BaseEnumField):
     AUTO_TYPE = InstancePowerState()
 
 
-class ListOfListsOfStringsField(fields.AutoTypedField):
+class ListOfListsOfStringsField(AutoTypedField):
     AUTO_TYPE = List(List(fields.String()))
 
 
@@ -1264,3 +1286,7 @@ class ListOfListsOfStringsField(fields.AutoTypedField):
 # when https://review.opendev.org/#/c/634700/ is released.
 class ListOfUUIDField(AutoTypedField):
     AUTO_TYPE = List(fields.UUID())
+
+
+class DictOfSetOfIntegersField(AutoTypedField):
+    AUTO_TYPE = Dict(Set(fields.Integer()))

@@ -309,6 +309,12 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         log_msg = mock_warn.call_args[0][0]
         self.assertIn("Failed to save allocation for", log_msg)
 
+    def test_put_allocations_fail_connection_error(self):
+        self.ks_adap_mock.put.side_effect = ks_exc.EndpointNotFound()
+        self.assertRaises(
+            exception.PlacementAPIConnectFailure, self.client.put_allocations,
+            self.context, mock.sentinel.consumer, mock.sentinel.payload)
+
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.put')
     def test_put_allocations_fail_due_to_consumer_generation_conflict(
             self, mock_put):
@@ -2085,10 +2091,13 @@ class TestProviderOperations(SchedulerReportClientTestCase):
         resources = scheduler_utils.ResourceRequest(req_spec)
         resources.get_request_group(None).aggregates = [
             ['agg1', 'agg2', 'agg3'], ['agg1', 'agg2']]
+        forbidden_aggs = set(['agg1', 'agg5', 'agg6'])
+        resources.get_request_group(None).forbidden_aggregates = forbidden_aggs
         expected_path = '/allocation_candidates'
         expected_query = [
             ('group_policy', 'isolate'),
             ('limit', '1000'),
+            ('member_of', '!in:agg1,agg5,agg6'),
             ('member_of', 'in:agg1,agg2'),
             ('member_of', 'in:agg1,agg2,agg3'),
             ('required', 'CUSTOM_TRAIT1,HW_CPU_X86_AVX,!CUSTOM_TRAIT3,'
@@ -2115,7 +2124,7 @@ class TestProviderOperations(SchedulerReportClientTestCase):
         expected_url = '/allocation_candidates?%s' % parse.urlencode(
             expected_query)
         self.ks_adap_mock.get.assert_called_once_with(
-            expected_url, microversion='1.31',
+            expected_url, microversion='1.32',
             global_request_id=self.context.global_id)
         self.assertEqual(mock.sentinel.alloc_reqs, alloc_reqs)
         self.assertEqual(mock.sentinel.p_sums, p_sums)
@@ -2159,7 +2168,7 @@ class TestProviderOperations(SchedulerReportClientTestCase):
             expected_query)
         self.assertEqual(mock.sentinel.alloc_reqs, alloc_reqs)
         self.ks_adap_mock.get.assert_called_once_with(
-            expected_url, microversion='1.31',
+            expected_url, microversion='1.32',
             global_request_id=self.context.global_id)
         self.assertEqual(mock.sentinel.p_sums, p_sums)
 
@@ -2185,7 +2194,7 @@ class TestProviderOperations(SchedulerReportClientTestCase):
         res = self.client.get_allocation_candidates(self.context, resources)
 
         self.ks_adap_mock.get.assert_called_once_with(
-            mock.ANY, microversion='1.31',
+            mock.ANY, microversion='1.32',
             global_request_id=self.context.global_id)
         url = self.ks_adap_mock.get.call_args[0][0]
         split_url = parse.urlsplit(url)
@@ -3210,6 +3219,19 @@ class TestAllocations(SchedulerReportClientTestCase):
         self.assertEqual(0, mock_log.info.call_count)
         self.assertEqual(1, mock_log.error.call_count)
 
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.delete',
+                new=mock.Mock(side_effect=ks_exc.EndpointNotFound()))
+    def test_delete_resource_provider_placement_exception(self):
+        """Ensure that a ksa exception in delete_resource_provider raises
+        through.
+        """
+        self.client._provider_tree.new_root(uuids.cn, uuids.cn, generation=1)
+        cn = objects.ComputeNode(uuid=uuids.cn, host="fake_host",
+                hypervisor_hostname="fake_hostname", )
+        self.assertRaises(
+            ks_exc.ClientException,
+            self.client.delete_resource_provider, self.context, cn)
+
     @mock.patch("nova.scheduler.client.report.SchedulerReportClient.get")
     def test_get_allocations_for_resource_provider(self, mock_get):
         mock_get.return_value = fake_requests.FakeResponse(
@@ -4131,4 +4153,17 @@ class TestUsages(SchedulerReportClientTestCase):
         self.assertEqual(2, mock_get.call_count)
         expected = {'project': {'cores': 0, 'ram': 0},
                     'user': {'cores': 0, 'ram': 0}}
+        self.assertDictEqual(expected, counts)
+
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.get')
+    def test_get_usages_count_with_pcpu(self, mock_get):
+        fake_responses = fake_requests.FakeResponse(
+            200,
+            content=jsonutils.dumps({'usages': {orc.VCPU: 2, orc.PCPU: 2}}))
+        mock_get.return_value = fake_responses
+        counts = self.client.get_usages_counts_for_quota(
+            self.context, 'fake-project', user_id='fake-user')
+        self.assertEqual(2, mock_get.call_count)
+        expected = {'project': {'cores': 4, 'ram': 0},
+                    'user': {'cores': 4, 'ram': 0}}
         self.assertDictEqual(expected, counts)

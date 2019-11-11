@@ -29,6 +29,7 @@ import six
 
 from nova.compute import utils as compute_utils
 import nova.conf
+from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
 from nova.network import base_api
@@ -971,6 +972,10 @@ class API(base_api.NetworkAPI):
         # We do not want to create a new neutron session for each call
         neutron = get_client(context)
 
+        # We always need admin_client to build nw_info,
+        # we sometimes need it when updating ports
+        admin_client = get_client(context, admin=True)
+
         #
         # Validate ports and networks with neutron. The requested_ports_dict
         # variable is a dict, keyed by port ID, of ports that were on the user
@@ -978,9 +983,15 @@ class API(base_api.NetworkAPI):
         # NetworkRequest objects for any networks or ports specifically
         # requested by the user, which again may be empty.
         #
+
+        # NOTE(gibi): we use the admin_client here to ensure that the returned
+        # ports has the resource_request attribute filled as later we use this
+        # information to decide when to add allocation key to the port binding.
+        # See bug 1849657.
         requested_ports_dict, ordered_networks = (
             self._validate_requested_port_ids(
-                context, instance, neutron, requested_networks, attach=attach))
+                context, instance, admin_client, requested_networks,
+                attach=attach))
 
         nets = self._validate_requested_network_ids(
             context, instance, neutron, requested_networks, ordered_networks)
@@ -1027,10 +1038,6 @@ class API(base_api.NetworkAPI):
         #
         # Update existing and newly created ports
         #
-
-        # We always need admin_client to build nw_info,
-        # we sometimes need it when updating ports
-        admin_client = get_client(context, admin=True)
 
         ordered_nets, ordered_port_ids, preexisting_port_ids, \
             created_port_ids = self._update_ports_for_instance(
@@ -2231,7 +2238,11 @@ class API(base_api.NetworkAPI):
         :return: A list of RequestGroup objects
         """
 
-        neutron = get_client(context)
+        # NOTE(gibi): We need to use an admin client as otherwise a non admin
+        # initiated resize causes that neutron does not fill the
+        # resource_request field of the port and this will lead to resource
+        # allocation issues. See bug 1849695
+        neutron = get_client(context, admin=True)
         # get the ports associated to this instance
         data = neutron.list_ports(
             device_id=instance_uuid, fields=['id', 'resource_request'])
@@ -2373,12 +2384,59 @@ class API(base_api.NetworkAPI):
         LOG.info('re-assign floating IP %(address)s from '
                  'instance %(instance_id)s', msg_dict,
                  instance=instance)
-        orig_instance = objects.Instance.get_by_uuid(context,
-                                                     orig_instance_uuid)
+        orig_instance = self._get_instance_by_uuid_using_api_db(
+            context, orig_instance_uuid)
+        if orig_instance:
+            # purge cached nw info for the original instance; pass the
+            # context from the instance in case we found it in another cell
+            base_api.update_instance_cache_with_nw_info(
+                self, orig_instance._context, orig_instance)
+        else:
+            # Leave a breadcrumb about not being able to refresh the
+            # the cache for the original instance.
+            LOG.info('Unable to refresh the network info cache for '
+                     'instance %s after disassociating floating IP %s. '
+                     'If the instance still exists, its info cache may '
+                     'be healed automatically.',
+                     orig_instance_uuid, fip['id'])
 
-        # purge cached nw info for the original instance
-        base_api.update_instance_cache_with_nw_info(self, context,
-                                                    orig_instance)
+    @staticmethod
+    def _get_instance_by_uuid_using_api_db(context, instance_uuid):
+        """Look up the instance by UUID
+
+        This method is meant to be used sparingly since it tries to find
+        the instance by UUID in the cell-targeted context. If the instance
+        is not found, this method will try to determine if it's not found
+        because it is deleted or if it is just in another cell. Therefore
+        it assumes to have access to the API database and should only be
+        called from methods that are used in the control plane services.
+
+        :param context: cell-targeted nova auth RequestContext
+        :param instance_uuid: UUID of the instance to find
+        :returns: Instance object if the instance was found, else None.
+        """
+        try:
+            return objects.Instance.get_by_uuid(context, instance_uuid)
+        except exception.InstanceNotFound:
+            # The instance could be deleted or it could be in another cell.
+            # To determine if its in another cell, check the instance
+            # mapping in the API DB.
+            try:
+                inst_map = objects.InstanceMapping.get_by_instance_uuid(
+                    context, instance_uuid)
+            except exception.InstanceMappingNotFound:
+                # The instance is gone so just return.
+                return
+
+            # We have the instance mapping, look up the instance in the
+            # cell the instance is in.
+            with nova_context.target_cell(
+                    context, inst_map.cell_mapping) as cctxt:
+                try:
+                    return objects.Instance.get_by_uuid(cctxt, instance_uuid)
+                except exception.InstanceNotFound:
+                    # Alright it's really gone.
+                    return
 
     def get_all(self, context):
         """Get all networks for client."""
@@ -3233,11 +3291,12 @@ class API(base_api.NetworkAPI):
         """Create a private DNS domain with optional nova project."""
         raise NotImplementedError()
 
-    def setup_instance_network_on_host(self, context, instance, host,
-                                       migration=None):
+    def setup_instance_network_on_host(
+            self, context, instance, host, migration=None,
+            provider_mappings=None):
         """Setup network for specified instance on host."""
-        self._update_port_binding_for_instance(context, instance, host,
-                                               migration)
+        self._update_port_binding_for_instance(
+            context, instance, host, migration, provider_mappings)
 
     def cleanup_instance_network_on_host(self, context, instance, host):
         """Cleanup network for specified instance on host."""
@@ -3325,16 +3384,28 @@ class API(base_api.NetworkAPI):
 
             if p.get('resource_request'):
                 if not provider_mappings:
+                    # TODO(gibi): Remove this check when compute RPC API is
+                    # bumped to 6.0
                     # NOTE(gibi): This should not happen as the API level
                     # minimum compute service version check ensures that the
                     # compute services already send the RequestSpec during
                     # the move operations between the source and the
                     # destination and the dest compute calculates the
                     # mapping based on that.
+                    LOG.warning(
+                        "Provider mappings are not available to the compute "
+                        "service but are required for ports with a resource "
+                        "request. If compute RPC API versions are pinned for "
+                        "a rolling upgrade, you will need to retry this "
+                        "operation once the RPC version is unpinned and the "
+                        "nova-compute services are all upgraded.",
+                        instance=instance)
                     raise exception.PortUpdateFailed(
                         port_id=p['id'],
-                        reason=_("Provider mappings wasn't provided for the "
-                                 "port with resource request"))
+                        reason=_(
+                            "Provider mappings are not available to the "
+                            "compute service but are required for ports with "
+                            "a resource request."))
 
                 # NOTE(gibi): In the resource provider mapping there can be
                 # more than one RP fulfilling a request group. But resource

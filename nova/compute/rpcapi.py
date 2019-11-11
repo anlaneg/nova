@@ -368,6 +368,13 @@ class ComputeAPI(object):
         * 5.2 - Add request_spec parameter for the following: resize_instance,
                 finish_resize, revert_resize, finish_revert_resize,
                 unshelve_instance
+        * 5.3 - Add migration and limits parameters to
+                check_can_live_migrate_destination(), and a new
+                drop_move_claim_at_destination() method
+        * 5.4 - Add cache_images() support
+        * 5.5 - Add prep_snapshot_based_resize_at_dest()
+        * 5.6 - Add prep_snapshot_based_resize_at_source()
+        * 5.7 - Add finish_snapshot_based_resize_at_dest()
     '''
 
     VERSION_ALIASES = {
@@ -382,6 +389,7 @@ class ComputeAPI(object):
         'queens': '5.0',
         'rocky': '5.0',
         'stein': '5.1',
+        'train': '5.3',
     }
 
     @property
@@ -546,16 +554,25 @@ class ComputeAPI(object):
                    instance=instance, diff=diff)
 
     def check_can_live_migrate_destination(self, ctxt, instance, destination,
-                                           block_migration, disk_over_commit):
-        version = '5.0'
+                                           block_migration, disk_over_commit,
+                                           migration, limits):
         client = self.router.client(ctxt)
+        version = '5.3'
+        kwargs = {
+            'instance': instance,
+            'block_migration': block_migration,
+            'disk_over_commit': disk_over_commit,
+            'migration': migration,
+            'limits': limits
+        }
+        if not client.can_send_version(version):
+            kwargs.pop('migration')
+            kwargs.pop('limits')
+            version = '5.0'
         cctxt = client.prepare(server=destination, version=version,
                                call_monitor_timeout=CONF.rpc_response_timeout,
                                timeout=CONF.long_rpc_timeout)
-        return cctxt.call(ctxt, 'check_can_live_migrate_destination',
-                          instance=instance,
-                          block_migration=block_migration,
-                          disk_over_commit=disk_over_commit)
+        return cctxt.call(ctxt, 'check_can_live_migrate_destination', **kwargs)
 
     def check_can_live_migrate_source(self, ctxt, instance, dest_check_data):
         version = '5.0'
@@ -639,6 +656,46 @@ class ComputeAPI(object):
         cctxt = client.prepare(
                 server=host, version=version)
         cctxt.cast(ctxt, 'finish_revert_resize', **msg_args)
+
+    def finish_snapshot_based_resize_at_dest(
+            self, ctxt, instance, migration, snapshot_id, request_spec):
+        """Finishes the snapshot-based resize at the destination compute.
+
+        Sets up block devices and networking on the destination compute and
+        spawns the guest.
+
+        This is a synchronous RPC call using the ``long_rpc_timeout``
+        configuration option.
+
+        :param ctxt: nova auth request context targeted at the target cell DB
+        :param instance: The Instance object being resized with the
+            ``migration_context`` field set. Upon successful completion of this
+            method the vm_state should be "resized", the task_state should be
+            None, and migration context, host/node and flavor-related fields
+            should be set on the instance.
+        :param migration: The Migration object for this resize operation. Upon
+            successful completion of this method the migration status should
+            be "finished".
+        :param snapshot_id: ID of the image snapshot created for a
+            non-volume-backed instance, else None.
+        :param request_spec: nova.objects.RequestSpec object for the operation
+        :raises: nova.exception.MigrationError if the destination compute
+            service is too old for this method
+        :raises: oslo_messaging.exceptions.MessagingTimeout if the pre-check
+            RPC call times out
+        """
+        client = self.router.client(ctxt)
+        version = '5.7'
+        if not client.can_send_version(version):
+            raise exception.MigrationError(reason=_('Compute too old'))
+        cctxt = client.prepare(
+            server=migration.dest_compute, version=version,
+            call_monitor_timeout=CONF.rpc_response_timeout,
+            timeout=CONF.long_rpc_timeout)
+        return cctxt.call(
+            ctxt, 'finish_snapshot_based_resize_at_dest',
+            instance=instance, migration=migration, snapshot_id=snapshot_id,
+            request_spec=request_spec)
 
     def get_console_output(self, ctxt, instance, tail_length):
         version = '5.0'
@@ -783,6 +840,8 @@ class ComputeAPI(object):
         return cctxt.call(ctxt, 'post_live_migration_at_destination',
             instance=instance, block_migration=block_migration)
 
+    # TODO(mriedem): Remove the unused block_migration argument in v6.0 of
+    # the compute RPC API.
     def pre_live_migration(self, ctxt, instance, block_migration, disk,
             host, migrate_data):
         version = '5.0'
@@ -795,6 +854,14 @@ class ComputeAPI(object):
                           block_migration=block_migration,
                           disk=disk, migrate_data=migrate_data)
 
+    def supports_resize_with_qos_port(self, ctxt):
+        """Returns whether we can send 5.2, needed for migrating and resizing
+        servers with ports having resource request.
+        """
+        client = self.router.client(ctxt)
+        return client.can_send_version('5.2')
+
+    # TODO(mriedem): Drop compat for request_spec being a legacy dict in v6.0.
     def prep_resize(self, ctxt, instance, image, instance_type, host,
                     migration, request_spec, filter_properties, node,
                     clean_shutdown, host_list):
@@ -824,6 +891,90 @@ class ComputeAPI(object):
             version = '5.0'
         cctxt = client.prepare(server=host, version=version)
         cctxt.cast(ctxt, 'prep_resize', **msg_args)
+
+    def prep_snapshot_based_resize_at_dest(
+            self, ctxt, instance, flavor, nodename, migration, limits,
+            request_spec, destination):
+        """Performs pre-cross-cell resize resource claim on the dest host.
+
+        This runs on the destination host in a cross-cell resize operation
+        before the resize is actually started.
+
+        Performs a resize_claim for resources that are not claimed in placement
+        like PCI devices and NUMA topology.
+
+        Note that this is different from same-cell prep_resize in that this:
+
+        * Does not RPC cast to the source compute, that is orchestrated from
+          conductor.
+        * This does not reschedule on failure, conductor handles that since
+          conductor is synchronously RPC calling this method.
+
+        :param ctxt: user auth request context
+        :param instance: the instance being resized
+        :param flavor: the flavor being resized to (unchanged for cold migrate)
+        :param nodename: Name of the target compute node
+        :param migration: nova.objects.Migration object for the operation
+        :param limits: nova.objects.SchedulerLimits object of resource limits
+        :param request_spec: nova.objects.RequestSpec object for the operation
+        :param destination: possible target host for the cross-cell resize
+        :returns: nova.objects.MigrationContext; the migration context created
+            on the destination host during the resize_claim.
+        :raises: nova.exception.MigrationPreCheckError if the pre-check
+            validation fails for the given host selection or the destination
+            compute service is too old for this method
+        :raises: oslo_messaging.exceptions.MessagingTimeout if the pre-check
+            RPC call times out
+        """
+        version = '5.5'
+        client = self.router.client(ctxt)
+        if not client.can_send_version(version):
+            raise exception.MigrationPreCheckError(reason=_('Compute too old'))
+        cctxt = client.prepare(server=destination, version=version,
+                               call_monitor_timeout=CONF.rpc_response_timeout,
+                               timeout=CONF.long_rpc_timeout)
+        return cctxt.call(ctxt, 'prep_snapshot_based_resize_at_dest',
+                          instance=instance, flavor=flavor, nodename=nodename,
+                          migration=migration, limits=limits,
+                          request_spec=request_spec)
+
+    def prep_snapshot_based_resize_at_source(
+            self, ctxt, instance, migration, snapshot_id=None):
+        """Prepares the instance at the source host for cross-cell resize
+
+        Performs actions like powering off the guest, upload snapshot data if
+        the instance is not volume-backed, disconnecting volumes, unplugging
+        VIFs and activating the destination host port bindings.
+
+        :param ctxt: user auth request context targeted at source cell
+        :param instance: nova.objects.Instance; the instance being resized.
+            The expected instance.task_state is "resize_migrating" when calling
+            this method, and the expected task_state upon successful completion
+            is "resize_migrated".
+        :param migration: nova.objects.Migration object for the operation.
+            The expected migration.status is "pre-migrating" when calling this
+            method and the expected status upon successful completion is
+            "post-migrating".
+        :param snapshot_id: ID of the image snapshot to upload if not a
+            volume-backed instance
+        :raises: nova.exception.InstancePowerOffFailure if stopping the
+            instance fails
+        :raises: nova.exception.MigrationError if the source compute is too
+            old to perform the operation
+        :raises: oslo_messaging.exceptions.MessagingTimeout if the RPC call
+            times out
+        """
+        version = '5.6'
+        client = self.router.client(ctxt)
+        if not client.can_send_version(version):
+            raise exception.MigrationError(reason=_('Compute too old'))
+        cctxt = client.prepare(server=_compute_host(None, instance),
+                               version=version,
+                               call_monitor_timeout=CONF.rpc_response_timeout,
+                               timeout=CONF.long_rpc_timeout)
+        return cctxt.call(
+            ctxt, 'prep_snapshot_based_resize_at_source',
+            instance=instance, migration=migration, snapshot_id=snapshot_id)
 
     def reboot_instance(self, ctxt, instance, block_device_info,
                         reboot_type):
@@ -961,6 +1112,26 @@ class ComputeAPI(object):
         cctxt.cast(ctxt, 'rollback_live_migration_at_destination',
                    instance=instance, destroy_disks=destroy_disks,
                    migrate_data=migrate_data)
+
+    def supports_numa_live_migration(self, ctxt):
+        """Returns whether we can send 5.3, needed for NUMA live migration.
+        """
+        client = self.router.client(ctxt)
+        return client.can_send_version('5.3')
+
+    def drop_move_claim_at_destination(self, ctxt, instance, host):
+        """Called by the source of a live migration that's being rolled back.
+        This is a call not because we care about the return value, but because
+        dropping the move claim depends on instance.migration_context being
+        set, and we drop the migration context on the source. Thus, to avoid
+        races, we call the destination synchronously to make sure it's done
+        dropping the move claim before we drop the migration context from the
+        instance.
+        """
+        version = '5.3'
+        client = self.router.client(ctxt)
+        cctxt = client.prepare(server=host, version=version)
+        cctxt.call(ctxt, 'drop_move_claim_at_destination', instance=instance)
 
     def set_admin_password(self, ctxt, instance, new_pass):
         version = '5.0'
@@ -1197,3 +1368,17 @@ class ComputeAPI(object):
         cctxt = client.prepare(server=_compute_host(None, instance),
                 version=version)
         return cctxt.cast(ctxt, "trigger_crash_dump", instance=instance)
+
+    def cache_images(self, ctxt, host, image_ids):
+        version = '5.4'
+        client = self.router.client(ctxt)
+        if not client.can_send_version(version):
+            raise exception.NovaException('Compute RPC version pin does not '
+                                          'allow cache_images() to be called')
+        # This is a potentially very long-running call, so we provide the
+        # two timeout values which enables the call monitor in oslo.messaging
+        # so that this can run for extended periods.
+        cctxt = client.prepare(server=host, version=version,
+                               call_monitor_timeout=CONF.rpc_response_timeout,
+                               timeout=CONF.long_rpc_timeout)
+        return cctxt.call(ctxt, 'cache_images', image_ids=image_ids)

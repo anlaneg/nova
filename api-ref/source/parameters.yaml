@@ -1133,6 +1133,13 @@ progress_query_server:
   in: query
   required: false
   type: integer
+project_id_query_migrations:
+  description: |
+    Filter the migrations by the given project ID.
+  in: query
+  required: false
+  type: string
+  min_version: 2.80
 project_id_query_server:
   description: |
     Filter the list of servers by the given project ID.
@@ -1409,6 +1416,13 @@ usage_marker:
   required: false
   type: string
   min_version: 2.40
+user_id_query_migrations:
+  description: |
+    Filter the migrations by the given user ID.
+  in: query
+  required: false
+  type: string
+  min_version: 2.80
 user_id_query_quota:
   description: |
     ID of user to list the quotas for.
@@ -1983,6 +1997,11 @@ boot_index:
   in: body
   required: true
   type: integer
+cache:
+  description: A list of image objects to cache.
+  in: body
+  required: true
+  type: array
 certificate:
   description: |
     The certificate object.
@@ -5697,6 +5716,14 @@ project_id:
   in: body
   required: false
   type: string
+project_id_migration_2_80:
+  description: |
+    The ID of the project which initiated the server migration. The value
+    may be ``null`` for older migration records.
+  in: body
+  required: true
+  type: string
+  min_version: 2.80
 project_id_server:
   description: |
     The ID of the project that this server belongs to.
@@ -6046,11 +6073,17 @@ security_groups_obj:
   in: body
   required: true
   type: array
+security_groups_obj_optional:
+  description: |
+    One or more security groups objects.
+  in: body
+  required: false
+  type: array
 security_groups_obj_update_rebuild:
   description: |
     One or more security groups objects.
   in: body
-  required: true
+  required: false
   type: array
   min_version: 2.75
 security_groups_quota:
@@ -6406,11 +6439,11 @@ server_topology_nodes_cpu_siblings:
   in: body
   required: false
   type: list
-server_topology_nodes_host_numa_node:
+server_topology_nodes_host_node:
   description: |
     The host NUMA node the virtual NUMA node is map to.
 
-    By default the ``host_numa_node`` field is only visible to users with the
+    By default the ``host_node`` field is only visible to users with the
     administrator role. You can change the default behavior via the policy
     rule::
 
@@ -7107,6 +7140,14 @@ user_id:
   in: body
   required: true
   type: string
+user_id_migration_2_80:
+  description: |
+    The ID of the user which initiated the server migration. The value
+    may be ``null`` for older migration records.
+  in: body
+  required: true
+  type: string
+  min_version: 2.80
 user_id_server_action:
   description: |
     The ID of the user which initiated the server action.

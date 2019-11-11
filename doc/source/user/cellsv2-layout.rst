@@ -319,6 +319,18 @@ service **must** be run as a standalone service, using the
 :program:`nova-api-metadata` service, in this case.
 
 
+Console proxies
+~~~~~~~~~~~~~~~
+
+`Starting from the Rocky release`__, console proxies must be run per cell
+because console token authorizations are stored in cell databases. This means
+that each console proxy server must have access to the
+:oslo.config:option:`database.connection` information for the cell database
+containing the instances for which it is proxying console access.
+
+.. __: https://specs.openstack.org/openstack/nova-specs/specs/rocky/implemented/convert-consoles-to-objects.html
+
+
 Operations Requiring upcalls
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -342,6 +354,8 @@ following:
 
 #. Attaching a volume and ``[cinder]/cross_az_attach=False``
 #. Instance reschedules during boot and resize (part 2)
+
+   .. note:: This has been resolved in the Ussuri release [#]_ [#]_.
 
 The first is simple: if you boot an instance, it gets scheduled to a
 compute node, fails, it would normally be re-scheduled to another
@@ -391,3 +405,5 @@ the API DB.
 .. [#] https://blueprints.launchpad.net/nova/+spec/efficient-multi-cell-instance-list-and-sort
 .. [#] https://specs.openstack.org/openstack/nova-specs/specs/queens/approved/return-alternate-hosts.html
 .. [#] https://blueprints.launchpad.net/nova/+spec/live-migration-in-xapi-pool
+.. [#] https://review.opendev.org/686047/
+.. [#] https://review.opendev.org/686050/

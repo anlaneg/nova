@@ -21,7 +21,6 @@ from keystoneauth1.fixture import V2Token
 from keystoneauth1 import loading as ks_loading
 from keystoneauth1 import service_token
 import mock
-from mox3 import mox
 import netaddr
 from neutronclient.common import exceptions
 from neutronclient.v2_0 import client
@@ -72,53 +71,6 @@ fake_info_cache = {
     'instance_uuid': uuids.instance,
     'network_info': '[]',
     }
-
-
-class MyComparator(mox.Comparator):
-    def __init__(self, lhs):
-        self.lhs = lhs
-
-    def _com_dict(self, lhs, rhs):
-        if len(lhs) != len(rhs):
-            return False
-        for key, value in lhs.items():
-            if key not in rhs:
-                return False
-            rhs_value = rhs[key]
-            if not self._com(value, rhs_value):
-                return False
-        return True
-
-    def _com_list(self, lhs, rhs):
-        if len(lhs) != len(rhs):
-            return False
-        for lhs_value in lhs:
-            if lhs_value not in rhs:
-                return False
-        return True
-
-    def _com(self, lhs, rhs):
-        if lhs is None:
-            return rhs is None
-        if isinstance(lhs, dict):
-            if not isinstance(rhs, dict):
-                return False
-            return self._com_dict(lhs, rhs)
-        if isinstance(lhs, list):
-            if not isinstance(rhs, list):
-                return False
-            return self._com_list(lhs, rhs)
-        if isinstance(lhs, tuple):
-            if not isinstance(rhs, tuple):
-                return False
-            return self._com_list(lhs, rhs)
-        return lhs == rhs
-
-    def equals(self, rhs):
-        return self._com(self.lhs, rhs)
-
-    def __repr__(self):
-        return str(self.lhs)
 
 
 class TestNeutronClient(test.NoDBTestCase):
@@ -516,7 +468,6 @@ class TestNeutronv2Base(test.TestCase):
                                     mock_refresh, mock_populate, net_idx=1,
                                     requested_networks=None,
                                     exception=None,
-                                    get_client_admin_call=True,
                                     context=None,
                                     **kwargs):
         ctxt = context or self.context
@@ -662,12 +613,9 @@ class TestNeutronv2Base(test.TestCase):
                 ctxt, self.instance, False, requested_networks,
                 bind_host_id=bind_host_id)
 
-        if get_client_admin_call:
-            mock_get_client.assert_has_calls([
-                mock.call(ctxt), mock.call(ctxt, admin=True)],
-                any_order=True)
-        else:
-            mock_get_client.assert_called_once_with(mock.ANY)
+        mock_get_client.assert_has_calls([
+            mock.call(ctxt), mock.call(ctxt, admin=True)],
+            any_order=True)
 
         mock_refresh.assert_not_called()
 
@@ -815,1381 +763,6 @@ class TestNeutronv2Base(test.TestCase):
 
 
 class TestNeutronv2(TestNeutronv2Base):
-
-    def setUp(self):
-        super(TestNeutronv2, self).setUp()
-        self.mox.StubOutWithMock(neutronapi, 'get_client')
-        self.moxed_client = self.mox.CreateMock(client.Client)
-        self.addCleanup(CONF.reset)
-        self.addCleanup(self.mox.VerifyAll)
-        self.addCleanup(self.mox.UnsetStubs)
-        self.addCleanup(self.stubs.UnsetAll)
-
-    def test_validate_networks_with_ports_and_networks(self):
-        # Test validation for a request for one instance needing
-        # one port allocated via nova with another port being passed in.
-        port_b = self.port_data2[1]
-        port_b['device_id'] = None
-        port_b['device_owner'] = None
-        requested_networks = objects.NetworkRequestList(
-            objects=[objects.NetworkRequest(network_id=uuids.my_netid1),
-                     objects.NetworkRequest(port_id=port_b['id'])])
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.show_port(port_b['id']).AndReturn({'port': port_b})
-        ids = [uuids.my_netid1]
-        self.moxed_client.list_networks(
-            id=mox.SameElementsAs(ids)).AndReturn(
-                {'networks': self.nets1})
-        self.moxed_client.show_quota(
-            uuids.my_tenant).AndReturn(
-                    {'quota': {'port': 5}})
-        self.moxed_client.list_ports(
-            tenant_id=uuids.my_tenant, fields=['id']).AndReturn(
-                    {'ports': self.port_data2})
-        self.mox.ReplayAll()
-        api = neutronapi.API()
-        max_count = api.validate_networks(self.context,
-                                          requested_networks, 1)
-        self.assertEqual(1, max_count)
-
-    def test_validate_networks_one_port_and_no_networks(self):
-        # Test that show quota is not called if no networks are
-        # passed in and only ports.
-        port_b = self.port_data2[1]
-        port_b['device_id'] = None
-        port_b['device_owner'] = None
-        requested_networks = objects.NetworkRequestList(
-            objects=[objects.NetworkRequest(port_id=port_b['id'])])
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.show_port(port_b['id']).AndReturn({'port': port_b})
-        self.mox.ReplayAll()
-        api = neutronapi.API()
-        max_count = api.validate_networks(self.context,
-                                          requested_networks, 1)
-        self.assertEqual(1, max_count)
-
-    def test_validate_networks_some_quota(self):
-        # Test validation for a request for two instance needing
-        # two ports each, where the quota is 5 and 2 ports are in use
-        #  => instances which can be created = 1
-        requested_networks = objects.NetworkRequestList(
-            objects=[objects.NetworkRequest(network_id=uuids.my_netid1),
-                     objects.NetworkRequest(network_id=uuids.my_netid2)])
-        ids = [uuids.my_netid1, uuids.my_netid2]
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_networks(
-            id=mox.SameElementsAs(ids)).AndReturn(
-                {'networks': self.nets2})
-        self.moxed_client.show_quota(
-            uuids.my_tenant).AndReturn(
-                    {'quota': {'port': 5}})
-        self.moxed_client.list_ports(
-            tenant_id=uuids.my_tenant, fields=['id']).AndReturn(
-                    {'ports': self.port_data2})
-        self.mox.ReplayAll()
-        api = neutronapi.API()
-        max_count = api.validate_networks(self.context,
-                                          requested_networks, 2)
-        self.assertEqual(1, max_count)
-
-    def test_validate_networks_unlimited_quota(self):
-        # Test validation for a request for two instance needing
-        # two ports each, where the quota is -1 (unlimited)
-        #  => instances which can be created = 1
-        requested_networks = objects.NetworkRequestList(
-            objects=[objects.NetworkRequest(network_id=uuids.my_netid1),
-                     objects.NetworkRequest(network_id=uuids.my_netid2)])
-        ids = [uuids.my_netid1, uuids.my_netid2]
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_networks(
-            id=mox.SameElementsAs(ids)).AndReturn(
-                {'networks': self.nets2})
-        self.moxed_client.show_quota(
-            uuids.my_tenant).AndReturn(
-                    {'quota': {'port': -1}})
-        self.mox.ReplayAll()
-        api = neutronapi.API()
-        max_count = api.validate_networks(self.context,
-                                          requested_networks, 2)
-        self.assertEqual(2, max_count)
-
-    def test_validate_networks_no_quota_but_ports_supplied(self):
-        port_a = self.port_data3[0]
-        port_a['fixed_ips'] = {'ip_address': '10.0.0.2',
-                               'subnet_id': 'subnet_id'}
-        port_b = self.port_data2[1]
-        self.assertNotEqual(port_a['network_id'], port_b['network_id'])
-        for port in [port_a, port_b]:
-            port['device_id'] = None
-            port['device_owner'] = None
-
-        requested_networks = objects.NetworkRequestList(
-            objects=[objects.NetworkRequest(port_id=port_a['id']),
-                     objects.NetworkRequest(port_id=port_b['id'])])
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.show_port(port_a['id']).AndReturn({'port': port_a})
-        self.moxed_client.show_port(port_b['id']).AndReturn({'port': port_b})
-
-        self.mox.ReplayAll()
-
-        api = neutronapi.API()
-        max_count = api.validate_networks(self.context,
-                                          requested_networks, 1)
-        self.assertEqual(1, max_count)
-
-    def _mock_list_ports(self, port_data=None):
-        if port_data is None:
-            port_data = self.port_data2
-        address = self.port_address
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_ports(
-            fixed_ips=MyComparator('ip_address=%s' % address)).AndReturn(
-                {'ports': port_data})
-        self.mox.ReplayAll()
-        return address
-
-    def test_get_fixed_ip_by_address_fails_for_no_ports(self):
-        address = self._mock_list_ports(port_data=[])
-        api = neutronapi.API()
-        self.assertRaises(exception.FixedIpNotFoundForAddress,
-                          api.get_fixed_ip_by_address,
-                          self.context, address)
-
-    def test_get_fixed_ip_by_address_succeeds_for_1_port(self):
-        address = self._mock_list_ports(port_data=self.port_data1)
-        api = neutronapi.API()
-        result = api.get_fixed_ip_by_address(self.context, address)
-        self.assertEqual(self.instance2['uuid'], result['instance_uuid'])
-
-    def test_get_fixed_ip_by_address_fails_for_more_than_1_port(self):
-        address = self._mock_list_ports()
-        api = neutronapi.API()
-        self.assertRaises(exception.FixedIpAssociatedWithMultipleInstances,
-                          api.get_fixed_ip_by_address,
-                          self.context, address)
-
-    def _get_available_networks(self, prv_nets, pub_nets,
-                                req_ids=None, context=None):
-        api = neutronapi.API()
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        nets = prv_nets + pub_nets
-        if req_ids:
-            mox_list_params = {'id': req_ids}
-            self.moxed_client.list_networks(
-                **mox_list_params).AndReturn({'networks': nets})
-        else:
-            mox_list_params = {'tenant_id': self.instance['project_id'],
-                               'shared': False}
-            self.moxed_client.list_networks(
-                **mox_list_params).AndReturn({'networks': prv_nets})
-            mox_list_params = {'shared': True}
-            self.moxed_client.list_networks(
-                **mox_list_params).AndReturn({'networks': pub_nets})
-
-        self.mox.ReplayAll()
-        rets = api._get_available_networks(
-            context if context else self.context,
-            self.instance['project_id'],
-            req_ids)
-        self.assertEqual(nets, rets)
-
-    def test_get_available_networks_all_private(self):
-        self._get_available_networks(prv_nets=self.nets2, pub_nets=[])
-
-    def test_get_available_networks_all_public(self):
-        self._get_available_networks(prv_nets=[], pub_nets=self.nets2)
-
-    def test_get_available_networks_private_and_public(self):
-        self._get_available_networks(prv_nets=self.nets1, pub_nets=self.nets4)
-
-    def test_get_available_networks_with_network_ids(self):
-        prv_nets = [self.nets3[0]]
-        pub_nets = [self.nets3[-1]]
-        # specify only first and last network
-        req_ids = [net['id'] for net in (self.nets3[0], self.nets3[-1])]
-        self._get_available_networks(prv_nets, pub_nets, req_ids)
-
-    def test_get_available_networks_with_custom_policy(self):
-        rules = {'network:attach_external_network': ''}
-        policy.set_rules(oslo_policy.Rules.from_dict(rules))
-        req_ids = [net['id'] for net in self.nets5]
-        self._get_available_networks(self.nets5, pub_nets=[], req_ids=req_ids)
-
-    def test_get_floating_ip_pools(self):
-        api = neutronapi.API()
-        search_opts = {'router:external': True}
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_networks(**search_opts).\
-            AndReturn({'networks': [self.fip_pool, self.fip_pool_nova]})
-        self.mox.ReplayAll()
-        pools = api.get_floating_ip_pools(self.context)
-        expected = [self.fip_pool['name'], self.fip_pool_nova['name']]
-        self.assertEqual(expected, pools)
-
-    def _get_expected_fip_model(self, fip_data, idx=0):
-        expected = {'id': fip_data['id'],
-                    'address': fip_data['floating_ip_address'],
-                    'pool': self.fip_pool['name'],
-                    'project_id': fip_data['tenant_id'],
-                    'fixed_ip': None,
-                    'instance': ({'uuid': self.port_data2[idx]['device_id']}
-                                 if fip_data['port_id']
-                                 else None)}
-        if fip_data['fixed_ip_address']:
-            expected['fixed_ip'] = {'address': fip_data['fixed_ip_address']}
-        return expected
-
-    def _compare(self, obj, dic):
-        for key, value in dic.items():
-            objvalue = obj[key]
-            if isinstance(value, dict):
-                self._compare(objvalue, value)
-            elif isinstance(objvalue, netaddr.IPAddress):
-                self.assertEqual(value, str(objvalue))
-            else:
-                self.assertEqual(value, objvalue)
-
-    def _test_get_floating_ip(self, fip_data, idx=0, by_address=False):
-        api = neutronapi.API()
-        fip_id = fip_data['id']
-        net_id = fip_data['floating_network_id']
-        address = fip_data['floating_ip_address']
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        if by_address:
-            self.moxed_client.list_floatingips(floating_ip_address=address).\
-                AndReturn({'floatingips': [fip_data]})
-        else:
-            self.moxed_client.show_floatingip(fip_id).\
-                AndReturn({'floatingip': fip_data})
-        self.moxed_client.show_network(net_id).\
-            AndReturn({'network': self.fip_pool})
-        if fip_data['port_id']:
-            self.moxed_client.show_port(fip_data['port_id']).\
-                AndReturn({'port': self.port_data2[idx]})
-        self.mox.ReplayAll()
-
-        expected = self._get_expected_fip_model(fip_data, idx)
-
-        if by_address:
-            fip = api.get_floating_ip_by_address(self.context, address)
-        else:
-            fip = api.get_floating_ip(self.context, fip_id)
-        self._compare(fip, expected)
-
-    def test_get_floating_ip_unassociated(self):
-        self._test_get_floating_ip(self.fip_unassociated, idx=0)
-
-    def test_get_floating_ip_associated(self):
-        self._test_get_floating_ip(self.fip_associated, idx=1)
-
-    def test_get_floating_ip_by_address(self):
-        self._test_get_floating_ip(self.fip_unassociated, idx=0,
-                                   by_address=True)
-
-    def test_get_floating_ip_by_address_associated(self):
-        self._test_get_floating_ip(self.fip_associated, idx=1,
-                                   by_address=True)
-
-    def test_get_floating_ip_by_address_not_found(self):
-        api = neutronapi.API()
-        address = self.fip_unassociated['floating_ip_address']
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_floatingips(floating_ip_address=address).\
-            AndReturn({'floatingips': []})
-        self.mox.ReplayAll()
-        self.assertRaises(exception.FloatingIpNotFoundForAddress,
-                          api.get_floating_ip_by_address,
-                          self.context, address)
-
-    def test_get_floating_ip_by_id_not_found(self):
-        api = neutronapi.API()
-        NeutronNotFound = exceptions.NeutronClientException(status_code=404)
-        floating_ip_id = self.fip_unassociated['id']
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.show_floatingip(floating_ip_id).\
-            AndRaise(NeutronNotFound)
-        self.mox.ReplayAll()
-        self.assertRaises(exception.FloatingIpNotFound,
-                          api.get_floating_ip,
-                          self.context, floating_ip_id)
-
-    def test_get_floating_ip_raises_non404(self):
-        api = neutronapi.API()
-        NeutronNotFound = exceptions.NeutronClientException(status_code=0)
-        floating_ip_id = self.fip_unassociated['id']
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.show_floatingip(floating_ip_id).\
-            AndRaise(NeutronNotFound)
-        self.mox.ReplayAll()
-        self.assertRaises(exceptions.NeutronClientException,
-                          api.get_floating_ip,
-                          self.context, floating_ip_id)
-
-    def test_get_floating_ip_by_address_multiple_found(self):
-        api = neutronapi.API()
-        address = self.fip_unassociated['floating_ip_address']
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_floatingips(floating_ip_address=address).\
-            AndReturn({'floatingips': [self.fip_unassociated] * 2})
-        self.mox.ReplayAll()
-        self.assertRaises(exception.FloatingIpMultipleFoundForAddress,
-                          api.get_floating_ip_by_address,
-                          self.context, address)
-
-    def test_get_floating_ips_by_project(self):
-        api = neutronapi.API()
-        project_id = self.context.project_id
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_floatingips(tenant_id=project_id).\
-            AndReturn({'floatingips': [self.fip_unassociated,
-                                       self.fip_associated]})
-        search_opts = {'router:external': True}
-        self.moxed_client.list_networks(**search_opts).\
-            AndReturn({'networks': [self.fip_pool, self.fip_pool_nova]})
-        self.moxed_client.list_ports(tenant_id=project_id).\
-                AndReturn({'ports': self.port_data2})
-        self.mox.ReplayAll()
-
-        expected = [self._get_expected_fip_model(self.fip_unassociated),
-                    self._get_expected_fip_model(self.fip_associated, idx=1)]
-        fips = api.get_floating_ips_by_project(self.context)
-        self.assertEqual(len(expected), len(fips))
-        for i, expected_value in enumerate(expected):
-            self._compare(fips[i], expected_value)
-
-    def _test_get_instance_id_by_floating_address(self, fip_data,
-                                                  associated=False):
-        api = neutronapi.API()
-        address = fip_data['floating_ip_address']
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_floatingips(floating_ip_address=address).\
-                AndReturn({'floatingips': [fip_data]})
-        if associated:
-            self.moxed_client.show_port(fip_data['port_id']).\
-                AndReturn({'port': self.port_data2[1]})
-        self.mox.ReplayAll()
-
-        if associated:
-            expected = self.port_data2[1]['device_id']
-        else:
-            expected = None
-        fip = api.get_instance_id_by_floating_address(self.context, address)
-        self.assertEqual(expected, fip)
-
-    def test_get_instance_id_by_floating_address(self):
-        self._test_get_instance_id_by_floating_address(self.fip_unassociated)
-
-    def test_get_instance_id_by_floating_address_associated(self):
-        self._test_get_instance_id_by_floating_address(self.fip_associated,
-                                                       associated=True)
-
-    def test_allocate_floating_ip(self):
-        api = neutronapi.API()
-        pool_name = self.fip_pool['name']
-        pool_id = self.fip_pool['id']
-        search_opts = {'router:external': True,
-                       'fields': 'id',
-                       'name': pool_name}
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_networks(**search_opts).\
-            AndReturn({'networks': [self.fip_pool]})
-        self.moxed_client.create_floatingip(
-            {'floatingip': {'floating_network_id': pool_id}}).\
-            AndReturn({'floatingip': self.fip_unassociated})
-        self.mox.ReplayAll()
-        fip = api.allocate_floating_ip(self.context, 'ext_net')
-        self.assertEqual(self.fip_unassociated['floating_ip_address'], fip)
-
-    def test_allocate_floating_ip_addr_gen_fail(self):
-        api = neutronapi.API()
-        pool_name = self.fip_pool['name']
-        pool_id = self.fip_pool['id']
-        search_opts = {'router:external': True,
-                       'fields': 'id',
-                       'name': pool_name}
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_networks(**search_opts).\
-            AndReturn({'networks': [self.fip_pool]})
-        self.moxed_client.create_floatingip(
-            {'floatingip': {'floating_network_id': pool_id}}).\
-            AndRaise(exceptions.IpAddressGenerationFailureClient)
-        self.mox.ReplayAll()
-        self.assertRaises(exception.NoMoreFloatingIps,
-                          api.allocate_floating_ip, self.context, 'ext_net')
-
-    def test_allocate_floating_ip_exhausted_fail(self):
-        api = neutronapi.API()
-        pool_name = self.fip_pool['name']
-        pool_id = self.fip_pool['id']
-        search_opts = {'router:external': True,
-                       'fields': 'id',
-                       'name': pool_name}
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_networks(**search_opts).\
-            AndReturn({'networks': [self.fip_pool]})
-        self.moxed_client.create_floatingip(
-            {'floatingip': {'floating_network_id': pool_id}}).\
-            AndRaise(exceptions.ExternalIpAddressExhaustedClient)
-        self.mox.ReplayAll()
-        self.assertRaises(exception.NoMoreFloatingIps,
-                          api.allocate_floating_ip, self.context, 'ext_net')
-
-    def test_allocate_floating_ip_with_pool_id(self):
-        api = neutronapi.API()
-        pool_id = self.fip_pool['id']
-        search_opts = {'router:external': True,
-                       'fields': 'id',
-                       'id': pool_id}
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_networks(**search_opts).\
-            AndReturn({'networks': [self.fip_pool]})
-        self.moxed_client.create_floatingip(
-            {'floatingip': {'floating_network_id': pool_id}}).\
-            AndReturn({'floatingip': self.fip_unassociated})
-        self.mox.ReplayAll()
-        fip = api.allocate_floating_ip(self.context, pool_id)
-        self.assertEqual(self.fip_unassociated['floating_ip_address'], fip)
-
-    def test_allocate_floating_ip_with_default_pool(self):
-        api = neutronapi.API()
-        pool_name = self.fip_pool_nova['name']
-        pool_id = self.fip_pool_nova['id']
-        search_opts = {'router:external': True,
-                       'fields': 'id',
-                       'name': pool_name}
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_networks(**search_opts).\
-            AndReturn({'networks': [self.fip_pool_nova]})
-        self.moxed_client.create_floatingip(
-            {'floatingip': {'floating_network_id': pool_id}}).\
-            AndReturn({'floatingip': self.fip_unassociated})
-        self.mox.ReplayAll()
-        fip = api.allocate_floating_ip(self.context)
-        self.assertEqual(self.fip_unassociated['floating_ip_address'], fip)
-
-    def test_disassociate_and_release_floating_ip(self):
-        api = neutronapi.API()
-        address = self.fip_unassociated['floating_ip_address']
-        fip_id = self.fip_unassociated['id']
-        floating_ip = {'address': address}
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_floatingips(floating_ip_address=address).\
-            AndReturn({'floatingips': [self.fip_unassociated]})
-        self.moxed_client.delete_floatingip(fip_id)
-        self.mox.ReplayAll()
-        api.disassociate_and_release_floating_ip(self.context, None,
-                                               floating_ip)
-
-    def test_disassociate_and_release_floating_ip_with_instance(self):
-        api = neutronapi.API()
-        address = self.fip_unassociated['floating_ip_address']
-        fip_id = self.fip_unassociated['id']
-        floating_ip = {'address': address}
-        instance = self._fake_instance_object(self.instance)
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_floatingips(floating_ip_address=address).\
-            AndReturn({'floatingips': [self.fip_unassociated]})
-        self.moxed_client.delete_floatingip(fip_id)
-        self._setup_mock_for_refresh_cache(api, [instance])
-        self.mox.ReplayAll()
-        api.disassociate_and_release_floating_ip(self.context, instance,
-                                                 floating_ip)
-
-    def _setup_mock_for_refresh_cache(self, api, instances):
-        nw_info = model.NetworkInfo()
-        self.mox.StubOutWithMock(api, '_get_instance_nw_info')
-        self.mox.StubOutWithMock(api.db, 'instance_info_cache_update')
-        for instance in instances:
-            api._get_instance_nw_info(mox.IgnoreArg(), instance).\
-                AndReturn(nw_info)
-            api.db.instance_info_cache_update(mox.IgnoreArg(),
-                                              instance['uuid'],
-                                              mox.IgnoreArg()).AndReturn(
-                                                  fake_info_cache)
-
-    def test_associate_floating_ip(self):
-        api = neutronapi.API()
-        address = self.fip_unassociated['floating_ip_address']
-        fixed_address = self.port_address2
-        fip_id = self.fip_unassociated['id']
-        instance = self._fake_instance_object(self.instance)
-
-        search_opts = {'device_owner': 'compute:nova',
-                       'device_id': instance.uuid}
-
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_ports(**search_opts).\
-            AndReturn({'ports': [self.port_data2[1]]})
-        self.moxed_client.list_floatingips(floating_ip_address=address).\
-            AndReturn({'floatingips': [self.fip_unassociated]})
-        self.moxed_client.update_floatingip(
-            fip_id, {'floatingip': {'port_id': self.fip_associated['port_id'],
-                                    'fixed_ip_address': fixed_address}})
-        self._setup_mock_for_refresh_cache(api, [instance])
-
-        self.mox.ReplayAll()
-        api.associate_floating_ip(self.context, instance,
-                                  address, fixed_address)
-
-    @mock.patch('nova.objects.Instance.get_by_uuid')
-    def test_reassociate_floating_ip(self, mock_get):
-        api = neutronapi.API()
-        address = self.fip_associated['floating_ip_address']
-        new_fixed_address = self.port_address
-        fip_id = self.fip_associated['id']
-
-        search_opts = {'device_owner': 'compute:nova',
-                       'device_id': self.instance2['uuid']}
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_ports(**search_opts).\
-            AndReturn({'ports': [self.port_data2[0]]})
-        self.moxed_client.list_floatingips(floating_ip_address=address).\
-            AndReturn({'floatingips': [self.fip_associated]})
-        self.moxed_client.update_floatingip(
-            fip_id, {'floatingip': {'port_id': uuids.portid_1,
-                                    'fixed_ip_address': new_fixed_address}})
-        self.moxed_client.show_port(self.fip_associated['port_id']).\
-                AndReturn({'port': self.port_data2[1]})
-
-        mock_get.return_value = fake_instance.fake_instance_obj(
-            self.context, **self.instance)
-        instance2 = self._fake_instance_object(self.instance2)
-        self._setup_mock_for_refresh_cache(api, [mock_get.return_value,
-                                                 instance2])
-
-        self.mox.ReplayAll()
-        api.associate_floating_ip(self.context, instance2,
-                                  address, new_fixed_address)
-
-    def test_associate_floating_ip_not_found_fixed_ip(self):
-        instance = self._fake_instance_object(self.instance)
-        api = neutronapi.API()
-        address = self.fip_associated['floating_ip_address']
-        fixed_address = self.fip_associated['fixed_ip_address']
-
-        search_opts = {'device_owner': 'compute:nova',
-                       'device_id': self.instance['uuid']}
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_ports(**search_opts).\
-            AndReturn({'ports': [self.port_data2[0]]})
-
-        self.mox.ReplayAll()
-        self.assertRaises(exception.FixedIpNotFoundForAddress,
-                          api.associate_floating_ip, self.context,
-                          instance, address, fixed_address)
-
-    def test_disassociate_floating_ip(self):
-        instance = self._fake_instance_object(self.instance)
-        api = neutronapi.API()
-        address = self.fip_associated['floating_ip_address']
-        fip_id = self.fip_associated['id']
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_floatingips(floating_ip_address=address).\
-            AndReturn({'floatingips': [self.fip_associated]})
-        self.moxed_client.update_floatingip(
-            fip_id, {'floatingip': {'port_id': None}})
-        self._setup_mock_for_refresh_cache(api, [instance])
-
-        self.mox.ReplayAll()
-        api.disassociate_floating_ip(self.context, instance, address)
-
-    def test_add_fixed_ip_to_instance(self):
-        instance = self._fake_instance_object(self.instance)
-        api = neutronapi.API()
-        self._setup_mock_for_refresh_cache(api, [instance])
-        network_id = uuids.my_netid1
-        search_opts = {'network_id': network_id}
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_subnets(
-            **search_opts).AndReturn({'subnets': self.subnet_data_n})
-
-        search_opts = {'device_id': instance.uuid,
-                       'device_owner': 'compute:nova',
-                       'network_id': network_id}
-        self.moxed_client.list_ports(
-            **search_opts).AndReturn({'ports': self.port_data1})
-        port_req_body = {
-            'port': {
-                'fixed_ips': [{'subnet_id': 'my_subid1'},
-                              {'subnet_id': 'my_subid1'}],
-            },
-        }
-        port = self.port_data1[0]
-        port['fixed_ips'] = [{'subnet_id': 'my_subid1'}]
-        self.moxed_client.update_port(uuids.portid_1,
-            MyComparator(port_req_body)).AndReturn({'port': port})
-
-        self.mox.ReplayAll()
-        api.add_fixed_ip_to_instance(self.context,
-                                     instance,
-                                     network_id)
-
-    def test_remove_fixed_ip_from_instance(self):
-        instance = self._fake_instance_object(self.instance)
-        api = neutronapi.API()
-        self._setup_mock_for_refresh_cache(api, [instance])
-        address = '10.0.0.3'
-        zone = 'compute:%s' % self.instance['availability_zone']
-        search_opts = {'device_id': self.instance['uuid'],
-                       'device_owner': zone,
-                       'fixed_ips': 'ip_address=%s' % address}
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_ports(
-            **search_opts).AndReturn({'ports': self.port_data1})
-        port_req_body = {
-            'port': {
-                'fixed_ips': [],
-            },
-        }
-        port = self.port_data1[0]
-        port['fixed_ips'] = []
-        self.moxed_client.update_port(uuids.portid_1,
-            MyComparator(port_req_body)).AndReturn({'port': port})
-
-        self.mox.ReplayAll()
-        api.remove_fixed_ip_from_instance(self.context, instance,
-                                          address)
-
-    def test_list_floating_ips_without_l3_support(self):
-        api = neutronapi.API()
-        NeutronNotFound = exceptions.NotFound()
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_floatingips(
-            fixed_ip_address='1.1.1.1', port_id=1).AndRaise(NeutronNotFound)
-        self.mox.ReplayAll()
-        neutronapi.get_client(uuids.fake)
-        floatingips = api._get_floating_ips_by_fixed_and_port(
-            self.moxed_client, '1.1.1.1', 1)
-        self.assertEqual([], floatingips)
-
-    def test_nw_info_get_ips(self):
-        fake_port = {
-            'fixed_ips': [
-                {'ip_address': '1.1.1.1'}],
-            'id': 'port-id',
-            }
-        api = neutronapi.API()
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.mox.StubOutWithMock(api, '_get_floating_ips_by_fixed_and_port')
-        api._get_floating_ips_by_fixed_and_port(
-            self.moxed_client, '1.1.1.1', 'port-id').AndReturn(
-                [{'floating_ip_address': '10.0.0.1'}])
-        self.mox.ReplayAll()
-        neutronapi.get_client(uuids.fake)
-        result = api._nw_info_get_ips(self.moxed_client, fake_port)
-        self.assertEqual(1, len(result))
-        self.assertEqual('1.1.1.1', result[0]['address'])
-        self.assertEqual('10.0.0.1', result[0]['floating_ips'][0]['address'])
-
-    def test_nw_info_get_subnets(self):
-        fake_port = {
-            'fixed_ips': [
-                {'ip_address': '1.1.1.1'},
-                {'ip_address': '2.2.2.2'}],
-            'id': 'port-id',
-            }
-        fake_subnet = model.Subnet(cidr='1.0.0.0/8')
-        fake_ips = [model.IP(x['ip_address']) for x in fake_port['fixed_ips']]
-        api = neutronapi.API()
-        self.mox.StubOutWithMock(api, '_get_subnets_from_port')
-        api._get_subnets_from_port(
-            self.context, fake_port, None).AndReturn(
-            [fake_subnet])
-        self.mox.ReplayAll()
-        subnets = api._nw_info_get_subnets(self.context, fake_port, fake_ips)
-        self.assertEqual(1, len(subnets))
-        self.assertEqual(1, len(subnets[0]['ips']))
-        self.assertEqual('1.1.1.1', subnets[0]['ips'][0]['address'])
-
-    def _test_nw_info_build_network(self, vif_type):
-        fake_port = {
-            'fixed_ips': [{'ip_address': '1.1.1.1'}],
-            'id': 'port-id',
-            'network_id': 'net-id',
-            'binding:vif_type': vif_type,
-            }
-        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
-        fake_nets = [{'id': 'net-id', 'name': 'foo', 'tenant_id': 'tenant',
-                      'mtu': 9000}]
-        api = neutronapi.API()
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        neutronapi.get_client(mox.IgnoreArg(), admin=True).AndReturn(
-            self.moxed_client)
-        self.mox.StubOutWithMock(api, '_get_physnet_tunneled_info')
-        api._get_physnet_tunneled_info(self.context, self.moxed_client,
-                                       'net-id').AndReturn((None, False))
-        self.mox.ReplayAll()
-        neutronapi.get_client(uuids.fake)
-        net, iid = api._nw_info_build_network(self.context, fake_port,
-                                              fake_nets, fake_subnets)
-        self.assertEqual(fake_subnets, net['subnets'])
-        self.assertEqual('net-id', net['id'])
-        self.assertEqual('foo', net['label'])
-        self.assertEqual('tenant', net.get_meta('tenant_id'))
-        self.assertEqual(9000, net.get_meta('mtu'))
-        self.assertEqual(CONF.flat_injected, net.get_meta('injected'))
-        return net, iid
-
-    def test_nw_info_build_network_ovs(self):
-        net, iid = self._test_nw_info_build_network(model.VIF_TYPE_OVS)
-        self.assertEqual(CONF.neutron.ovs_bridge, net['bridge'])
-        self.assertNotIn('should_create_bridge', net)
-        self.assertEqual('port-id', iid)
-
-    def test_nw_info_build_network_dvs(self):
-        net, iid = self._test_nw_info_build_network(model.VIF_TYPE_DVS)
-        self.assertEqual('net-id', net['bridge'])
-        self.assertNotIn('should_create_bridge', net)
-        self.assertNotIn('ovs_interfaceid', net)
-        self.assertIsNone(iid)
-
-    def test_nw_info_build_network_bridge(self):
-        net, iid = self._test_nw_info_build_network(model.VIF_TYPE_BRIDGE)
-        self.assertEqual('brqnet-id', net['bridge'])
-        self.assertTrue(net['should_create_bridge'])
-        self.assertIsNone(iid)
-
-    def test_nw_info_build_network_tap(self):
-        net, iid = self._test_nw_info_build_network(model.VIF_TYPE_TAP)
-        self.assertIsNone(net['bridge'])
-        self.assertNotIn('should_create_bridge', net)
-        self.assertIsNone(iid)
-
-    def test_nw_info_build_network_other(self):
-        net, iid = self._test_nw_info_build_network(None)
-        self.assertIsNone(net['bridge'])
-        self.assertNotIn('should_create_bridge', net)
-        self.assertIsNone(iid)
-
-    def test_nw_info_build_no_match(self):
-        fake_port = {
-            'fixed_ips': [{'ip_address': '1.1.1.1'}],
-            'id': 'port-id',
-            'network_id': 'net-id1',
-            'tenant_id': 'tenant',
-            'binding:vif_type': model.VIF_TYPE_OVS,
-            }
-        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
-        fake_nets = [{'id': 'net-id2', 'name': 'foo', 'tenant_id': 'tenant'}]
-        api = neutronapi.API()
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        neutronapi.get_client(mox.IgnoreArg(), admin=True).AndReturn(
-            self.moxed_client)
-        self.mox.StubOutWithMock(api, '_get_physnet_tunneled_info')
-        api._get_physnet_tunneled_info(self.context, self.moxed_client,
-                                       'net-id1').AndReturn((None, False))
-        self.mox.ReplayAll()
-        neutronapi.get_client(uuids.fake)
-        net, iid = api._nw_info_build_network(self.context, fake_port,
-                                              fake_nets, fake_subnets)
-        self.assertEqual(fake_subnets, net['subnets'])
-        self.assertEqual('net-id1', net['id'])
-        self.assertEqual('tenant', net['meta']['tenant_id'])
-
-    def test_nw_info_build_network_vhostuser(self):
-        fake_port = {
-            'fixed_ips': [{'ip_address': '1.1.1.1'}],
-            'id': 'port-id',
-            'network_id': 'net-id',
-            'binding:vif_type': model.VIF_TYPE_VHOSTUSER,
-            'binding:vif_details': {
-                    model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: True
-                                    }
-            }
-        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
-        fake_nets = [{'id': 'net-id', 'name': 'foo', 'tenant_id': 'tenant'}]
-        api = neutronapi.API()
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        neutronapi.get_client(mox.IgnoreArg(), admin=True).AndReturn(
-            self.moxed_client)
-        self.mox.StubOutWithMock(api, '_get_physnet_tunneled_info')
-        api._get_physnet_tunneled_info(mox.IgnoreArg(), mox.IgnoreArg(),
-                                       'net-id').AndReturn((None, False))
-        self.mox.ReplayAll()
-        neutronapi.get_client(uuids.fake)
-        net, iid = api._nw_info_build_network(self.context, fake_port,
-                                              fake_nets, fake_subnets)
-        self.assertEqual(fake_subnets, net['subnets'])
-        self.assertEqual('net-id', net['id'])
-        self.assertEqual('foo', net['label'])
-        self.assertEqual('tenant', net.get_meta('tenant_id'))
-        self.assertEqual(CONF.flat_injected, net.get_meta('injected'))
-        self.assertEqual(CONF.neutron.ovs_bridge, net['bridge'])
-        self.assertNotIn('should_create_bridge', net)
-        self.assertEqual('port-id', iid)
-
-    def test_nw_info_build_network_vhostuser_fp(self):
-        fake_port = {
-            'fixed_ips': [{'ip_address': '1.1.1.1'}],
-            'id': 'port-id',
-            'network_id': 'net-id',
-            'binding:vif_type': model.VIF_TYPE_VHOSTUSER,
-            'binding:vif_details': {
-                    model.VIF_DETAILS_VHOSTUSER_FP_PLUG: True,
-                    model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: False,
-                                    }
-            }
-        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
-        fake_nets = [{'id': 'net-id', 'name': 'foo', 'tenant_id': 'tenant'}]
-        api = neutronapi.API()
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        neutronapi.get_client(mox.IgnoreArg(), admin=True).AndReturn(
-            self.moxed_client)
-        self.mox.StubOutWithMock(api, '_get_physnet_tunneled_info')
-        api._get_physnet_tunneled_info(mox.IgnoreArg(), mox.IgnoreArg(),
-                                       'net-id').AndReturn((None, False))
-        self.mox.ReplayAll()
-        neutronapi.get_client(uuids.fake)
-        net, ovs_interfaceid = api._nw_info_build_network(
-            self.context, fake_port, fake_nets, fake_subnets)
-        self.assertEqual(fake_subnets, net['subnets'])
-        self.assertEqual('net-id', net['id'])
-        self.assertEqual('foo', net['label'])
-        self.assertEqual('tenant', net.get_meta('tenant_id'))
-        self.assertEqual('brqnet-id', net['bridge'])
-        self.assertIsNone(ovs_interfaceid)
-
-    def _test_nw_info_build_custom_bridge(self, vif_type, extra_details=None):
-        fake_port = {
-            'fixed_ips': [{'ip_address': '1.1.1.1'}],
-            'id': 'port-id',
-            'network_id': 'net-id',
-            'binding:vif_type': vif_type,
-            'binding:vif_details': {
-                model.VIF_DETAILS_BRIDGE_NAME: 'custom-bridge',
-            }
-        }
-        if extra_details:
-            fake_port['binding:vif_details'].update(extra_details)
-        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
-        fake_nets = [{'id': 'net-id', 'name': 'foo', 'tenant_id': 'tenant'}]
-        api = neutronapi.API()
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        neutronapi.get_client(mox.IgnoreArg(), admin=True).AndReturn(
-            self.moxed_client)
-        self.mox.StubOutWithMock(api, '_get_physnet_tunneled_info')
-        api._get_physnet_tunneled_info(mox.IgnoreArg(), mox.IgnoreArg(),
-                                       'net-id').AndReturn((None, False))
-        self.mox.ReplayAll()
-        neutronapi.get_client(uuids.fake)
-        net, iid = api._nw_info_build_network(self.context, fake_port,
-                                              fake_nets, fake_subnets)
-        self.assertNotEqual(CONF.neutron.ovs_bridge, net['bridge'])
-        self.assertEqual('custom-bridge', net['bridge'])
-
-    def test_nw_info_build_custom_ovs_bridge(self):
-        self._test_nw_info_build_custom_bridge(model.VIF_TYPE_OVS)
-
-    def test_nw_info_build_custom_ovs_bridge_vhostuser(self):
-        self._test_nw_info_build_custom_bridge(model.VIF_TYPE_VHOSTUSER,
-                {model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: True})
-
-    def test_nw_info_build_custom_lb_bridge(self):
-        self._test_nw_info_build_custom_bridge(model.VIF_TYPE_BRIDGE)
-
-    def test_build_network_info_model(self):
-        api = neutronapi.API()
-
-        fake_inst = objects.Instance()
-        fake_inst.project_id = uuids.fake
-        fake_inst.uuid = uuids.instance
-        fake_inst.info_cache = objects.InstanceInfoCache()
-        fake_inst.info_cache.network_info = model.NetworkInfo()
-        fake_ports = [
-            # admin_state_up=True and status='ACTIVE' thus vif.active=True
-            {'id': 'port1',
-             'network_id': 'net-id',
-             'admin_state_up': True,
-             'status': 'ACTIVE',
-             'fixed_ips': [{'ip_address': '1.1.1.1'}],
-             'mac_address': 'de:ad:be:ef:00:01',
-             'binding:vif_type': model.VIF_TYPE_BRIDGE,
-             'binding:vnic_type': model.VNIC_TYPE_NORMAL,
-             'binding:vif_details': {},
-             },
-            # admin_state_up=False and status='DOWN' thus vif.active=True
-            {'id': 'port2',
-             'network_id': 'net-id',
-             'admin_state_up': False,
-             'status': 'DOWN',
-             'fixed_ips': [{'ip_address': '1.1.1.1'}],
-             'mac_address': 'de:ad:be:ef:00:02',
-             'binding:vif_type': model.VIF_TYPE_BRIDGE,
-             'binding:vnic_type': model.VNIC_TYPE_NORMAL,
-             'binding:vif_details': {},
-             },
-            # admin_state_up=True and status='DOWN' thus vif.active=False
-             {'id': 'port0',
-             'network_id': 'net-id',
-             'admin_state_up': True,
-             'status': 'DOWN',
-             'fixed_ips': [{'ip_address': '1.1.1.1'}],
-             'mac_address': 'de:ad:be:ef:00:03',
-             'binding:vif_type': model.VIF_TYPE_BRIDGE,
-             'binding:vnic_type': model.VNIC_TYPE_NORMAL,
-             'binding:vif_details': {},
-             },
-            # admin_state_up=True and status='ACTIVE' thus vif.active=True
-            {'id': 'port3',
-             'network_id': 'net-id',
-             'admin_state_up': True,
-             'status': 'ACTIVE',
-             'fixed_ips': [{'ip_address': '1.1.1.1'}],
-             'mac_address': 'de:ad:be:ef:00:04',
-             'binding:vif_type': model.VIF_TYPE_HW_VEB,
-             'binding:vnic_type': model.VNIC_TYPE_DIRECT,
-             constants.BINDING_PROFILE: {'pci_vendor_info': '1137:0047',
-                                         'pci_slot': '0000:0a:00.1',
-                                         'physical_network': 'physnet1'},
-             'binding:vif_details': {model.VIF_DETAILS_PROFILEID: 'pfid'},
-             },
-            # admin_state_up=True and status='ACTIVE' thus vif.active=True
-            {'id': 'port4',
-             'network_id': 'net-id',
-             'admin_state_up': True,
-             'status': 'ACTIVE',
-             'fixed_ips': [{'ip_address': '1.1.1.1'}],
-             'mac_address': 'de:ad:be:ef:00:05',
-             'binding:vif_type': model.VIF_TYPE_802_QBH,
-             'binding:vnic_type': model.VNIC_TYPE_MACVTAP,
-             constants.BINDING_PROFILE: {'pci_vendor_info': '1137:0047',
-                                         'pci_slot': '0000:0a:00.2',
-                                         'physical_network': 'physnet1'},
-             'binding:vif_details': {model.VIF_DETAILS_PROFILEID: 'pfid'},
-             },
-            # admin_state_up=True and status='ACTIVE' thus vif.active=True
-            # This port has no binding:vnic_type to verify default is assumed
-            {'id': 'port5',
-             'network_id': 'net-id',
-             'admin_state_up': True,
-             'status': 'ACTIVE',
-             'fixed_ips': [{'ip_address': '1.1.1.1'}],
-             'mac_address': 'de:ad:be:ef:00:06',
-             'binding:vif_type': model.VIF_TYPE_BRIDGE,
-             # No binding:vnic_type
-             'binding:vif_details': {},
-             },
-            # This does not match the networks we provide below,
-            # so it should be ignored (and is here to verify that)
-            {'id': 'port6',
-             'network_id': 'other-net-id',
-             'admin_state_up': True,
-             'status': 'DOWN',
-             'binding:vnic_type': model.VNIC_TYPE_NORMAL,
-             },
-            ]
-        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
-        fake_nets = [
-            {'id': 'net-id',
-             'name': 'foo',
-             'tenant_id': uuids.fake,
-             }
-            ]
-        neutronapi.get_client(mox.IgnoreArg(), admin=True).AndReturn(
-            self.moxed_client)
-        self.moxed_client.list_ports(
-            tenant_id=uuids.fake, device_id=uuids.instance).AndReturn(
-                {'ports': fake_ports})
-
-        self.mox.StubOutWithMock(api, '_get_floating_ips_by_fixed_and_port')
-        self.mox.StubOutWithMock(api, '_get_subnets_from_port')
-        requested_ports = [fake_ports[2], fake_ports[0], fake_ports[1],
-                           fake_ports[3], fake_ports[4], fake_ports[5]]
-        for requested_port in requested_ports:
-            api._get_floating_ips_by_fixed_and_port(
-                self.moxed_client, '1.1.1.1', requested_port['id']).AndReturn(
-                    [{'floating_ip_address': '10.0.0.1'}])
-        for requested_port in requested_ports:
-            api._get_subnets_from_port(self.context, requested_port,
-                                       self.moxed_client).AndReturn(
-                fake_subnets)
-
-        self.mox.StubOutWithMock(api, '_get_preexisting_port_ids')
-        api._get_preexisting_port_ids(fake_inst).AndReturn(['port5'])
-
-        neutronapi.get_client(mox.IgnoreArg(),
-                              admin=True).MultipleTimes().AndReturn(
-            self.moxed_client)
-        self.mox.StubOutWithMock(api, '_get_physnet_tunneled_info')
-        api._get_physnet_tunneled_info(
-            mox.IgnoreArg(), mox.IgnoreArg(),
-            mox.IgnoreArg()).MultipleTimes().AndReturn(
-                (None, False))
-
-        self.mox.ReplayAll()
-        fake_inst.info_cache = objects.InstanceInfoCache.new(
-            self.context, uuids.instance)
-        fake_inst.info_cache.network_info = model.NetworkInfo.hydrate([])
-        nw_infos = api._build_network_info_model(
-            self.context, fake_inst,
-            fake_nets,
-            [fake_ports[2]['id'],
-             fake_ports[0]['id'],
-             fake_ports[1]['id'],
-             fake_ports[3]['id'],
-             fake_ports[4]['id'],
-             fake_ports[5]['id']],
-            preexisting_port_ids=['port3'])
-
-        self.assertEqual(6, len(nw_infos))
-        index = 0
-        for nw_info in nw_infos:
-            self.assertEqual(requested_ports[index]['mac_address'],
-                             nw_info['address'])
-            self.assertEqual('tapport' + str(index), nw_info['devname'])
-            self.assertIsNone(nw_info['ovs_interfaceid'])
-            self.assertEqual(requested_ports[index]['binding:vif_type'],
-                             nw_info['type'])
-            if nw_info['type'] == model.VIF_TYPE_BRIDGE:
-                self.assertEqual('brqnet-id', nw_info['network']['bridge'])
-            self.assertEqual(requested_ports[index].get('binding:vnic_type',
-                                model.VNIC_TYPE_NORMAL), nw_info['vnic_type'])
-            self.assertEqual(requested_ports[index].get('binding:vif_details'),
-                             nw_info.get('details'))
-            self.assertEqual(
-                # If the requested port does not define a binding:profile, or
-                # has it set to None, we default to an empty dict to avoid
-                # NoneType errors.
-                requested_ports[index].get(
-                    constants.BINDING_PROFILE) or {},
-                nw_info.get('profile'))
-            index += 1
-
-        self.assertFalse(nw_infos[0]['active'])
-        self.assertTrue(nw_infos[1]['active'])
-        self.assertTrue(nw_infos[2]['active'])
-        self.assertTrue(nw_infos[3]['active'])
-        self.assertTrue(nw_infos[4]['active'])
-        self.assertTrue(nw_infos[5]['active'])
-
-        self.assertEqual('port0', nw_infos[0]['id'])
-        self.assertEqual('port1', nw_infos[1]['id'])
-        self.assertEqual('port2', nw_infos[2]['id'])
-        self.assertEqual('port3', nw_infos[3]['id'])
-        self.assertEqual('port4', nw_infos[4]['id'])
-        self.assertEqual('port5', nw_infos[5]['id'])
-
-        self.assertFalse(nw_infos[0]['preserve_on_delete'])
-        self.assertFalse(nw_infos[1]['preserve_on_delete'])
-        self.assertFalse(nw_infos[2]['preserve_on_delete'])
-        self.assertTrue(nw_infos[3]['preserve_on_delete'])
-        self.assertFalse(nw_infos[4]['preserve_on_delete'])
-        self.assertTrue(nw_infos[5]['preserve_on_delete'])
-
-    @mock.patch('nova.network.neutronv2.api.API._nw_info_get_subnets')
-    @mock.patch('nova.network.neutronv2.api.API._nw_info_get_ips')
-    @mock.patch('nova.network.neutronv2.api.API._nw_info_build_network')
-    @mock.patch('nova.network.neutronv2.api.API._get_preexisting_port_ids')
-    @mock.patch('nova.network.neutronv2.api.API._gather_port_ids_and_networks')
-    def test_build_network_info_model_empty(
-            self, mock_gather_port_ids_and_networks,
-            mock_get_preexisting_port_ids,
-            mock_nw_info_build_network,
-            mock_nw_info_get_ips,
-            mock_nw_info_get_subnets):
-        # An empty instance info network cache should not be populated from
-        # ports found in Neutron.
-        api = neutronapi.API()
-
-        fake_inst = objects.Instance()
-        fake_inst.project_id = uuids.fake
-        fake_inst.uuid = uuids.instance
-        fake_inst.info_cache = objects.InstanceInfoCache()
-        fake_inst.info_cache.network_info = model.NetworkInfo()
-        fake_ports = [
-            # admin_state_up=True and status='ACTIVE' thus vif.active=True
-            {'id': 'port1',
-             'network_id': 'net-id',
-             'admin_state_up': True,
-             'status': 'ACTIVE',
-             'fixed_ips': [{'ip_address': '1.1.1.1'}],
-             'mac_address': 'de:ad:be:ef:00:01',
-             'binding:vif_type': model.VIF_TYPE_BRIDGE,
-             'binding:vnic_type': model.VNIC_TYPE_NORMAL,
-             'binding:vif_details': {},
-             },
-            ]
-        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
-
-        neutronapi.get_client(mox.IgnoreArg(), admin=True).AndReturn(
-            self.moxed_client)
-        self.moxed_client.list_ports(
-            tenant_id=uuids.fake, device_id=uuids.instance).AndReturn(
-                {'ports': fake_ports})
-
-        mock_gather_port_ids_and_networks.return_value = ([], [])
-        mock_get_preexisting_port_ids.return_value = []
-        mock_nw_info_build_network.return_value = (None, None)
-        mock_nw_info_get_ips.return_value = []
-        mock_nw_info_get_subnets.return_value = fake_subnets
-
-        self.mox.ReplayAll()
-
-        nw_infos = api._build_network_info_model(
-            self.context, fake_inst)
-        self.assertEqual(0, len(nw_infos))
-
-    def test_get_subnets_from_port(self):
-        api = neutronapi.API()
-
-        port_data = copy.copy(self.port_data1[0])
-        # add another IP on the same subnet and verify the subnet is deduped
-        port_data['fixed_ips'].append({'ip_address': '10.0.1.3',
-                                       'subnet_id': 'my_subid1'})
-        subnet_data1 = copy.copy(self.subnet_data1)
-        subnet_data1[0]['host_routes'] = [
-            {'destination': '192.168.0.0/24', 'nexthop': '1.0.0.10'}
-        ]
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_subnets(
-            id=[port_data['fixed_ips'][0]['subnet_id']]
-        ).AndReturn({'subnets': subnet_data1})
-        self.moxed_client.list_ports(
-            network_id=subnet_data1[0]['network_id'],
-            device_owner='network:dhcp').AndReturn({'ports': []})
-        self.mox.ReplayAll()
-
-        subnets = api._get_subnets_from_port(self.context, port_data)
-
-        self.assertEqual(1, len(subnets))
-        self.assertEqual(1, len(subnets[0]['routes']))
-        self.assertEqual(subnet_data1[0]['host_routes'][0]['destination'],
-                         subnets[0]['routes'][0]['cidr'])
-        self.assertEqual(subnet_data1[0]['host_routes'][0]['nexthop'],
-                         subnets[0]['routes'][0]['gateway']['address'])
-
-    @mock.patch.object(neutronapi, 'get_client')
-    def test_get_subnets_from_port_enabled_dhcp(self, mock_get_client):
-        api = neutronapi.API()
-        mocked_client = mock.create_autospec(client.Client)
-        mock_get_client.return_value = mocked_client
-
-        port_data = copy.copy(self.port_data1[0])
-        # add another IP on the same subnet and verify the subnet is deduped
-        port_data['fixed_ips'].append({'ip_address': '10.0.1.3',
-                                       'subnet_id': 'my_subid1'})
-        subnet_data1 = copy.copy(self.subnet_data1)
-        subnet_data1[0]['enable_dhcp'] = True
-
-        mocked_client.list_subnets.return_value = {'subnets': subnet_data1}
-        mocked_client.list_ports.return_value = {'ports': self.dhcp_port_data1}
-
-        subnets = api._get_subnets_from_port(self.context, port_data)
-
-        self.assertEqual(self.dhcp_port_data1[0]['fixed_ips'][0]['ip_address'],
-                         subnets[0]['meta']['dhcp_server'])
-
-    @mock.patch.object(neutronapi, 'get_client')
-    def test_get_subnets_from_port_enabled_dhcp_no_dhcp_ports(self,
-            mock_get_client):
-        api = neutronapi.API()
-        mocked_client = mock.create_autospec(client.Client)
-        mock_get_client.return_value = mocked_client
-
-        port_data = copy.copy(self.port_data1[0])
-        # add another IP on the same subnet and verify the subnet is deduped
-        port_data['fixed_ips'].append({'ip_address': '10.0.1.3',
-                                       'subnet_id': 'my_subid1'})
-        subnet_data1 = copy.copy(self.subnet_data1)
-        subnet_data1[0]['enable_dhcp'] = True
-
-        mocked_client.list_subnets.return_value = {'subnets': subnet_data1}
-        mocked_client.list_ports.return_value = {'ports': []}
-
-        subnets = api._get_subnets_from_port(self.context, port_data)
-
-        self.assertEqual(subnet_data1[0]['gateway_ip'],
-                         subnets[0]['meta']['dhcp_server'])
-
-    def test_get_all_empty_list_networks(self):
-        api = neutronapi.API()
-        neutronapi.get_client(mox.IgnoreArg()).AndReturn(self.moxed_client)
-        self.moxed_client.list_networks().AndReturn({'networks': []})
-        self.mox.ReplayAll()
-        networks = api.get_all(self.context)
-        self.assertIsInstance(networks, objects.NetworkList)
-        self.assertEqual(0, len(networks))
-
-    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
-    def test_get_physnet_tunneled_info_multi_segment(self, mock_get_client):
-        api = neutronapi.API()
-        self.mox.ResetAll()
-        test_net = {'network': {'segments':
-                                    [{'provider:physical_network': 'physnet10',
-                                      'provider:segmentation_id': 1000,
-                                      'provider:network_type': 'vlan'},
-                                     {'provider:physical_network': None,
-                                      'provider:segmentation_id': 153,
-                                      'provider:network_type': 'vxlan'}]}}
-        test_ext_list = {'extensions':
-                            [{'name': 'Multi Provider Network',
-                             'alias': 'multi-segments'}]}
-
-        mock_client = mock_get_client()
-        mock_client.list_extensions.return_value = test_ext_list
-        mock_client.show_network.return_value = test_net
-        physnet_name, tunneled = api._get_physnet_tunneled_info(
-            self.context, mock_client, 'test-net')
-
-        mock_client.show_network.assert_called_once_with(
-            'test-net', fields='segments')
-        self.assertEqual('physnet10', physnet_name)
-        self.assertFalse(tunneled)
-
-    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
-    def test_get_physnet_tunneled_info_vlan_with_multi_segment_ext(
-            self, mock_get_client):
-        api = neutronapi.API()
-        self.mox.ResetAll()
-        test_net = {'network': {'provider:physical_network': 'physnet10',
-                                'provider:segmentation_id': 1000,
-                                'provider:network_type': 'vlan'}}
-        test_ext_list = {'extensions':
-                            [{'name': 'Multi Provider Network',
-                             'alias': 'multi-segments'}]}
-
-        mock_client = mock_get_client()
-        mock_client.list_extensions.return_value = test_ext_list
-        mock_client.show_network.return_value = test_net
-        physnet_name, tunneled = api._get_physnet_tunneled_info(
-            self.context, mock_client, 'test-net')
-
-        mock_client.show_network.assert_called_with(
-            'test-net', fields=['provider:physical_network',
-                                'provider:network_type'])
-        self.assertEqual('physnet10', physnet_name)
-        self.assertFalse(tunneled)
-
-    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
-    def test_get_physnet_tunneled_info_multi_segment_no_physnet(
-            self, mock_get_client):
-        api = neutronapi.API()
-        self.mox.ResetAll()
-        test_net = {'network': {'segments':
-                                    [{'provider:physical_network': None,
-                                      'provider:segmentation_id': 1000,
-                                      'provider:network_type': 'vlan'},
-                                     {'provider:physical_network': None,
-                                      'provider:segmentation_id': 153,
-                                      'provider:network_type': 'vlan'}]}}
-        test_ext_list = {'extensions':
-                            [{'name': 'Multi Provider Network',
-                             'alias': 'multi-segments'}]}
-
-        mock_client = mock_get_client()
-        mock_client.list_extensions.return_value = test_ext_list
-        mock_client.show_network.return_value = test_net
-        self.assertRaises(exception.NovaException,
-                          api._get_physnet_tunneled_info,
-                          self.context, mock_client, 'test-net')
-
-    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
-    def test_get_physnet_tunneled_info_tunneled(
-            self, mock_get_client):
-        api = neutronapi.API()
-        self.mox.ResetAll()
-        test_net = {'network': {'provider:network_type': 'vxlan'}}
-        test_ext_list = {'extensions': []}
-
-        mock_client = mock_get_client()
-        mock_client.list_extensions.return_value = test_ext_list
-        mock_client.show_network.return_value = test_net
-        physnet_name, tunneled = api._get_physnet_tunneled_info(
-            self.context, mock_client, 'test-net')
-
-        mock_client.show_network.assert_called_once_with(
-            'test-net', fields=['provider:physical_network',
-                                'provider:network_type'])
-        self.assertTrue(tunneled)
-        self.assertIsNone(physnet_name)
-
-    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
-    def test_get_phynet_tunneled_info_non_tunneled(
-            self, mock_get_client):
-        api = neutronapi.API()
-        self.mox.ResetAll()
-        test_net = {'network': {'provider:network_type': 'vlan'}}
-        test_ext_list = {'extensions': []}
-
-        mock_client = mock_get_client()
-        mock_client.list_extensions.return_value = test_ext_list
-        mock_client.show_network.return_value = test_net
-        physnet_name, tunneled = api._get_physnet_tunneled_info(
-            self.context, mock_client, 'test-net')
-
-        mock_client.show_network.assert_called_once_with(
-            'test-net', fields=['provider:physical_network',
-                                'provider:network_type'])
-        self.assertFalse(tunneled)
-        self.assertIsNone(physnet_name)
-
-    def _test_get_port_vnic_info(self, mock_get_client,
-                                 binding_vnic_type,
-                                 expected_vnic_type,
-                                 port_resource_request=None):
-        api = neutronapi.API()
-        self.mox.ResetAll()
-        test_port = {
-            'port': {'id': 'my_port_id2',
-                      'network_id': 'net-id',
-                      },
-            }
-
-        if binding_vnic_type:
-            test_port['port']['binding:vnic_type'] = binding_vnic_type
-        if port_resource_request:
-            test_port['port'][
-                constants.RESOURCE_REQUEST] = port_resource_request
-
-        mock_get_client.reset_mock()
-        mock_client = mock_get_client()
-        mock_client.show_port.return_value = test_port
-
-        result = api._get_port_vnic_info(
-            self.context, mock_client, test_port['port']['id'])
-        vnic_type, trusted, network_id, resource_request = result
-
-        mock_client.show_port.assert_called_once_with(test_port['port']['id'],
-            fields=['binding:vnic_type', 'binding:profile', 'network_id',
-                    constants.RESOURCE_REQUEST])
-        self.assertEqual(expected_vnic_type, vnic_type)
-        self.assertEqual('net-id', network_id)
-        self.assertIsNone(trusted)
-        self.assertEqual(port_resource_request, resource_request)
-
-    @mock.patch.object(neutronapi, 'get_client', return_value=mock.MagicMock())
-    def test_get_port_vnic_info_1(self, mock_get_client):
-        self._test_get_port_vnic_info(mock_get_client, model.VNIC_TYPE_DIRECT,
-                                      model.VNIC_TYPE_DIRECT)
-
-    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
-    def test_get_port_vnic_info_2(self, mock_get_client):
-        self._test_get_port_vnic_info(mock_get_client, model.VNIC_TYPE_NORMAL,
-                                      model.VNIC_TYPE_NORMAL)
-
-    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
-    def test_get_port_vnic_info_3(self, mock_get_client):
-        self._test_get_port_vnic_info(mock_get_client, None,
-                                      model.VNIC_TYPE_NORMAL)
-
-    @mock.patch.object(neutronapi, 'get_client')
-    def test_get_port_vnic_info_requested_resources(self, mock_get_client):
-        self._test_get_port_vnic_info(
-            mock_get_client, None, model.VNIC_TYPE_NORMAL,
-            port_resource_request={
-                "resources": {
-                    "NET_BW_EGR_KILOBIT_PER_SEC": 6000,
-                    "NET_BW_IGR_KILOBIT_PER_SEC": 6000,
-                     },
-                "required": [
-                    "CUSTOM_PHYSNET_PHYSNET0",
-                    "CUSTOM_VNIC_TYPE_NORMAL"
-                ]
-            }
-        )
-
-
-class TestNeutronv2WithMock(TestNeutronv2Base):
     """Used to test Neutron V2 API with mock."""
 
     @mock.patch.object(db_api, 'instance_info_cache_get')
@@ -2600,8 +1173,7 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
     def test_allocate_for_instance_2(self):
         # Allocate one port in two networks env.
         self._test_allocate_for_instance(
-            net_idx=2, exception=exception.NetworkAmbiguous,
-            get_client_admin_call=False)
+            net_idx=2, exception=exception.NetworkAmbiguous)
 
     def test_allocate_for_instance_accepts_only_portid(self):
         # Make sure allocate_for_instance works when only a portid is provided
@@ -2622,8 +1194,7 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
 
     def test_allocate_for_instance_without_requested_networks(self):
         self._test_allocate_for_instance(
-            net_idx=3, exception=exception.NetworkAmbiguous,
-            get_client_admin_call=False)
+            net_idx=3, exception=exception.NetworkAmbiguous)
 
     def test_allocate_for_instance_with_requested_non_available_network(self):
         """verify that a non available network is ignored.
@@ -2663,7 +1234,6 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
         # raised.
         self._test_allocate_for_instance_with_virtual_interface(
             net_idx=4, exception=exception.SecurityGroupCannotBeApplied,
-            get_client_admin_call=False,
             _break='post_list_extensions')
 
     def test_allocate_for_instance_with_invalid_network_id(self):
@@ -2673,7 +1243,6 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
         self._test_allocate_for_instance(net_idx=9,
             requested_networks=requested_networks,
             exception=exception.NetworkNotFound,
-            get_client_admin_call=False,
             _break='post_list_networks')
 
     def test_allocate_for_instance_with_requested_networks_with_fixedip(self):
@@ -2702,7 +1271,9 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
         nwinfo = self.api.allocate_for_instance(self.context, self.instance,
                                                 False, None)
         self.assertEqual(0, len(nwinfo))
-        mock_get_client.assert_called_once_with(self.context)
+        mock_get_client.assert_has_calls([
+            mock.call(self.context),
+            mock.call(self.context, admin=True)])
         mocked_client.list_networks.assert_has_calls([
             mock.call(tenant_id=self.instance.project_id, shared=False),
             mock.call(shared=True)])
@@ -2812,7 +1383,9 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
                           self.api.allocate_for_instance,
                           self.context, self.instance, False,
                           requested_networks=requested_networks)
-        mock_get_client.assert_called_once_with(self.context)
+        mock_get_client.assert_has_calls([
+            mock.call(self.context),
+            mock.call(self.context, admin=True)])
         mocked_client.list_networks.assert_called_once_with(
             id=[uuids.my_netid1, uuids.my_netid2])
         mocked_client.create_port.assert_called_once_with(port_req_body)
@@ -2833,7 +1406,9 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
         self.assertRaises(test.TestingException,
                           self.api.allocate_for_instance, self.context,
                           self.instance, False, requested_networks)
-        mock_get_client.assert_called_once_with(self.context)
+        mock_get_client.assert_has_calls([
+            mock.call(self.context),
+            mock.call(self.context, admin=True)])
         mock_get_available.assert_called_once_with(
             self.context, self.instance.project_id, [],
             neutron=mocked_client, auto_allocate=False)
@@ -2852,9 +1427,8 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
             objects=[objects.NetworkRequest(port_id=uuids.portid_1)])
         self._test_allocate_for_instance(
             requested_networks=requested_networks,
-            exception=exception.PortInUse,
-            get_client_admin_call=False,
-            _break='pre_list_networks', _device=True)
+            exception=exception.PortInUse, _break='pre_list_networks',
+            _device=True)
 
     def test_allocate_for_instance_port_not_found(self):
         # If a port is not found, an exception should be raised.
@@ -2863,7 +1437,6 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
         self._test_allocate_for_instance(
             requested_networks=requested_networks,
             exception=exception.PortNotFound,
-            get_client_admin_call=False,
             _break='pre_list_networks')
 
     def test_allocate_for_instance_port_invalid_tenantid(self):
@@ -2873,7 +1446,6 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
         self._test_allocate_for_instance(
             requested_networks=requested_networks,
             exception=exception.PortNotUsable,
-            get_client_admin_call=False,
             _break='pre_list_networks')
 
     @mock.patch.object(neutronapi, 'get_client')
@@ -2894,7 +1466,9 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
         self.assertRaises(exception.ExternalNetworkAttachForbidden,
                           self.api.allocate_for_instance, self.context,
                           self.instance, False, None)
-        mock_get_client.assert_called_once_with(self.context)
+        mock_get_client.assert_has_calls([
+            mock.call(self.context),
+            mock.call(self.context, admin=True)])
         mocked_client.list_networks.assert_has_calls([
             mock.call(tenant_id=self.instance.project_id, shared=False),
             mock.call(shared=True)])
@@ -2919,7 +1493,9 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
             exception.NetworkAmbiguous,
             self.api.allocate_for_instance,
             self.context, self.instance, False, None)
-        mock_get_client.assert_called_once_with(self.context)
+        mock_get_client.assert_has_calls([
+            mock.call(self.context),
+            mock.call(self.context, admin=True)])
         mocked_client.list_networks.assert_has_calls([
             mock.call(tenant_id=self.instance.project_id, shared=False),
             mock.call(shared=True)])
@@ -3506,6 +2082,1505 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
         mocked_client.show_quota.assert_called_once_with(uuids.my_tenant)
         mocked_client.list_ports.assert_called_once_with(
             tenant_id=uuids.my_tenant, fields=['id'])
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_validate_networks_with_ports_and_networks(self, mock_get_client):
+        # Test validation for a request for one instance needing
+        # one port allocated via nova with another port being passed in.
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        port_b = self.port_data2[1]
+        port_b['device_id'] = None
+        port_b['device_owner'] = None
+        requested_networks = objects.NetworkRequestList(
+            objects=[objects.NetworkRequest(network_id=uuids.my_netid1),
+                     objects.NetworkRequest(port_id=port_b['id'])])
+        mocked_client.show_port.return_value = {'port': port_b}
+        ids = [uuids.my_netid1]
+        mocked_client.list_networks.return_value = {'networks': self.nets1}
+        mocked_client.show_quota.return_value = {'quota': {'port': 5}}
+        mocked_client.list_ports.return_value = {'ports': self.port_data2}
+
+        max_count = self.api.validate_networks(self.context,
+                                               requested_networks, 1)
+
+        self.assertEqual(1, max_count)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.show_port.assert_called_once_with(port_b['id'])
+        mocked_client.list_networks.assert_called_once_with(id=ids)
+        mocked_client.show_quota.assert_called_once_with(uuids.my_tenant)
+        mocked_client.list_ports.assert_called_once_with(
+            tenant_id=uuids.my_tenant, fields=['id'])
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_validate_networks_one_port_and_no_networks(self, mock_get_client):
+        # Test that show quota is not called if no networks are
+        # passed in and only ports.
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        port_b = self.port_data2[1]
+        port_b['device_id'] = None
+        port_b['device_owner'] = None
+        requested_networks = objects.NetworkRequestList(
+            objects=[objects.NetworkRequest(port_id=port_b['id'])])
+        mocked_client.show_port.return_value = {'port': port_b}
+
+        max_count = self.api.validate_networks(self.context,
+                                               requested_networks, 1)
+
+        self.assertEqual(1, max_count)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.show_port.assert_called_once_with(port_b['id'])
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_validate_networks_some_quota(self, mock_get_client):
+        # Test validation for a request for two instance needing
+        # two ports each, where the quota is 5 and 2 ports are in use
+        #  => instances which can be created = 1
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        requested_networks = objects.NetworkRequestList(
+            objects=[objects.NetworkRequest(network_id=uuids.my_netid1),
+                     objects.NetworkRequest(network_id=uuids.my_netid2)])
+        ids = [uuids.my_netid1, uuids.my_netid2]
+        mocked_client.list_networks.return_value = {'networks': self.nets2}
+        mocked_client.show_quota.return_value = {'quota': {'port': 5}}
+        mocked_client.list_ports.return_value = {'ports': self.port_data2}
+
+        max_count = self.api.validate_networks(self.context,
+                                               requested_networks, 2)
+
+        self.assertEqual(1, max_count)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_networks.assert_called_once_with(id=ids)
+        mocked_client.show_quota.assert_called_once_with(uuids.my_tenant)
+        mocked_client.list_ports.assert_called_once_with(
+            tenant_id=uuids.my_tenant, fields=['id'])
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_validate_networks_unlimited_quota(self, mock_get_client):
+        # Test validation for a request for two instance needing
+        # two ports each, where the quota is -1 (unlimited)
+        #  => instances which can be created = 1
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        requested_networks = objects.NetworkRequestList(
+            objects=[objects.NetworkRequest(network_id=uuids.my_netid1),
+                     objects.NetworkRequest(network_id=uuids.my_netid2)])
+        ids = [uuids.my_netid1, uuids.my_netid2]
+        mocked_client.list_networks.return_value = {'networks': self.nets2}
+        mocked_client.show_quota.return_value = {'quota': {'port': -1}}
+
+        max_count = self.api.validate_networks(self.context,
+                                               requested_networks, 2)
+
+        self.assertEqual(2, max_count)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_networks.assert_called_once_with(id=ids)
+        mocked_client.show_quota.assert_called_once_with(uuids.my_tenant)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_validate_networks_no_quota_but_ports_supplied(self,
+                                                           mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        port_a = self.port_data3[0]
+        port_a['fixed_ips'] = {'ip_address': '10.0.0.2',
+                               'subnet_id': 'subnet_id'}
+        port_b = self.port_data2[1]
+        self.assertNotEqual(port_a['network_id'], port_b['network_id'])
+        for port in [port_a, port_b]:
+            port['device_id'] = None
+            port['device_owner'] = None
+
+        requested_networks = objects.NetworkRequestList(
+            objects=[objects.NetworkRequest(port_id=port_a['id']),
+                     objects.NetworkRequest(port_id=port_b['id'])])
+        mocked_client.show_port.side_effect = [{'port': port_a},
+                                               {'port': port_b}]
+
+        max_count = self.api.validate_networks(self.context,
+                                               requested_networks, 1)
+
+        self.assertEqual(1, max_count)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.show_port.assert_has_calls([mock.call(port_a['id']),
+                                                  mock.call(port_b['id'])])
+        self.assertEqual(2, mocked_client.show_port.call_count)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def _test_get_fixed_ip_by_address_with_exception(self, mock_get_client,
+                                                     port_data=None,
+                                                     exception=None):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        if port_data is None:
+            port_data = self.port_data2
+        mocked_client.list_ports.return_value = {'ports': port_data}
+
+        result = None
+        if exception:
+            self.assertRaises(exception, self.api.get_fixed_ip_by_address,
+                              self.context, self.port_address)
+        else:
+            result = self.api.get_fixed_ip_by_address(self.context,
+                                                      self.port_address)
+
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_ports.assert_called_once_with(
+            fixed_ips='ip_address=%s' % self.port_address)
+
+        return result
+
+    def test_get_fixed_ip_by_address_fails_for_no_ports(self):
+        self._test_get_fixed_ip_by_address_with_exception(
+            port_data=[], exception=exception.FixedIpNotFoundForAddress)
+
+    def test_get_fixed_ip_by_address_succeeds_for_1_port(self):
+        result = self._test_get_fixed_ip_by_address_with_exception(
+            port_data=self.port_data1)
+        self.assertEqual(self.instance2['uuid'], result['instance_uuid'])
+
+    def test_get_fixed_ip_by_address_fails_for_more_than_1_port(self):
+        self._test_get_fixed_ip_by_address_with_exception(
+            exception=exception.FixedIpAssociatedWithMultipleInstances)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def _test_get_available_networks(self, prv_nets, pub_nets, mock_get_client,
+                                     req_ids=None, context=None):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        nets = prv_nets + pub_nets
+        if req_ids:
+            mocked_client.list_networks.return_value = {'networks': nets}
+        else:
+            mocked_client.list_networks.side_effect = [{'networks': prv_nets},
+                                                       {'networks': pub_nets}]
+
+        rets = self.api._get_available_networks(
+            context if context else self.context,
+            self.instance['project_id'],
+            req_ids)
+
+        self.assertEqual(nets, rets)
+        mock_get_client.assert_called_once_with(self.context)
+        if req_ids:
+            mocked_client.list_networks.assert_called_once_with(id=req_ids)
+        else:
+            mocked_client.list_networks.assert_has_calls([
+                mock.call(tenant_id=self.instance['project_id'], shared=False),
+                mock.call(shared=True)])
+            self.assertEqual(2, mocked_client.list_networks.call_count)
+
+    def test_get_available_networks_all_private(self):
+        self._test_get_available_networks(self.nets2, [])
+
+    def test_get_available_networks_all_public(self):
+        self._test_get_available_networks([], self.nets2)
+
+    def test_get_available_networks_private_and_public(self):
+        self._test_get_available_networks(self.nets1, self.nets4)
+
+    def test_get_available_networks_with_network_ids(self):
+        prv_nets = [self.nets3[0]]
+        pub_nets = [self.nets3[-1]]
+        # specify only first and last network
+        req_ids = [net['id'] for net in (self.nets3[0], self.nets3[-1])]
+        self._test_get_available_networks(prv_nets, pub_nets, req_ids=req_ids)
+
+    def test_get_available_networks_with_custom_policy(self):
+        rules = {'network:attach_external_network': ''}
+        policy.set_rules(oslo_policy.Rules.from_dict(rules))
+        req_ids = [net['id'] for net in self.nets5]
+        self._test_get_available_networks(self.nets5, [],
+                                          req_ids=req_ids)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_floating_ip_pools(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        search_opts = {'router:external': True}
+        mocked_client.list_networks.return_value = {
+            'networks': [self.fip_pool, self.fip_pool_nova]}
+
+        pools = self.api.get_floating_ip_pools(self.context)
+
+        expected = [self.fip_pool['name'], self.fip_pool_nova['name']]
+        self.assertEqual(expected, pools)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_networks.assert_called_once_with(**search_opts)
+
+    def _get_expected_fip_model(self, fip_data, idx=0):
+        expected = {'id': fip_data['id'],
+                    'address': fip_data['floating_ip_address'],
+                    'pool': self.fip_pool['name'],
+                    'project_id': fip_data['tenant_id'],
+                    'fixed_ip': None,
+                    'instance': ({'uuid': self.port_data2[idx]['device_id']}
+                                 if fip_data['port_id']
+                                 else None)}
+        if fip_data['fixed_ip_address']:
+            expected['fixed_ip'] = {'address': fip_data['fixed_ip_address']}
+        return expected
+
+    def _compare(self, obj, dic):
+        for key, value in dic.items():
+            objvalue = obj[key]
+            if isinstance(value, dict):
+                self._compare(objvalue, value)
+            elif isinstance(objvalue, netaddr.IPAddress):
+                self.assertEqual(value, str(objvalue))
+            else:
+                self.assertEqual(value, objvalue)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def _test_get_floating_ip(self, fip_data, mock_get_client,
+                              idx=0, by_address=False):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        fip_id = fip_data['id']
+        net_id = fip_data['floating_network_id']
+        address = fip_data['floating_ip_address']
+        if by_address:
+            mocked_client.list_floatingips.return_value = {
+               'floatingips': [fip_data]}
+        else:
+            mocked_client.show_floatingip.return_value = {
+                'floatingip': fip_data}
+        mocked_client.show_network.return_value = {'network': self.fip_pool}
+        if fip_data['port_id']:
+            mocked_client.show_port.return_value = {
+                'port': self.port_data2[idx]}
+
+        expected = self._get_expected_fip_model(fip_data, idx)
+
+        if by_address:
+            fip = self.api.get_floating_ip_by_address(self.context, address)
+        else:
+            fip = self.api.get_floating_ip(self.context, fip_id)
+
+        self._compare(fip, expected)
+        mock_get_client.assert_called_once_with(self.context)
+        if by_address:
+            mocked_client.list_floatingips.assert_called_once_with(
+                floating_ip_address=address)
+        else:
+            mocked_client.show_floatingip.assert_called_once_with(fip_id)
+        mocked_client.show_network.assert_called_once_with(net_id)
+        if fip_data['port_id']:
+            mocked_client.show_port.assert_called_once_with(
+                fip_data['port_id'])
+
+    def test_get_floating_ip_unassociated(self):
+        self._test_get_floating_ip(self.fip_unassociated, idx=0)
+
+    def test_get_floating_ip_associated(self):
+        self._test_get_floating_ip(self.fip_associated, idx=1)
+
+    def test_get_floating_ip_by_address(self):
+        self._test_get_floating_ip(self.fip_unassociated, idx=0,
+                                   by_address=True)
+
+    def test_get_floating_ip_by_address_associated(self):
+        self._test_get_floating_ip(self.fip_associated, idx=1,
+                                   by_address=True)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_floating_ip_by_address_not_found(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        address = self.fip_unassociated['floating_ip_address']
+        mocked_client.list_floatingips.return_value = {'floatingips': []}
+        self.assertRaises(exception.FloatingIpNotFoundForAddress,
+                          self.api.get_floating_ip_by_address,
+                          self.context, address)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_floatingips.assert_called_once_with(
+            floating_ip_address=address)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_floating_ip_by_id_not_found(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        floating_ip_id = self.fip_unassociated['id']
+        mocked_client.show_floatingip.side_effect = (
+            exceptions.NeutronClientException(status_code=404))
+        self.assertRaises(exception.FloatingIpNotFound,
+                          self.api.get_floating_ip,
+                          self.context, floating_ip_id)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.show_floatingip.assert_called_once_with(floating_ip_id)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_floating_ip_raises_non404(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        floating_ip_id = self.fip_unassociated['id']
+        mocked_client.show_floatingip.side_effect = (
+            exceptions.NeutronClientException(status_code=0))
+        self.assertRaises(exceptions.NeutronClientException,
+                          self.api.get_floating_ip,
+                          self.context, floating_ip_id)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.show_floatingip.assert_called_once_with(floating_ip_id)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_floating_ip_by_address_multiple_found(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        address = self.fip_unassociated['floating_ip_address']
+        mocked_client.list_floatingips.return_value = {
+            'floatingips': [self.fip_unassociated] * 2}
+        self.assertRaises(exception.FloatingIpMultipleFoundForAddress,
+                          self.api.get_floating_ip_by_address,
+                          self.context, address)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_floatingips.assert_called_once_with(
+            floating_ip_address=address)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_floating_ips_by_project(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        project_id = self.context.project_id
+        mocked_client.list_floatingips.return_value = {
+            'floatingips': [self.fip_unassociated, self.fip_associated]}
+        mocked_client.list_networks.return_value = {
+            'networks': [self.fip_pool, self.fip_pool_nova]}
+        mocked_client.list_ports.return_value = {'ports': self.port_data2}
+        expected = [self._get_expected_fip_model(self.fip_unassociated),
+                    self._get_expected_fip_model(self.fip_associated, idx=1)]
+
+        fips = self.api.get_floating_ips_by_project(self.context)
+
+        self.assertEqual(len(expected), len(fips))
+        for i, expected_value in enumerate(expected):
+            self._compare(fips[i], expected_value)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_floatingips.assert_called_once_with(
+            tenant_id=project_id)
+        mocked_client.list_networks.assert_called_once_with(
+            **{'router:external': True})
+        mocked_client.list_ports.assert_called_once_with(tenant_id=project_id)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def _test_get_instance_id_by_floating_address(self, fip_data,
+                                                  mock_get_client,
+                                                  associated=False):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        address = fip_data['floating_ip_address']
+        mocked_client.list_floatingips.return_value = {
+            'floatingips': [fip_data]}
+        if associated:
+            mocked_client.show_port.return_value = {'port': self.port_data2[1]}
+            expected = self.port_data2[1]['device_id']
+        else:
+            expected = None
+
+        fip = self.api.get_instance_id_by_floating_address(self.context,
+                                                           address)
+
+        self.assertEqual(expected, fip)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_floatingips.assert_called_once_with(
+            floating_ip_address=address)
+        if associated:
+            mocked_client.show_port.assert_called_once_with(
+                fip_data['port_id'])
+
+    def test_get_instance_id_by_floating_address(self):
+        self._test_get_instance_id_by_floating_address(self.fip_unassociated)
+
+    def test_get_instance_id_by_floating_address_associated(self):
+        self._test_get_instance_id_by_floating_address(self.fip_associated,
+                                                       associated=True)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_allocate_floating_ip(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        pool_name = self.fip_pool['name']
+        pool_id = self.fip_pool['id']
+        search_opts = {'router:external': True,
+                       'fields': 'id',
+                       'name': pool_name}
+        mocked_client.list_networks.return_value = {
+            'networks': [self.fip_pool]}
+        mocked_client.create_floatingip.return_value = {
+            'floatingip': self.fip_unassociated}
+
+        fip = self.api.allocate_floating_ip(self.context, 'ext_net')
+
+        self.assertEqual(self.fip_unassociated['floating_ip_address'], fip)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_networks.assert_called_once_with(**search_opts)
+        mocked_client.create_floatingip.assert_called_once_with(
+            {'floatingip': {'floating_network_id': pool_id}})
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_allocate_floating_ip_addr_gen_fail(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        pool_name = self.fip_pool['name']
+        pool_id = self.fip_pool['id']
+        search_opts = {'router:external': True,
+                       'fields': 'id',
+                       'name': pool_name}
+        mocked_client.list_networks.return_value = {
+            'networks': [self.fip_pool]}
+        mocked_client.create_floatingip.side_effect = (
+            exceptions.IpAddressGenerationFailureClient)
+
+        self.assertRaises(exception.NoMoreFloatingIps,
+                          self.api.allocate_floating_ip, self.context,
+                          'ext_net')
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_networks.assert_called_once_with(**search_opts)
+        mocked_client.create_floatingip.assert_called_once_with(
+            {'floatingip': {'floating_network_id': pool_id}})
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_allocate_floating_ip_exhausted_fail(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        pool_name = self.fip_pool['name']
+        pool_id = self.fip_pool['id']
+        search_opts = {'router:external': True,
+                       'fields': 'id',
+                       'name': pool_name}
+        mocked_client.list_networks.return_value = {
+            'networks': [self.fip_pool]}
+        mocked_client.create_floatingip.side_effect = (
+            exceptions.ExternalIpAddressExhaustedClient)
+
+        self.assertRaises(exception.NoMoreFloatingIps,
+                          self.api.allocate_floating_ip, self.context,
+                          'ext_net')
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_networks.assert_called_once_with(**search_opts)
+        mocked_client.create_floatingip.assert_called_once_with(
+            {'floatingip': {'floating_network_id': pool_id}})
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_allocate_floating_ip_with_pool_id(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        pool_id = self.fip_pool['id']
+        search_opts = {'router:external': True,
+                       'fields': 'id',
+                       'id': pool_id}
+        mocked_client.list_networks.return_value = {
+            'networks': [self.fip_pool]}
+        mocked_client.create_floatingip.return_value = {
+            'floatingip': self.fip_unassociated}
+
+        fip = self.api.allocate_floating_ip(self.context, pool_id)
+
+        self.assertEqual(self.fip_unassociated['floating_ip_address'], fip)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_networks.assert_called_once_with(**search_opts)
+        mocked_client.create_floatingip.assert_called_once_with(
+            {'floatingip': {'floating_network_id': pool_id}})
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_allocate_floating_ip_with_default_pool(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        pool_name = self.fip_pool_nova['name']
+        pool_id = self.fip_pool_nova['id']
+        search_opts = {'router:external': True,
+                       'fields': 'id',
+                       'name': pool_name}
+        mocked_client.list_networks.return_value = {
+            'networks': [self.fip_pool_nova]}
+        mocked_client.create_floatingip.return_value = {
+            'floatingip': self.fip_unassociated}
+
+        fip = self.api.allocate_floating_ip(self.context)
+
+        self.assertEqual(self.fip_unassociated['floating_ip_address'], fip)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_networks.assert_called_once_with(**search_opts)
+        mocked_client.create_floatingip.assert_called_once_with(
+            {'floatingip': {'floating_network_id': pool_id}})
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_disassociate_and_release_floating_ip(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        address = self.fip_unassociated['floating_ip_address']
+        fip_id = self.fip_unassociated['id']
+        floating_ip = {'address': address}
+        mocked_client.list_floatingips.return_value = {
+            'floatingips': [self.fip_unassociated]}
+
+        self.api.disassociate_and_release_floating_ip(self.context, None,
+                                                      floating_ip)
+
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_floatingips.assert_called_once_with(
+            floating_ip_address=address)
+        mocked_client.delete_floatingip.assert_called_once_with(fip_id)
+
+    @mock.patch.object(neutronapi.API, '_get_instance_nw_info',
+                       return_value=model.NetworkInfo())
+    @mock.patch.object(db_api, 'instance_info_cache_update',
+                       return_value=fake_info_cache)
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_disassociate_and_release_floating_ip_with_instance(
+            self, mock_get_client, mock_cache_update, mock_get_nw):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        address = self.fip_unassociated['floating_ip_address']
+        fip_id = self.fip_unassociated['id']
+        floating_ip = {'address': address}
+        instance = self._fake_instance_object(self.instance)
+        mocked_client.list_floatingips.return_value = {
+            'floatingips': [self.fip_unassociated]}
+
+        self.api.disassociate_and_release_floating_ip(self.context, instance,
+                                                      floating_ip)
+
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_floatingips.assert_called_once_with(
+            floating_ip_address=address)
+        mocked_client.delete_floatingip.assert_called_once_with(fip_id)
+        mock_cache_update.assert_called_once_with(mock.ANY, instance['uuid'],
+                                                  mock.ANY)
+        mock_get_nw.assert_called_once_with(mock.ANY, instance)
+
+    @mock.patch.object(neutronapi.API, '_get_instance_nw_info',
+                       return_value=model.NetworkInfo())
+    @mock.patch.object(db_api, 'instance_info_cache_update',
+                       return_value=fake_info_cache)
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_associate_floating_ip(self, mock_get_client, mock_cache_update,
+                                   mock_get_nw):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        address = self.fip_unassociated['floating_ip_address']
+        fixed_address = self.port_address2
+        fip_id = self.fip_unassociated['id']
+        instance = self._fake_instance_object(self.instance)
+
+        mocked_client.list_ports.return_value = {'ports': [self.port_data2[1]]}
+        mocked_client.list_floatingips.return_value = {
+            'floatingips': [self.fip_unassociated]}
+
+        self.api.associate_floating_ip(self.context, instance,
+                                       address, fixed_address)
+
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_ports.assert_called_once_with(
+            **{'device_owner': 'compute:nova', 'device_id': instance.uuid})
+        mocked_client.list_floatingips.assert_called_once_with(
+            floating_ip_address=address)
+        mocked_client.update_floatingip.assert_called_once_with(
+            fip_id, {'floatingip': {'port_id': self.fip_associated['port_id'],
+                                    'fixed_ip_address': fixed_address}})
+        mock_cache_update.assert_called_once_with(mock.ANY, instance['uuid'],
+                                                  mock.ANY)
+        mock_get_nw.assert_called_once_with(mock.ANY, instance)
+
+    @mock.patch.object(neutronapi.API, '_get_instance_nw_info',
+                       return_value=model.NetworkInfo())
+    @mock.patch.object(db_api, 'instance_info_cache_update',
+                       return_value=fake_info_cache)
+    @mock.patch.object(neutronapi, 'get_client')
+    @mock.patch('nova.objects.Instance.get_by_uuid')
+    def test_reassociate_floating_ip(self, mock_get, mock_get_client,
+                                     mock_cache_update, mock_get_nw):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        address = self.fip_associated['floating_ip_address']
+        new_fixed_address = self.port_address
+        fip_id = self.fip_associated['id']
+
+        mocked_client.list_ports.return_value = {'ports': [self.port_data2[0]]}
+        mocked_client.list_floatingips.return_value = {
+            'floatingips': [self.fip_associated]}
+        mocked_client.show_port.return_value = {'port': self.port_data2[1]}
+        mock_get.return_value = fake_instance.fake_instance_obj(
+            self.context, **self.instance)
+        instance2 = self._fake_instance_object(self.instance2)
+
+        self.api.associate_floating_ip(self.context, instance2,
+                                       address, new_fixed_address)
+
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_ports.assert_called_once_with(
+            **{'device_owner': 'compute:nova',
+               'device_id': self.instance2['uuid']})
+        mocked_client.list_floatingips.assert_called_once_with(
+            floating_ip_address=address)
+        mocked_client.update_floatingip.assert_called_once_with(
+            fip_id, {'floatingip': {'port_id': uuids.portid_1,
+                                    'fixed_ip_address': new_fixed_address}})
+        mocked_client.show_port.assert_called_once_with(
+            self.fip_associated['port_id'])
+        mock_cache_update.assert_has_calls([
+            mock.call(mock.ANY, mock_get.return_value['uuid'], mock.ANY),
+            mock.call(mock.ANY, instance2['uuid'], mock.ANY)])
+        self.assertEqual(2, mock_cache_update.call_count)
+        mock_get_nw.assert_has_calls([
+            mock.call(mock.ANY, mock_get.return_value),
+            mock.call(mock.ANY, instance2)])
+        self.assertEqual(2, mock_get_nw.call_count)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_associate_floating_ip_not_found_fixed_ip(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        instance = self._fake_instance_object(self.instance)
+        address = self.fip_associated['floating_ip_address']
+        fixed_address = self.fip_associated['fixed_ip_address']
+        mocked_client.list_ports.return_value = {'ports': [self.port_data2[0]]}
+
+        self.assertRaises(exception.FixedIpNotFoundForAddress,
+                          self.api.associate_floating_ip, self.context,
+                          instance, address, fixed_address)
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_ports.assert_called_once_with(
+            **{'device_owner': 'compute:nova',
+               'device_id': self.instance['uuid']})
+
+    @mock.patch.object(neutronapi.API, '_get_instance_nw_info',
+                       return_value=model.NetworkInfo())
+    @mock.patch.object(db_api, 'instance_info_cache_update',
+                       return_value=fake_info_cache)
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_disassociate_floating_ip(self, mock_get_client,
+                                      mock_cache_update, mock_get_nw):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        instance = self._fake_instance_object(self.instance)
+        address = self.fip_associated['floating_ip_address']
+        fip_id = self.fip_associated['id']
+        mocked_client.list_floatingips.return_value = {
+            'floatingips': [self.fip_associated]}
+
+        self.api.disassociate_floating_ip(self.context, instance, address)
+
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_floatingips.assert_called_once_with(
+            floating_ip_address=address)
+        mocked_client.update_floatingip.assert_called_once_with(
+            fip_id, {'floatingip': {'port_id': None}})
+        mock_cache_update.assert_called_once_with(mock.ANY, instance['uuid'],
+                                                  mock.ANY)
+        mock_get_nw.assert_called_once_with(mock.ANY, instance)
+
+    @mock.patch.object(neutronapi.API, '_get_instance_nw_info',
+                       return_value=model.NetworkInfo())
+    @mock.patch.object(db_api, 'instance_info_cache_update',
+                       return_value=fake_info_cache)
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_add_fixed_ip_to_instance(self, mock_get_client,
+                                      mock_cache_update, mock_get_nw):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        instance = self._fake_instance_object(self.instance)
+        network_id = uuids.my_netid1
+        mocked_client.list_subnets.return_value = {
+            'subnets': self.subnet_data_n}
+        mocked_client.list_ports.return_value = {'ports': self.port_data1}
+        port_req_body = {
+            'port': {
+                'fixed_ips': [{'subnet_id': 'my_subid1'},
+                              {'subnet_id': 'my_subid1'}],
+            },
+        }
+        port = self.port_data1[0]
+        port['fixed_ips'] = [{'subnet_id': 'my_subid1'}]
+        mocked_client.update_port.return_value = {'port': port}
+
+        self.api.add_fixed_ip_to_instance(self.context,
+                                          instance,
+                                          network_id)
+
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_subnets.assert_called_once_with(
+            network_id=network_id)
+        mocked_client.list_ports.assert_called_once_with(
+            device_id=instance.uuid, device_owner='compute:nova',
+            network_id=network_id)
+        mocked_client.update_port.assert_called_once_with(uuids.portid_1,
+                                                          port_req_body)
+        mock_cache_update.assert_called_once_with(mock.ANY, instance['uuid'],
+                                                  mock.ANY)
+        mock_get_nw.assert_called_once_with(mock.ANY, instance)
+
+    @mock.patch.object(neutronapi.API, '_get_instance_nw_info',
+                       return_value=model.NetworkInfo())
+    @mock.patch.object(db_api, 'instance_info_cache_update',
+                       return_value=fake_info_cache)
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_remove_fixed_ip_from_instance(self, mock_get_client,
+                                           mock_cache_update, mock_get_nw):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        instance = self._fake_instance_object(self.instance)
+        address = '10.0.0.3'
+        zone = 'compute:%s' % self.instance['availability_zone']
+        mocked_client.list_ports.return_value = {'ports': self.port_data1}
+        port_req_body = {
+            'port': {
+                'fixed_ips': [],
+            },
+        }
+        port = self.port_data1[0]
+        port['fixed_ips'] = []
+        mocked_client.update_port.return_value = {'port': port}
+
+        self.api.remove_fixed_ip_from_instance(self.context, instance,
+                                               address)
+
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_ports.assert_called_once_with(
+            device_id=self.instance['uuid'], device_owner=zone,
+            fixed_ips='ip_address=%s' % address)
+        mocked_client.update_port.assert_called_once_with(uuids.portid_1,
+                                                          port_req_body)
+        mock_cache_update.assert_called_once_with(mock.ANY, instance['uuid'],
+                                                  mock.ANY)
+        mock_get_nw.assert_called_once_with(mock.ANY, instance)
+
+    def test_list_floating_ips_without_l3_support(self):
+        mocked_client = mock.create_autospec(client.Client)
+        mocked_client.list_floatingips.side_effect = exceptions.NotFound
+
+        floatingips = self.api._get_floating_ips_by_fixed_and_port(
+            mocked_client, '1.1.1.1', 1)
+
+        self.assertEqual([], floatingips)
+        mocked_client.list_floatingips.assert_called_once_with(
+            fixed_ip_address='1.1.1.1', port_id=1)
+
+    @mock.patch.object(neutronapi.API, '_get_floating_ips_by_fixed_and_port')
+    def test_nw_info_get_ips(self, mock_get_floating):
+        mocked_client = mock.create_autospec(client.Client)
+        fake_port = {
+            'fixed_ips': [
+                {'ip_address': '1.1.1.1'}],
+            'id': 'port-id',
+            }
+        mock_get_floating.return_value = [{'floating_ip_address': '10.0.0.1'}]
+
+        result = self.api._nw_info_get_ips(mocked_client, fake_port)
+
+        self.assertEqual(1, len(result))
+        self.assertEqual('1.1.1.1', result[0]['address'])
+        self.assertEqual('10.0.0.1', result[0]['floating_ips'][0]['address'])
+        mock_get_floating.assert_called_once_with(mocked_client, '1.1.1.1',
+                                                  'port-id')
+
+    @mock.patch.object(neutronapi.API, '_get_subnets_from_port')
+    def test_nw_info_get_subnets(self, mock_get_subnets):
+        fake_port = {
+            'fixed_ips': [
+                {'ip_address': '1.1.1.1'},
+                {'ip_address': '2.2.2.2'}],
+            'id': 'port-id',
+            }
+        fake_subnet = model.Subnet(cidr='1.0.0.0/8')
+        fake_ips = [model.IP(x['ip_address']) for x in fake_port['fixed_ips']]
+        mock_get_subnets.return_value = [fake_subnet]
+
+        subnets = self.api._nw_info_get_subnets(self.context, fake_port,
+                                                fake_ips)
+
+        self.assertEqual(1, len(subnets))
+        self.assertEqual(1, len(subnets[0]['ips']))
+        self.assertEqual('1.1.1.1', subnets[0]['ips'][0]['address'])
+        mock_get_subnets.assert_called_once_with(self.context, fake_port, None)
+
+    @mock.patch.object(neutronapi.API, '_get_physnet_tunneled_info',
+                       return_value=(None, False))
+    @mock.patch.object(neutronapi, 'get_client')
+    def _test_nw_info_build_network(self, vif_type, mock_get_client,
+                                    mock_get_physnet):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        fake_port = {
+            'fixed_ips': [{'ip_address': '1.1.1.1'}],
+            'id': 'port-id',
+            'network_id': 'net-id',
+            'binding:vif_type': vif_type,
+            }
+        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
+        fake_nets = [{'id': 'net-id', 'name': 'foo', 'tenant_id': 'tenant',
+                      'mtu': 9000}]
+
+        net, iid = self.api._nw_info_build_network(self.context, fake_port,
+                                                   fake_nets, fake_subnets)
+
+        self.assertEqual(fake_subnets, net['subnets'])
+        self.assertEqual('net-id', net['id'])
+        self.assertEqual('foo', net['label'])
+        self.assertEqual('tenant', net.get_meta('tenant_id'))
+        self.assertEqual(9000, net.get_meta('mtu'))
+        self.assertEqual(CONF.flat_injected, net.get_meta('injected'))
+
+        mock_get_client.assert_called_once_with(mock.ANY, admin=True)
+        mock_get_physnet.assert_called_once_with(self.context, mocked_client,
+                                                 'net-id')
+
+        return net, iid
+
+    def test_nw_info_build_network_ovs(self):
+        net, iid = self._test_nw_info_build_network(model.VIF_TYPE_OVS)
+        self.assertEqual(CONF.neutron.ovs_bridge, net['bridge'])
+        self.assertNotIn('should_create_bridge', net)
+        self.assertEqual('port-id', iid)
+
+    def test_nw_info_build_network_dvs(self):
+        net, iid = self._test_nw_info_build_network(model.VIF_TYPE_DVS)
+        self.assertEqual('net-id', net['bridge'])
+        self.assertNotIn('should_create_bridge', net)
+        self.assertNotIn('ovs_interfaceid', net)
+        self.assertIsNone(iid)
+
+    def test_nw_info_build_network_bridge(self):
+        net, iid = self._test_nw_info_build_network(model.VIF_TYPE_BRIDGE)
+        self.assertEqual('brqnet-id', net['bridge'])
+        self.assertTrue(net['should_create_bridge'])
+        self.assertIsNone(iid)
+
+    def test_nw_info_build_network_tap(self):
+        net, iid = self._test_nw_info_build_network(model.VIF_TYPE_TAP)
+        self.assertIsNone(net['bridge'])
+        self.assertNotIn('should_create_bridge', net)
+        self.assertIsNone(iid)
+
+    def test_nw_info_build_network_other(self):
+        net, iid = self._test_nw_info_build_network(None)
+        self.assertIsNone(net['bridge'])
+        self.assertNotIn('should_create_bridge', net)
+        self.assertIsNone(iid)
+
+    @mock.patch.object(neutronapi.API, '_get_physnet_tunneled_info',
+                       return_value=(None, False))
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_nw_info_build_no_match(self, mock_get_client, mock_get_physnet):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        fake_port = {
+            'fixed_ips': [{'ip_address': '1.1.1.1'}],
+            'id': 'port-id',
+            'network_id': 'net-id1',
+            'tenant_id': 'tenant',
+            'binding:vif_type': model.VIF_TYPE_OVS,
+            }
+        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
+        fake_nets = [{'id': 'net-id2', 'name': 'foo', 'tenant_id': 'tenant'}]
+        net, iid = self.api._nw_info_build_network(self.context, fake_port,
+                                                   fake_nets, fake_subnets)
+        self.assertEqual(fake_subnets, net['subnets'])
+        self.assertEqual('net-id1', net['id'])
+        self.assertEqual('tenant', net['meta']['tenant_id'])
+        mock_get_client.assert_called_once_with(mock.ANY, admin=True)
+        mock_get_physnet.assert_called_once_with(self.context, mocked_client,
+                                                 'net-id1')
+
+    @mock.patch.object(neutronapi.API, '_get_physnet_tunneled_info',
+                       return_value=(None, False))
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_nw_info_build_network_vhostuser(self, mock_get_client,
+                                             mock_get_physnet):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        fake_port = {
+            'fixed_ips': [{'ip_address': '1.1.1.1'}],
+            'id': 'port-id',
+            'network_id': 'net-id',
+            'binding:vif_type': model.VIF_TYPE_VHOSTUSER,
+            'binding:vif_details': {
+                    model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: True
+                                    }
+            }
+        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
+        fake_nets = [{'id': 'net-id', 'name': 'foo', 'tenant_id': 'tenant'}]
+        net, iid = self.api._nw_info_build_network(self.context, fake_port,
+                                                   fake_nets, fake_subnets)
+        self.assertEqual(fake_subnets, net['subnets'])
+        self.assertEqual('net-id', net['id'])
+        self.assertEqual('foo', net['label'])
+        self.assertEqual('tenant', net.get_meta('tenant_id'))
+        self.assertEqual(CONF.flat_injected, net.get_meta('injected'))
+        self.assertEqual(CONF.neutron.ovs_bridge, net['bridge'])
+        self.assertNotIn('should_create_bridge', net)
+        self.assertEqual('port-id', iid)
+        mock_get_client.assert_called_once_with(mock.ANY, admin=True)
+        mock_get_physnet.assert_called_once_with(self.context, mocked_client,
+                                                 'net-id')
+
+    @mock.patch.object(neutronapi.API, '_get_physnet_tunneled_info',
+                       return_value=(None, False))
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_nw_info_build_network_vhostuser_fp(self, mock_get_client,
+                                                mock_get_physnet):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        fake_port = {
+            'fixed_ips': [{'ip_address': '1.1.1.1'}],
+            'id': 'port-id',
+            'network_id': 'net-id',
+            'binding:vif_type': model.VIF_TYPE_VHOSTUSER,
+            'binding:vif_details': {
+                    model.VIF_DETAILS_VHOSTUSER_FP_PLUG: True,
+                    model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: False,
+                                    }
+            }
+        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
+        fake_nets = [{'id': 'net-id', 'name': 'foo', 'tenant_id': 'tenant'}]
+        net, ovs_interfaceid = self.api._nw_info_build_network(
+            self.context, fake_port, fake_nets, fake_subnets)
+        self.assertEqual(fake_subnets, net['subnets'])
+        self.assertEqual('net-id', net['id'])
+        self.assertEqual('foo', net['label'])
+        self.assertEqual('tenant', net.get_meta('tenant_id'))
+        self.assertEqual('brqnet-id', net['bridge'])
+        self.assertIsNone(ovs_interfaceid)
+        mock_get_client.assert_called_once_with(mock.ANY, admin=True)
+        mock_get_physnet.assert_called_once_with(self.context, mocked_client,
+                                                 'net-id')
+
+    @mock.patch.object(neutronapi.API, '_get_physnet_tunneled_info',
+                       return_value=(None, False))
+    @mock.patch.object(neutronapi, 'get_client')
+    def _test_nw_info_build_custom_bridge(self, vif_type, mock_get_client,
+                                          mock_get_physnet,
+                                          extra_details=None):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        fake_port = {
+            'fixed_ips': [{'ip_address': '1.1.1.1'}],
+            'id': 'port-id',
+            'network_id': 'net-id',
+            'binding:vif_type': vif_type,
+            'binding:vif_details': {
+                model.VIF_DETAILS_BRIDGE_NAME: 'custom-bridge',
+            }
+        }
+        if extra_details:
+            fake_port['binding:vif_details'].update(extra_details)
+        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
+        fake_nets = [{'id': 'net-id', 'name': 'foo', 'tenant_id': 'tenant'}]
+        net, iid = self.api._nw_info_build_network(self.context, fake_port,
+                                                   fake_nets, fake_subnets)
+        self.assertNotEqual(CONF.neutron.ovs_bridge, net['bridge'])
+        self.assertEqual('custom-bridge', net['bridge'])
+        mock_get_client.assert_called_once_with(mock.ANY, admin=True)
+        mock_get_physnet.assert_called_once_with(self.context, mocked_client,
+                                                 'net-id')
+
+    def test_nw_info_build_custom_ovs_bridge(self):
+        self._test_nw_info_build_custom_bridge(model.VIF_TYPE_OVS)
+
+    def test_nw_info_build_custom_ovs_bridge_vhostuser(self):
+        self._test_nw_info_build_custom_bridge(model.VIF_TYPE_VHOSTUSER,
+                extra_details={model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: True})
+
+    def test_nw_info_build_custom_lb_bridge(self):
+        self._test_nw_info_build_custom_bridge(model.VIF_TYPE_BRIDGE)
+
+    @mock.patch.object(neutronapi.API, '_get_physnet_tunneled_info',
+                       return_value=(None, False))
+    @mock.patch.object(neutronapi.API, '_get_preexisting_port_ids',
+                       return_value=['port5'])
+    @mock.patch.object(neutronapi.API, '_get_subnets_from_port',
+                       return_value=[model.Subnet(cidr='1.0.0.0/8')])
+    @mock.patch.object(neutronapi.API, '_get_floating_ips_by_fixed_and_port',
+                       return_value=[{'floating_ip_address': '10.0.0.1'}])
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_build_network_info_model(self, mock_get_client,
+                                      mock_get_floating, mock_get_subnets,
+                                      mock_get_preexisting, mock_get_physnet):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        fake_inst = objects.Instance()
+        fake_inst.project_id = uuids.fake
+        fake_inst.uuid = uuids.instance
+        fake_inst.info_cache = objects.InstanceInfoCache()
+        fake_inst.info_cache.network_info = model.NetworkInfo()
+        fake_ports = [
+            # admin_state_up=True and status='ACTIVE' thus vif.active=True
+            {'id': 'port1',
+             'network_id': 'net-id',
+             'admin_state_up': True,
+             'status': 'ACTIVE',
+             'fixed_ips': [{'ip_address': '1.1.1.1'}],
+             'mac_address': 'de:ad:be:ef:00:01',
+             'binding:vif_type': model.VIF_TYPE_BRIDGE,
+             'binding:vnic_type': model.VNIC_TYPE_NORMAL,
+             'binding:vif_details': {},
+             },
+            # admin_state_up=False and status='DOWN' thus vif.active=True
+            {'id': 'port2',
+             'network_id': 'net-id',
+             'admin_state_up': False,
+             'status': 'DOWN',
+             'fixed_ips': [{'ip_address': '1.1.1.1'}],
+             'mac_address': 'de:ad:be:ef:00:02',
+             'binding:vif_type': model.VIF_TYPE_BRIDGE,
+             'binding:vnic_type': model.VNIC_TYPE_NORMAL,
+             'binding:vif_details': {},
+             },
+            # admin_state_up=True and status='DOWN' thus vif.active=False
+             {'id': 'port0',
+             'network_id': 'net-id',
+             'admin_state_up': True,
+             'status': 'DOWN',
+             'fixed_ips': [{'ip_address': '1.1.1.1'}],
+             'mac_address': 'de:ad:be:ef:00:03',
+             'binding:vif_type': model.VIF_TYPE_BRIDGE,
+             'binding:vnic_type': model.VNIC_TYPE_NORMAL,
+             'binding:vif_details': {},
+             },
+            # admin_state_up=True and status='ACTIVE' thus vif.active=True
+            {'id': 'port3',
+             'network_id': 'net-id',
+             'admin_state_up': True,
+             'status': 'ACTIVE',
+             'fixed_ips': [{'ip_address': '1.1.1.1'}],
+             'mac_address': 'de:ad:be:ef:00:04',
+             'binding:vif_type': model.VIF_TYPE_HW_VEB,
+             'binding:vnic_type': model.VNIC_TYPE_DIRECT,
+             constants.BINDING_PROFILE: {'pci_vendor_info': '1137:0047',
+                                         'pci_slot': '0000:0a:00.1',
+                                         'physical_network': 'physnet1'},
+             'binding:vif_details': {model.VIF_DETAILS_PROFILEID: 'pfid'},
+             },
+            # admin_state_up=True and status='ACTIVE' thus vif.active=True
+            {'id': 'port4',
+             'network_id': 'net-id',
+             'admin_state_up': True,
+             'status': 'ACTIVE',
+             'fixed_ips': [{'ip_address': '1.1.1.1'}],
+             'mac_address': 'de:ad:be:ef:00:05',
+             'binding:vif_type': model.VIF_TYPE_802_QBH,
+             'binding:vnic_type': model.VNIC_TYPE_MACVTAP,
+             constants.BINDING_PROFILE: {'pci_vendor_info': '1137:0047',
+                                         'pci_slot': '0000:0a:00.2',
+                                         'physical_network': 'physnet1'},
+             'binding:vif_details': {model.VIF_DETAILS_PROFILEID: 'pfid'},
+             },
+            # admin_state_up=True and status='ACTIVE' thus vif.active=True
+            # This port has no binding:vnic_type to verify default is assumed
+            {'id': 'port5',
+             'network_id': 'net-id',
+             'admin_state_up': True,
+             'status': 'ACTIVE',
+             'fixed_ips': [{'ip_address': '1.1.1.1'}],
+             'mac_address': 'de:ad:be:ef:00:06',
+             'binding:vif_type': model.VIF_TYPE_BRIDGE,
+             # No binding:vnic_type
+             'binding:vif_details': {},
+             },
+            # This does not match the networks we provide below,
+            # so it should be ignored (and is here to verify that)
+            {'id': 'port6',
+             'network_id': 'other-net-id',
+             'admin_state_up': True,
+             'status': 'DOWN',
+             'binding:vnic_type': model.VNIC_TYPE_NORMAL,
+             },
+            ]
+        fake_nets = [
+            {'id': 'net-id',
+             'name': 'foo',
+             'tenant_id': uuids.fake,
+             }
+            ]
+        mocked_client.list_ports.return_value = {'ports': fake_ports}
+
+        requested_ports = [fake_ports[2], fake_ports[0], fake_ports[1],
+                           fake_ports[3], fake_ports[4], fake_ports[5]]
+        expected_get_floating_calls = []
+        for requested_port in requested_ports:
+            expected_get_floating_calls.append(mock.call(mocked_client,
+                                                         '1.1.1.1',
+                                                         requested_port['id']))
+        expected_get_subnets_calls = []
+        for requested_port in requested_ports:
+            expected_get_subnets_calls.append(
+                mock.call(self.context, requested_port, mocked_client))
+
+        fake_inst.info_cache = objects.InstanceInfoCache.new(
+            self.context, uuids.instance)
+        fake_inst.info_cache.network_info = model.NetworkInfo.hydrate([])
+
+        nw_infos = self.api._build_network_info_model(
+            self.context, fake_inst,
+            fake_nets,
+            [fake_ports[2]['id'],
+             fake_ports[0]['id'],
+             fake_ports[1]['id'],
+             fake_ports[3]['id'],
+             fake_ports[4]['id'],
+             fake_ports[5]['id']],
+            preexisting_port_ids=['port3'])
+
+        self.assertEqual(6, len(nw_infos))
+        index = 0
+        for nw_info in nw_infos:
+            self.assertEqual(requested_ports[index]['mac_address'],
+                             nw_info['address'])
+            self.assertEqual('tapport' + str(index), nw_info['devname'])
+            self.assertIsNone(nw_info['ovs_interfaceid'])
+            self.assertEqual(requested_ports[index]['binding:vif_type'],
+                             nw_info['type'])
+            if nw_info['type'] == model.VIF_TYPE_BRIDGE:
+                self.assertEqual('brqnet-id', nw_info['network']['bridge'])
+            self.assertEqual(requested_ports[index].get('binding:vnic_type',
+                                model.VNIC_TYPE_NORMAL), nw_info['vnic_type'])
+            self.assertEqual(requested_ports[index].get('binding:vif_details'),
+                             nw_info.get('details'))
+            self.assertEqual(
+                # If the requested port does not define a binding:profile, or
+                # has it set to None, we default to an empty dict to avoid
+                # NoneType errors.
+                requested_ports[index].get(
+                    constants.BINDING_PROFILE) or {},
+                nw_info.get('profile'))
+            index += 1
+
+        self.assertFalse(nw_infos[0]['active'])
+        self.assertTrue(nw_infos[1]['active'])
+        self.assertTrue(nw_infos[2]['active'])
+        self.assertTrue(nw_infos[3]['active'])
+        self.assertTrue(nw_infos[4]['active'])
+        self.assertTrue(nw_infos[5]['active'])
+
+        self.assertEqual('port0', nw_infos[0]['id'])
+        self.assertEqual('port1', nw_infos[1]['id'])
+        self.assertEqual('port2', nw_infos[2]['id'])
+        self.assertEqual('port3', nw_infos[3]['id'])
+        self.assertEqual('port4', nw_infos[4]['id'])
+        self.assertEqual('port5', nw_infos[5]['id'])
+
+        self.assertFalse(nw_infos[0]['preserve_on_delete'])
+        self.assertFalse(nw_infos[1]['preserve_on_delete'])
+        self.assertFalse(nw_infos[2]['preserve_on_delete'])
+        self.assertTrue(nw_infos[3]['preserve_on_delete'])
+        self.assertFalse(nw_infos[4]['preserve_on_delete'])
+        self.assertTrue(nw_infos[5]['preserve_on_delete'])
+
+        mock_get_client.assert_has_calls([
+            mock.call(self.context, admin=True)] * 7, any_order=True)
+        mocked_client.list_ports.assert_called_once_with(
+            tenant_id=uuids.fake, device_id=uuids.instance)
+        mock_get_floating.assert_has_calls(expected_get_floating_calls)
+        self.assertEqual(len(expected_get_floating_calls),
+                         mock_get_floating.call_count)
+        mock_get_subnets.assert_has_calls(expected_get_subnets_calls)
+        self.assertEqual(len(expected_get_subnets_calls),
+                         mock_get_subnets.call_count)
+        mock_get_preexisting.assert_called_once_with(fake_inst)
+        mock_get_physnet.assert_has_calls([
+            mock.call(self.context, mocked_client, 'net-id')] * 6)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    @mock.patch('nova.network.neutronv2.api.API._nw_info_get_subnets')
+    @mock.patch('nova.network.neutronv2.api.API._nw_info_get_ips')
+    @mock.patch('nova.network.neutronv2.api.API._nw_info_build_network')
+    @mock.patch('nova.network.neutronv2.api.API._get_preexisting_port_ids')
+    @mock.patch('nova.network.neutronv2.api.API._gather_port_ids_and_networks')
+    def test_build_network_info_model_empty(
+            self, mock_gather_port_ids_and_networks,
+            mock_get_preexisting_port_ids,
+            mock_nw_info_build_network,
+            mock_nw_info_get_ips,
+            mock_nw_info_get_subnets,
+            mock_get_client):
+        # An empty instance info network cache should not be populated from
+        # ports found in Neutron.
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        fake_inst = objects.Instance()
+        fake_inst.project_id = uuids.fake
+        fake_inst.uuid = uuids.instance
+        fake_inst.info_cache = objects.InstanceInfoCache()
+        fake_inst.info_cache.network_info = model.NetworkInfo()
+        fake_ports = [
+            # admin_state_up=True and status='ACTIVE' thus vif.active=True
+            {'id': 'port1',
+             'network_id': 'net-id',
+             'admin_state_up': True,
+             'status': 'ACTIVE',
+             'fixed_ips': [{'ip_address': '1.1.1.1'}],
+             'mac_address': 'de:ad:be:ef:00:01',
+             'binding:vif_type': model.VIF_TYPE_BRIDGE,
+             'binding:vnic_type': model.VNIC_TYPE_NORMAL,
+             'binding:vif_details': {},
+             },
+            ]
+        fake_subnets = [model.Subnet(cidr='1.0.0.0/8')]
+
+        mocked_client.list_ports.return_value = {'ports': fake_ports}
+
+        mock_gather_port_ids_and_networks.return_value = ([], [])
+        mock_get_preexisting_port_ids.return_value = []
+        mock_nw_info_build_network.return_value = (None, None)
+        mock_nw_info_get_ips.return_value = []
+        mock_nw_info_get_subnets.return_value = fake_subnets
+
+        nw_infos = self.api._build_network_info_model(
+            self.context, fake_inst)
+
+        self.assertEqual(0, len(nw_infos))
+        mock_get_client.assert_called_once_with(self.context, admin=True)
+        mocked_client.list_ports.assert_called_once_with(
+            tenant_id=uuids.fake, device_id=uuids.instance)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_subnets_from_port(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        port_data = copy.copy(self.port_data1[0])
+        # add another IP on the same subnet and verify the subnet is deduped
+        port_data['fixed_ips'].append({'ip_address': '10.0.1.3',
+                                       'subnet_id': 'my_subid1'})
+        subnet_data1 = copy.copy(self.subnet_data1)
+        subnet_data1[0]['host_routes'] = [
+            {'destination': '192.168.0.0/24', 'nexthop': '1.0.0.10'}
+        ]
+        mocked_client.list_subnets.return_value = {'subnets': subnet_data1}
+        mocked_client.list_ports.return_value = {'ports': []}
+
+        subnets = self.api._get_subnets_from_port(self.context, port_data)
+
+        self.assertEqual(1, len(subnets))
+        self.assertEqual(1, len(subnets[0]['routes']))
+        self.assertEqual(subnet_data1[0]['host_routes'][0]['destination'],
+                         subnets[0]['routes'][0]['cidr'])
+        self.assertEqual(subnet_data1[0]['host_routes'][0]['nexthop'],
+                         subnets[0]['routes'][0]['gateway']['address'])
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_subnets.assert_called_once_with(
+            id=[port_data['fixed_ips'][0]['subnet_id']])
+        mocked_client.list_ports.assert_called_once_with(
+            network_id=subnet_data1[0]['network_id'],
+            device_owner='network:dhcp')
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_subnets_from_port_enabled_dhcp(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+
+        port_data = copy.copy(self.port_data1[0])
+        # add another IP on the same subnet and verify the subnet is deduped
+        port_data['fixed_ips'].append({'ip_address': '10.0.1.3',
+                                       'subnet_id': 'my_subid1'})
+        subnet_data1 = copy.copy(self.subnet_data1)
+        subnet_data1[0]['enable_dhcp'] = True
+
+        mocked_client.list_subnets.return_value = {'subnets': subnet_data1}
+        mocked_client.list_ports.return_value = {'ports': self.dhcp_port_data1}
+
+        subnets = self.api._get_subnets_from_port(self.context, port_data)
+
+        self.assertEqual(self.dhcp_port_data1[0]['fixed_ips'][0]['ip_address'],
+                         subnets[0]['meta']['dhcp_server'])
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_subnets_from_port_enabled_dhcp_no_dhcp_ports(self,
+            mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+
+        port_data = copy.copy(self.port_data1[0])
+        # add another IP on the same subnet and verify the subnet is deduped
+        port_data['fixed_ips'].append({'ip_address': '10.0.1.3',
+                                       'subnet_id': 'my_subid1'})
+        subnet_data1 = copy.copy(self.subnet_data1)
+        subnet_data1[0]['enable_dhcp'] = True
+
+        mocked_client.list_subnets.return_value = {'subnets': subnet_data1}
+        mocked_client.list_ports.return_value = {'ports': []}
+
+        subnets = self.api._get_subnets_from_port(self.context, port_data)
+
+        self.assertEqual(subnet_data1[0]['gateway_ip'],
+                         subnets[0]['meta']['dhcp_server'])
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_all_empty_list_networks(self, mock_get_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_get_client.return_value = mocked_client
+        mocked_client.list_networks.return_value = {'networks': []}
+        networks = self.api.get_all(self.context)
+        self.assertIsInstance(networks, objects.NetworkList)
+        self.assertEqual(0, len(networks))
+        mock_get_client.assert_called_once_with(self.context)
+        mocked_client.list_networks.assert_called_once_with()
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_get_physnet_tunneled_info_multi_segment(self, mock_get_client):
+        test_net = {'network': {'segments':
+                                    [{'provider:physical_network': 'physnet10',
+                                      'provider:segmentation_id': 1000,
+                                      'provider:network_type': 'vlan'},
+                                     {'provider:physical_network': None,
+                                      'provider:segmentation_id': 153,
+                                      'provider:network_type': 'vxlan'}]}}
+        test_ext_list = {'extensions':
+                            [{'name': 'Multi Provider Network',
+                             'alias': 'multi-segments'}]}
+
+        mock_client = mock_get_client.return_value
+        mock_client.list_extensions.return_value = test_ext_list
+        mock_client.show_network.return_value = test_net
+        physnet_name, tunneled = self.api._get_physnet_tunneled_info(
+            self.context, mock_client, 'test-net')
+
+        mock_client.show_network.assert_called_once_with(
+            'test-net', fields='segments')
+        self.assertEqual('physnet10', physnet_name)
+        self.assertFalse(tunneled)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_get_physnet_tunneled_info_vlan_with_multi_segment_ext(
+            self, mock_get_client):
+        test_net = {'network': {'provider:physical_network': 'physnet10',
+                                'provider:segmentation_id': 1000,
+                                'provider:network_type': 'vlan'}}
+        test_ext_list = {'extensions':
+                            [{'name': 'Multi Provider Network',
+                             'alias': 'multi-segments'}]}
+
+        mock_client = mock_get_client.return_value
+        mock_client.list_extensions.return_value = test_ext_list
+        mock_client.show_network.return_value = test_net
+        physnet_name, tunneled = self.api._get_physnet_tunneled_info(
+            self.context, mock_client, 'test-net')
+
+        mock_client.show_network.assert_called_with(
+            'test-net', fields=['provider:physical_network',
+                                'provider:network_type'])
+        self.assertEqual('physnet10', physnet_name)
+        self.assertFalse(tunneled)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_get_physnet_tunneled_info_multi_segment_no_physnet(
+            self, mock_get_client):
+        test_net = {'network': {'segments':
+                                    [{'provider:physical_network': None,
+                                      'provider:segmentation_id': 1000,
+                                      'provider:network_type': 'vlan'},
+                                     {'provider:physical_network': None,
+                                      'provider:segmentation_id': 153,
+                                      'provider:network_type': 'vlan'}]}}
+        test_ext_list = {'extensions':
+                            [{'name': 'Multi Provider Network',
+                             'alias': 'multi-segments'}]}
+
+        mock_client = mock_get_client.return_value
+        mock_client.list_extensions.return_value = test_ext_list
+        mock_client.show_network.return_value = test_net
+        self.assertRaises(exception.NovaException,
+                          self.api._get_physnet_tunneled_info,
+                          self.context, mock_client, 'test-net')
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_get_physnet_tunneled_info_tunneled(
+            self, mock_get_client):
+        test_net = {'network': {'provider:network_type': 'vxlan'}}
+        test_ext_list = {'extensions': []}
+
+        mock_client = mock_get_client.return_value
+        mock_client.list_extensions.return_value = test_ext_list
+        mock_client.show_network.return_value = test_net
+        physnet_name, tunneled = self.api._get_physnet_tunneled_info(
+            self.context, mock_client, 'test-net')
+
+        mock_client.show_network.assert_called_once_with(
+            'test-net', fields=['provider:physical_network',
+                                'provider:network_type'])
+        self.assertTrue(tunneled)
+        self.assertIsNone(physnet_name)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_get_phynet_tunneled_info_non_tunneled(
+            self, mock_get_client):
+        test_net = {'network': {'provider:network_type': 'vlan'}}
+        test_ext_list = {'extensions': []}
+
+        mock_client = mock_get_client.return_value
+        mock_client.list_extensions.return_value = test_ext_list
+        mock_client.show_network.return_value = test_net
+        physnet_name, tunneled = self.api._get_physnet_tunneled_info(
+            self.context, mock_client, 'test-net')
+
+        mock_client.show_network.assert_called_once_with(
+            'test-net', fields=['provider:physical_network',
+                                'provider:network_type'])
+        self.assertFalse(tunneled)
+        self.assertIsNone(physnet_name)
+
+    def _test_get_port_vnic_info(self, mock_get_client,
+                                 binding_vnic_type,
+                                 expected_vnic_type,
+                                 port_resource_request=None):
+        test_port = {
+            'port': {'id': 'my_port_id2',
+                      'network_id': 'net-id',
+                      },
+            }
+
+        if binding_vnic_type:
+            test_port['port']['binding:vnic_type'] = binding_vnic_type
+        if port_resource_request:
+            test_port['port'][
+                constants.RESOURCE_REQUEST] = port_resource_request
+
+        mock_get_client.reset_mock()
+        mock_client = mock_get_client.return_value
+        mock_client.show_port.return_value = test_port
+
+        vnic_type, trusted, network_id, resource_request = (
+            self.api._get_port_vnic_info(
+                self.context, mock_client, test_port['port']['id']))
+
+        mock_client.show_port.assert_called_once_with(test_port['port']['id'],
+            fields=['binding:vnic_type', 'binding:profile', 'network_id',
+                    constants.RESOURCE_REQUEST])
+        self.assertEqual(expected_vnic_type, vnic_type)
+        self.assertEqual('net-id', network_id)
+        self.assertIsNone(trusted)
+        self.assertEqual(port_resource_request, resource_request)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.MagicMock())
+    def test_get_port_vnic_info_1(self, mock_get_client):
+        self._test_get_port_vnic_info(mock_get_client, model.VNIC_TYPE_DIRECT,
+                                      model.VNIC_TYPE_DIRECT)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_get_port_vnic_info_2(self, mock_get_client):
+        self._test_get_port_vnic_info(mock_get_client, model.VNIC_TYPE_NORMAL,
+                                      model.VNIC_TYPE_NORMAL)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_get_port_vnic_info_3(self, mock_get_client):
+        self._test_get_port_vnic_info(mock_get_client, None,
+                                      model.VNIC_TYPE_NORMAL)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_port_vnic_info_requested_resources(self, mock_get_client):
+        self._test_get_port_vnic_info(
+            mock_get_client, None, model.VNIC_TYPE_NORMAL,
+            port_resource_request={
+                "resources": {
+                    "NET_BW_EGR_KILOBIT_PER_SEC": 6000,
+                    "NET_BW_IGR_KILOBIT_PER_SEC": 6000,
+                     },
+                "required": [
+                    "CUSTOM_PHYSNET_PHYSNET0",
+                    "CUSTOM_VNIC_TYPE_NORMAL"
+                ]
+            }
+        )
 
     @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
     def test_get_port_vnic_info_trusted(self, mock_get_client):
@@ -4543,8 +4618,8 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
              constants.BINDING_PROFILE:
                  {'allocation': uuids.source_compute_rp},
              'resource_request': mock.sentinel.resource_request}]}
-        migration = {'status': 'confirmed',
-                     'migration_type': "migration"}
+        migration = objects.Migration(
+            status='confirmed', migration_type='migration')
         list_ports_mock = mock.Mock(return_value=fake_ports)
         get_client_mock.return_value.list_ports = list_ports_mock
 
@@ -4569,8 +4644,8 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
              constants.BINDING_PROFILE:
                  {'allocation': uuids.source_compute_rp},
              'resource_request': mock.sentinel.resource_request}]}
-        migration = {'status': 'confirmed',
-                     'migration_type': "migration"}
+        migration = objects.Migration(
+            status='confirmed', migration_type='migration')
         list_ports_mock = mock.Mock(return_value=fake_ports)
         get_client_mock.return_value.list_ports = list_ports_mock
 
@@ -4579,8 +4654,9 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
             self.api._update_port_binding_for_instance, self.context,
             instance, 'new-host', migration, provider_mappings=None)
         self.assertIn(
-            "Provider mappings wasn't provided for the port with resource "
-            "request", six.text_type(ex))
+            "Provider mappings are not available to the compute service but "
+            "are required for ports with a resource request.",
+            six.text_type(ex))
 
     def test_get_pci_mapping_for_migration(self):
         instance = fake_instance.fake_instance_obj(self.context)
@@ -5804,6 +5880,174 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
         mock_update_cache.assert_called_once_with(  # from @refresh_cache
             self.api, ctxt, instance, nw_info=None)
 
+    @mock.patch('nova.network.base_api.update_instance_cache_with_nw_info')
+    def test_update_inst_info_cache_for_disassociated_fip_other_cell(
+            self, mock_update_cache):
+        """Tests a scenario where a floating IP is associated to an instance
+        in another cell from the one in which it's currently associated
+        and the network info cache on the original instance is refreshed.
+        """
+        ctxt = context.get_context()
+        mock_client = mock.Mock()
+        new_instance = fake_instance.fake_instance_obj(ctxt)
+        cctxt = context.get_context()
+        old_instance = fake_instance.fake_instance_obj(cctxt)
+        fip = {'id': uuids.floating_ip_id,
+               'port_id': uuids.old_port_id,
+               'floating_ip_address': '172.24.5.15'}
+        # Setup the mocks.
+        with test.nested(
+            mock.patch.object(self.api, '_show_port',
+                              return_value={
+                                  'device_id': old_instance.uuid}),
+            mock.patch.object(self.api, '_get_instance_by_uuid_using_api_db',
+                              return_value=old_instance)
+        ) as (
+            _show_port, _get_instance_by_uuid_using_api_db
+        ):
+            # Run the code.
+            self.api._update_inst_info_cache_for_disassociated_fip(
+                ctxt, new_instance, mock_client, fip)
+        # Assert the calls.
+        _show_port.assert_called_once_with(
+            ctxt, uuids.old_port_id, neutron_client=mock_client)
+        _get_instance_by_uuid_using_api_db.assert_called_once_with(
+            ctxt, old_instance.uuid)
+        mock_update_cache.assert_called_once_with(
+            self.api, cctxt, old_instance)
+
+    @mock.patch('nova.network.neutronv2.api.LOG.info')
+    @mock.patch('nova.network.base_api.update_instance_cache_with_nw_info')
+    def test_update_inst_info_cache_for_disassociated_fip_inst_not_found(
+            self, mock_update_cache, mock_log_info):
+        """Tests the case that a floating IP is re-associated to an instance
+        in another cell but the original instance cannot be found.
+        """
+        ctxt = context.get_context()
+        mock_client = mock.Mock()
+        new_instance = fake_instance.fake_instance_obj(ctxt)
+        fip = {'id': uuids.floating_ip_id,
+               'port_id': uuids.old_port_id,
+               'floating_ip_address': '172.24.5.15'}
+        # Setup the mocks.
+        with test.nested(
+            mock.patch.object(self.api, '_show_port',
+                              return_value={
+                                  'device_id': uuids.original_inst_uuid}),
+            mock.patch.object(self.api,
+                              '_get_instance_by_uuid_using_api_db',
+                              return_value=None)
+        ) as (
+            _show_port, _get_instance_by_uuid_using_api_db
+        ):
+            # Run the code.
+            self.api._update_inst_info_cache_for_disassociated_fip(
+                ctxt, new_instance, mock_client, fip)
+        # Assert the calls.
+        _show_port.assert_called_once_with(
+            ctxt, uuids.old_port_id, neutron_client=mock_client)
+        _get_instance_by_uuid_using_api_db.assert_called_once_with(
+            ctxt, uuids.original_inst_uuid)
+        mock_update_cache.assert_not_called()
+        self.assertEqual(2, mock_log_info.call_count)
+        self.assertIn('If the instance still exists, its info cache may '
+                      'be healed automatically.',
+                      mock_log_info.call_args[0][0])
+
+    @mock.patch('nova.objects.Instance.get_by_uuid')
+    @mock.patch('nova.objects.InstanceMapping.get_by_instance_uuid')
+    def test_get_instance_by_uuid_using_api_db_current_cell(
+            self, mock_get_map, mock_get_inst):
+        """Tests that _get_instance_by_uuid_using_api_db finds the
+        instance in the cell currently targeted by the context.
+        """
+        ctxt = context.get_context()
+        instance = fake_instance.fake_instance_obj(ctxt)
+        mock_get_inst.return_value = instance
+        inst = self.api._get_instance_by_uuid_using_api_db(ctxt, instance.uuid)
+        self.assertIs(inst, instance)
+        mock_get_inst.assert_called_once_with(ctxt, instance.uuid)
+        mock_get_map.assert_not_called()
+
+    @mock.patch('nova.objects.Instance.get_by_uuid')
+    @mock.patch('nova.objects.InstanceMapping.get_by_instance_uuid')
+    def test_get_instance_by_uuid_using_api_db_other_cell(
+            self, mock_get_map, mock_get_inst):
+        """Tests that _get_instance_by_uuid_using_api_db finds the
+        instance in another cell different from the currently targeted context.
+        """
+        ctxt = context.get_context()
+        instance = fake_instance.fake_instance_obj(ctxt)
+        mock_get_map.return_value = objects.InstanceMapping(
+            cell_mapping=objects.CellMapping(
+                uuid=uuids.cell_mapping_uuid,
+                database_connection=
+                self.cell_mappings['cell1'].database_connection,
+                transport_url='none://fake'))
+        # Mock get_by_uuid to not find the instance in the first call, but
+        # do find it in the second. Target the instance context as well so
+        # we can assert that we used a different context for the 2nd call.
+
+        def stub_inst_get_by_uuid(_context, instance_uuid, *args, **kwargs):
+            if not mock_get_map.called:
+                # First call, raise InstanceNotFound.
+                self.assertIs(_context, ctxt)
+                raise exception.InstanceNotFound(instance_id=instance_uuid)
+            # Else return the instance with a newly targeted context.
+            self.assertIsNot(_context, ctxt)
+            instance._context = _context
+            return instance
+        mock_get_inst.side_effect = stub_inst_get_by_uuid
+
+        inst = self.api._get_instance_by_uuid_using_api_db(ctxt, instance.uuid)
+        # The instance's internal context should still be targeted and not
+        # the original context.
+        self.assertIsNot(inst._context, ctxt)
+        self.assertIsNotNone(inst._context.db_connection)
+        mock_get_map.assert_called_once_with(ctxt, instance.uuid)
+        mock_get_inst.assert_has_calls([
+            mock.call(ctxt, instance.uuid),
+            mock.call(inst._context, instance.uuid)])
+
+    @mock.patch('nova.objects.Instance.get_by_uuid',
+                side_effect=exception.InstanceNotFound(instance_id=uuids.inst))
+    @mock.patch('nova.objects.InstanceMapping.get_by_instance_uuid')
+    def test_get_instance_by_uuid_using_api_db_other_cell_never_found(
+            self, mock_get_map, mock_get_inst):
+        """Tests that _get_instance_by_uuid_using_api_db does not find the
+        instance in either the current cell or another cell.
+        """
+        ctxt = context.get_context()
+        instance = fake_instance.fake_instance_obj(ctxt, uuid=uuids.inst)
+        mock_get_map.return_value = objects.InstanceMapping(
+            cell_mapping=objects.CellMapping(
+                uuid=uuids.cell_mapping_uuid,
+                database_connection=
+                self.cell_mappings['cell1'].database_connection,
+                transport_url='none://fake'))
+        self.assertIsNone(
+            self.api._get_instance_by_uuid_using_api_db(ctxt, instance.uuid))
+        mock_get_map.assert_called_once_with(ctxt, instance.uuid)
+        mock_get_inst.assert_has_calls([
+            mock.call(ctxt, instance.uuid),
+            mock.call(test.MatchType(context.RequestContext), instance.uuid)])
+
+    @mock.patch('nova.objects.Instance.get_by_uuid',
+                side_effect=exception.InstanceNotFound(instance_id=uuids.inst))
+    @mock.patch('nova.objects.InstanceMapping.get_by_instance_uuid',
+                side_effect=exception.InstanceMappingNotFound(uuid=uuids.inst))
+    def test_get_instance_by_uuid_using_api_db_other_cell_map_not_found(
+            self, mock_get_map, mock_get_inst):
+        """Tests that _get_instance_by_uuid_using_api_db does not find an
+        instance mapping for the instance.
+        """
+        ctxt = context.get_context()
+        instance = fake_instance.fake_instance_obj(ctxt, uuid=uuids.inst)
+        self.assertIsNone(
+            self.api._get_instance_by_uuid_using_api_db(ctxt, instance.uuid))
+        mock_get_inst.assert_called_once_with(ctxt, instance.uuid)
+        mock_get_map.assert_called_once_with(ctxt, instance.uuid)
+
     @mock.patch('nova.network.neutronv2.api._get_ksa_client',
                 new_callable=mock.NonCallableMock)  # asserts not called
     def test_migrate_instance_start_no_binding_ext(self, get_client_mock):
@@ -5982,6 +6226,8 @@ class TestNeutronv2WithMock(TestNeutronv2Base):
         self.assertEqual(
             uuids.port1,
             request_groups[0].requester_id)
+
+        mock_get_client.assert_called_once_with(self.context, admin=True)
 
 
 class TestNeutronv2ModuleMethods(test.NoDBTestCase):
@@ -6562,11 +6808,12 @@ class TestAllocateForInstance(test.NoDBTestCase):
         result = api.allocate_for_instance(self.context, self.instance,
                                            False, None)
 
-        # TODO(johngarbutt) we need to replace the old mox coverage
-        # with new tests that can build on this very poor test
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0], {"id": uuids.created})
         self.assertEqual(result[1], {"id": uuids.preexist})
+
+        mock_validate_ports.assert_called_once_with(
+            self.context, self.instance, "admin", None, attach=False)
 
     def test_ensure_no_port_binding_failure_raises(self):
         port = {
@@ -6889,8 +7136,6 @@ class TestAllocateForInstance(test.NoDBTestCase):
                 mock_neutron, mock_admin, requests_and_created_ports, nets,
                 bind_host_id, requested_ports_dict)
 
-        # TODO(johngarbutt) need to build on this test so we can replace
-        # all the mox based tests
         self.assertEqual([net1, net2], ordered_nets, "ordered_nets")
         self.assertEqual([uuids.port1, uuids.port2], ordered_ports,
             "ordered_ports")
@@ -6939,7 +7184,6 @@ class TestNeutronv2NeutronHostnameDNS(TestNeutronv2Base):
         self._test_allocate_for_instance(
             requested_networks=requested_networks,
             exception=exception.PortNotUsableDNS,
-            get_client_admin_call=False,
             dns_extension=True,
             _break='pre_list_networks',
             _dns_name='my-instance')

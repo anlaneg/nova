@@ -31,7 +31,7 @@ LOG = logging.getLogger(__name__)
 
 
 # NOTE(danms): This is the global service version counter
-SERVICE_VERSION = 39
+SERVICE_VERSION = 44
 
 
 # NOTE(danms): This is our SERVICE_VERSION history. The idea is that any
@@ -156,6 +156,19 @@ SERVICE_VERSION_HISTORY = (
     # Version 39: resize_instance, finish_resize, revert_resize,
     # finish_revert_resize, unshelve_instance takes a RequestSpec object
     {'compute_rpc': '5.2'},
+    # Version 40: Add migration and limits parameters to
+    # check_can_live_migrate_destination(), new
+    # drop_move_claim_at_destination() method, and numa_live_migration
+    # parameter to check_can_live_migrate_source()
+    {'compute_rpc': '5.3'},
+    # Version 41: Add cache_images() to compute rpcapi (version 5.4)
+    {'compute_rpc': '5.4'},
+    # Version 42: Compute RPC version 5.5; +prep_snapshot_based_resize_at_dest
+    {'compute_rpc': '5.5'},
+    # Version 43: Compute RPC version 5.6: prep_snapshot_based_resize_at_source
+    {'compute_rpc': '5.6'},
+    # Version 44: Compute RPC version 5.7: finish_snapshot_based_resize_at_dest
+    {'compute_rpc': '5.7'},
 )
 
 

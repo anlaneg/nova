@@ -16,6 +16,7 @@ import functools
 import itertools
 
 from os_brick import encryptors
+from os_brick.initiator import utils as brick_utils
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
@@ -24,7 +25,6 @@ from oslo_utils import excutils
 from nova import block_device
 import nova.conf
 from nova import exception
-from nova import utils
 
 CONF = nova.conf.CONF
 
@@ -276,7 +276,9 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
     _proxy_as_attr_inherited = set(['volume_size', 'volume_id', 'volume_type'])
     _update_on_save = {'disk_bus': None,
                        'device_name': 'mount_device',
-                       'device_type': None}
+                       'device_type': None,
+                       # needed for boot from volume for blank/image/snapshot
+                       'attachment_id': None}
 
     def _transform(self):
         if (not self._bdm_obj.source_type == self._valid_source or
@@ -354,6 +356,43 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
         except exception.CinderAPIVersionNotAvailable:
             return volume_api.get(context, volume_id)
 
+    def _create_volume(self, context, instance, volume_api, size,
+                       wait_func=None, **create_kwargs):
+        """Create a volume and attachment record.
+
+        :param context: nova auth RequestContext
+        :param instance: Instance object to which the created volume will be
+            attached.
+        :param volume_api: nova.volume.cinder.API instance
+        :param size: The size of the volume to create in GiB.
+        :param wait_func: Optional callback function to wait for the volume to
+            reach some status before continuing with a signature of::
+
+                wait_func(context, volume_id)
+        :param create_kwargs: Additional optional parameters used to create the
+            volume. See nova.volume.cinder.API.create for keys.
+        :return: A two-item tuple of volume ID and attachment ID.
+        """
+        av_zone = _get_volume_create_az_value(instance)
+        name = create_kwargs.pop('name', '')
+        description = create_kwargs.pop('description', '')
+        vol = volume_api.create(
+            context, size, name, description, volume_type=self.volume_type,
+            availability_zone=av_zone, **create_kwargs)
+
+        if wait_func:
+            self._call_wait_func(context, wait_func, volume_api, vol['id'])
+
+        # Unconditionally create an attachment record for the volume so the
+        # attach/detach flows use the "new style" introduced in Queens. Note
+        # that nova required the Cinder Queens level APIs (3.44+) starting in
+        # Train.
+        attachment_id = (
+            volume_api.attachment_create(
+                context, vol['id'], instance.uuid)['id'])
+
+        return vol['id'], attachment_id
+
     def _do_detach(self, context, instance, volume_api, virt_driver,
                    attachment_id=None, destroy_bdm=False):
         """Private method that actually does the detach.
@@ -430,19 +469,10 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
     def detach(self, context, instance, volume_api, virt_driver,
                attachment_id=None, destroy_bdm=False):
         volume = self._get_volume(context, volume_api, self.volume_id)
-        # Check to see if we need to lock based on the shared_targets value.
-        # Default to False if the volume does not expose that value to maintain
-        # legacy behavior.
-        if volume.get('shared_targets', False):
-            # Lock the detach call using the provided service_uuid.
-            @utils.synchronized(volume['service_uuid'])
-            def _do_locked_detach(*args, **_kwargs):
-                self._do_detach(*args, **_kwargs)
-
-            _do_locked_detach(context, instance, volume_api, virt_driver,
-                              attachment_id, destroy_bdm)
-        else:
-            # We don't need to (or don't know if we need to) lock.
+        # Let OS-Brick handle high level locking that covers the local os-brick
+        # detach and the Cinder call to call unmap the volume.  Not all volume
+        # backends or hosts require locking.
+        with brick_utils.guard_connection(volume):
             self._do_detach(context, instance, volume_api, virt_driver,
                             attachment_id, destroy_bdm)
 
@@ -635,19 +665,10 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
         volume = self._get_volume(context, volume_api, self.volume_id)
         volume_api.check_availability_zone(context, volume,
                                            instance=instance)
-        # Check to see if we need to lock based on the shared_targets value.
-        # Default to False if the volume does not expose that value to maintain
-        # legacy behavior.
-        if volume.get('shared_targets', False):
-            # Lock the attach call using the provided service_uuid.
-            @utils.synchronized(volume['service_uuid'])
-            def _do_locked_attach(*args, **_kwargs):
-                self._do_attach(*args, **_kwargs)
-
-            _do_locked_attach(context, instance, volume, volume_api,
-                              virt_driver, do_driver_attach)
-        else:
-            # We don't need to (or don't know if we need to) lock.
+        # Let OS-Brick handle high level locking that covers the call to
+        # Cinder that exports & maps the volume, and for the local os-brick
+        # attach.  Not all volume backends or hosts require locking.
+        with brick_utils.guard_connection(volume):
             self._do_attach(context, instance, volume, volume_api,
                             virt_driver, do_driver_attach)
 
@@ -719,19 +740,11 @@ class DriverVolSnapshotBlockDevice(DriverVolumeBlockDevice):
                virt_driver, wait_func=None):
 
         if not self.volume_id:
-            av_zone = _get_volume_create_az_value(instance)
             snapshot = volume_api.get_snapshot(context,
                                                self.snapshot_id)
-            vol = volume_api.create(context, self.volume_size, '', '',
-                                    snapshot, volume_type=self.volume_type,
-                                    availability_zone=av_zone)
-            if wait_func:
-                self._call_wait_func(context, wait_func, volume_api, vol['id'])
-
-            self.volume_id = vol['id']
-
-            # TODO(mriedem): Create an attachment to reserve the volume and
-            # make us go down the new-style attach flow.
+            self.volume_id, self.attachment_id = self._create_volume(
+                context, instance, volume_api, self.volume_size,
+                wait_func=wait_func, snapshot=snapshot)
 
         # Call the volume attach now
         super(DriverVolSnapshotBlockDevice, self).attach(
@@ -746,18 +759,9 @@ class DriverVolImageBlockDevice(DriverVolumeBlockDevice):
     def attach(self, context, instance, volume_api,
                virt_driver, wait_func=None):
         if not self.volume_id:
-            av_zone = _get_volume_create_az_value(instance)
-            vol = volume_api.create(context, self.volume_size,
-                                    '', '', image_id=self.image_id,
-                                    volume_type=self.volume_type,
-                                    availability_zone=av_zone)
-            if wait_func:
-                self._call_wait_func(context, wait_func, volume_api, vol['id'])
-
-            self.volume_id = vol['id']
-
-            # TODO(mriedem): Create an attachment to reserve the volume and
-            # make us go down the new-style attach flow.
+            self.volume_id, self.attachment_id = self._create_volume(
+                context, instance, volume_api, self.volume_size,
+                wait_func=wait_func, image_id=self.image_id)
 
         super(DriverVolImageBlockDevice, self).attach(
             context, instance, volume_api, virt_driver)
@@ -772,17 +776,9 @@ class DriverVolBlankBlockDevice(DriverVolumeBlockDevice):
                virt_driver, wait_func=None):
         if not self.volume_id:
             vol_name = instance.uuid + '-blank-vol'
-            av_zone = _get_volume_create_az_value(instance)
-            vol = volume_api.create(context, self.volume_size, vol_name, '',
-                                    volume_type=self.volume_type,
-                                    availability_zone=av_zone)
-            if wait_func:
-                self._call_wait_func(context, wait_func, volume_api, vol['id'])
-
-            self.volume_id = vol['id']
-
-            # TODO(mriedem): Create an attachment to reserve the volume and
-            # make us go down the new-style attach flow.
+            self.volume_id, self.attachment_id = self._create_volume(
+                context, instance, volume_api, self.volume_size,
+                wait_func=wait_func, name=vol_name)
 
         super(DriverVolBlankBlockDevice, self).attach(
             context, instance, volume_api, virt_driver)

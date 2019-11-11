@@ -18,7 +18,6 @@ import datetime
 
 import mock
 from oslo_utils.fixture import uuidsentinel as uuids
-import six
 import webob
 
 from nova.api.openstack.compute import server_migrations
@@ -57,6 +56,8 @@ fake_migrations = [
         'deleted': False,
         'uuid': uuids.migration1,
         'cross_cell_move': False,
+        'user_id': None,
+        'project_id': None
     },
     {
         'id': 5678,
@@ -83,6 +84,8 @@ fake_migrations = [
         'deleted': False,
         'uuid': uuids.migration2,
         'cross_cell_move': False,
+        'user_id': None,
+        'project_id': None
     }
 ]
 
@@ -344,24 +347,9 @@ class ServerMigrationsTestsV265(ServerMigrationsTestsV224):
                                                support_abort_in_queue=True)
         _do_test()
 
-    def test_cancel_live_migration_in_queue_not_yet_available(self):
-        exc = exception.AbortQueuedLiveMigrationNotYetSupported(
-            migration_id=1, status='queued')
 
-        @mock.patch.object(self.compute_api, 'live_migrate_abort',
-                           side_effect=exc)
-        @mock.patch.object(self.compute_api, 'get')
-        def _do_test(mock_get, mock_abort):
-            error = self.assertRaises(webob.exc.HTTPConflict,
-                                      self.controller.delete,
-                                      self.req, 'server-id', 1)
-            self.assertIn("Aborting live migration 1 with status queued is "
-                          "not yet supported for this instance.",
-                          six.text_type(error))
-            mock_abort.assert_called_once_with(self.context,
-                                               mock_get.return_value, 1,
-                                               support_abort_in_queue=True)
-        _do_test()
+class ServerMigrationsTestsV280(ServerMigrationsTestsV265):
+    wsgi_api_version = '2.80'
 
 
 class ServerMigrationsPolicyEnforcementV21(test.NoDBTestCase):

@@ -24,6 +24,7 @@ inline callbacks.
 import nova.monkey_patch  # noqa
 
 import abc
+import collections
 import copy
 import datetime
 import inspect
@@ -213,6 +214,9 @@ class TestCase(testtools.TestCase):
             os.environ.get('OS_TEST_TIMEOUT', 0),
             self.TIMEOUT_SCALING_FACTOR))
 
+        # How many of which service we've started. {$service-name: $count}
+        self._service_fixture_count = collections.defaultdict(int)
+
         self.useFixture(nova_fixtures.OpenStackSDKFixture())
 
         self.useFixture(fixtures.NestedTempfile())
@@ -303,6 +307,14 @@ class TestCase(testtools.TestCase):
         # Reset the compute RPC API globals (mostly the _ROUTER).
         compute_rpcapi.reset_globals()
 
+        # TODO(takashin): Remove MoxStubout fixture
+        # after removing tests which uses mox and are related to
+        # nova-network in the following files.
+        #
+        # - nova/tests/unit/api/openstack/compute/test_floating_ips.py
+        # - nova/tests/unit/api/openstack/compute/test_security_groups.py
+        # - nova/tests/unit/fake_network.py
+        # - nova/tests/unit/network/test_manager.py
         mox_fixture = self.useFixture(moxstubout.MoxStubout())
         self.mox = mox_fixture.mox
         self.stubs = mox_fixture.stubs
@@ -426,6 +438,10 @@ class TestCase(testtools.TestCase):
             CONF.set_override(k, v, group)
 
     def start_service(self, name, host=None, **kwargs):
+        # Disallow starting multiple scheduler services
+        if name == 'scheduler' and self._service_fixture_count[name]:
+            raise TestingException("Duplicate start_service(%s)!" % name)
+
         cell = None
         # if the host is None then the CONF.host remains defaulted to
         # 'fake-mini' (originally done in ConfFixture)
@@ -450,6 +466,19 @@ class TestCase(testtools.TestCase):
                 self.host_mappings[hm.host] = hm
         svc = self.useFixture(
             nova_fixtures.ServiceFixture(name, host, cell=cell, **kwargs))
+
+        # Keep track of how many instances of this service are running.
+        self._service_fixture_count[name] += 1
+        real_stop = svc.service.stop
+
+        # Make sure stopping the service decrements the active count, so that
+        # start,stop,start doesn't trigger the "Duplicate start_service"
+        # exception.
+        def patch_stop(*a, **k):
+            self._service_fixture_count[name] -= 1
+            return real_stop(*a, **k)
+        self.useFixture(fixtures.MockPatchObject(
+            svc.service, 'stop', patch_stop))
 
         return svc.service
 

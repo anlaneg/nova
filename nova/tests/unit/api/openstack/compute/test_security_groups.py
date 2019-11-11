@@ -311,7 +311,7 @@ class TestSecurityGroupsV21(test.TestCase):
         self.stub_out('nova.db.api.security_group_get_by_project',
                       return_security_groups)
 
-        path = '/v2/fake/os-security-groups'
+        path = '/v2/%s/os-security-groups' % fakes.FAKE_PROJECT_ID
         if limited:
             path += '?offset=1&limit=1'
         req = fakes.HTTPRequest.blank(path, use_admin_context=True)
@@ -359,7 +359,8 @@ class TestSecurityGroupsV21(test.TestCase):
 
         self.assertEqual(res_dict, expected)
         mock_list.assert_called_once_with(self.req.environ['nova.context'],
-                                          project='fake', search_opts={})
+                                          project=fakes.FAKE_PROJECT_ID,
+                                          search_opts={})
 
     def test_get_security_group_list_all_tenants(self):
         all_groups = []
@@ -389,7 +390,7 @@ class TestSecurityGroupsV21(test.TestCase):
         self.stub_out('nova.db.api.security_group_get_by_project',
                       return_tenant_security_groups)
 
-        path = '/v2/fake/os-security-groups'
+        path = '/v2/%s/os-security-groups' % fakes.FAKE_PROJECT_ID
 
         req = fakes.HTTPRequest.blank(path, use_admin_context=True)
         res_dict = self.controller.index(req)
@@ -416,7 +417,7 @@ class TestSecurityGroupsV21(test.TestCase):
                 group_id=group_id)
             sg = security_group_template(
                 id=i + 1, name=name, description=name + '-desc',
-                rules=[rule1, rule2], tenant_id='fake')
+                rules=[rule1, rule2], tenant_id=fakes.FAKE_PROJECT_ID)
             groups.append(sg)
 
         # An expected rule here needs to be created as the api returns
@@ -424,16 +425,19 @@ class TestSecurityGroupsV21(test.TestCase):
         # passed in.
         expected_rule1 = security_group_rule_template(
             ip_range={}, parent_group_id=1, ip_protocol='TCP',
-            group={'name': 'default', 'tenant_id': 'fake'}, id=99)
+            group={'name': 'default', 'tenant_id': fakes.FAKE_PROJECT_ID},
+            id=99)
         expected_rule2 = security_group_rule_template(
             ip_range={}, parent_group_id=1, ip_protocol='UDP',
-            group={'name': 'default', 'tenant_id': 'fake'}, id=77)
+            group={'name': 'default', 'tenant_id': fakes.FAKE_PROJECT_ID},
+            id=77)
         expected_group1 = security_group_template(
             id=1, name='default', description='default-desc',
-            rules=[expected_rule1, expected_rule2], tenant_id='fake')
+            rules=[expected_rule1, expected_rule2],
+            tenant_id=fakes.FAKE_PROJECT_ID)
         expected_group2 = security_group_template(
             id=2, name='test', description='test-desc', rules=[],
-            tenant_id='fake')
+            tenant_id=fakes.FAKE_PROJECT_ID)
 
         expected = {'security_groups': [expected_group1, expected_group2]}
 
@@ -548,7 +552,7 @@ class TestSecurityGroupsV21(test.TestCase):
                           self.req, '1', {'security_group': sg})
 
     def test_delete_security_group_by_id(self):
-        sg = security_group_template(id=1, project_id='fake_project',
+        sg = security_group_template(id=1, project_id=fakes.FAKE_PROJECT_ID,
                                      user_id='fake_user', rules=[])
 
         self.called = False
@@ -1350,7 +1354,7 @@ def fake_compute_create(*args, **kwargs):
 
 
 class SecurityGroupsOutputTestV21(test.TestCase):
-    base_url = '/v2/fake/servers'
+    base_url = '/v2/%s/servers' % fakes.FAKE_PROJECT_ID
     content_type = 'application/json'
 
     def setUp(self):

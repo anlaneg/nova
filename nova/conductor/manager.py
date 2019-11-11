@@ -14,8 +14,10 @@
 
 """Handles database requests from other nova services."""
 
+import collections
 import contextlib
 import copy
+import eventlet
 import functools
 import sys
 
@@ -230,7 +232,7 @@ class ComputeTaskManager(base.Base):
     may involve coordinating activities on multiple compute nodes.
     """
 
-    target = messaging.Target(namespace='compute_task', version='1.20')
+    target = messaging.Target(namespace='compute_task', version='1.21')
 
     def __init__(self):
         super(ComputeTaskManager, self).__init__()
@@ -301,31 +303,49 @@ class ComputeTaskManager(base.Base):
         else:
             raise NotImplementedError()
 
-    def _cold_migrate(self, context, instance, flavor, filter_properties,
-                      clean_shutdown, request_spec, host_list):
-        image = utils.get_image_from_system_metadata(
-            instance.system_metadata)
-
+    @staticmethod
+    def _get_request_spec_for_cold_migrate(context, instance, flavor,
+                                           filter_properties, request_spec):
         # NOTE(sbauza): If a reschedule occurs when prep_resize(), then
         # it only provides filter_properties legacy dict back to the
         # conductor with no RequestSpec part of the payload for <Stein
         # computes.
-        # TODO(mriedem): We should be able to remove this in Train when we
-        # only support >=Stein computes and request_spec is passed back to
-        # conductor on reschedule.
+        # TODO(mriedem): We can remove this compat code for no request spec
+        # coming to conductor in ComputeTaskAPI RPC API version 2.0
         if not request_spec:
+            image_meta = utils.get_image_from_system_metadata(
+                instance.system_metadata)
             # Make sure we hydrate a new RequestSpec object with the new flavor
             # and not the nested one from the instance
             request_spec = objects.RequestSpec.from_components(
-                context, instance.uuid, image,
+                context, instance.uuid, image_meta,
                 flavor, instance.numa_topology, instance.pci_requests,
                 filter_properties, None, instance.availability_zone,
                 project_id=instance.project_id, user_id=instance.user_id)
+        elif not isinstance(request_spec, objects.RequestSpec):
+            # Prior to compute RPC API 5.1 conductor would pass a legacy dict
+            # version of the request spec to compute and Stein compute
+            # could be sending that back to conductor on reschedule, so if we
+            # got a dict convert it to an object.
+            # TODO(mriedem): We can drop this compat code when we only support
+            # compute RPC API >=6.0.
+            request_spec = objects.RequestSpec.from_primitives(
+                context, request_spec, filter_properties)
+            # We don't have to set the new flavor on the request spec because
+            # if we got here it was due to a reschedule from the compute and
+            # the request spec would already have the new flavor in it from the
+            # else block below.
         else:
             # NOTE(sbauza): Resizes means new flavor, so we need to update the
             # original RequestSpec object for make sure the scheduler verifies
             # the right one and not the original flavor
             request_spec.flavor = flavor
+        return request_spec
+
+    def _cold_migrate(self, context, instance, flavor, filter_properties,
+                      clean_shutdown, request_spec, host_list):
+        request_spec = self._get_request_spec_for_cold_migrate(
+            context, instance, flavor, filter_properties, request_spec)
 
         task = self._build_cold_migrate_task(context, instance, flavor,
                 request_spec, clean_shutdown, host_list)
@@ -357,11 +377,23 @@ class ComputeTaskManager(base.Base):
                                               updates, ex, request_spec)
         except Exception as ex:
             with excutils.save_and_reraise_exception():
-                updates = {'vm_state': instance.vm_state,
-                           'task_state': None}
-                self._set_vm_state_and_notify(context, instance.uuid,
-                                              'migrate_server',
-                                              updates, ex, request_spec)
+                # Refresh the instance so we don't overwrite vm_state changes
+                # set after we executed the task.
+                try:
+                    instance.refresh()
+                    # Passing vm_state is kind of silly but it's expected in
+                    # set_vm_state_and_notify.
+                    updates = {'vm_state': instance.vm_state,
+                               'task_state': None}
+                    self._set_vm_state_and_notify(context, instance.uuid,
+                                                  'migrate_server',
+                                                  updates, ex, request_spec)
+                except exception.InstanceNotFound:
+                    # We can't send the notification because the instance is
+                    # gone so just log it.
+                    LOG.info('During %s the instance was deleted.',
+                             'resize' if instance.instance_type_id != flavor.id
+                             else 'cold migrate', instance=instance)
         # NOTE(sbauza): Make sure we persist the new flavor in case we had
         # a successful scheduler call if and only if nothing bad happened
         if request_spec.obj_what_changed():
@@ -734,9 +766,24 @@ class ComputeTaskManager(base.Base):
                         context, instance, exc, legacy_request_spec,
                         requested_networks)
                     return
-            instance.availability_zone = (
-                availability_zones.get_host_availability_zone(context,
-                        host.service_host))
+
+            # The availability_zone field was added in v1.1 of the Selection
+            # object so make sure to handle the case where it is missing.
+            if 'availability_zone' in host:
+                instance.availability_zone = host.availability_zone
+            else:
+                try:
+                    instance.availability_zone = (
+                        availability_zones.get_host_availability_zone(context,
+                                host.service_host))
+                except Exception as exc:
+                    # Put the instance into ERROR state, set task_state to
+                    # None, inject a fault, etc.
+                    self._cleanup_when_reschedule_fails(
+                        context, instance, exc, legacy_request_spec,
+                        requested_networks)
+                    continue
+
             try:
                 # NOTE(danms): This saves the az change above, refreshes our
                 # instance, and tells us if it has been deleted underneath us
@@ -1053,9 +1100,16 @@ class ComputeTaskManager(base.Base):
                     # if we want to make sure that the next destination
                     # is not forced to be the original host
                     request_spec.reset_forced_destinations()
-                    # TODO(gibi): We need to make sure that the
-                    # requested_resources field is re calculated based on
-                    # neutron ports.
+
+                    port_res_req = (
+                        self.network_api.get_requested_resource_for_instance(
+                            context, instance.uuid))
+                    # NOTE(gibi): When cyborg or other module wants to handle
+                    # similar non-nova resources then here we have to collect
+                    # all the external resource requests in a single list and
+                    # add them to the RequestSpec.
+                    request_spec.requested_resources = port_res_req
+
                 try:
                     # if this is a rebuild of instance on the same host with
                     # new image.
@@ -1067,6 +1121,7 @@ class ComputeTaskManager(base.Base):
                     request_spec.ensure_network_metadata(instance)
                     compute_utils.heal_reqspec_is_bfv(
                         context, request_spec, instance)
+
                     host_lists = self._schedule_instances(context,
                             request_spec, [instance.uuid],
                             return_alternates=False)
@@ -1074,9 +1129,19 @@ class ComputeTaskManager(base.Base):
                     selection = host_list[0]
                     host, node, limits = (selection.service_host,
                             selection.nodename, selection.limits)
+
+                    if recreate:
+                        scheduler_utils.fill_provider_mapping(
+                            context, self.report_client, request_spec,
+                            selection)
+
                 except (exception.NoValidHost,
                         exception.UnsupportedPolicyException,
-                        exception.AllocationUpdateFailed) as ex:
+                        exception.AllocationUpdateFailed,
+                        # the next two can come from fill_provider_mapping and
+                        # signals a software error.
+                        NotImplementedError,
+                        ValueError) as ex:
                     if migration:
                         migration.status = 'error'
                         migration.save()
@@ -1608,3 +1673,133 @@ class ComputeTaskManager(base.Base):
                         pass
             return False
         return True
+
+    def cache_images(self, context, aggregate, image_ids):
+        """Cache a set of images on the set of hosts in an aggregate.
+
+        :param context: The RequestContext
+        :param aggregate: The Aggregate object from the request to constrain
+                          the host list
+        :param image_id: The IDs of the image to cache
+        """
+
+        # TODO(mriedem): Consider including the list of images in the
+        # notification payload.
+        compute_utils.notify_about_aggregate_action(
+            context, aggregate,
+            fields.NotificationAction.IMAGE_CACHE,
+            fields.NotificationPhase.START)
+
+        clock = timeutils.StopWatch()
+        threads = CONF.image_cache.precache_concurrency
+        fetch_pool = eventlet.GreenPool(size=threads)
+
+        hosts_by_cell = {}
+        cells_by_uuid = {}
+        # TODO(danms): Make this a much more efficient bulk query
+        for hostname in aggregate.hosts:
+            hmap = objects.HostMapping.get_by_host(context, hostname)
+            cells_by_uuid.setdefault(hmap.cell_mapping.uuid, hmap.cell_mapping)
+            hosts_by_cell.setdefault(hmap.cell_mapping.uuid, [])
+            hosts_by_cell[hmap.cell_mapping.uuid].append(hostname)
+
+        LOG.info('Preparing to request pre-caching of image(s) %(image_ids)s '
+                 'on %(hosts)i hosts across %(cells)i cells.',
+                 {'image_ids': ','.join(image_ids),
+                  'hosts': len(aggregate.hosts),
+                  'cells': len(hosts_by_cell)})
+        clock.start()
+
+        stats = collections.defaultdict(lambda: (0, 0, 0, 0))
+        failed_images = collections.defaultdict(int)
+        down_hosts = set()
+        host_stats = {
+            'completed': 0,
+            'total': len(aggregate.hosts),
+        }
+
+        def host_completed(context, host, result):
+            for image_id, status in result.items():
+                cached, existing, error, unsupported = stats[image_id]
+                if status == 'error':
+                    failed_images[image_id] += 1
+                    error += 1
+                elif status == 'cached':
+                    cached += 1
+                elif status == 'existing':
+                    existing += 1
+                elif status == 'unsupported':
+                    unsupported += 1
+                stats[image_id] = (cached, existing, error, unsupported)
+
+            host_stats['completed'] += 1
+            compute_utils.notify_about_aggregate_cache(context, aggregate,
+                                                       host, result,
+                                                       host_stats['completed'],
+                                                       host_stats['total'])
+
+        def wrap_cache_images(ctxt, host, image_ids):
+            result = self.compute_rpcapi.cache_images(
+                ctxt,
+                host=host,
+                image_ids=image_ids)
+            host_completed(context, host, result)
+
+        def skipped_host(context, host, image_ids):
+            result = {image: 'skipped' for image in image_ids}
+            host_completed(context, host, result)
+
+        for cell_uuid, hosts in hosts_by_cell.items():
+            cell = cells_by_uuid[cell_uuid]
+            with nova_context.target_cell(context, cell) as target_ctxt:
+                for host in hosts:
+                    service = objects.Service.get_by_compute_host(target_ctxt,
+                                                                  host)
+                    if not self.servicegroup_api.service_is_up(service):
+                        down_hosts.add(host)
+                        LOG.info(
+                            'Skipping image pre-cache request to compute '
+                            '%(host)r because it is not up',
+                            {'host': host})
+                        skipped_host(target_ctxt, host, image_ids)
+                        continue
+
+                    fetch_pool.spawn_n(wrap_cache_images, target_ctxt, host,
+                                       image_ids)
+
+        # Wait until all those things finish
+        fetch_pool.waitall()
+
+        overall_stats = {'cached': 0, 'existing': 0, 'error': 0,
+                         'unsupported': 0}
+        for cached, existing, error, unsupported in stats.values():
+            overall_stats['cached'] += cached
+            overall_stats['existing'] += existing
+            overall_stats['error'] += error
+            overall_stats['unsupported'] += unsupported
+
+        clock.stop()
+        LOG.info('Image pre-cache operation for image(s) %(image_ids)s '
+                 'completed in %(time).2f seconds; '
+                 '%(cached)i cached, %(existing)i existing, %(error)i errors, '
+                 '%(unsupported)i unsupported, %(skipped)i skipped (down) '
+                 'hosts',
+                 {'image_ids': ','.join(image_ids),
+                  'time': clock.elapsed(),
+                  'cached': overall_stats['cached'],
+                  'existing': overall_stats['existing'],
+                  'error': overall_stats['error'],
+                  'unsupported': overall_stats['unsupported'],
+                  'skipped': len(down_hosts),
+                 })
+        # Log error'd images specifically at warning level
+        for image_id, fails in failed_images.items():
+            LOG.warning('Image pre-cache operation for image %(image)s '
+                        'failed %(fails)i times',
+                        {'image': image_id,
+                         'fails': fails})
+
+        compute_utils.notify_about_aggregate_action(
+            context, aggregate,
+            fields.NotificationAction.IMAGE_CACHE,
+            fields.NotificationPhase.END)

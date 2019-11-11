@@ -362,8 +362,8 @@ class UnsupportedDbRegexpTestCase(DbTestCase):
         test2 = self.create_instance_with_args(display_name='test2')
         test3 = self.create_instance_with_args(display_name='test3')
         uuids = [i.uuid for i in (test1, test2, test3)]
-        results = db.instance_get_all_uuids_by_hosts(self.context,
-                                                         [test1.host])
+        results = db.instance_get_all_uuids_by_hosts(
+            self.context, [test1.host])
         self.assertEqual(1, len(results))
         self.assertIn(test1.host, results)
         found_uuids = results[test1.host]
@@ -1123,7 +1123,8 @@ class MigrationTestCase(test.TestCase):
     def _create(self, status='migrating', source_compute='host1',
                 source_node='a', dest_compute='host2', dest_node='b',
                 system_metadata=None, migration_type=None, uuid=None,
-                created_at=None, updated_at=None):
+                created_at=None, updated_at=None, user_id=None,
+                project_id=None):
 
         values = {'host': source_compute}
         instance = db.instance_create(self.ctxt, values)
@@ -1139,6 +1140,10 @@ class MigrationTestCase(test.TestCase):
             values['created_at'] = created_at
         if updated_at:
             values['updated_at'] = updated_at
+        if user_id:
+            values['user_id'] = user_id
+        if project_id:
+            values['project_id'] = project_id
         db.migration_create(self.ctxt, values)
         return values
 
@@ -1148,7 +1153,6 @@ class MigrationTestCase(test.TestCase):
             self.assertNotEqual('reverted', migration['status'])
             self.assertNotEqual('error', migration['status'])
             self.assertNotEqual('failed', migration['status'])
-            self.assertNotEqual('accepted', migration['status'])
             self.assertNotEqual('done', migration['status'])
             self.assertNotEqual('cancelled', migration['status'])
 
@@ -1164,7 +1168,7 @@ class MigrationTestCase(test.TestCase):
         migrations = db.migration_get_in_progress_by_host_and_node(self.ctxt,
                 'host1', 'a')
         # 2 as source + 1 as dest
-        self.assertEqual(3, len(migrations))
+        self.assertEqual(4, len(migrations))
         self._assert_in_progress(migrations)
 
     def test_in_progress_host1_nodeb(self):
@@ -1177,7 +1181,7 @@ class MigrationTestCase(test.TestCase):
         migrations = db.migration_get_in_progress_by_host_and_node(self.ctxt,
                 'host2', 'b')
         # 2 as dest, 1 as source
-        self.assertEqual(3, len(migrations))
+        self.assertEqual(4, len(migrations))
         self._assert_in_progress(migrations)
 
     def test_instance_join(self):
@@ -1291,6 +1295,54 @@ class MigrationTestCase(test.TestCase):
             self.assertEqual(1, len(instance_migrations))
             self.assertEqual(migration['instance_uuid'],
                              instance_migrations[0]['instance_uuid'])
+
+    def test_get_migrations_by_filters_user_id(self):
+        # Create two migrations with different user_id
+        user_id1 = "fake_user_id"
+        self._create(user_id=user_id1)
+        user_id2 = "other_fake_user_id"
+        self._create(user_id=user_id2)
+        # Filter on only the first user_id
+        filters = {"user_id": user_id1}
+        migrations = db.migration_get_all_by_filters(self.ctxt, filters)
+        # We should only get one migration back because we filtered on only
+        # one of the two different user_id
+        self.assertEqual(1, len(migrations))
+        for migration in migrations:
+            self.assertEqual(filters['user_id'], migration['user_id'])
+
+    def test_get_migrations_by_filters_project_id(self):
+        # Create two migrations with different project_id
+        project_id1 = "fake_project_id"
+        self._create(project_id=project_id1)
+        project_id2 = "other_fake_project_id"
+        self._create(project_id=project_id2)
+        # Filter on only the first project_id
+        filters = {"project_id": project_id1}
+        migrations = db.migration_get_all_by_filters(self.ctxt, filters)
+        # We should only get one migration back because we filtered on only
+        # one of the two different project_id
+        self.assertEqual(1, len(migrations))
+        for migration in migrations:
+            self.assertEqual(filters['project_id'], migration['project_id'])
+
+    def test_get_migrations_by_filters_user_id_and_project_id(self):
+        # Create two migrations with different user_id and project_id
+        user_id1 = "fake_user_id"
+        project_id1 = "fake_project_id"
+        self._create(user_id=user_id1, project_id=project_id1)
+        user_id2 = "other_fake_user_id"
+        project_id2 = "other_fake_project_id"
+        self._create(user_id=user_id2, project_id=project_id2)
+        # Filter on only the first user_id and project_id
+        filters = {"user_id": user_id1, "project_id": project_id1}
+        migrations = db.migration_get_all_by_filters(self.ctxt, filters)
+        # We should only get one migration back because we filtered on only
+        # one of the two different user_id and project_id
+        self.assertEqual(1, len(migrations))
+        for migration in migrations:
+            self.assertEqual(filters['user_id'], migration['user_id'])
+            self.assertEqual(filters['project_id'], migration['project_id'])
 
     def test_migration_get_unconfirmed_by_dest_compute(self):
         # Ensure no migrations are returned.
@@ -3319,7 +3371,7 @@ class InstanceExtraTestCase(test.TestCase):
         db.instance_extra_update_by_uuid(self.ctxt, self.instance['uuid'],
                                          {'numa_topology': 'changed',
                                           'trusted_certs': "['123', 'foo']",
-                                          'vpmems': "['vpmem0', 'vpmem1']",
+                                          'resources': "['res0', 'res1']",
                                           })
         inst_extra = db.instance_extra_get_by_instance_uuid(
             self.ctxt, self.instance['uuid'])
@@ -3327,7 +3379,7 @@ class InstanceExtraTestCase(test.TestCase):
         # NOTE(jackie-truong): trusted_certs is stored as a Text type in
         # instance_extra and read as a list of strings
         self.assertEqual("['123', 'foo']", inst_extra.trusted_certs)
-        self.assertEqual("['vpmem0', 'vpmem1']", inst_extra.vpmems)
+        self.assertEqual("['res0', 'res1']", inst_extra.resources)
 
     def test_instance_extra_update_by_uuid_and_create(self):
         @sqlalchemy_api.pick_context_manager_writer
@@ -3352,13 +3404,14 @@ class InstanceExtraTestCase(test.TestCase):
     def test_instance_extra_get_with_columns(self):
         extra = db.instance_extra_get_by_instance_uuid(
             self.ctxt, self.instance['uuid'],
-            columns=['numa_topology', 'vcpu_model', 'trusted_certs', 'vpmems'])
+            columns=['numa_topology', 'vcpu_model', 'trusted_certs',
+                     'resources'])
         self.assertRaises(SQLAlchemyError,
                           extra.__getitem__, 'pci_requests')
         self.assertIn('numa_topology', extra)
         self.assertIn('vcpu_model', extra)
         self.assertIn('trusted_certs', extra)
-        self.assertIn('vpmems', extra)
+        self.assertIn('resources', extra)
 
 
 class ServiceTestCase(test.TestCase, ModelsObjectComparatorMixin):

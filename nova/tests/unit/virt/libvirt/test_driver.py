@@ -14,6 +14,7 @@
 #    under the License.
 
 import binascii
+from collections import defaultdict
 from collections import deque
 from collections import OrderedDict
 import contextlib
@@ -27,6 +28,7 @@ import random
 import re
 import shutil
 import signal
+import testtools
 import threading
 import time
 import unittest
@@ -69,6 +71,7 @@ from nova.compute import vm_states
 import nova.conf
 from nova import context
 from nova.db import api as db
+from nova.db import constants as db_const
 from nova import exception
 from nova.network import model as network_model
 from nova import objects
@@ -87,7 +90,7 @@ from nova.tests.unit import fake_diagnostics
 from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
 from nova.tests.unit import fake_network
-import nova.tests.unit.image.fake
+import nova.tests.unit.image.fake as fake_image
 from nova.tests.unit import matchers
 from nova.tests.unit.objects import test_diagnostics
 from nova.tests.unit.objects import test_pci_device
@@ -105,10 +108,12 @@ from nova.virt.image import model as imgmodel
 from nova.virt import images
 from nova.virt.libvirt import blockinfo
 from nova.virt.libvirt import config as vconfig
+from nova.virt.libvirt import designer
 from nova.virt.libvirt import driver as libvirt_driver
 from nova.virt.libvirt import firewall
 from nova.virt.libvirt import guest as libvirt_guest
 from nova.virt.libvirt import host
+from nova.virt.libvirt.host import SEV_KERNEL_PARAM_FILE
 from nova.virt.libvirt import imagebackend
 from nova.virt.libvirt import imagecache
 from nova.virt.libvirt import migration as libvirt_migrate
@@ -382,6 +387,49 @@ _fake_qemu64_cpu_feature = """
   <feature policy='require' name='pse'/>
   <feature policy='require' name='de'/>
   <feature policy='require' name='fpu'/>
+</cpu>
+"""
+
+_fake_sandy_bridge_cpu_feature = """<cpu mode='custom' match='exact'>
+  <model fallback='forbid'>SandyBridge</model>
+  <feature policy='require' name='aes'/>
+  <feature policy='require' name='apic'/>
+  <feature policy='require' name='avx'/>
+  <feature policy='require' name='clflush'/>
+  <feature policy='require' name='cmov'/>
+  <feature policy='require' name='cx16'/>
+  <feature policy='require' name='cx8'/>
+  <feature policy='require' name='de'/>
+  <feature policy='require' name='fpu'/>
+  <feature policy='require' name='fxsr'/>
+  <feature policy='require' name='lahf_lm'/>
+  <feature policy='require' name='lm'/>
+  <feature policy='require' name='mca'/>
+  <feature policy='require' name='mce'/>
+  <feature policy='require' name='mmx'/>
+  <feature policy='require' name='msr'/>
+  <feature policy='require' name='mtrr'/>
+  <feature policy='require' name='nx'/>
+  <feature policy='require' name='pae'/>
+  <feature policy='require' name='pat'/>
+  <feature policy='require' name='pclmuldq'/>
+  <feature policy='require' name='pge'/>
+  <feature policy='require' name='pni'/>
+  <feature policy='require' name='popcnt'/>
+  <feature policy='require' name='pse'/>
+  <feature policy='require' name='pse36'/>
+  <feature policy='require' name='rdtscp'/>
+  <feature policy='require' name='sep'/>
+  <feature policy='require' name='sse'/>
+  <feature policy='require' name='sse2'/>
+  <feature policy='require' name='sse4.1'/>
+  <feature policy='require' name='sse4.2'/>
+  <feature policy='require' name='ssse3'/>
+  <feature policy='require' name='syscall'/>
+  <feature policy='require' name='tsc'/>
+  <feature policy='require' name='tsc-deadline'/>
+  <feature policy='require' name='x2apic'/>
+  <feature policy='require' name='xsave'/>
 </cpu>
 """
 
@@ -853,9 +901,11 @@ def _create_test_instance():
         'ephemeral_key_uuid': None,
         'vcpu_model': None,
         'host': 'fake-host',
+        'node': 'fake-node',
         'task_state': None,
         'vm_state': None,
-        'trusted_certs': None
+        'trusted_certs': None,
+        'resources': None,
     }
 
 
@@ -1244,6 +1294,178 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
         self.assertRaises(exception.InternalError,
                           drvr._check_file_backed_memory_support)
+
+    def test__check_cpu_compatibility_start_ok(self):
+        self.flags(cpu_mode="custom",
+                   cpu_models=["Penryn"],
+                   group="libvirt")
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr.init_host("dummyhost")
+
+    def test__check_cpu_compatibility_none_models(self):
+        self.flags(cpu_mode="custom",
+                   cpu_models=[],
+                   group="libvirt")
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        self.assertRaises(exception.Invalid, drvr.init_host, "dummyhost")
+
+    def test__check_cpu_compatibility_none_mode(self):
+        self.flags(cpu_mode="none",
+                   cpu_models=["Penryn"],
+                   group="libvirt")
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        self.assertRaises(exception.Invalid, drvr.init_host, "dummyhost")
+
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.compareCPU')
+    def test__check_cpu_compatibility_advance_model(self, mocked_compare):
+        mocked_compare.side_effect = (2, 0)
+        self.flags(cpu_mode="custom",
+                   cpu_models=["qemu64", "Broadwell-noTSX"],
+                   group="libvirt")
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        self.assertRaises(exception.InvalidCPUInfo,
+                          drvr.init_host, "dummyhost")
+
+    def test__check_cpu_compatibility_with_flag(self):
+        self.flags(cpu_mode="custom",
+                   cpu_models=["Penryn"],
+                   cpu_model_extra_flags = ["aes"],
+                   group="libvirt")
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr.init_host("dummyhost")
+
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.compareCPU')
+    def test__check_cpu_compatibility_advance_flag(self, mocked_compare):
+        mocked_compare.side_effect = (2, 0)
+        self.flags(cpu_mode="custom",
+                   cpu_models=["qemu64"],
+                   cpu_model_extra_flags = ["avx", "avx2"],
+                   group="libvirt")
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        self.assertRaises(exception.InvalidCPUInfo,
+                          drvr.init_host, "dummyhost")
+
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.compareCPU')
+    def test__check_cpu_compatibility_wrong_flag(self, mocked_compare):
+        mocked_compare.side_effect = (2, 0)
+        self.flags(cpu_mode="custom",
+                   cpu_models=["Broadwell-noTSX"],
+                   cpu_model_extra_flags = ["a v x"],
+                   group="libvirt")
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        self.assertRaises(exception.InvalidCPUInfo,
+                          drvr.init_host, "dummyhost")
+
+    def test__check_cpu_compatibility_invalid_virt_type(self):
+        """Test getting CPU traits when using a virt_type that doesn't support
+        the feature, only kvm and qemu supports reporting CPU traits.
+        """
+        self.flags(cpu_mode='custom',
+                   cpu_models=['IvyBridge'],
+                   virt_type='lxc',
+                   group='libvirt')
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        self.assertRaises(exception.Invalid, drvr.init_host, "dummyhost")
+
+    @mock.patch.object(libvirt_driver.LOG, 'warning')
+    def test_check_cpu_set_configuration__no_configuration(self, mock_log):
+        """Test that configuring no CPU option results no errors or logs.
+        """
+        self.flags(vcpu_pin_set=None, reserved_host_cpus=None)
+        self.flags(cpu_shared_set=None, cpu_dedicated_set=None,
+                   group='compute')
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr._check_cpu_set_configuration()
+
+        mock_log.assert_not_called()
+
+    def test_check_cpu_set_configuration__cpu_shared_set_cpu_dedicated_set(
+            self):
+        """Test that configuring 'cpu_shared_set' and 'cpu_dedicated_set' such
+        that they overlap (are not disjoint) results in an error stating that
+        this is not allowed.
+        """
+        self.flags(vcpu_pin_set=None, reserved_host_cpus=None)
+        self.flags(cpu_shared_set='0-3', cpu_dedicated_set='3-5',
+                   group='compute')
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+
+        self.assertRaises(exception.InvalidConfiguration,
+                          drvr._check_cpu_set_configuration)
+
+    def test_check_cpu_set_configuration__reserved_host_cpus_cpu_shared_set(
+            self):
+        """Test that configuring 'reserved_host_cpus' with one of the new
+        options, in this case '[compute] cpu_shared_set', results in an error
+        stating that this is not allowed.
+        """
+        self.flags(vcpu_pin_set=None, reserved_host_cpus=1)
+        self.flags(cpu_shared_set='1-10', cpu_dedicated_set=None,
+                   group='compute')
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+
+        ex = self.assertRaises(exception.InvalidConfiguration,
+                               drvr._check_cpu_set_configuration)
+        self.assertIn("The 'reserved_host_cpus' config option cannot be "
+                      "defined alongside ", six.text_type(ex))
+
+    @mock.patch.object(libvirt_driver.LOG, 'warning')
+    def test_check_cpu_set_configuration__vcpu_pin_set(self, mock_log):
+        """Test that configuring only 'vcpu_pin_set' results in a warning that
+        the option is being used for VCPU inventory but this is deprecated
+        behavior.
+        """
+        self.flags(vcpu_pin_set='0-3', reserved_host_cpus=None)
+        self.flags(cpu_shared_set=None, cpu_dedicated_set=None,
+                   group='compute')
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr._check_cpu_set_configuration()
+
+        mock_log.assert_called_once()
+        self.assertIn("When defined, 'vcpu_pin_set' will be used to calculate "
+                      "'VCPU' inventory and schedule instances that have "
+                      "'VCPU' allocations.",
+                      six.text_type(mock_log.call_args[0]))
+
+    @mock.patch.object(libvirt_driver.LOG, 'warning')
+    def test_check_cpu_set_configuration__vcpu_pin_set_cpu_shared_set(
+            self, mock_log):
+        """Test that configuring both 'vcpu_pin_set' and 'cpu_shared_set'
+        results in a warning that 'cpu_shared_set' is being ignored for
+        calculating VCPU inventory.
+        """
+        self.flags(vcpu_pin_set='0-3', reserved_host_cpus=None)
+        self.flags(cpu_shared_set='4-5', cpu_dedicated_set=None,
+                   group='compute')
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr._check_cpu_set_configuration()
+
+        mock_log.assert_called_once()
+        self.assertIn("The '[compute] cpu_shared_set' and 'vcpu_pin_set' "
+                      "config options have both been defined.",
+                      six.text_type(mock_log.call_args[0]))
+
+    def test_check_cpu_set_configuration__vcpu_pin_set_cpu_dedicated_set(
+            self):
+        """Test that configuring both 'vcpu_pin_set' and 'cpu_dedicated_set'
+        results in an error stating that the two options cannot co-exist.
+        """
+        self.flags(vcpu_pin_set='0-3', reserved_host_cpus=None)
+        self.flags(cpu_shared_set=None, cpu_dedicated_set='4-5',
+                   group='compute')
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+
+        ex = self.assertRaises(exception.InvalidConfiguration,
+                               drvr._check_cpu_set_configuration)
+        self.assertIn("The 'vcpu_pin_set' config option has been deprecated "
+                      "and cannot be defined alongside '[compute] "
+                      "cpu_dedicated_set'.", six.text_type(ex))
 
     def _do_test_parse_migration_flags(self, lm_expected=None,
                                        bm_expected=None):
@@ -2415,6 +2637,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         self.assertEqual("/sbin/init", cfg.os_init_path)
         self.assertEqual("console=tty0 console=ttyS0 console=hvc0",
                          cfg.os_cmdline)
+        self.assertEqual("OpenStack Nova", cfg.os_init_env['product_name'])
         self.assertIsNone(cfg.os_root)
         self.assertEqual(3, len(cfg.devices))
         self.assertIsInstance(cfg.devices[0],
@@ -2455,9 +2678,98 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         self.assertIsInstance(cfg.idmaps[1],
                               vconfig.LibvirtConfigGuestGIDMap)
 
+    def test_post_claim_migrate_data(self):
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        instance = objects.Instance(**self.test_instance)
+        md = objects.LibvirtLiveMigrateData()
+        claim = mock.Mock(autospec=True)
+        claimed_numa_topology = objects.InstanceNUMATopology()
+        claim.claimed_numa_topology = claimed_numa_topology
+        claim.instance_type = instance.flavor
+        numa_info = objects.LibvirtLiveMigrateNUMAInfo()
+        with test.nested(
+            mock.patch.object(drvr, '_get_live_migrate_numa_info',
+                              return_value=numa_info),
+            mock.patch('nova.objects.Instance.image_meta',
+                       new_callable=mock.PropertyMock,
+                       return_value='fake-image-meta')
+        ) as (mock_get_lm_numa_info, mock_image_meta):
+            claim.image_meta = instance.image_meta
+            post_claim_md = drvr.post_claim_migrate_data(
+                self.context, instance, md, claim)
+            self.assertEqual(post_claim_md.dst_numa_info, numa_info)
+            mock_get_lm_numa_info.assert_called_with(
+                claimed_numa_topology, instance.flavor, 'fake-image-meta')
+
+    @mock.patch.object(hardware, 'get_vcpu_pin_set', new=mock.Mock())
+    def test_get_live_migrate_numa_info(self):
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+
+        vcpupin1 = vconfig.LibvirtConfigGuestCPUTuneVCPUPin()
+        vcpupin1.id = 0
+        vcpupin1.cpuset = set([0, 1])
+        vcpupin2 = vconfig.LibvirtConfigGuestCPUTuneVCPUPin()
+        vcpupin2.id = 1
+        vcpupin2.cpuset = set([2, 3])
+        emulatorpin = vconfig.LibvirtConfigGuestCPUTuneEmulatorPin()
+        emulatorpin.cpuset = set([4, 5])
+        guest_cpu_tune = vconfig.LibvirtConfigGuestCPUTune()
+        guest_cpu_tune.vcpupin = [vcpupin1, vcpupin2]
+        guest_cpu_tune.emulatorpin = emulatorpin
+        guest_cpu_tune.vcpusched = [
+            vconfig.LibvirtConfigGuestCPUTuneVCPUSched()]
+        guest_cpu_tune.vcpusched[0].vcpus = set([6, 7])
+        guest_cpu_tune.vcpusched[0].priority = 8
+
+        memnode1 = vconfig.LibvirtConfigGuestNUMATuneMemNode()
+        memnode1.cellid = 2
+        memnode1.nodeset = [6, 7]
+        memnode2 = vconfig.LibvirtConfigGuestNUMATuneMemNode()
+        memnode2.cellid = 3
+        memnode2.nodeset = [8, 9]
+        guest_numa_tune = vconfig.LibvirtConfigGuestNUMATune()
+        guest_numa_tune.memnodes = [memnode1, memnode2]
+
+        expected_numa_info = objects.LibvirtLiveMigrateNUMAInfo(
+            cpu_pins={'0': set([0, 1]), '1': set([2, 3])},
+            cell_pins={'2': set([6, 7]), '3': set([8, 9])},
+            emulator_pins=set([4, 5]),
+            sched_vcpus=set([7, 6]),
+            sched_priority=8)
+
+        # NOTE(artom) This is a
+        # (cpu_set, guest_cpu_tune, guest_cpu_numa, guest_numa_tune)
+        # tuple. See _get_guest_numa_config() docstring for full documenation.
+        # _get_live_migrate_numa_info() only cares about guest_cpu_tune for CPU
+        # pinning and emulator thread pinning, and guest_numa_tune for cell
+        # pinning; so only include those 2 in the tuple.
+        guest_numa_config = (None, guest_cpu_tune, None, guest_numa_tune)
+
+        with mock.patch.object(drvr, '_get_guest_numa_config',
+                               return_value=guest_numa_config):
+            self.assertEqual(
+                expected_numa_info.obj_to_primitive(),
+                drvr._get_live_migrate_numa_info(
+                    'fake-instance-numa-topology',
+                    'fake-flavor', 'fake-image-meta').obj_to_primitive())
+
+    @mock.patch.object(hardware, 'get_vcpu_pin_set')
+    def test_get_live_migrate_numa_info_empty(self, _):
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        guest_numa_config = (None, None, None, None)
+        with mock.patch.object(drvr, '_get_guest_numa_config',
+                               return_value=guest_numa_config):
+            self.assertEqual(
+                objects.LibvirtLiveMigrateNUMAInfo().obj_to_primitive(),
+                drvr._get_live_migrate_numa_info(
+                    'fake-instance-numa-topology',
+                    'fake-flavor', 'fake-image-meta').obj_to_primitive())
+
     @mock.patch.object(
         host.Host, "is_cpu_control_policy_capable", return_value=True)
     def test_get_guest_config_numa_host_instance_fits(self, is_able):
+        self.flags(cpu_shared_set=None, cpu_dedicated_set=None,
+                   group='compute')
         instance_ref = objects.Instance(**self.test_instance)
         image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
         flavor = objects.Flavor(memory_mb=1, vcpus=2, root_gb=496,
@@ -2480,7 +2792,10 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                 mock.patch.object(host.Host, 'has_min_version',
                                   return_value=True),
                 mock.patch.object(host.Host, "get_capabilities",
-                                  return_value=caps)):
+                                  return_value=caps),
+                mock.patch.object(host.Host, 'get_online_cpus',
+                                  return_value=set([0, 1])),
+                ):
             cfg = drvr._get_guest_config(instance_ref, [],
                                          image_meta, disk_info)
             self.assertIsNone(cfg.cpuset)
@@ -2513,29 +2828,29 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         with test.nested(
                 mock.patch.object(host.Host, "get_capabilities",
                                   return_value=caps),
-                mock.patch.object(
-                    hardware, 'get_vcpu_pin_set', return_value=set([3])),
                 mock.patch.object(random, 'choice'),
                 mock.patch.object(drvr, '_has_numa_support',
                                   return_value=False)
-            ) as (get_host_cap_mock,
-                  get_vcpu_pin_set_mock, choice_mock,
-                  _has_numa_support_mock):
+            ) as (_, choice_mock, _):
             cfg = drvr._get_guest_config(instance_ref, [],
                                          image_meta, disk_info)
             self.assertFalse(choice_mock.called)
-            self.assertEqual(set([3]), cfg.cpuset)
+            self.assertIsNone(cfg.cpuset)
             self.assertEqual(0, len(cfg.cputune.vcpupin))
             self.assertIsNone(cfg.cpu.numa)
 
     def _test_get_guest_memory_backing_config(
             self, host_topology, inst_topology, numatune):
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        flavor = objects.Flavor(memory_mb=4096, vcpus=4, root_gb=496,
+                                ephemeral_gb=8128, swap=33550336, name='fake',
+                                extra_specs={})
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
         with mock.patch.object(
                 drvr, "_get_host_numa_topology",
                 return_value=host_topology):
             return drvr._get_guest_memory_backing_config(
-                inst_topology, numatune, {})
+                inst_topology, numatune, flavor, image_meta)
 
     @mock.patch.object(host.Host,
                        'has_min_version', return_value=True)
@@ -2544,6 +2859,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             objects.NUMACell(
                 id=3,
                 cpuset=set([1]),
+                pcpuset=set(),
                 siblings=[set([1])],
                 memory=1024,
                 mempages=[
@@ -2574,6 +2890,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             objects.NUMACell(
                 id=3,
                 cpuset=set([1]),
+                pcpuset=set(),
                 siblings=[set([1])],
                 memory=1024,
                 mempages=[
@@ -2596,15 +2913,211 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         self.assertIsNone(result)
 
     def test_get_guest_memory_backing_config_realtime(self):
-        flavor = {"extra_specs": {
+        extra_specs = {
             "hw:cpu_realtime": "yes",
             "hw:cpu_policy": "dedicated"
-        }}
+        }
+        flavor = objects.Flavor(name='m1.small',
+                                memory_mb=6,
+                                vcpus=28,
+                                root_gb=496,
+                                ephemeral_gb=8128,
+                                swap=33550336,
+                                extra_specs=extra_specs)
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
         membacking = drvr._get_guest_memory_backing_config(
-            None, None, flavor)
+            None, None, flavor, image_meta)
         self.assertTrue(membacking.locked)
         self.assertFalse(membacking.sharedpages)
+
+    def _test_sev_enabled(self, expected=None, host_sev_enabled=False,
+                          enc_extra_spec=None, enc_image_prop=None,
+                          hw_machine_type=None, hw_firmware_type=None):
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr._host._supports_amd_sev = host_sev_enabled
+
+        extra_specs = {}
+        if enc_extra_spec is not None:
+            extra_specs['hw:mem_encryption'] = enc_extra_spec
+        flavor = objects.Flavor(name='m1.fake')
+        flavor.extra_specs = extra_specs
+
+        image_props = {}
+        if hw_machine_type is not None:
+            image_props['hw_machine_type'] = hw_machine_type
+        if hw_firmware_type is not None:
+            image_props['hw_firmware_type'] = hw_firmware_type
+        if enc_image_prop is not None:
+            image_props['hw_mem_encryption'] = enc_image_prop
+
+        image_meta = fake_image.fake_image_obj(
+            {'id': '150d530b-1c57-4367-b754-1f1b5237923d'},
+            {}, image_props)
+
+        enabled = drvr._sev_enabled(flavor, image_meta)
+
+        if expected is None:
+            self.fail("_test_sev_enabled called without an expected "
+                      "return value. Maybe you expected an exception?")
+
+        self.assertEqual(expected, enabled)
+
+    def test_sev_enabled_no_host_support(self):
+        self._test_sev_enabled(False)
+
+    def test_sev_enabled_host_support_no_flavor_image(self):
+        self._test_sev_enabled(False, host_sev_enabled=True)
+
+    def test_sev_enabled_no_host_support_flavor_requested(self):
+        self._test_sev_enabled(False, enc_extra_spec=True)
+
+    def test_sev_enabled_no_host_support_image_requested(self):
+        self._test_sev_enabled(False, enc_image_prop=True)
+
+    def test_sev_enabled_host_support_flavor_requested(self):
+        self._test_sev_enabled(True, host_sev_enabled=True,
+                               enc_extra_spec=True, hw_firmware_type='uefi',
+                               hw_machine_type='q35')
+
+    def test_sev_enabled_host_support_image_requested(self):
+        self._test_sev_enabled(True, host_sev_enabled=True,
+                               enc_image_prop=True, hw_firmware_type='uefi',
+                               hw_machine_type='q35')
+
+    # The cases where the flavor and image requests contradict each other
+    # are already covered by test_hardware.MemEncryptionConflictTestCase
+    # so we don't need to test them in great detail here.
+    def test_sev_enabled_host_extra_spec_image_conflict(self):
+        exc = self.assertRaises(exception.FlavorImageConflict,
+                                self._test_sev_enabled,
+                                host_sev_enabled=True, enc_extra_spec=False,
+                                enc_image_prop=True)
+        self.assertEqual(
+            "Flavor m1.fake has hw:mem_encryption extra spec explicitly set "
+            "to False, conflicting with image fake_image which has "
+            "hw_mem_encryption property explicitly set to True", str(exc))
+
+    def test_sev_enabled_host_extra_spec_no_uefi(self):
+        exc = self.assertRaises(exception.FlavorImageConflict,
+                                self._test_sev_enabled,
+                                host_sev_enabled=True, enc_extra_spec=True)
+        self.assertEqual(
+            "Memory encryption requested by hw:mem_encryption extra spec in "
+            "m1.fake flavor but image fake_image doesn't have "
+            "'hw_firmware_type' property set to 'uefi'", str(exc))
+
+    def test_sev_enabled_host_extra_spec_no_machine_type(self):
+        exc = self.assertRaises(exception.InvalidMachineType,
+                                self._test_sev_enabled,
+                                host_sev_enabled=True, enc_extra_spec=True,
+                                hw_firmware_type='uefi')
+        self.assertEqual(
+            "Machine type 'pc' is not compatible with image fake_image "
+            "(150d530b-1c57-4367-b754-1f1b5237923d): q35 type is required "
+            "for SEV to work", str(exc))
+
+    def test_sev_enabled_host_extra_spec_pc(self):
+        exc = self.assertRaises(exception.InvalidMachineType,
+                                self._test_sev_enabled,
+                                host_sev_enabled=True, enc_extra_spec=True,
+                                hw_firmware_type='uefi', hw_machine_type='pc')
+        self.assertEqual(
+            "Machine type 'pc' is not compatible with image fake_image "
+            "(150d530b-1c57-4367-b754-1f1b5237923d): q35 type is required "
+            "for SEV to work", str(exc))
+
+    def _setup_fake_domain_caps(self, fake_domain_caps):
+        sev_feature = vconfig.LibvirtConfigDomainCapsFeatureSev()
+        sev_feature.cbitpos = 47
+        sev_feature.reduced_phys_bits = 1
+        domain_caps = vconfig.LibvirtConfigDomainCaps()
+        domain_caps._features = vconfig.LibvirtConfigDomainCapsFeatures()
+        domain_caps._features.features = [sev_feature]
+        fake_domain_caps.return_value = defaultdict(
+            dict, {'x86_64': {'q35': domain_caps}})
+
+    @mock.patch.object(host.Host, 'get_domain_capabilities')
+    def test_find_sev_feature_missing_arch(self, fake_domain_caps):
+        self._setup_fake_domain_caps(fake_domain_caps)
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        self.assertIsNone(drvr._find_sev_feature('arm1', 'q35'))
+
+    @mock.patch.object(host.Host, 'get_domain_capabilities')
+    def test_find_sev_feature_missing_mach_type(self, fake_domain_caps):
+        self._setup_fake_domain_caps(fake_domain_caps)
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        self.assertIsNone(drvr._find_sev_feature('x86_64', 'g3beige'))
+
+    @mock.patch.object(host.Host, 'get_domain_capabilities')
+    def test_find_sev_feature(self, fake_domain_caps):
+        self._setup_fake_domain_caps(fake_domain_caps)
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        feature = drvr._find_sev_feature('x86_64', 'q35')
+        self.assertIsInstance(feature,
+                              vconfig.LibvirtConfigDomainCapsFeatureSev)
+        self.assertEqual(47, feature.cbitpos)
+        self.assertEqual(1, feature.reduced_phys_bits)
+
+    @mock.patch.object(libvirt_driver.LibvirtDriver,
+                       "_has_uefi_support", new=mock.Mock(return_value=True))
+    def _setup_sev_guest(self):
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr._host._supports_amd_sev = True
+
+        ctxt = context.RequestContext(project_id=123,
+                                      project_name="aubergine",
+                                      user_id=456,
+                                      user_name="pie")
+
+        extra_specs = {
+            "hw:mem_encryption": True,
+        }
+        flavor = objects.Flavor(name='m1.small',
+                                memory_mb=6,
+                                vcpus=28,
+                                root_gb=496,
+                                ephemeral_gb=8128,
+                                swap=33550336,
+                                extra_specs=extra_specs)
+
+        instance_ref = objects.Instance(**self.test_instance)
+        instance_ref.flavor = flavor
+        image_meta = objects.ImageMeta.from_dict({
+            'id': 'd9c6aeee-8258-4bdb-bca4-39940461b182',
+            'name': 'fakeimage',
+            'disk_format': 'raw',
+            'properties': {'hw_firmware_type': 'uefi',
+                           'hw_machine_type': 'q35'}
+        })
+
+        disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
+                                            instance_ref,
+                                            image_meta)
+
+        return drvr._get_guest_config(instance_ref,
+                                      _fake_network_info(self, 1),
+                                      image_meta, disk_info,
+                                      context=ctxt)
+
+    def test_get_guest_config_sev_no_feature(self):
+        self.assertRaises(exception.MissingDomainCapabilityFeatureException,
+                          self._setup_sev_guest)
+
+    @mock.patch.object(host.Host, 'get_domain_capabilities')
+    @mock.patch.object(designer, 'set_driver_iommu_for_sev')
+    def test_get_guest_config_sev(self, mock_designer, fake_domain_caps):
+        self._setup_fake_domain_caps(fake_domain_caps)
+        cfg = self._setup_sev_guest()
+
+        # SEV-related tag should be set
+        self.assertIsInstance(cfg.launch_security,
+                              vconfig.LibvirtConfigGuestSEVLaunchSecurity)
+        self.assertIsInstance(cfg.membacking,
+                              vconfig.LibvirtConfigGuestMemoryBacking)
+        self.assertTrue(cfg.membacking.locked)
+
+        mock_designer.assert_called_once_with(cfg)
 
     def test_get_guest_memory_backing_config_file_backed(self):
         self.flags(file_backed_memory=1024, group="libvirt")
@@ -2670,6 +3183,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             objects.NUMACell(
                 id=3,
                 cpuset=set([1]),
+                pcpuset=set(),
                 siblings=[set([1])],
                 memory=1024,
                 mempages=[
@@ -2695,6 +3209,9 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         host.Host, "is_cpu_control_policy_capable", return_value=True)
     def test_get_guest_config_numa_host_instance_pci_no_numa_info(
             self, is_able):
+        self.flags(cpu_shared_set='3', cpu_dedicated_set=None,
+                   group='compute')
+
         instance_ref = objects.Instance(**self.test_instance)
         image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
         flavor = objects.Flavor(memory_mb=1, vcpus=2, root_gb=496,
@@ -2726,12 +3243,10 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         with test.nested(
                 mock.patch.object(host.Host, 'has_min_version',
                                   return_value=True),
-                mock.patch.object(
-                    host.Host, "get_capabilities", return_value=caps),
-                mock.patch.object(
-                    hardware, 'get_vcpu_pin_set', return_value=set([3])),
+                mock.patch.object(host.Host, "get_capabilities",
+                                  return_value=caps),
                 mock.patch.object(host.Host, 'get_online_cpus',
-                                  return_value=set(range(8))),
+                                  return_value=set([3])),
                 mock.patch.object(pci_manager, "get_instance_pci_devs",
                                   return_value=[pci_device])):
             cfg = conn._get_guest_config(instance_ref, [],
@@ -2745,6 +3260,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
     @mock.patch.object(
         host.Host, "is_cpu_control_policy_capable", return_value=True)
     def test_get_guest_config_numa_host_instance_2pci_no_fit(self, is_able):
+        self.flags(cpu_shared_set='3', cpu_dedicated_set=None,
+                   group='compute')
         instance_ref = objects.Instance(**self.test_instance)
         image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
         flavor = objects.Flavor(memory_mb=4096, vcpus=4, root_gb=496,
@@ -2777,16 +3294,14 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         with test.nested(
                 mock.patch.object(
                     host.Host, "get_capabilities", return_value=caps),
-                mock.patch.object(
-                    hardware, 'get_vcpu_pin_set', return_value=set([3])),
+                mock.patch.object(host.Host, 'get_online_cpus',
+                                  return_value=set([3])),
                 mock.patch.object(random, 'choice'),
                 mock.patch.object(pci_manager, "get_instance_pci_devs",
                                   return_value=[pci_device, pci_device2]),
                 mock.patch.object(conn, '_has_numa_support',
                                   return_value=False)
-            ) as (get_host_cap_mock,
-                  get_vcpu_pin_set_mock, choice_mock, pci_mock,
-                  _has_numa_support_mock):
+            ) as (_, _, choice_mock, pci_mock, _):
             cfg = conn._get_guest_config(instance_ref, [],
                                          image_meta, disk_info)
             self.assertFalse(choice_mock.called)
@@ -2866,6 +3381,9 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         host.Host, "is_cpu_control_policy_capable", return_value=True)
     def test_get_guest_config_numa_host_instance_fit_w_cpu_pinset(
             self, is_able):
+        self.flags(cpu_shared_set='2-3', cpu_dedicated_set=None,
+                   group='compute')
+
         instance_ref = objects.Instance(**self.test_instance)
         image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
         flavor = objects.Flavor(memory_mb=1024, vcpus=2, root_gb=496,
@@ -2887,14 +3405,11 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         with test.nested(
                 mock.patch.object(host.Host, 'has_min_version',
                                   return_value=True),
-                mock.patch.object(host.Host, "get_capabilities",
+                mock.patch.object(host.Host, 'get_capabilities',
                                   return_value=caps),
-                mock.patch.object(
-                    hardware, 'get_vcpu_pin_set', return_value=set([2, 3])),
                 mock.patch.object(host.Host, 'get_online_cpus',
-                                  return_value=set(range(8)))
-                ) as (has_min_version_mock, get_host_cap_mock,
-                        get_vcpu_pin_set_mock, get_online_cpus_mock):
+                                  return_value=set([2, 3])),
+                ):
             cfg = drvr._get_guest_config(instance_ref, [],
                                          image_meta, disk_info)
             # NOTE(ndipanov): we make sure that pin_set was taken into account
@@ -2954,6 +3469,9 @@ class LibvirtConnTestCase(test.NoDBTestCase,
     @mock.patch.object(
         host.Host, "is_cpu_control_policy_capable", return_value=True)
     def test_get_guest_config_numa_host_instance_topo(self, is_able):
+        self.flags(cpu_shared_set='0-5', cpu_dedicated_set=None,
+                   group='compute')
+
         instance_topology = objects.InstanceNUMATopology(
                     cells=[objects.InstanceNUMACell(
                         id=1, cpuset=set([0, 1]), memory=1024, pagesize=None),
@@ -2987,9 +3505,6 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                                   return_value=True),
                 mock.patch.object(host.Host, "get_capabilities",
                                   return_value=caps),
-                mock.patch.object(
-                    hardware, 'get_vcpu_pin_set',
-                    return_value=set([2, 3, 4, 5])),
                 mock.patch.object(host.Host, 'get_online_cpus',
                                   return_value=set(range(8))),
                 ):
@@ -3184,6 +3699,9 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                 self.assertEqual("strict", memnode.mode)
 
     def test_get_guest_config_numa_host_mempages_shared(self):
+        self.flags(cpu_shared_set='2-5', cpu_dedicated_set=None,
+                   group='compute')
+
         instance_topology = objects.InstanceNUMATopology(
             cells=[
                 objects.InstanceNUMACell(
@@ -3222,11 +3740,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                                   return_value=True),
                 mock.patch.object(host.Host, "get_capabilities",
                                   return_value=caps),
-                mock.patch.object(
-                    hardware, 'get_vcpu_pin_set',
-                    return_value=set([2, 3, 4, 5])),
                 mock.patch.object(host.Host, 'get_online_cpus',
-                                  return_value=set(range(8))),
+                                  return_value=set([2, 3, 4, 5])),
                 ):
             cfg = drvr._get_guest_config(instance_ref, [],
                                          image_meta, disk_info)
@@ -3257,13 +3772,20 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             self.assertEqual(set([2, 3, 4, 5]), cfg.cputune.emulatorpin.cpuset)
 
     def test_get_guest_config_numa_host_instance_cpu_pinning_realtime(self):
+        self.flags(cpu_shared_set=None, cpu_dedicated_set='4-7',
+                   group='compute')
+
         instance_topology = objects.InstanceNUMATopology(
             cells=[
                 objects.InstanceNUMACell(
                     id=2, cpuset=set([0, 1]),
+                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                    cpu_pinning={0: 4, 1: 5},
                     memory=1024, pagesize=2048),
                 objects.InstanceNUMACell(
                     id=3, cpuset=set([2, 3]),
+                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                    cpu_pinning={2: 6, 3: 7},
                     memory=1024, pagesize=2048)])
         instance_ref = objects.Instance(**self.test_instance)
         instance_ref.numa_topology = instance_topology
@@ -3271,6 +3793,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         flavor = objects.Flavor(memory_mb=2048, vcpus=4, root_gb=496,
                                 ephemeral_gb=8128, swap=33550336, name='fake',
                                 extra_specs={
+                                    "hw:numa_nodes": "2",
                                     "hw:cpu_realtime": "yes",
                                     "hw:cpu_policy": "dedicated",
                                     "hw:cpu_realtime_mask": "^0-1"
@@ -3299,9 +3822,6 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                                   return_value=True),
                 mock.patch.object(host.Host, "get_capabilities",
                                   return_value=caps),
-                mock.patch.object(
-                    hardware, 'get_vcpu_pin_set',
-                    return_value=set([4, 5, 6, 7])),
                 mock.patch.object(host.Host, 'get_online_cpus',
                                   return_value=set(range(8))),
                 ):
@@ -3333,12 +3853,10 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             self.assertEqual(1, len(cfg.cputune.vcpusched))
             self.assertEqual("fifo", cfg.cputune.vcpusched[0].scheduler)
 
-            # Ensure vCPUs 0-1 are pinned on host CPUs 4-5 and 2-3 are
-            # set on host CPUs 6-7 according the realtime mask ^0-1
-            self.assertEqual(set([4, 5]), cfg.cputune.vcpupin[0].cpuset)
-            self.assertEqual(set([4, 5]), cfg.cputune.vcpupin[1].cpuset)
-            self.assertEqual(set([6, 7]), cfg.cputune.vcpupin[2].cpuset)
-            self.assertEqual(set([6, 7]), cfg.cputune.vcpupin[3].cpuset)
+            self.assertEqual(set([4]), cfg.cputune.vcpupin[0].cpuset)
+            self.assertEqual(set([5]), cfg.cputune.vcpupin[1].cpuset)
+            self.assertEqual(set([6]), cfg.cputune.vcpupin[2].cpuset)
+            self.assertEqual(set([7]), cfg.cputune.vcpupin[3].cpuset)
 
             # We ensure that emulator threads are pinned on host CPUs
             # 4-5 which are "normal" vCPUs
@@ -3349,6 +3867,9 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             self.assertEqual(set([2, 3]), cfg.cputune.vcpusched[0].vcpus)
 
     def test_get_guest_config_numa_host_instance_isolated_emulthreads(self):
+        self.flags(cpu_shared_set=None, cpu_dedicated_set='4-8',
+                   group='compute')
+
         instance_topology = objects.InstanceNUMATopology(
             emulator_threads_policy=(
                 fields.CPUEmulatorThreadsPolicy.ISOLATE),
@@ -3387,9 +3908,6 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                                   return_value=True),
                 mock.patch.object(host.Host, "get_capabilities",
                                   return_value=caps),
-                mock.patch.object(
-                    hardware, 'get_vcpu_pin_set',
-                    return_value=set([4, 5, 6, 7, 8])),
                 mock.patch.object(host.Host, 'get_online_cpus',
                                   return_value=set(range(10))),
                 ):
@@ -3404,7 +3922,9 @@ class LibvirtConnTestCase(test.NoDBTestCase,
 
     def test_get_guest_config_numa_host_instance_shared_emulthreads_err(
             self):
-        self.flags(cpu_shared_set="48-50", group="compute")
+        self.flags(cpu_shared_set='48-50', cpu_dedicated_set='4-8',
+                   group='compute')
+
         instance_topology = objects.InstanceNUMATopology(
             emulator_threads_policy=(
                 fields.CPUEmulatorThreadsPolicy.SHARE),
@@ -3443,9 +3963,6 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                                   return_value=True),
                 mock.patch.object(host.Host, "get_capabilities",
                                   return_value=caps),
-                mock.patch.object(
-                    hardware, 'get_vcpu_pin_set',
-                    return_value=set([4, 5, 6, 7, 8])),
                 mock.patch.object(host.Host, 'get_online_cpus',
                                   return_value=set(range(10))),
                 ):
@@ -3455,7 +3972,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
 
     def test_get_guest_config_numa_host_instance_shared_emulator_threads(
             self):
-        self.flags(cpu_shared_set="48-50", group="compute")
+        self.flags(cpu_shared_set='0,1', cpu_dedicated_set='2-7',
+                   group='compute')
         instance_topology = objects.InstanceNUMATopology(
             emulator_threads_policy=(
                 fields.CPUEmulatorThreadsPolicy.SHARE),
@@ -3464,13 +3982,13 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                     id=0, cpuset=set([0, 1]),
                     memory=1024, pagesize=2048,
                     cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
-                    cpu_pinning={0: 4, 1: 5},
+                    cpu_pinning={0: 2, 1: 3},
                     cpuset_reserved=set([6])),
                 objects.InstanceNUMACell(
                     id=1, cpuset=set([2, 3]),
                     memory=1024, pagesize=2048,
                     cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
-                    cpu_pinning={2: 7, 3: 8})])
+                    cpu_pinning={2: 4, 3: 5})])
 
         instance_ref = objects.Instance(**self.test_instance)
         instance_ref.numa_topology = instance_topology
@@ -3494,23 +4012,18 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                                   return_value=True),
                 mock.patch.object(host.Host, "get_capabilities",
                                   return_value=caps),
-                mock.patch.object(
-                    hardware, 'get_vcpu_pin_set',
-                    return_value=set([4, 5, 6, 7, 8])),
                 mock.patch.object(host.Host, 'get_online_cpus',
-                                  return_value=set(list(range(10)) +
-                                                   [48, 50])),
+                                  return_value=set(range(8))),
                 ):
             cfg = drvr._get_guest_config(instance_ref, [],
                                          image_meta, disk_info)
 
-            # cpu_shared_set is configured with [48, 49, 50] but only
-            # [48, 50] are online.
-            self.assertEqual(set([48, 50]), cfg.cputune.emulatorpin.cpuset)
-            self.assertEqual(set([4]), cfg.cputune.vcpupin[0].cpuset)
-            self.assertEqual(set([5]), cfg.cputune.vcpupin[1].cpuset)
-            self.assertEqual(set([7]), cfg.cputune.vcpupin[2].cpuset)
-            self.assertEqual(set([8]), cfg.cputune.vcpupin[3].cpuset)
+            # emulator threads should be mapped to cores from 'cpu_shared_set'
+            self.assertEqual(set([0, 1]), cfg.cputune.emulatorpin.cpuset)
+            self.assertEqual(set([2]), cfg.cputune.vcpupin[0].cpuset)
+            self.assertEqual(set([3]), cfg.cputune.vcpupin[1].cpuset)
+            self.assertEqual(set([4]), cfg.cputune.vcpupin[2].cpuset)
+            self.assertEqual(set([5]), cfg.cputune.vcpupin[3].cpuset)
 
     def test_get_cpu_numa_config_from_instance(self):
         topology = objects.InstanceNUMATopology(cells=[
@@ -3548,18 +4061,21 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             objects.NUMACell(
                 id=0,
                 cpuset=set([1, 2]),
+                pcpuset=set(),
                 siblings=[set([1]), set([2])],
                 memory=1024,
                 mempages=[]),
             objects.NUMACell(
                 id=1,
                 cpuset=set([3, 4]),
+                pcpuset=set(),
                 siblings=[set([3]), set([4])],
                 memory=1024,
                 mempages=[]),
             objects.NUMACell(
                 id=16,
                 cpuset=set([5, 6]),
+                pcpuset=set(),
                 siblings=[set([5]), set([6])],
                 memory=1024,
                 mempages=[])])
@@ -3568,7 +4084,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         with test.nested(
                 mock.patch.object(drvr, "_get_host_numa_topology",
                                   return_value=host_topology),
-                mock.patch.object(hardware, 'get_vcpu_pin_set',
+                mock.patch.object(hardware, "get_cpu_shared_set",
                                   return_value=[1, 2, 3, 4, 5, 6])):
             guest_numa_config = drvr._get_guest_numa_config(
                 instance_topology, flavor={}, image_meta={})
@@ -5822,6 +6338,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         self.assertEqual(cfg.devices[5].rate_period, 2)
 
     @mock.patch('nova.virt.libvirt.driver.os.path.exists')
+    @test.patch_exists(SEV_KERNEL_PARAM_FILE, False)
     def test_get_guest_config_with_rng_backend(self, mock_path):
         self.flags(virt_type='kvm',
                    rng_dev_path='/dev/hw_rng',
@@ -6500,6 +7017,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                        "_get_guest_storage_config")
     @mock.patch.object(libvirt_driver.LibvirtDriver, "_has_numa_support")
     @mock.patch('os.path.exists', return_value=True)
+    @test.patch_exists(SEV_KERNEL_PARAM_FILE, False)
     def test_get_guest_config_aarch64(self, mock_path_exists,
                                       mock_numa, mock_storage, mock_get_arch):
         def get_host_capabilities_stub(self):
@@ -6554,6 +7072,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                        "_get_guest_storage_config")
     @mock.patch.object(libvirt_driver.LibvirtDriver, "_has_numa_support")
     @mock.patch('os.path.exists', return_value=True)
+    @test.patch_exists(SEV_KERNEL_PARAM_FILE, False)
     def test_get_guest_config_aarch64_with_graphics(self, mock_path_exists,
                                                     mock_numa, mock_storage,
                                                     mock_get_arch):
@@ -6592,25 +7111,32 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         self.assertTrue(usbhost_exists)
         self.assertTrue(keyboard_exists)
 
-    def test_get_guest_config_machine_type_through_image_meta(self):
-        self.flags(virt_type="kvm",
-                   group='libvirt')
+    def _get_guest_config_machine_type_through_image_meta(self, mach_type):
+        self.flags(virt_type="kvm", group='libvirt')
 
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
         instance_ref = objects.Instance(**self.test_instance)
         image_meta = objects.ImageMeta.from_dict({
             "disk_format": "raw",
-            "properties": {"hw_machine_type":
-                           "fake_machine_type"}})
+            "properties": {"hw_machine_type": mach_type}})
 
         disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
                                             instance_ref,
                                             image_meta)
 
-        cfg = drvr._get_guest_config(instance_ref,
-                                     _fake_network_info(self, 1),
-                                     image_meta, disk_info)
+        return drvr._get_guest_config(instance_ref,
+                                      _fake_network_info(self, 1),
+                                      image_meta, disk_info)
+
+    def test_get_guest_config_machine_type_through_image_meta(self):
+        cfg = self._get_guest_config_machine_type_through_image_meta(
+            "fake_machine_type")
         self.assertEqual(cfg.os_mach_type, "fake_machine_type")
+
+    def test_get_guest_config_machine_type_through_image_meta_sev(self):
+        fake_q35 = "fake-q35-2.11"
+        cfg = self._get_guest_config_machine_type_through_image_meta(fake_q35)
+        self.assertEqual(cfg.os_mach_type, fake_q35)
 
     def test_get_guest_config_machine_type_from_config(self):
         self.flags(virt_type='kvm', group='libvirt')
@@ -6641,10 +7167,66 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                       </cpu>
                    """
 
+        def fake_getCPUModelNames(arch):
+            return [
+                '486',
+                'pentium',
+                'pentium2',
+                'pentium3',
+                'pentiumpro',
+                'coreduo',
+                'n270',
+                'core2duo',
+                'qemu32',
+                'kvm32',
+                'cpu64-rhel5',
+                'cpu64-rhel6',
+                'qemu64',
+                'kvm64',
+                'Conroe',
+                'Penryn',
+                'Nehalem',
+                'Nehalem-IBRS',
+                'Westmere',
+                'Westmere-IBRS',
+                'SandyBridge',
+                'SandyBridge-IBRS',
+                'IvyBridge',
+                'IvyBridge-IBRS',
+                'Haswell-noTSX',
+                'Haswell-noTSX-IBRS',
+                'Haswell',
+                'Haswell-IBRS',
+                'Broadwell-noTSX',
+                'Broadwell-noTSX-IBRS',
+                'Broadwell',
+                'Broadwell-IBRS',
+                'Skylake-Client',
+                'Skylake-Client-IBRS',
+                'Skylake-Server',
+                'Skylake-Server-IBRS',
+                'Cascadelake-Server',
+                'Icelake-Client',
+                'Icelake-Server',
+                'athlon',
+                'phenom',
+                'Opteron_G1',
+                'Opteron_G2',
+                'Opteron_G3',
+                'Opteron_G4',
+                'Opteron_G5',
+                'EPYC',
+                'EPYC-IBPB']
+
+        def fake_getCPUMap():
+            return (2, [True, True], 2)
+
         # Make sure the host arch is mocked as x86_64
         self.create_fake_libvirt_mock(getCapabilities=fake_getCapabilities,
                                       baselineCPU=fake_baselineCPU,
-                                      getVersion=lambda: 1005001)
+                                      getCPUModelNames=fake_getCPUModelNames,
+                                      getVersion=lambda: 1005001,
+                                      getCPUMap=fake_getCPUMap)
 
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
         instance_ref = objects.Instance(**self.test_instance)
@@ -6870,7 +7452,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
 
         self.flags(cpu_mode="custom",
-                   cpu_model="Penryn",
+                   cpu_models=["Penryn"],
                    group='libvirt')
         disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
                                             instance_ref,
@@ -6894,7 +7476,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
 
         self.flags(cpu_mode="custom",
-                   cpu_model="IvyBridge",
+                   cpu_models=["IvyBridge"],
                    cpu_model_extra_flags="pcid",
                    group='libvirt')
         disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
@@ -6921,7 +7503,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
 
         self.flags(cpu_mode="custom",
-                   cpu_model="IvyBridge",
+                   cpu_models=["IvyBridge"],
                    cpu_model_extra_flags="PCID",
                    group='libvirt')
         disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
@@ -6950,7 +7532,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
 
         self.flags(cpu_mode="custom",
-                   cpu_model="IvyBridge",
+                   cpu_models=["IvyBridge"],
                    cpu_model_extra_flags=['pcid', 'vmx'],
                    group='libvirt')
         disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
@@ -6970,6 +7552,188 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         self.assertEqual(conf.cpu.cores, 1)
         self.assertEqual(conf.cpu.threads, 1)
         mock_warn.assert_not_called()
+
+    def test_get_guest_cpu_config_custom_upper_cpu_model(self):
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        instance_ref = objects.Instance(**self.test_instance)
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
+        disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
+                                            instance_ref,
+                                            image_meta)
+
+        self.flags(cpu_mode="custom",
+                   cpu_models=["PENRYN", "IVYBRIDGE"],
+                   group="libvirt")
+        conf = drvr._get_guest_config(instance_ref,
+                                      _fake_network_info(self, 1),
+                                      image_meta, disk_info)
+        self.assertEqual(conf.cpu.mode, "custom")
+        self.assertEqual(conf.cpu.model, "Penryn")
+        self.assertEqual(conf.cpu.sockets, instance_ref.flavor.vcpus)
+        self.assertEqual(conf.cpu.cores, 1)
+        self.assertEqual(conf.cpu.threads, 1)
+
+    def test_get_guest_cpu_config_custom_without_traits(self):
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        instance_ref = objects.Instance(**self.test_instance)
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
+        disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
+                                            instance_ref,
+                                            image_meta)
+
+        self.flags(cpu_mode="custom",
+                   cpu_models=["SandyBridge", "IvyBridge"],
+                   group="libvirt")
+        conf = drvr._get_guest_config(instance_ref,
+                                      _fake_network_info(self, 1),
+                                      image_meta, disk_info)
+        self.assertEqual(conf.cpu.mode, "custom")
+        self.assertEqual(conf.cpu.model, "SandyBridge")
+        self.assertEqual(conf.cpu.sockets, instance_ref.flavor.vcpus)
+        self.assertEqual(conf.cpu.cores, 1)
+        self.assertEqual(conf.cpu.threads, 1)
+
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.baselineCPU')
+    def test_get_guest_cpu_config_custom_with_traits(self, mocked_baseline):
+        mocked_baseline.side_effect = ('', _fake_qemu64_cpu_feature,
+                                       _fake_broadwell_cpu_feature)
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+
+        extra_specs = {
+            "trait:HW_CPU_X86_AVX": "required",
+            "trait:HW_CPU_X86_AVX2": "required"
+        }
+        test_instance = _create_test_instance()
+        test_instance["flavor"]["extra_specs"] = extra_specs
+        instance_ref = objects.Instance(**test_instance)
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
+        disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
+                                            instance_ref,
+                                            image_meta)
+
+        self.flags(cpu_mode="custom",
+                   cpu_models=["qemu64", "Broadwell-noTSX"],
+                   group="libvirt")
+        conf = drvr._get_guest_config(instance_ref,
+                                      _fake_network_info(self, 1),
+                                      image_meta, disk_info)
+        self.assertEqual(conf.cpu.mode, "custom")
+        self.assertEqual(conf.cpu.model, "Broadwell-noTSX")
+        self.assertEqual(conf.cpu.sockets, instance_ref.flavor.vcpus)
+        self.assertEqual(conf.cpu.cores, 1)
+        self.assertEqual(conf.cpu.threads, 1)
+
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.baselineCPU')
+    def test_get_guest_cpu_config_custom_with_traits_multi_models(self,
+            mocked_baseline):
+        mocked_baseline.side_effect = ('', _fake_qemu64_cpu_feature,
+                                       _fake_broadwell_cpu_feature)
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+
+        extra_specs = {
+            "trait:HW_CPU_X86_SSE41": "required",
+            "trait:HW_CPU_X86_SSE42": "required"
+        }
+        test_instance = _create_test_instance()
+        test_instance["flavor"]["extra_specs"] = extra_specs
+        instance_ref = objects.Instance(**test_instance)
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
+        disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
+                                            instance_ref,
+                                            image_meta)
+
+        self.flags(cpu_mode="custom",
+                   cpu_models=["qemu64", "SandyBridge", "Broadwell-noTSX"],
+                   group="libvirt")
+        conf = drvr._get_guest_config(instance_ref,
+                                      _fake_network_info(self, 1),
+                                      image_meta, disk_info)
+        self.assertEqual(conf.cpu.mode, "custom")
+        self.assertEqual(conf.cpu.model, "SandyBridge")
+        self.assertEqual(conf.cpu.sockets, instance_ref.flavor.vcpus)
+        self.assertEqual(conf.cpu.cores, 1)
+        self.assertEqual(conf.cpu.threads, 1)
+
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.baselineCPU')
+    def test_get_guest_cpu_config_custom_with_traits_none_model(self,
+            mocked_baseline):
+        mocked_baseline.side_effect = ('', _fake_qemu64_cpu_feature,
+                                       _fake_sandy_bridge_cpu_feature)
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+
+        extra_specs = {
+            "trait:HW_CPU_X86_AVX": "required",
+            "trait:HW_CPU_X86_AVX2": "required"
+        }
+        test_instance = _create_test_instance()
+        test_instance["flavor"]["extra_specs"] = extra_specs
+        instance_ref = objects.Instance(**test_instance)
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
+        disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
+                                            instance_ref,
+                                            image_meta)
+
+        self.flags(cpu_mode="custom",
+                   cpu_models=["qemu64", "SandyBridge"],
+                   group="libvirt")
+        self.assertRaises(exception.InvalidCPUInfo,
+                          drvr._get_guest_config,
+                          instance_ref,
+                          _fake_network_info(self, 1),
+                          image_meta,
+                          disk_info)
+
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.baselineCPU')
+    def test_get_guest_cpu_config_custom_with_progressive_model(self,
+            mocked_baseline):
+        """Test progressive models
+
+        If require two flags: flag1 and flag2, and there are three sorted
+        CPU models: [model1, model2, model3], model1 only has flag1, model2
+        only has flag2, model3 both have flag1 and flag2.
+
+        Test that the driver will select model3 but not model2.
+        """
+        # Assume that qemu64 have flag avx2 for the test.
+        fake_qemu64_cpu_feature_with_avx2 = _fake_qemu64_cpu_feature.split(
+            '\n')
+        fake_qemu64_cpu_feature_with_avx2.insert(
+            -2, "  <feature policy='require' name='avx2'/>")
+        fake_qemu64_cpu_feature_with_avx2 = "\n".join(
+            fake_qemu64_cpu_feature_with_avx2)
+
+        mocked_baseline.side_effect = ('', fake_qemu64_cpu_feature_with_avx2,
+                                       _fake_sandy_bridge_cpu_feature,
+                                       _fake_broadwell_cpu_feature)
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+
+        extra_specs = {
+            "trait:HW_CPU_X86_AVX": "required",
+            "trait:HW_CPU_X86_AVX2": "required"
+        }
+        test_instance = _create_test_instance()
+        test_instance["flavor"]["extra_specs"] = extra_specs
+        instance_ref = objects.Instance(**test_instance)
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
+        disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
+                                            instance_ref,
+                                            image_meta)
+
+        self.flags(cpu_mode="custom",
+                   cpu_models=["qemu64", "SandyBridge", "Broadwell-noTSX"],
+                   group="libvirt")
+        conf = drvr._get_guest_config(instance_ref,
+                                      _fake_network_info(self, 1),
+                                      image_meta, disk_info)
+        self.assertEqual(conf.cpu.mode, "custom")
+        self.assertEqual(conf.cpu.model, "Broadwell-noTSX")
+        self.assertEqual(conf.cpu.sockets, instance_ref.flavor.vcpus)
+        self.assertEqual(conf.cpu.cores, 1)
+        self.assertEqual(conf.cpu.threads, 1)
 
     @mock.patch.object(libvirt_driver.LOG, 'warning')
     def test_get_guest_cpu_config_host_model_with_extra_flags(self,
@@ -7441,42 +8205,120 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         mock_list.assert_called_with(only_guests=True, only_running=False)
 
     @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus',
-                return_value=None)
-    @mock.patch('nova.virt.libvirt.host.Host.get_cpu_count',
-                return_value=4)
-    def test_get_host_vcpus_is_empty(self, get_cpu_count, get_online_cpus):
+                return_value=set([0, 1, 2, 3]))
+    def test_get_pcpu_available(self, get_online_cpus):
+        """Test what happens when the '[compute] cpu_dedicated_set' config
+        option is set.
+        """
+        self.flags(vcpu_pin_set=None)
+        self.flags(cpu_dedicated_set='2-3', cpu_shared_set=None,
+                   group='compute')
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
-        self.flags(vcpu_pin_set="")
-        vcpus = drvr._get_vcpu_total()
-        self.assertEqual(4, vcpus)
+        pcpus = drvr._get_pcpu_available()
+        self.assertEqual(set([2, 3]), pcpus)
 
-    @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus')
-    def test_get_host_vcpus(self, get_online_cpus):
+    @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus',
+                return_value=set([0, 1, 2, 3]))
+    def test_get_pcpu_available__cpu_dedicated_set_unset(
+            self, get_online_cpus):
+        """Test what happens when the '[compute] cpu_dedicated_set' config
+        option is not set.
+        """
+        self.flags(vcpu_pin_set=None)
+        self.flags(cpu_dedicated_set=None, cpu_shared_set=None,
+                   group='compute')
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
-        self.flags(vcpu_pin_set="4-5")
-        get_online_cpus.return_value = set([4, 5, 6])
-        expected_vcpus = 2
-        vcpus = drvr._get_vcpu_total()
-        self.assertEqual(expected_vcpus, vcpus)
+        pcpus = drvr._get_pcpu_available()
+        self.assertEqual(set([]), pcpus)
 
-    @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus')
-    def test_get_host_vcpus_out_of_range(self, get_online_cpus):
+    @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus',
+                return_value=set([4, 5]))
+    def test_get_pcpu_available__cpu_dedicated_set_invalid(self,
+            get_online_cpus):
+        """Test what happens when the '[compute] cpu_dedicated_set' config
+        option is set but it's invalid.
+        """
+        self.flags(vcpu_pin_set=None)
+        self.flags(cpu_dedicated_set='4-6', cpu_shared_set=None,
+                   group='compute')
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
-        self.flags(vcpu_pin_set="4-6")
-        get_online_cpus.return_value = set([4, 5])
-        self.assertRaises(exception.Invalid, drvr._get_vcpu_total)
+        self.assertRaises(exception.Invalid, drvr._get_pcpu_available)
 
-    @mock.patch('nova.virt.libvirt.host.Host.get_cpu_count')
-    def test_get_host_vcpus_after_hotplug(self, get_cpu_count):
+    @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus',
+                return_value=set([0, 1, 2, 3]))
+    def test_get_vcpu_available(self, get_online_cpus):
+        """Test what happens when neither the '[compute] cpu_shared_set' or
+        legacy 'vcpu_pin_set' config options are set.
+        """
+        self.flags(vcpu_pin_set=None)
+        self.flags(cpu_shared_set=None, cpu_dedicated_set=None,
+                   group='compute')
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
-        get_cpu_count.return_value = 2
-        expected_vcpus = 2
-        vcpus = drvr._get_vcpu_total()
-        self.assertEqual(expected_vcpus, vcpus)
-        get_cpu_count.return_value = 3
-        expected_vcpus = 3
-        vcpus = drvr._get_vcpu_total()
-        self.assertEqual(expected_vcpus, vcpus)
+        vcpus = drvr._get_vcpu_available()
+        self.assertEqual(set([0, 1, 2, 3]), vcpus)
+
+    @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus',
+                return_value=set([4, 5, 6, 7]))
+    def test_get_vcpu_available__with_cpu_shared_set(self, get_online_cpus):
+        """Test what happens when the '[compute] cpu_shared_set' config option
+        is set.
+        """
+        self.flags(vcpu_pin_set=None)
+        self.flags(cpu_shared_set='4-5', cpu_dedicated_set=None,
+                   group='compute')
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        vcpus = drvr._get_vcpu_available()
+        self.assertEqual(set([4, 5]), vcpus)
+
+    @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus',
+                return_value=set([4, 5, 6, 7]))
+    def test_get_vcpu_available__with_vcpu_pin_set(self, get_online_cpus):
+        """Test what happens when the legacy 'vcpu_pin_set' config option is
+        set.
+        """
+        self.flags(vcpu_pin_set='4-5')
+        self.flags(cpu_shared_set=None, cpu_dedicated_set=None,
+                   group='compute')
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        vcpus = drvr._get_vcpu_available()
+        self.assertEqual(set([4, 5]), vcpus)
+
+    @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus',
+                return_value=set([4, 5, 6, 7]))
+    def test_get_vcpu_available__with_cpu_dedicated_set(self, get_online_cpus):
+        """Test what happens when the '[compute] cpu_dedicated_set' config
+        option is set.
+        """
+        self.flags(vcpu_pin_set=None)
+        self.flags(cpu_shared_set=None, cpu_dedicated_set='4-5',
+                   group='compute')
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        vcpus = drvr._get_vcpu_available()
+        self.assertEqual(set([]), vcpus)
+
+    @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus',
+                return_value=set([4, 5]))
+    def test_get_vcpu_available__cpu_shared_set_invalid(self, get_online_cpus):
+        """Test what happens when the '[compute] cpu_shared_set' config option
+        is set but it's invalid.
+        """
+        self.flags(vcpu_pin_set=None)
+        self.flags(cpu_shared_set='4-6', cpu_dedicated_set=None,
+                   group='compute')
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        self.assertRaises(exception.Invalid, drvr._get_vcpu_available)
+
+    @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus',
+                return_value=set([4, 5]))
+    def test_get_vcpu_available__vcpu_pin_set_invalid(self, get_online_cpus):
+        """Test what happens when the legacy 'vcpu_pin_set' config option is
+        set but it's invalid.
+        """
+        self.flags(vcpu_pin_set='4-6')
+        self.flags(cpu_shared_set=None, cpu_dedicated_set=None,
+                   group='compute')
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        self.assertRaises(exception.Invalid, drvr._get_vcpu_available)
 
     @mock.patch.object(host.Host, "has_min_version", return_value=True)
     def test_quiesce(self, mock_has_min_version):
@@ -8664,6 +9506,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         check = [
             (lambda t: t.find('.').get('type'), 'lxc'),
             (lambda t: t.find('./os/type').text, 'exe'),
+            (lambda t: t.find("./os/initenv[@name='product_name']").text,
+                    'OpenStack Nova'),
             (lambda t: t.find('./devices/filesystem/target').get('dir'), '/')]
 
         for i, (check, expected_result) in enumerate(check):
@@ -9238,6 +10082,34 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                          result.obj_to_primitive()['nova_object.data'])
 
     @mock.patch.object(libvirt_driver.LibvirtDriver,
+                       '_create_shared_storage_test_file',
+                       return_value='fake')
+    @mock.patch.object(libvirt_driver.LibvirtDriver, '_compare_cpu')
+    def test_check_can_live_migrate_dest_numa_lm(
+            self, mock_cpu, mock_test_file):
+        instance_ref = objects.Instance(**self.test_instance)
+        instance_ref.numa_topology = objects.InstanceNUMATopology(
+            cells=[objects.InstanceNUMACell()])
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        compute_info = {'cpu_info': 'asdf', 'disk_available_least': 1}
+        result = drvr.check_can_live_migrate_destination(
+            self.context, instance_ref, compute_info, compute_info)
+        self.assertTrue(result.dst_supports_numa_live_migration)
+
+    @mock.patch.object(libvirt_driver.LibvirtDriver,
+                       '_create_shared_storage_test_file',
+                       return_value='fake')
+    @mock.patch.object(libvirt_driver.LibvirtDriver, '_compare_cpu')
+    def test_check_can_live_migrate_dest_numa_lm_no_instance_numa(
+            self, mock_cpu, mock_test_file):
+        instance_ref = objects.Instance(**self.test_instance)
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        compute_info = {'cpu_info': 'asdf', 'disk_available_least': 1}
+        result = drvr.check_can_live_migrate_destination(
+            self.context, instance_ref, compute_info, compute_info)
+        self.assertNotIn('dst_supports_numa_live_migration', result)
+
+    @mock.patch.object(libvirt_driver.LibvirtDriver,
         '_create_shared_storage_test_file')
     @mock.patch.object(fakelibvirt.Connection, 'compareCPU')
     def test_check_can_live_migrate_dest_no_instance_cpu_info(
@@ -9382,7 +10254,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         compute_info = {'cpu_info': 'asdf', 'disk_available_least': 1}
 
         mock_cpu.side_effect = exception.InvalidCPUInfo(reason='foo')
-        self.assertRaises(exception.InvalidCPUInfo,
+        self.assertRaises(exception.MigrationPreCheckError,
                           drvr.check_can_live_migrate_destination,
                           self.context, instance_ref,
                           compute_info, compute_info, False)
@@ -9459,7 +10331,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         instance = objects.Instance(**self.test_instance)
         mock_compare.side_effect = fakelibvirt.libvirtError('cpu')
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
-        self.assertRaises(exception.MigrationPreCheckError,
+        self.assertRaises(exception.InvalidCPUInfo,
                           conn._compare_cpu, None,
                           jsonutils.dumps(_fake_cpu_info),
                           instance)
@@ -9511,8 +10383,12 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                                       is_shared_block_storage=False,
                                       is_shared_instance_path=False,
                                       disk_available_mb=1024,
-                                      exception=None):
+                                      exception=None,
+                                      numa_lm=True):
         instance = objects.Instance(**self.test_instance)
+        if numa_lm:
+            instance.numa_topology = objects.InstanceNUMATopology(cells=[
+                objects.InstanceNUMACell()])
         dest_check_data = objects.LibvirtLiveMigrateData(
             filename='file',
             image_type='default',
@@ -9530,6 +10406,10 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         else:
             ret = drvr.check_can_live_migrate_source(self.context, instance,
                                                      dest_check_data)
+            if numa_lm:
+                self.assertTrue(ret.src_supports_numa_live_migration)
+            else:
+                self.assertNotIn('src_supports_numa_live_migration', ret)
 
         mock_is_shared.assert_called_once_with(instance, dest_check_data, None)
         mock_check_shared.assert_called_once_with('file', instance)
@@ -9561,6 +10441,12 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         mock_assert_dest.assert_called_once_with(
             self.context, instance, dest_check_data.disk_available_mb,
             False, None)
+
+    def test_check_can_live_migrate_source_numa_lm(self):
+        self._test_can_live_migrate_source(is_shared_block_storage=True,
+                                           numa_lm=True)
+        self._test_can_live_migrate_source(is_shared_block_storage=True,
+                                           numa_lm=False)
 
     def test_check_can_live_migrate_source_shared_block_storage(self):
         self._test_can_live_migrate_source(is_shared_block_storage=True)
@@ -12745,6 +13631,33 @@ class LibvirtConnTestCase(test.NoDBTestCase,
 
         _test()
 
+    @mock.patch.object(libvirt_driver.LibvirtDriver, '_disconnect_volume')
+    @mock.patch.object(driver, 'block_device_info_get_mapping')
+    def test_post_live_migration_exception_swallowed(self, mock_get_bdm,
+                                                     mock_disconnect_volume):
+        vol_1_conn_info = {'data': {'volume_id': uuids.vol_1_id}}
+        vol_2_conn_info = {'data': {'volume_id': uuids.vol_2_id}}
+        mock_get_bdm.return_value = [{'connection_info': vol_1_conn_info},
+                                     {'connection_info': vol_2_conn_info}]
+
+        # Raise an exception with the first call to disconnect_volume
+        mock_disconnect_volume.side_effect = [test.TestingException, None]
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        drvr.post_live_migration(mock.sentinel.ctxt, mock.sentinel.instance,
+                                 mock.sentinel.bdi)
+
+        # Assert disconnect_volume is called twice despite the exception
+        mock_disconnect_volume.assert_has_calls([
+            mock.call(mock.sentinel.ctxt, vol_1_conn_info,
+                      mock.sentinel.instance),
+            mock.call(mock.sentinel.ctxt, vol_2_conn_info,
+                      mock.sentinel.instance)])
+
+        # Assert that we log the failure to disconnect the first volume
+        self.assertIn("Ignoring exception while attempting to disconnect "
+                      "volume %s" % uuids.vol_1_id, self.stdlog.logger.output)
+
     @mock.patch('os.stat')
     @mock.patch('os.path.getsize')
     @mock.patch('nova.virt.disk.api.get_disk_info')
@@ -12885,14 +13798,70 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                       </cpu>
                    """
 
+        def fake_getCPUModelNames(arch):
+            return [
+                '486',
+                'pentium',
+                'pentium2',
+                'pentium3',
+                'pentiumpro',
+                'coreduo',
+                'n270',
+                'core2duo',
+                'qemu32',
+                'kvm32',
+                'cpu64-rhel5',
+                'cpu64-rhel6',
+                'qemu64',
+                'kvm64',
+                'Conroe',
+                'Penryn',
+                'Nehalem',
+                'Nehalem-IBRS',
+                'Westmere',
+                'Westmere-IBRS',
+                'SandyBridge',
+                'SandyBridge-IBRS',
+                'IvyBridge',
+                'IvyBridge-IBRS',
+                'Haswell-noTSX',
+                'Haswell-noTSX-IBRS',
+                'Haswell',
+                'Haswell-IBRS',
+                'Broadwell-noTSX',
+                'Broadwell-noTSX-IBRS',
+                'Broadwell',
+                'Broadwell-IBRS',
+                'Skylake-Client',
+                'Skylake-Client-IBRS',
+                'Skylake-Server',
+                'Skylake-Server-IBRS',
+                'Cascadelake-Server',
+                'Icelake-Client',
+                'Icelake-Server',
+                'athlon',
+                'phenom',
+                'Opteron_G1',
+                'Opteron_G2',
+                'Opteron_G3',
+                'Opteron_G4',
+                'Opteron_G5',
+                'EPYC',
+                'EPYC-IBPB']
+
+        def fake_getCPUMap():
+            return (2, [True, True], 2)
+
         # _fake_network_info must be called before create_fake_libvirt_mock(),
         # as _fake_network_info calls importutils.import_class() and
         # create_fake_libvirt_mock() mocks importutils.import_class().
         network_info = _fake_network_info(self, 1)
         self.create_fake_libvirt_mock(getLibVersion=fake_getLibVersion,
                                       getCapabilities=fake_getCapabilities,
+                                      getCPUModelNames=fake_getCPUModelNames,
                                       getVersion=lambda: 1005001,
-                                      baselineCPU=fake_baselineCPU)
+                                      baselineCPU=fake_baselineCPU,
+                                      getCPUMap=fake_getCPUMap)
 
         instance = objects.Instance(**self.test_instance)
         instance.image_ref = uuids.image_ref
@@ -14102,7 +15071,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                                       mock_unplug_vifs):
         instance = fake_instance.fake_instance_obj(
             None, name='instancename', id=1,
-            uuid='875a8070-d0b9-4949-8b31-104d125c9a64')
+            uuid='875a8070-d0b9-4949-8b31-104d125c9a64',
+            expected_attrs=['resources'])
 
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         drvr.destroy(self.context, instance, [], None, False)
@@ -15599,7 +16569,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                 ' virNodeNumOfDevices',
                 error_code=fakelibvirt.VIR_ERR_NO_SUPPORT)
 
-        with mock.patch.object(drvr._conn, 'listDevices',
+        with mock.patch.object(host.Host, '_list_devices',
                                side_effect=not_supported_exc):
             self.assertEqual('[]', drvr._get_pci_passthrough_devices())
 
@@ -15613,7 +16583,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             'other exc',
             error_code=fakelibvirt.VIR_ERR_NO_DOMAIN)
 
-        with mock.patch.object(drvr._conn, 'listDevices',
+        with mock.patch.object(host.Host, '_list_devices',
                                side_effect=other_exc):
             self.assertRaises(fakelibvirt.libvirtError,
                               drvr._get_pci_passthrough_devices)
@@ -15682,9 +16652,62 @@ class LibvirtConnTestCase(test.NoDBTestCase,
             mock.call('0000:04:11.7', False)
         ])
 
-    # TODO(stephenfin): This only has one caller. Flatten it and remove the
-    # 'mempages=False' branches or add the missing test
-    def _test_get_host_numa_topology(self, mempages):
+    @mock.patch.object(host.Host, 'has_min_version',
+                       new=mock.Mock(return_value=True))
+    def _test_get_host_numa_topology(self):
+        nodes = 4
+        sockets = 1
+        cores = 1
+        threads = 2
+        total_cores = nodes * sockets * cores * threads
+
+        caps = vconfig.LibvirtConfigCaps()
+        caps.host = vconfig.LibvirtConfigCapsHost()
+        caps.host.cpu = vconfig.LibvirtConfigCPU()
+        caps.host.cpu.arch = fields.Architecture.X86_64
+        caps.host.topology = fakelibvirt.NUMATopology(
+            cpu_nodes=nodes, cpu_sockets=sockets, cpu_cores=cores,
+            cpu_threads=threads)
+        for i, cell in enumerate(caps.host.topology.cells):
+            cell.mempages = fakelibvirt.create_mempages(
+                [(4, 1024 * i), (2048, i)])
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+
+        with test.nested(
+                mock.patch.object(host.Host, 'get_capabilities',
+                                  return_value=caps),
+                mock.patch.object(host.Host, 'get_online_cpus',
+                                  return_value=set(range(total_cores))),
+                ):
+            got_topo = drvr._get_host_numa_topology()
+
+            # there should be varying amounts of mempages for each cell
+            self.assertEqual(4, got_topo.cells[0].mempages[0].size_kb)
+            self.assertEqual(0, got_topo.cells[0].mempages[0].total)
+            self.assertEqual(2048, got_topo.cells[0].mempages[1].size_kb)
+            self.assertEqual(0, got_topo.cells[0].mempages[1].total)
+            self.assertEqual(4, got_topo.cells[1].mempages[0].size_kb)
+            self.assertEqual(1024, got_topo.cells[1].mempages[0].total)
+            self.assertEqual(2048, got_topo.cells[1].mempages[1].size_kb)
+            self.assertEqual(1, got_topo.cells[1].mempages[1].total)
+
+            # none of the topologies should have pinned CPUs yet
+            self.assertEqual(set([]), got_topo.cells[0].pinned_cpus)
+            self.assertEqual(set([]), got_topo.cells[1].pinned_cpus)
+            self.assertEqual(set([]), got_topo.cells[2].pinned_cpus)
+            self.assertEqual(set([]), got_topo.cells[3].pinned_cpus)
+
+            # return to caller for further checks
+            return got_topo
+
+    def test_get_host_numa_topology(self):
+        """Check that the host NUMA topology is generated correctly for a
+        fairly complex configuration.
+        """
+        self.flags(cpu_shared_set='0-1', cpu_dedicated_set='2-6',
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
         self.flags(physnets=['foo', 'bar', 'baz'], group='neutron')
         # we need to call the below again to ensure the updated 'physnets'
         # value is read and the new groups created
@@ -15694,68 +16717,122 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         self.flags(numa_nodes=[3], group='neutron_physnet_bar')
         self.flags(numa_nodes=[1, 2, 3], group='neutron_physnet_baz')
 
-        caps = vconfig.LibvirtConfigCaps()
-        caps.host = vconfig.LibvirtConfigCapsHost()
-        caps.host.cpu = vconfig.LibvirtConfigCPU()
-        caps.host.cpu.arch = fields.Architecture.X86_64
-        caps.host.topology = fakelibvirt.NUMATopology()
-        if mempages:
-            for i, cell in enumerate(caps.host.topology.cells):
-                cell.mempages = fakelibvirt.create_mempages(
-                    [(4, 1024 * i), (2048, i)])
+        got_topo = self._test_get_host_numa_topology()
 
-        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        # only cores 0 and 1 are configured as shared using the
+        # 'cpu_shared_set' config option
+        self.assertEqual(set([0, 1]), got_topo.cells[0].cpuset)
+        self.assertEqual(set(), got_topo.cells[0].pcpuset)
+        self.assertEqual(set(), got_topo.cells[1].cpuset)
+        self.assertEqual(set([2, 3]), got_topo.cells[1].pcpuset)
+        self.assertEqual(set(), got_topo.cells[2].cpuset)
+        self.assertEqual(set([4, 5]), got_topo.cells[2].pcpuset)
+        self.assertEqual(set(), got_topo.cells[3].cpuset)
+        self.assertEqual(set([6]), got_topo.cells[3].pcpuset)
 
-        with test.nested(
-                mock.patch.object(host.Host, "get_capabilities",
-                                  return_value=caps),
-                mock.patch.object(
-                    hardware, 'get_vcpu_pin_set',
-                    return_value=set([0, 1, 3, 4, 5])),
-                mock.patch.object(host.Host, 'get_online_cpus',
-                                  return_value=set([0, 1, 2, 3, 6])),
-                ):
-            got_topo = drvr._get_host_numa_topology()
+        # all cells except the last one should have siblings
+        self.assertEqual([set([0, 1])], got_topo.cells[0].siblings)
+        self.assertEqual([set([2, 3])], got_topo.cells[1].siblings)
+        self.assertEqual([set([4, 5])], got_topo.cells[2].siblings)
+        self.assertEqual([set([6])], got_topo.cells[3].siblings)
 
-            if mempages:
-                # cells 0
-                self.assertEqual(4, got_topo.cells[0].mempages[0].size_kb)
-                self.assertEqual(0, got_topo.cells[0].mempages[0].total)
-                self.assertEqual(2048, got_topo.cells[0].mempages[1].size_kb)
-                self.assertEqual(0, got_topo.cells[0].mempages[1].total)
-                # cells 1
-                self.assertEqual(4, got_topo.cells[1].mempages[0].size_kb)
-                self.assertEqual(1024, got_topo.cells[1].mempages[0].total)
-                self.assertEqual(2048, got_topo.cells[1].mempages[1].size_kb)
-                self.assertEqual(1, got_topo.cells[1].mempages[1].total)
-            else:
-                self.assertEqual([], got_topo.cells[0].mempages)
-                self.assertEqual([], got_topo.cells[1].mempages)
+        self.assertEqual(set(),
+                         got_topo.cells[0].network_metadata.physnets)
+        self.assertEqual(set(['foo', 'baz']),
+                         got_topo.cells[1].network_metadata.physnets)
+        self.assertEqual(set(['baz']),
+                         got_topo.cells[2].network_metadata.physnets)
+        self.assertEqual(set(['bar', 'baz']),
+                         got_topo.cells[3].network_metadata.physnets)
 
-            self.assertEqual(set([]), got_topo.cells[0].pinned_cpus)
-            self.assertEqual(set([]), got_topo.cells[1].pinned_cpus)
-            self.assertEqual(set([]), got_topo.cells[2].pinned_cpus)
-            self.assertEqual(set([]), got_topo.cells[3].pinned_cpus)
-            self.assertEqual([set([0, 1])], got_topo.cells[0].siblings)
-            self.assertEqual([set([3])], got_topo.cells[1].siblings)
+        self.assertTrue(got_topo.cells[0].network_metadata.tunneled)
+        self.assertFalse(got_topo.cells[1].network_metadata.tunneled)
+        self.assertTrue(got_topo.cells[2].network_metadata.tunneled)
+        self.assertFalse(got_topo.cells[3].network_metadata.tunneled)
 
-            self.assertEqual(set(),
-                             got_topo.cells[0].network_metadata.physnets)
-            self.assertEqual(set(['foo', 'baz']),
-                             got_topo.cells[1].network_metadata.physnets)
-            self.assertEqual(set(['baz']),
-                             got_topo.cells[2].network_metadata.physnets)
-            self.assertEqual(set(['bar', 'baz']),
-                             got_topo.cells[3].network_metadata.physnets)
+    def test_get_host_numa_topology__vcpu_pin_set_fallback(self):
+        """Check that the host NUMA topology will fall back to using
+        'vcpu_pin_set' if 'cpu_dedicated_set' is not defined.
+        """
+        self.flags(cpu_shared_set='0-1', cpu_dedicated_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set='2-6')
 
-            self.assertTrue(got_topo.cells[0].network_metadata.tunneled)
-            self.assertFalse(got_topo.cells[1].network_metadata.tunneled)
-            self.assertTrue(got_topo.cells[2].network_metadata.tunneled)
-            self.assertFalse(got_topo.cells[3].network_metadata.tunneled)
+        got_topo = self._test_get_host_numa_topology()
 
-    @mock.patch.object(host.Host, 'has_min_version', return_value=True)
-    def test_get_host_numa_topology(self, mock_version):
-        self._test_get_host_numa_topology(mempages=True)
+        # cores 0 and 1 are configured as shared using the 'cpu_shared_set'
+        # config option but because 'vcpu_pin_set' is configured this
+        # configuration is ignored. All the cores listed in 'vcpu_pin_set' are
+        # dual reported for upgrade reasons
+        self.assertEqual(set(), got_topo.cells[0].cpuset)
+        self.assertEqual(set(), got_topo.cells[0].pcpuset)
+        self.assertEqual(set([2, 3]), got_topo.cells[1].cpuset)
+        self.assertEqual(set([2, 3]), got_topo.cells[1].pcpuset)
+        self.assertEqual(set([4, 5]), got_topo.cells[2].cpuset)
+        self.assertEqual(set([4, 5]), got_topo.cells[2].pcpuset)
+        self.assertEqual(set([6]), got_topo.cells[3].cpuset)
+        self.assertEqual(set([6]), got_topo.cells[3].pcpuset)
+
+        # all cells except the first and last one should have siblings
+        self.assertEqual([], got_topo.cells[0].siblings)
+        self.assertEqual([set([2, 3])], got_topo.cells[1].siblings)
+        self.assertEqual([set([4, 5])], got_topo.cells[2].siblings)
+        self.assertEqual([set([6])], got_topo.cells[3].siblings)
+
+    def test_get_host_numa_topology__no_cpu_configuration(self):
+        """Check that the host NUMA topology will fall back to using
+        'vcpu_pin_set' if 'cpu_dedicated_set' is not defined.
+        """
+        self.flags(cpu_shared_set=None, cpu_dedicated_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
+
+        got_topo = self._test_get_host_numa_topology()
+
+        # there's no CPU configuration so every core is dual-reported for
+        # upgrade reasons
+        self.assertEqual(set([0, 1]), got_topo.cells[0].cpuset)
+        self.assertEqual(set([0, 1]), got_topo.cells[0].pcpuset)
+        self.assertEqual(set([2, 3]), got_topo.cells[1].cpuset)
+        self.assertEqual(set([2, 3]), got_topo.cells[1].pcpuset)
+        self.assertEqual(set([4, 5]), got_topo.cells[2].cpuset)
+        self.assertEqual(set([4, 5]), got_topo.cells[2].pcpuset)
+        self.assertEqual(set([6, 7]), got_topo.cells[3].cpuset)
+        self.assertEqual(set([6, 7]), got_topo.cells[3].pcpuset)
+
+        # all cells should have siblings
+        self.assertEqual([set([0, 1])], got_topo.cells[0].siblings)
+        self.assertEqual([set([2, 3])], got_topo.cells[1].siblings)
+        self.assertEqual([set([4, 5])], got_topo.cells[2].siblings)
+        self.assertEqual([set([6, 7])], got_topo.cells[3].siblings)
+
+    def test_get_host_numa_topology__only_shared_cpus(self):
+        """Check that the host NUMA topology does not use 'cpu_shared_set' if
+        'cpu_dedicated_set' is not defined.
+        """
+        self.flags(cpu_shared_set='0-6', cpu_dedicated_set=None,
+                   group='compute')
+        self.flags(vcpu_pin_set=None)
+
+        got_topo = self._test_get_host_numa_topology()
+
+        # only cores 0 and 1 are configured as shared using the
+        # 'cpu_shared_set' config option, but the rest are dual reported
+        # for upgrade reasons
+        self.assertEqual(set([0, 1]), got_topo.cells[0].cpuset)
+        self.assertEqual(set(), got_topo.cells[0].pcpuset)
+        self.assertEqual(set([2, 3]), got_topo.cells[1].cpuset)
+        self.assertEqual(set([]), got_topo.cells[1].pcpuset)
+        self.assertEqual(set([4, 5]), got_topo.cells[2].cpuset)
+        self.assertEqual(set([]), got_topo.cells[2].pcpuset)
+        self.assertEqual(set([6]), got_topo.cells[3].cpuset)
+        self.assertEqual(set([]), got_topo.cells[3].pcpuset)
+
+        # all cells except the lasat one should have siblings
+        self.assertEqual([set([0, 1])], got_topo.cells[0].siblings)
+        self.assertEqual([set([2, 3])], got_topo.cells[1].siblings)
+        self.assertEqual([set([4, 5])], got_topo.cells[2].siblings)
+        self.assertEqual([set([6])], got_topo.cells[3].siblings)
 
     def test_get_host_numa_topology_empty(self):
         caps = vconfig.LibvirtConfigCaps()
@@ -15791,6 +16868,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
     @mock.patch.object(host.Host, 'has_min_version', return_value=True)
     def test_get_host_numa_topology_missing_network_metadata(self,
             mock_version):
+        self.flags(cpu_shared_set='0-5', cpu_dedicated_set=None,
+                   group='compute')
         self.flags(physnets=['bar'], group='neutron')
         # we need to call the below again to ensure the updated 'physnets'
         # value is read and the new groups created
@@ -15809,10 +16888,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         with test.nested(
                 mock.patch.object(host.Host, "get_capabilities",
                                   return_value=caps),
-                mock.patch.object(hardware, 'get_vcpu_pin_set',
-                                  return_value=set([0, 1, 3, 4, 5])),
                 mock.patch.object(host.Host, 'get_online_cpus',
-                                  return_value=set([0, 1, 2, 3, 6])),
+                                  return_value=set(range(6)))
                 ):
             self.assertRaisesRegex(
                 exception.InvalidNetworkNUMAAffinity,
@@ -15824,6 +16901,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
     @mock.patch.object(host.Host, 'has_min_version', return_value=True)
     def _test_get_host_numa_topology_invalid_network_affinity(self,
             group_name, mock_version):
+        self.flags(cpu_shared_set='0-5', cpu_dedicated_set=None,
+                   group='compute')
         self.flags(physnets=['foo', 'bar'], group='neutron')
         # we need to call the below again to ensure the updated 'physnets'
         # value is read and the new groups created
@@ -15847,10 +16926,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         with test.nested(
                 mock.patch.object(host.Host, "get_capabilities",
                                   return_value=caps),
-                mock.patch.object(hardware, 'get_vcpu_pin_set',
-                                  return_value=set([0, 1, 3, 4, 5])),
                 mock.patch.object(host.Host, 'get_online_cpus',
-                                  return_value=set([0, 1, 2, 3, 6])),
+                                  return_value=set(range(6)))
                 ):
             self.assertRaisesRegex(
                 exception.InvalidNetworkNUMAAffinity,
@@ -17081,7 +18158,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                      'destination_type': 'volume',
                      'volume_id': 'fake-image-id',
                      'device_name': '/dev/vdxx',
-                     'disk_bus': 'scsi'}))]
+                     'disk_bus': 'scsi',
+                     'attachment_id': None}))]
 
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         drvr.default_device_names_for_instance(instance,
@@ -17587,7 +18665,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI())
         drvr.firewall_driver = mock.Mock()
         drvr._disconnect_volume = mock.Mock()
-        fake_inst = {'name': 'foo'}
+        fake_inst = objects.Instance(**self.test_instance)
         fake_bdms = [{'connection_info': 'foo',
                      'mount_device': None}]
         with mock.patch('nova.virt.driver'
@@ -17600,7 +18678,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._undefine_domain')
     def test_cleanup_wants_vif_errors_ignored(self, undefine, unplug):
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI())
-        fake_inst = {'name': 'foo'}
+        fake_inst = objects.Instance(**self.test_instance)
         with mock.patch.object(drvr._conn, 'lookupByUUIDString') as lookup:
             lookup.return_value = fake_inst
             # NOTE(danms): Make unplug cause us to bail early, since
@@ -18344,6 +19422,41 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         else:
             assert False, "Unable to find any mediated device for the guest."
 
+    @mock.patch('nova.virt.hardware.get_vpmems')
+    def test_get_guest_config_with_vpmems(self, mock_get_vpmems_label):
+        vpmem_0 = objects.LibvirtVPMEMDevice(
+            label='4GB', name='ns_0', devpath='/dev/dax0.0',
+            size=4292870144, align=2097152)
+        vpmem_1 = objects.LibvirtVPMEMDevice(
+            label='16GB', name='ns_1', devpath='/dev/dax0.1',
+            size=17177772032, align=2097152)
+        resource_0 = objects.Resource(
+            provider_uuid=uuids.rp,
+            resource_class="CUSTOM_PMEM_NAMESPACE_4GB",
+            identifier='ns_0', metadata=vpmem_0)
+        resource_1 = objects.Resource(
+            provider_uuid=uuids.rp,
+            resource_class="CUSTOM_PMEM_NAMESPACE_16GB",
+            identifier='ns_1', metadata=vpmem_1)
+        resources = objects.ResourceList(objects=[resource_0, resource_1])
+
+        instance_ref = objects.Instance(**self.test_instance)
+        instance_ref.resources = resources
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr._vpmems_by_name = {"ns_0": vpmem_0, "ns_1": vpmem_1}
+
+        mock_get_vpmems_label.return_value = ['4GB', '16GB']
+        cfg = drvr._get_guest_config(instance_ref,
+                                     _fake_network_info(self, 1),
+                                     image_meta, {'mapping': {}})
+        vpmem_amount = 0
+        for device in cfg.devices:
+            if isinstance(device, vconfig.LibvirtConfigGuestVPMEM):
+                self.assertEqual("nvdimm", device.model)
+                vpmem_amount += 1
+        self.assertEqual(2, vpmem_amount)
+
 
 class TestGuestConfigSysinfoSerialOS(test.NoDBTestCase):
     def setUp(self):
@@ -18463,6 +19576,7 @@ class HostStateTestCase(test.NoDBTestCase):
         objects.NUMACell(
             id=1,
             cpuset=set([1, 2]),
+            pcpuset=set(),
             memory=1024,
             cpu_usage=0,
             memory_usage=0,
@@ -18472,6 +19586,7 @@ class HostStateTestCase(test.NoDBTestCase):
         objects.NUMACell(
             id=2,
             cpuset=set([3, 4]),
+            pcpuset=set(),
             memory=1024,
             cpu_usage=0,
             memory_usage=0,
@@ -18496,8 +19611,11 @@ class HostStateTestCase(test.NoDBTestCase):
             self._host.get_memory_mb_total = _get_memory_mb_total
             self._host.get_memory_mb_used = _get_memory_mb_used
 
-        def _get_vcpu_total(self):
-            return 1
+        def _get_pcpu_available(self):
+            return set([0])
+
+        def _get_vcpu_available(self):
+            return set([1])
 
         def _get_vcpu_used(self):
             return 0
@@ -18573,6 +19691,7 @@ class HostStateTestCase(test.NoDBTestCase):
 
 class TestUpdateProviderTree(test.NoDBTestCase):
     vcpus = 24
+    pcpus = 12
     memory_mb = 1024
     disk_gb = 200
     cpu_traits = {t: False for t in libvirt_utils.CPU_TRAITS_MAPPING.values()}
@@ -18610,6 +19729,14 @@ class TestUpdateProviderTree(test.NoDBTestCase):
                 'allocation_ratio': 16.0,
                 'reserved': 0,
             },
+            orc.PCPU: {
+                'total': self.pcpus,
+                'min_unit': 1,
+                'max_unit': self.pcpus,
+                'step_size': 1,
+                'allocation_ratio': 1.0,
+                'reserved': 0,
+            },
             orc.MEMORY_MB: {
                 'total': self.memory_mb,
                 'min_unit': 1,
@@ -18628,21 +19755,28 @@ class TestUpdateProviderTree(test.NoDBTestCase):
             },
         }
 
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_gpu_inventories')
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
                 '_get_cpu_feature_traits',
                 new=mock.Mock(return_value=cpu_traits))
-    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_gpu_inventories')
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_local_gb_info',
-                return_value={'total': disk_gb})
+                new=mock.Mock(return_value={'total': disk_gb}))
     @mock.patch('nova.virt.libvirt.host.Host.get_memory_mb_total',
-                return_value=memory_mb)
-    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vcpu_total',
-                return_value=vcpus)
-    def _test_update_provider_tree(self, mock_vcpu, mock_mem, mock_disk,
-                                   mock_gpu_invs, gpu_invs=None):
+                new=mock.Mock(return_value=memory_mb))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_pcpu_available',
+                new=mock.Mock(return_value=range(pcpus)))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vcpu_available',
+                new=mock.Mock(return_value=range(vcpus)))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
+                '_update_provider_tree_for_pcpu',
+                new=mock.Mock())
+    def _test_update_provider_tree(
+            self, mock_gpu_invs, gpu_invs=None, vpmems=None):
         if gpu_invs:
             self.flags(enabled_vgpu_types=['nvidia-11'], group='devices')
             mock_gpu_invs.return_value = gpu_invs
+        if vpmems:
+            self.driver._vpmems_by_rc = vpmems
         self.driver.update_provider_tree(self.pt,
                                          self.cn_rp['name'])
 
@@ -18706,16 +19840,70 @@ class TestUpdateProviderTree(test.NoDBTestCase):
                 'max_unit'] = inventory_dict['max_unit']
             self.assertEqual(pgpu_inventory, pgpu_provider_data.inventory)
 
+    def test_update_provider_tree_for_vpmem(self):
+        rp_uuid = self.cn_rp['uuid']
+        vpmem_0 = objects.LibvirtVPMEMDevice(label='4GB', name='ns_0',
+                    size=4292870144, devpath='/dev/dax0.0', align=2097152)
+        vpmem_1 = objects.LibvirtVPMEMDevice(label='SMALL', name='ns_1',
+                    size=4292870144, devpath='/dev/dax0.1', align=2097152)
+        vpmem_2 = objects.LibvirtVPMEMDevice(label='4GB', name='ns_2',
+                    size=4292870144, devpath='/dev/dax0.2', align=2097152)
+        vpmems_by_rc = {
+            'CUSTOM_PMEM_NAMESPACE_4GB': [vpmem_0],
+            'CUSTOM_PMEM_NAMESPACE_SMALL': [vpmem_1, vpmem_2]
+        }
+
+        self._test_update_provider_tree(vpmems=vpmems_by_rc)
+        expected_inventory = self._get_inventory()
+        expected_resources = {}
+        expected_inventory["CUSTOM_PMEM_NAMESPACE_4GB"] = {
+            'total': 1,
+            'max_unit': 1,
+            'min_unit': 1,
+            'step_size': 1,
+            'allocation_ratio': 1.0,
+            'reserved': 0
+        }
+        expected_inventory["CUSTOM_PMEM_NAMESPACE_SMALL"] = {
+            'total': 2,
+            'max_unit': 2,
+            'min_unit': 1,
+            'step_size': 1,
+            'allocation_ratio': 1.0,
+            'reserved': 0
+        }
+        expected_resources["CUSTOM_PMEM_NAMESPACE_4GB"] = {
+            objects.Resource(
+                provider_uuid=rp_uuid,
+                resource_class="CUSTOM_PMEM_NAMESPACE_4GB",
+                identifier='ns_0', metadata=vpmem_0)
+        }
+        expected_resources["CUSTOM_PMEM_NAMESPACE_SMALL"] = {
+            objects.Resource(
+                provider_uuid=rp_uuid,
+                resource_class="CUSTOM_PMEM_NAMESPACE_SMALL",
+                identifier='ns_1', metadata=vpmem_1),
+            objects.Resource(
+                provider_uuid=rp_uuid,
+                resource_class="CUSTOM_PMEM_NAMESPACE_SMALL",
+                identifier='ns_2', metadata=vpmem_2)
+        }
+        self.assertEqual(expected_inventory,
+                         self.pt.data(self.cn_rp['uuid']).inventory)
+        self.assertEqual(expected_resources,
+                         self.pt.data(self.cn_rp['uuid']).resources)
+
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_local_gb_info',
-                return_value={'total': disk_gb})
+                new=mock.Mock(return_value={'total': disk_gb}))
     @mock.patch('nova.virt.libvirt.host.Host.get_memory_mb_total',
-                return_value=memory_mb)
-    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vcpu_total',
-                return_value=vcpus)
+                new=mock.Mock(return_value=memory_mb))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_pcpu_available',
+                new=mock.Mock(return_value=range(pcpus)))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vcpu_available',
+                new=mock.Mock(return_value=range(vcpus)))
     # TODO(efried): Bug #1784020
     @unittest.expectedFailure
-    def test_update_provider_tree_for_shared_disk_gb_resource(
-        self, mock_vcpu, mock_mem, mock_disk):
+    def test_update_provider_tree_for_shared_disk_gb_resource(self):
         """Test to check DISK_GB is reported from shared resource
         provider.
         """
@@ -18764,22 +19952,26 @@ class TestUpdateProviderTree(test.NoDBTestCase):
                          self.pt.data(self.cn_rp['uuid']).traits)
 
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
-                '_get_cpu_feature_traits',
-                new=mock.Mock(return_value=cpu_traits))
-    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
                 '_get_mediated_device_information')
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
                 '_get_all_assigned_mediated_devices')
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_gpu_inventories')
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
+                '_get_cpu_feature_traits',
+                new=mock.Mock(return_value=cpu_traits))
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_local_gb_info',
-                return_value={'total': disk_gb})
+                new=mock.Mock(return_value={'total': disk_gb}))
     @mock.patch('nova.virt.libvirt.host.Host.get_memory_mb_total',
-                return_value=memory_mb)
-    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vcpu_total',
-                return_value=vcpus)
+                new=mock.Mock(return_value=memory_mb))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_pcpu_available',
+                new=mock.Mock(return_value=range(pcpus)))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vcpu_available',
+                new=mock.Mock(return_value=range(vcpus)))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
+                '_update_provider_tree_for_pcpu',
+                new=mock.Mock())
     def test_update_provider_tree_for_vgpu_reshape(
-            self, mock_vcpu, mock_mem, mock_disk, mock_gpus, mock_get_devs,
-            mock_get_mdev_info):
+            self, mock_gpus, mock_get_devs, mock_get_mdev_info):
         """Tests the VGPU reshape scenario."""
         self.flags(enabled_vgpu_types=['nvidia-11'], group='devices')
         # Let's assume we have two PCI devices each having 4 pGPUs for this
@@ -18833,24 +20025,25 @@ class TestUpdateProviderTree(test.NoDBTestCase):
         allocations = {
             uuids.consumer1: {
                 'allocations': {
-                    # This consumer has ram and vgpu allocations on the root
-                    # node provider and should be changed.
+                    # This consumer has vGPU allocations on the root
+                    # node provider and *should* be changed.
                     self.cn_rp['uuid']: {
                         'resources': {
                             orc.MEMORY_MB: 512,
-                            orc.VGPU: 1
+                            orc.VCPU: 2,
+                            orc.VGPU: 1,
                         }
                     }
                 }
             },
             uuids.consumer2: {
                 'allocations': {
-                    # This consumer has ram and vcpu allocations on the root
-                    # node provider and should not be changed.
+                    # This consumer has no vGPU allocations on the root
+                    # node provider and *should not* be changed.
                     self.cn_rp['uuid']: {
                         'resources': {
                             orc.MEMORY_MB: 256,
-                            orc.VCPU: 2
+                            orc.VCPU: 2,
                         }
                     }
                 }
@@ -18886,7 +20079,7 @@ class TestUpdateProviderTree(test.NoDBTestCase):
         # provider.
         consumer1_allocs = allocations[uuids.consumer1]['allocations']
         self.assertEqual(2, len(consumer1_allocs))
-        self.assertEqual({orc.MEMORY_MB: 512},
+        self.assertEqual({orc.MEMORY_MB: 512, orc.VCPU: 2},
                          consumer1_allocs[self.cn_rp['uuid']]['resources'])
         # Make sure the VGPU allocation moved to the corresponding child RP
         self.assertEqual(
@@ -18896,18 +20089,19 @@ class TestUpdateProviderTree(test.NoDBTestCase):
         self.assertEqual(original_allocations[uuids.consumer2],
                          allocations[uuids.consumer2])
 
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_gpu_inventories')
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
                 '_get_cpu_feature_traits',
                 new=mock.Mock(return_value=cpu_traits))
-    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_gpu_inventories')
     @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_local_gb_info',
-                return_value={'total': disk_gb})
+                new=mock.Mock(return_value={'total': disk_gb}))
     @mock.patch('nova.virt.libvirt.host.Host.get_memory_mb_total',
-                return_value=memory_mb)
-    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vcpu_total',
-                return_value=vcpus)
-    def test_update_provider_tree_for_vgpu_reshape_fails(
-            self, mock_vcpu, mock_mem, mock_disk, mock_gpus):
+                new=mock.Mock(return_value=memory_mb))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_pcpu_available',
+                new=mock.Mock(return_value=range(pcpus)))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_vcpu_available',
+                new=mock.Mock(return_value=range(vcpus)))
+    def test_update_provider_tree_for_vgpu_reshape_fails(self, mock_gpus):
         """Tests the VGPU reshape failure scenario where VGPU allocations
         are not on the root compute node provider as expected.
         """
@@ -18965,6 +20159,220 @@ class TestUpdateProviderTree(test.NoDBTestCase):
                                allocations=allocations)
         self.assertIn('Unexpected VGPU resource allocation on provider %s'
                       % uuids.other_rp, six.text_type(ex))
+
+    @mock.patch('nova.objects.instance.Instance.get_by_uuid')
+    @mock.patch('nova.objects.migration.MigrationList'
+                '.get_in_progress_by_host_and_node')
+    @mock.patch('nova.objects.instance.InstanceList.get_by_host')
+    @mock.patch('nova.objects.compute_node.ComputeNode.get_by_nodename')
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
+                '_update_provider_tree_for_vgpu',
+                new=mock.Mock())
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_cpu_traits',
+                new=mock.Mock(return_value=cpu_traits))
+    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver._get_local_gb_info',
+                new=mock.Mock(return_value={'total': disk_gb}))
+    @mock.patch('nova.virt.libvirt.host.Host.get_memory_mb_total',
+                new=mock.Mock(return_value=memory_mb))
+    @mock.patch('nova.virt.libvirt.host.Host.get_online_cpus',
+                new=mock.Mock(return_value=range(pcpus + vcpus)))
+    def test_update_provider_tree_for_pcpu_reshape(self,
+            mock_get_cn, mock_get_instances, mock_get_migrations,
+            mock_get_instance):
+        """Tests the CPU reshape scenario."""
+
+        # configure the 'cpu_dedicated_set' and 'cpu_shared_set' fields to
+        # something useful. Note that because we're setting this, we haven't
+        # mocked out '_get_pcpu_available' and '_get_vcpu_available' but
+        # instead have mocked out 'get_online_cpus'. This isn't very "unit
+        # testy" but it's a more realistic test
+
+        self.flags(cpu_shared_set='0-11,18-29',
+                   cpu_dedicated_set='12-17,30-35',
+                   group='compute')
+
+        # define a host topology with a single NUMA cell and four cores
+
+        numa_topology = objects.NUMATopology(cells=[
+            objects.NUMACell(
+                id=0,
+                cpuset=set(range(0, 12)) | set(range(18, 30)),
+                pcpuset=set(range(12, 18)) | set(range(30, 36)),
+                memory=8192,
+                cpu_usage=6,
+                memory_usage=0,
+                mempages=[],
+                siblings=[],  # no hyperthreading
+                pinned_cpus=set([2, 3]))])
+
+        cn = objects.ComputeNode(
+            uuid=self.cn_rp['uuid'],
+            host='host1',
+            hypervisor_hostname=self.cn_rp['name'],
+            numa_topology=numa_topology._to_json(),
+        )
+
+        # define three instances, one with a NUMA topology but no pinning, one
+        # with pinning (and an implicit NUMA topology), and one with neither
+        # pinning nor a NUMA topology. In practice, this shouldn't happen since
+        # they should all be on separate hosts, but since we don't enforce that
+        # we can't rely on it
+
+        base_instance = _create_test_instance()
+        base_instance.pop('id')
+        base_instance.pop('uuid')
+
+        instance_a = objects.Instance(
+            id=1, uuid=uuids.instance_a, **base_instance)
+        instance_a.numa_topology = objects.InstanceNUMATopology(cells=[
+            objects.InstanceNUMACell(
+                id=0,
+                cpuset=set([0, 1]),
+                memory=1024)])
+
+        instance_b = objects.Instance(
+            id=2, uuid=uuids.instance_b, **base_instance)
+        instance_b.numa_topology = objects.InstanceNUMATopology(cells=[
+            objects.InstanceNUMACell(
+                id=0,
+                cpuset=set([0, 1]),
+                cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                cpu_pinning={0: 2, 1: 3},
+                memory=1024)])
+
+        instance_c = objects.Instance(
+            id=3, uuid=uuids.instance_c, **base_instance)
+        instance_c.numa_topology = None
+
+        instances = objects.InstanceList(objects=[
+            instance_a, instance_b, instance_c])
+
+        instance_d = objects.Instance(
+            id=4, uuid=uuids.instance_d, **base_instance)
+        instance_d.numa_topology = objects.InstanceNUMATopology(cells=[
+            objects.InstanceNUMACell(
+                id=0,
+                cpuset=set([0, 1]),
+                cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                cpu_pinning={0: 0, 1: 1},
+                memory=1024)])
+
+        migration = objects.Migration(
+            id=42,
+            uuid=uuids.migration,
+            source_compute=cn.host,
+            dest_compute='host2',
+            instance_uuid=instance_d.uuid)
+
+        migrations = objects.MigrationList(objects=[migration])
+
+        # use the ComputeNode and InstanceList objects in our mocks
+
+        mock_get_cn.return_value = cn
+        mock_get_instances.return_value = instances
+
+        # ditto for the migration and corresponding instance (which is
+        # theoretically on another host now, but still has allocation here)
+
+        mock_get_instance.return_value = instance_d
+        mock_get_migrations.return_value = migrations
+
+        # mock the inventory of an pre-Trait compute node, where PCPUs have not
+        # yet been reported
+
+        initial_inventory = self._get_inventory()
+        expected_inventory = copy.copy(initial_inventory)
+
+        initial_inventory.pop(orc.PCPU)
+        self.pt.update_inventory(cn.uuid, initial_inventory)
+
+        # call 'update_provider_tree' to ensure it raises 'ReshapeNeeded'
+        # since there is a reshape needed and no allocations provided
+
+        with testtools.ExpectedException(exception.ReshapeNeeded):
+            self.driver.update_provider_tree(
+                  self.pt, cn.hypervisor_hostname)
+
+        # now prepare the allocations, which are all using VCPUs since we
+        # haven't reshaped anything yet
+
+        allocations = {
+            uuids.instance_a: {
+                'allocations': {
+                    cn.uuid: {
+                        'resources': {
+                            orc.MEMORY_MB: 1000,
+                            orc.VCPU: 2,
+                            orc.DISK_GB: 30,
+                        }
+                    }
+                }
+            },
+            uuids.instance_b: {
+                'allocations': {
+                    cn.uuid: {
+                        'resources': {
+                            orc.MEMORY_MB: 1000,
+                            orc.VCPU: 2,
+                            orc.DISK_GB: 30,
+                        }
+                    }
+                }
+            },
+            uuids.instance_c: {
+                'allocations': {
+                    cn.uuid: {
+                        'resources': {
+                            orc.MEMORY_MB: 1000,
+                            orc.VCPU: 2,
+                            orc.DISK_GB: 30,
+                        }
+                    }
+                }
+            },
+            uuids.migration: {
+                'allocations': {
+                    cn.uuid: {
+                        'resources': {
+                            orc.MEMORY_MB: 1000,
+                            orc.VCPU: 2,
+                            orc.DISK_GB: 30,
+                        }
+                    }
+                }
+            },
+        }
+
+        # post reshape, only the allocations for instance_b and the migration
+        # should change since those are the only instances (by way of
+        # instance_d in the case of the migration) with CPU pinning
+
+        expected_allocations = copy.deepcopy(allocations)
+        expected_allocations[uuids.instance_b]['allocations'][cn.uuid] = {
+            'resources': {
+                orc.MEMORY_MB: 1000,
+                orc.PCPU: 2,
+                orc.DISK_GB: 30,
+            }
+        }
+        expected_allocations[uuids.migration]['allocations'][cn.uuid] = {
+            'resources': {
+                orc.MEMORY_MB: 1000,
+                orc.PCPU: 2,
+                orc.DISK_GB: 30,
+            }
+        }
+
+        # initiate the reshape
+
+        self.driver.update_provider_tree(
+            self.pt, cn.hypervisor_hostname, allocations=allocations)
+
+        # check both the VCPU and PCPU inventory are now reported and the
+        # allocations have been updated
+
+        self.assertEqual(expected_inventory, self.pt.data(cn.uuid).inventory)
+        self.assertEqual(expected_allocations, allocations)
 
 
 class TraitsComparisonMixin(object):
@@ -19040,7 +20448,8 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
 
         # Attributes which we need to be set so they don't touch the db,
         # but it's not worth the effort to fake properly
-        for field in ['numa_topology', 'vcpu_model', 'trusted_certs']:
+        for field in ['numa_topology', 'vcpu_model', 'trusted_certs',
+                      'resources', 'migration_context']:
             setattr(instance, field, None)
 
         return instance
@@ -21108,7 +22517,8 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
         drv = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
         instance = objects.Instance(
             uuid=uuids.instance, id=1,
-            ephemeral_key_uuid=uuids.ephemeral_key_uuid)
+            ephemeral_key_uuid=uuids.ephemeral_key_uuid,
+            resources=None)
         instance.system_metadata = {}
         block_device_info = {'root_device_name': '/dev/vda',
                              'ephemerals': [],
@@ -21770,11 +23180,21 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
 
     @mock.patch.object(libvirt_driver.LibvirtDriver, '_get_cpu_feature_traits',
                        new=mock.Mock(return_value={}))
-    def test_cpu_traits_sev_no_feature_traits(self):
+    def test_cpu_traits__sev_support(self):
         for support in (False, True):
             self.drvr._host._supports_amd_sev = support
-            self.assertEqual({ot.HW_CPU_X86_AMD_SEV: support},
-                             self.drvr._get_cpu_traits())
+            traits = self.drvr._get_cpu_traits()
+            self.assertIn(ot.HW_CPU_X86_AMD_SEV, traits)
+            self.assertEqual(support, traits[ot.HW_CPU_X86_AMD_SEV])
+
+    @mock.patch.object(libvirt_driver.LibvirtDriver, '_get_cpu_feature_traits',
+                       new=mock.Mock(return_value={}))
+    def test_cpu_traits__hyperthreading_support(self):
+        for support in (False, True):
+            self.drvr._host._has_hyperthreading = support
+            traits = self.drvr._get_cpu_traits()
+            self.assertIn(ot.HW_CPU_HYPERTHREADING, traits)
+            self.assertEqual(support, traits[ot.HW_CPU_HYPERTHREADING])
 
     def test_cpu_traits_with_passthrough_mode(self):
         """Test getting CPU traits when cpu_mmode is 'host-passthrough', traits
@@ -21810,7 +23230,7 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
         _fake_broadwell_cpu_features.
         """
         self.flags(cpu_mode='custom',
-                   cpu_model='Broadwell-noTSX',
+                   cpu_models=['Broadwell-noTSX'],
                    group='libvirt')
         mock_baseline.return_value = _fake_broadwell_cpu_feature
 
@@ -21838,6 +23258,138 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
   <topology sockets="1" cores="2" threads="1"/>
 </cpu>
 '''], 1)
+
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.getCapabilities')
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.baselineCPU')
+    def test_cpu_traits_with_mode_custom_multi_models(self, mocked_baseline,
+                                                      mocked_cap):
+        """Test getting CPU traits when cpu_mode is 'custom' and cpu_model is
+        ['qemu64', 'SandyBridge'], and guest CPU model is Broadwell-noTSX,
+        traits are calculated from _fake_qemu64_cpu_feature and
+        _fake_sandy_bridge_cpu_feature.
+        """
+        self.flags(cpu_mode='custom',
+                   cpu_models=['QEMU64', 'sandybridge'],
+                   group='libvirt')
+        mocked_cap.return_value = '''
+            <capabilities>
+                <host>
+                    <uuid>cef19ce0-0ca2-11df-855d-b19fbce37686</uuid>
+                    <cpu>
+                      <arch>x86_64</arch>
+                      <model>Broadwell-noTSX</model>
+                      <topology sockets='1' cores='2' threads='2'/>
+                      <feature policy='require' name='erms'/>
+                      <pages unit='KiB' size='4' />
+                      <pages unit='KiB' size='1024' />
+                    </cpu>
+                </host>
+            </capabilities>
+        '''
+        mocked_baseline.side_effect = (_fake_broadwell_cpu_feature,
+                                       _fake_qemu64_cpu_feature,
+                                       _fake_sandy_bridge_cpu_feature)
+
+        self.assertTraitsEqual(
+            [
+                'HW_CPU_X86_AVX',
+                'HW_CPU_X86_AESNI',
+                'HW_CPU_X86_SSE42',
+                'HW_CPU_X86_SSE41',
+                'HW_CPU_X86_CLMUL',
+                'HW_CPU_X86_SSSE3',
+                'HW_CPU_X86_SSE2',
+                'HW_CPU_X86_SSE',
+                'HW_CPU_X86_MMX',
+                'HW_CPU_X86_SVM'
+            ], self.drvr._get_cpu_feature_traits()
+        )
+
+        calls = [mock.call([u'''<cpu>
+  <arch>x86_64</arch>
+  <model>Broadwell-noTSX</model>
+  <topology sockets="1" cores="2" threads="2"/>
+  <feature name="erms"/>
+</cpu>
+'''], 1), mock.call([u'''<cpu>
+  <arch>x86_64</arch>
+  <model>qemu64</model>
+  <topology sockets="1" cores="2" threads="2"/>
+</cpu>
+'''], 1), mock.call([u'''<cpu>
+  <arch>x86_64</arch>
+  <model>SandyBridge</model>
+  <topology sockets="1" cores="2" threads="2"/>
+</cpu>
+'''], 1)]
+        mocked_baseline.assert_has_calls(calls)
+
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.getCapabilities')
+    @mock.patch('nova.virt.libvirt.host.libvirt.Connection.baselineCPU')
+    def test_cpu_traits_with_mode_custom_multi_models_and_extra_flags(self,
+            mocked_baseline, mocked_cap):
+        """Test getting CPU traits when cpu_mode is 'custom' and cpu_model is
+        ['qemu64', 'SandyBridge'], cpu_model_extra_specs is ['pcid', 'avx2']
+        and guest CPU model is Broadwell-noTSX, traits are calculated from
+        _fake_qemu64_cpu_feature and _fake_sandy_bridge_cpu_feature.
+        """
+        self.flags(cpu_mode='custom',
+                   cpu_models=['QEMU64', 'sandybridge'],
+                   cpu_model_extra_flags=['pcid', 'avx2'],
+                   group='libvirt')
+        mocked_cap.return_value = '''
+            <capabilities>
+                <host>
+                    <uuid>cef19ce0-0ca2-11df-855d-b19fbce37686</uuid>
+                    <cpu>
+                      <arch>x86_64</arch>
+                      <model>Broadwell-noTSX</model>
+                      <topology sockets='1' cores='2' threads='2'/>
+                      <feature policy='require' name='erms'/>
+                      <pages unit='KiB' size='4' />
+                      <pages unit='KiB' size='1024' />
+                    </cpu>
+                </host>
+            </capabilities>
+        '''
+        mocked_baseline.side_effect = (_fake_broadwell_cpu_feature,
+                                       _fake_qemu64_cpu_feature,
+                                       _fake_sandy_bridge_cpu_feature)
+
+        self.assertTraitsEqual(
+            [
+                'HW_CPU_X86_AVX',
+                'HW_CPU_X86_AVX2',
+                'HW_CPU_X86_AESNI',
+                'HW_CPU_X86_SSE42',
+                'HW_CPU_X86_SSE41',
+                'HW_CPU_X86_CLMUL',
+                'HW_CPU_X86_SSSE3',
+                'HW_CPU_X86_SSE2',
+                'HW_CPU_X86_SSE',
+                'HW_CPU_X86_MMX',
+                'HW_CPU_X86_SVM'
+            ], self.drvr._get_cpu_feature_traits()
+        )
+
+        calls = [mock.call([u'''<cpu>
+  <arch>x86_64</arch>
+  <model>Broadwell-noTSX</model>
+  <topology sockets="1" cores="2" threads="2"/>
+  <feature name="erms"/>
+</cpu>
+'''], 1), mock.call([u'''<cpu>
+  <arch>x86_64</arch>
+  <model>qemu64</model>
+  <topology sockets="1" cores="2" threads="2"/>
+</cpu>
+'''], 1), mock.call([u'''<cpu>
+  <arch>x86_64</arch>
+  <model>SandyBridge</model>
+  <topology sockets="1" cores="2" threads="2"/>
+</cpu>
+'''], 1)]
+        mocked_baseline.assert_has_calls(calls)
 
     @mock.patch('nova.virt.libvirt.host.libvirt.Connection.baselineCPU')
     def test_cpu_traits_with_no_baseline_support(self, mock_baseline):
@@ -21893,17 +23445,6 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
 
         self.assertTraitsEqual([], self.drvr._get_cpu_feature_traits())
 
-    def test_cpu_traits_with_invalid_virt_type(self):
-        """Test getting CPU traits when using a virt_type that doesn't support
-        the feature, only kvm and qemu supports reporting CPU traits.
-        """
-        self.flags(cpu_mode='custom',
-                   cpu_model='IvyBridge',
-                   virt_type='lxc',
-                   group='libvirt'
-                   )
-        self.assertRaises(exception.Invalid, self.drvr._get_cpu_feature_traits)
-
     @mock.patch('nova.virt.libvirt.host.libvirt.Connection.getCapabilities')
     @mock.patch('nova.virt.libvirt.utils.cpu_features_to_traits')
     def test_cpu_traits_with_mode_passthrough_and_extra_flags(
@@ -21938,7 +23479,7 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
         """Test if extra flags are accounted when cpu_mode is set to custom.
         """
         self.flags(cpu_mode='custom',
-                   cpu_model='IvyBridge',
+                   cpu_models=['IvyBridge'],
                    cpu_model_extra_flags='PCID',
                    group='libvirt')
 
@@ -21947,7 +23488,6 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
                 <model fallback='forbid'>IvyBridge</model>
                 <vendor>Intel</vendor>
                 <feature policy='require' name='erms'/>
-                <feature policy='require' name='pcid'/>
             </cpu>
             """
         self.drvr._get_cpu_feature_traits()
@@ -21956,7 +23496,6 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
   <model>IvyBridge</model>
   <vendor>Intel</vendor>
   <topology sockets="1" cores="2" threads="1"/>
-  <feature name="pcid"/>
 </cpu>
 '''], 1)
         self.assertItemsEqual(['pcid', 'erms'], mock_to_traits.call_args[0][0])
@@ -22023,6 +23562,64 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
   <topology sockets="1" cores="5" threads="1"/>
 </cpu>
 '''], 1)
+
+    @mock.patch('oslo_utils.fileutils.ensure_tree')
+    @mock.patch('os.path.isdir')
+    @mock.patch('os.path.exists')
+    @mock.patch('os.utime')
+    @mock.patch('nova.virt.images.fetch_to_raw')
+    def test_cache_image_uncached(self, mock_fetch, mock_utime, mock_exists,
+                                  mock_isdir, mock_et, first_time=False):
+        # NOTE(artom): This is not actually a path on the system, since we
+        # are fully mocked out and are just testing string formatting in this
+        # test.
+        self.flags(instances_path='/nova/instances')
+        self.flags(image_cache_subdirectory_name='cache')
+        expected_fn = os.path.join('/nova/instances/cache',
+                                   imagecache.get_cache_fname('an-image'))
+
+        mock_isdir.return_value = not first_time
+        mock_exists.return_value = False
+        self.assertTrue(self.drvr.cache_image(self.context, 'an-image'))
+        mock_fetch.assert_called_once_with(self.context, 'an-image',
+                                           expected_fn)
+        mock_utime.assert_not_called()
+        mock_exists.assert_called_once_with(expected_fn)
+        mock_isdir.assert_called_once_with('/nova/instances/cache')
+        if first_time:
+            mock_et.assert_called_once_with('/nova/instances/cache')
+        else:
+            mock_et.assert_not_called()
+
+    def test_cache_image_uncached_first_time(self):
+        # Test the case where we do need to download the image,
+        # and this is the first time an image cache operation has ever
+        # been performed, so the directory structure has to be created.
+        self.test_cache_image_uncached(first_time=True)
+
+    @mock.patch('oslo_utils.fileutils.ensure_tree')
+    @mock.patch('os.path.isdir')
+    @mock.patch('os.path.exists')
+    @mock.patch('nova.privsep.path.utime')
+    @mock.patch('nova.virt.images.fetch_to_raw')
+    def test_cache_image_existing(self, mock_fetch, mock_utime, mock_exists,
+                                  mock_isdir, mock_et):
+        # NOTE(artom): This is not actually a path on the system, since we
+        # are fully mocked out and are just testing string formatting in this
+        # test.
+        self.flags(instances_path='/nova/instances')
+        self.flags(image_cache_subdirectory_name='cache')
+        expected_fn = os.path.join('/nova/instances/cache',
+                                   imagecache.get_cache_fname('an-image'))
+
+        mock_isdir.return_value = True
+        mock_exists.return_value = True
+        self.assertFalse(self.drvr.cache_image(self.context, 'an-image'))
+        mock_utime.assert_called_once_with(expected_fn)
+        mock_fetch.assert_not_called()
+        mock_exists.assert_called_once_with(expected_fn)
+        mock_et.assert_not_called()
+        mock_isdir.assert_not_called()
 
 
 class LibvirtVolumeUsageTestCase(test.NoDBTestCase):
@@ -23466,3 +25063,278 @@ class TestLibvirtMultiattach(test.NoDBTestCase):
     #     calls = [mock.call(lv_ver=libvirt_driver.MIN_LIBVIRT_MULTIATTACH),
     #              mock.call(hv_ver=(2, 10, 0))]
     #     has_min_version.assert_has_calls(calls)
+
+
+vc = fakelibvirt.virConnect
+
+
+class TestLibvirtSEV(test.NoDBTestCase):
+    """Libvirt driver tests for AMD SEV support."""
+
+    def setUp(self):
+        super(TestLibvirtSEV, self).setUp()
+        self.useFixture(fakelibvirt.FakeLibvirtFixture())
+        self.driver = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+
+
+@mock.patch.object(os.path, 'exists', new=mock.Mock(return_value=False))
+class TestLibvirtSEVUnsupported(TestLibvirtSEV):
+    def test_get_mem_encrypted_slots_no_config(self):
+        self.driver._host._set_amd_sev_support()
+        self.assertEqual(0, self.driver._get_memory_encrypted_slots())
+
+    def test_get_mem_encrypted_slots_config_zero(self):
+        self.flags(num_memory_encrypted_guests=0, group='libvirt')
+        self.driver._host._set_amd_sev_support()
+        self.assertEqual(0, self.driver._get_memory_encrypted_slots())
+
+    @mock.patch.object(libvirt_driver.LOG, 'warning')
+    def test_get_mem_encrypted_slots_config_non_zero_unsupported(
+            self, mock_log):
+        self.flags(num_memory_encrypted_guests=16, group='libvirt')
+        self.driver._host._set_amd_sev_support()
+        # Still zero without mocked SEV support
+        self.assertEqual(0, self.driver._get_memory_encrypted_slots())
+        mock_log.assert_called_with(
+            'Host is configured with libvirt.num_memory_encrypted_guests '
+            'set to %d, but is not SEV-capable.', 16)
+
+    def test_get_mem_encrypted_slots_unsupported(self):
+        self.driver._host._set_amd_sev_support()
+        self.assertEqual(0, self.driver._get_memory_encrypted_slots())
+
+
+@mock.patch.object(vc, '_domain_capability_features',
+                   new=vc._domain_capability_features_with_SEV)
+class TestLibvirtSEVSupported(TestLibvirtSEV):
+    """Libvirt driver tests for when AMD SEV support is present."""
+    @test.patch_exists(SEV_KERNEL_PARAM_FILE, True)
+    @test.patch_open(SEV_KERNEL_PARAM_FILE, "1\n")
+    def test_get_mem_encrypted_slots_unlimited(self):
+        self.driver._host._set_amd_sev_support()
+        self.assertEqual(db_const.MAX_INT,
+                         self.driver._get_memory_encrypted_slots())
+
+    @test.patch_exists(SEV_KERNEL_PARAM_FILE, True)
+    @test.patch_open(SEV_KERNEL_PARAM_FILE, "1\n")
+    def test_get_mem_encrypted_slots_config_non_zero_supported(self):
+        self.flags(num_memory_encrypted_guests=16, group='libvirt')
+        self.driver._host._set_amd_sev_support()
+        self.assertEqual(16, self.driver._get_memory_encrypted_slots())
+
+    @test.patch_exists(SEV_KERNEL_PARAM_FILE, True)
+    @test.patch_open(SEV_KERNEL_PARAM_FILE, "1\n")
+    def test_get_mem_encrypted_slots_config_zero_supported(self):
+        self.flags(num_memory_encrypted_guests=0, group='libvirt')
+        self.driver._host._set_amd_sev_support()
+        self.assertEqual(0, self.driver._get_memory_encrypted_slots())
+
+
+class LibvirtPMEMNamespaceTests(test.NoDBTestCase):
+
+    def setUp(self):
+        super(LibvirtPMEMNamespaceTests, self).setUp()
+        self.useFixture(fakelibvirt.FakeLibvirtFixture())
+        self.context = context.get_admin_context()
+        self.vpmem_0 = objects.LibvirtVPMEMDevice(
+                label='4GB',
+                name='ns_0', devpath='/dev/dax0.0',
+                size=4292870144, align=2097152)
+        self.vpmem_1 = objects.LibvirtVPMEMDevice(
+                label='SMALL',
+                name='ns_1', devpath='/dev/dax0.1',
+                size=17177772032, align=2097152)
+        self.vpmem_2 = objects.LibvirtVPMEMDevice(
+                label='SMALL',
+                name='ns_2', devpath='/dev/dax0.2',
+                size=17177772032, align=2097152)
+        self.resource_0 = objects.Resource(
+                provider_uuid=uuids.rp_uuid,
+                resource_class="CUSTOM_PMEM_NAMESPACE_4GB",
+                identifier='ns_0', metadata=self.vpmem_0)
+        self.resource_1 = objects.Resource(
+                provider_uuid=uuids.rp_uuid,
+                resource_class="CUSTOM_PMEM_NAMESPACE_SMALL",
+                identifier='ns_1', metadata=self.vpmem_1)
+        self.resource_2 = objects.Resource(
+                provider_uuid=uuids.rp_uuid,
+                resource_class="CUSTOM_PMEM_NAMESPACE_SMALL",
+                identifier='ns_2', metadata=self.vpmem_2)
+        self.resource_3 = objects.Resource(
+                provider_uuid=uuids.rp_uuid,
+                resource_class="CUSTOM_RESOURCE_0",
+                identifier='resource_0')
+
+        self.pmem_namespaces = '''
+            [{"dev":"namespace0.0",
+            "mode":"devdax",
+            "map":"mem",
+            "size":4292870144,
+            "uuid":"24ffd5e4-2b39-4f28-88b3-d6dc1ec44863",
+            "daxregion":{"id": 0, "size": 4292870144,"align": 2097152,
+            "devices":[{"chardev":"dax0.0",
+            "size":4292870144}]},
+            "name":"ns_0",
+            "numa_node":0},
+            {"dev":"namespace0.1",
+            "mode":"devdax",
+            "map":"mem",
+            "size":17177772032,
+            "uuid":"ac64fe52-de38-465b-b32b-947a6773ac66",
+            "daxregion":{"id": 0, "size": 17177772032,"align": 2097152,
+            "devices":[{"chardev":"dax0.1",
+            "size":17177772032}]},
+            "name":"ns_1",
+            "numa_node":0},
+            {"dev":"namespace0.2",
+            "mode":"devdax",
+            "map":"mem",
+            "size":17177772032,
+            "uuid":"48189df5-2599-4001-8696-c260f7460381",
+            "daxregion":{"id": 0, "size": 17177772032,"align": 2097152,
+            "devices":[{"chardev":"dax0.2",
+            "size":17177772032}]},
+            "name":"ns_2",
+            "numa_node":0}]'''
+
+    @mock.patch('nova.virt.libvirt.host.Host.has_min_version',
+                new=mock.Mock(return_value=True))
+    @mock.patch('nova.privsep.libvirt.get_pmem_namespaces')
+    def test_discover_vpmems(self, mock_get):
+        mock_get.return_value = self.pmem_namespaces
+        vpmem_conf = ["4GB:ns_0", "SMALL:ns_1|ns_2"]
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        vpmems_by_name, vpmems_by_rc = drvr._discover_vpmems(
+                                            vpmem_conf=vpmem_conf)
+        expected_vpmems_by_name = {
+            'ns_0': self.vpmem_0,
+            'ns_1': self.vpmem_1,
+            'ns_2': self.vpmem_2}
+        expected_vpmems_by_rc = {
+            'CUSTOM_PMEM_NAMESPACE_4GB': [self.vpmem_0],
+            'CUSTOM_PMEM_NAMESPACE_SMALL': [self.vpmem_1, self.vpmem_2]
+        }
+        for name, vpmem in expected_vpmems_by_name.items():
+            self.assertEqual(vpmem.devpath, vpmems_by_name[name].devpath)
+            self.assertEqual(vpmem.size, vpmems_by_name[name].size)
+        for rc in expected_vpmems_by_rc.keys():
+            self.assertEqual(len(expected_vpmems_by_rc[rc]),
+                             len(vpmems_by_rc[rc]))
+
+    @mock.patch('nova.virt.libvirt.host.Host.has_min_version',
+                new=mock.Mock(return_value=True))
+    @mock.patch('nova.privsep.libvirt.get_pmem_namespaces')
+    def test_vpmems_not_on_host(self, mock_get):
+        mock_get.return_value = self.pmem_namespaces
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        vpmem_conf = ["4GB:ns_3"]
+        self.assertRaises(exception.PMEMNamespaceConfigInvalid,
+                          drvr._discover_vpmems, vpmem_conf)
+
+    @mock.patch('nova.virt.libvirt.host.Host.has_min_version',
+                new=mock.Mock(return_value=True))
+    @mock.patch('nova.privsep.libvirt.get_pmem_namespaces')
+    def test_vpmems_invalid_format(self, mock_get):
+        mock_get.return_value = self.pmem_namespaces
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        vpmem_conf = ["ns_0", "ns_1", "ns_2"]
+        self.assertRaises(exception.PMEMNamespaceConfigInvalid,
+                          drvr._discover_vpmems, vpmem_conf)
+
+    @mock.patch('nova.virt.libvirt.host.Host.has_min_version',
+                new=mock.Mock(return_value=True))
+    @mock.patch('nova.privsep.libvirt.get_pmem_namespaces')
+    def test_vpmems_duplicated_config(self, mock_get):
+        mock_get.return_value = self.pmem_namespaces
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        vpmem_conf = ["4GB:ns_0", "SMALL:ns_0"]
+        self.assertRaises(exception.PMEMNamespaceConfigInvalid,
+                          drvr._discover_vpmems, vpmem_conf)
+
+    @mock.patch('nova.virt.hardware.get_vpmems')
+    def test_get_ordered_vpmems(self, mock_labels):
+        # get orgered vpmems based on flavor extra_specs
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr._vpmems_by_name = {'ns_0': self.vpmem_0,
+                                'ns_1': self.vpmem_1,
+                                'ns_2': self.vpmem_2}
+        instance = fake_instance.fake_instance_obj(self.context)
+        instance.flavor = objects.Flavor(
+            name='m1.small', memory_mb=2048, vcpus=2, root_gb=10,
+            ephemeral_gb=20, swap=0, extra_specs={
+                'hw:pmem': 'SMALL,4GB,SMALL'})
+        mock_labels.return_value = ['SMALL', '4GB', 'SMALL']
+        # self.resource_3 is not vpmem resource
+        instance.resources = objects.ResourceList(objects=[
+            self.resource_0, self.resource_1,
+            self.resource_2, self.resource_3])
+        ordered_vpmems = drvr._get_ordered_vpmems(instance, instance.flavor)
+        # keep consistent with the order in flavor extra_specs
+        self.assertEqual('SMALL', ordered_vpmems[0].label)
+        self.assertEqual('4GB', ordered_vpmems[1].label)
+        self.assertEqual('SMALL', ordered_vpmems[2].label)
+        vpmems = drvr._get_vpmems(instance)
+        # this is not sorted, keep the same as instance.resources
+        self.assertEqual('4GB', vpmems[0].label)
+        self.assertEqual('SMALL', vpmems[1].label)
+        self.assertEqual('SMALL', vpmems[2].label)
+
+    @mock.patch('nova.privsep.libvirt.cleanup_vpmem')
+    def test_cleanup_vpmems(self, mock_cleanup_vpmem):
+        vpmems = [self.vpmem_0, self.vpmem_1, self.vpmem_2]
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr._cleanup_vpmems(vpmems)
+        mock_cleanup_vpmem.assert_has_calls([
+            mock.call(self.vpmem_0.devpath),
+            mock.call(self.vpmem_1.devpath),
+            mock.call(self.vpmem_2.devpath)])
+
+    @mock.patch('nova.privsep.libvirt.cleanup_vpmem')
+    def test_cleanup_vpmems_fail(self, mock_cleanup_vpmem):
+        mock_cleanup_vpmem.side_effect = Exception('Not known')
+        vpmems = [self.vpmem_0, self.vpmem_1, self.vpmem_2]
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        self.assertRaises(exception.VPMEMCleanupFailed,
+                          drvr._cleanup_vpmems, vpmems)
+
+    def test_guest_add_vpmems_int_values(self):
+        """Ensures XML is generated with integer size/align values.
+
+        See bug #1845905.
+        """
+        guest = vconfig.LibvirtConfigGuest()
+        guest.virt_type = 'kvm'
+        guest.name = 'name'
+        guest.uuid = 'uuid'
+        guest.memory = 1024
+        vpmems = [self.vpmem_0]
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr._guest_add_vpmems(guest, vpmems)
+        expected = '''
+            <domain type="kvm">
+              <uuid>uuid</uuid>
+              <name>name</name>
+              <memory>1024</memory>
+              <maxMemory slots="1">4193280</maxMemory>
+              <vcpu>1</vcpu>
+              <os>
+                <type>None</type>
+              </os>
+              <devices>
+                <memory model="nvdimm" access="shared">
+                  <source>
+                    <path>/dev/dax0.0</path>
+                    <alignsize>2048</alignsize>
+                    <pmem/>
+                  </source>
+                  <target>
+                    <size>4192256</size>
+                    <node>0</node>
+                    <label>
+                      <size>2048</size>
+                    </label>
+                  </target>
+                </memory>
+              </devices>
+            </domain>'''
+        self.assertXmlEqual(expected, guest.to_xml())

@@ -499,8 +499,13 @@ class TestOpenStackClient(object):
         return self.api_get('/servers/%s/migrations' %
                             server_id).body['migrations']
 
-    def get_migrations(self):
-        return self.api_get('os-migrations').body['migrations']
+    def get_migrations(self, user_id=None, project_id=None):
+        url = '/os-migrations?'
+        if user_id:
+            url += 'user_id=%s&' % user_id
+        if project_id:
+            url += 'project_id=%s&' % project_id
+        return self.api_get(url).body['migrations']
 
     def force_complete_migration(self, server_id, migration_id):
         return self.api_post(
@@ -533,3 +538,17 @@ class TestOpenStackClient(object):
 
     def get_server_diagnostics(self, server_id):
         return self.api_get('/servers/%s/diagnostics' % server_id).body
+
+    def get_quota_detail(self, project_id=None):
+        if not project_id:
+            project_id = self.project_id
+        return self.api_get(
+            '/os-quota-sets/%s/detail' % project_id).body['quota_set']
+
+    def update_quota(self, quotas, project_id=None):
+        if not project_id:
+            project_id = self.project_id
+        body = {'quota_set': {}}
+        body['quota_set'].update(quotas)
+        return self.api_put(
+            '/os-quota-sets/%s' % project_id, body).body['quota_set']

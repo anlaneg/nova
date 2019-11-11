@@ -28,6 +28,7 @@ the other libvirt related classes
 """
 
 from collections import defaultdict
+import inspect
 import operator
 import os
 import socket
@@ -113,11 +114,40 @@ class Host(object):
         self._lifecycle_delay = 15
 
         self._initialized = False
+        self._libvirt_proxy_classes = self._get_libvirt_proxy_classes(libvirt)
+        self._libvirt_proxy = self._wrap_libvirt_proxy(libvirt)
 
         # AMD SEV is conditional on support in the hardware, kernel,
         # qemu, and libvirt.  This is determined on demand and
         # memoized by the supports_amd_sev property below.
         self._supports_amd_sev = None
+
+        self._has_hyperthreading = None
+
+    @staticmethod
+    def _get_libvirt_proxy_classes(libvirt_module):
+        """Return a tuple for tpool.Proxy's autowrap argument containing all
+        classes defined by the libvirt module except libvirtError.
+        """
+
+        # Get a list of (name, class) tuples of libvirt classes
+        classes = inspect.getmembers(libvirt_module, inspect.isclass)
+
+        # Return a list of just the classes, filtering out libvirtError because
+        # we don't need to proxy that
+        return tuple([cls[1] for cls in classes if cls[0] != 'libvirtError'])
+
+    def _wrap_libvirt_proxy(self, obj):
+        """Return an object wrapped in a tpool.Proxy using autowrap appropriate
+        for the libvirt module.
+        """
+
+        # libvirt is not pure python, so eventlet monkey patching doesn't work
+        # on it. Consequently long-running libvirt calls will not yield to
+        # eventlet's event loop, starving all other greenthreads until
+        # completion. eventlet's tpool.Proxy handles this situation for us by
+        # executing proxied calls in a native thread.
+        return tpool.Proxy(obj, autowrap=self._libvirt_proxy_classes)
 
     def _native_thread(self):
         """Receives async events coming in from libvirtd.
@@ -240,8 +270,7 @@ class Host(object):
             % len(creds))
 
     #实现与url的libvirt连接
-    @staticmethod
-    def _connect(uri, read_only):
+    def _connect(self, uri, read_only):
         auth = [[libvirt.VIR_CRED_AUTHNAME,
                  libvirt.VIR_CRED_ECHOPROMPT,
                  libvirt.VIR_CRED_REALM,
@@ -254,13 +283,8 @@ class Host(object):
         flags = 0
         if read_only:
             flags = libvirt.VIR_CONNECT_RO
-        # tpool.proxy_call creates a native thread. Due to limitations
-        # with eventlet locking we cannot use the logging API inside
-        # the called function.
         # 调用libvirt.openAuth建立一条连接，连接的是uri
-        return tpool.proxy_call(
-            (libvirt.virDomain, libvirt.virConnect),
-            libvirt.openAuth, uri, auth, flags)
+        return self._libvirt_proxy.openAuth(uri, auth, flags)
 
     #将事件event存入事件队列，并知会进行处理
     def _queue_event(self, event):
@@ -653,7 +677,12 @@ class Host(object):
         flags = libvirt.VIR_CONNECT_LIST_DOMAINS_ACTIVE
         if not only_running:
             flags = flags | libvirt.VIR_CONNECT_LIST_DOMAINS_INACTIVE
-        alldoms = self.get_connection().listAllDomains(flags)
+
+        # listAllDomains() returns <list of virDomain>, not <virDomain>, so
+        # tpool.Proxy's autowrap won't catch it. We need to wrap the
+        # contents of the list we return.
+        alldoms = (self._wrap_libvirt_proxy(dom)
+                   for dom in self.get_connection().listAllDomains(flags))
 
         doms = []
         for dom in alldoms:
@@ -666,15 +695,9 @@ class Host(object):
     def get_online_cpus(self):
         """Get the set of CPUs that are online on the host
 
-        Method is only used by NUMA code paths which check on
-        libvirt version >= 1.0.4. getCPUMap() was introduced in
-        libvirt 1.0.0.
-
         :returns: set of online CPUs, raises libvirtError on error
-
         """
-
-        (cpus, cpu_map, online) = self.get_connection().getCPUMap()
+        cpus, cpu_map, online = self.get_connection().getCPUMap()
 
         online_cpus = set()
         for cpu in range(cpus):
@@ -682,6 +705,21 @@ class Host(object):
                 online_cpus.add(cpu)
 
         return online_cpus
+
+    def get_cpu_model_names(self):
+        """Get the cpu models based on host CPU arch
+
+        :returns: a list of cpu models which supported by the given CPU arch
+        """
+        arch = self.get_capabilities().host.cpu.arch
+        return self.get_connection().getCPUModelNames(arch)
+
+    @staticmethod
+    def _log_host_capabilities(xmlstr):
+        # NOTE(mriedem): This looks a bit weird but we do this so we can stub
+        # out this method in unit/functional test runs since the xml string is
+        # big and it can cause subunit parsing to fail (see bug 1813147).
+        LOG.info("Libvirt host capabilities %s", xmlstr)
 
     def get_capabilities(self):
         """Returns the host capabilities information
@@ -695,7 +733,7 @@ class Host(object):
         """
         if not self._caps:
             xmlstr = self.get_connection().getCapabilities()
-            LOG.info("Libvirt host capabilities %s", xmlstr)
+            self._log_host_capabilities(xmlstr)
             self._caps = vconfig.LibvirtConfigCaps()
             self._caps.parse_str(xmlstr)
             # NOTE(mriedem): Don't attempt to get baseline CPU features
@@ -1044,10 +1082,6 @@ class Host(object):
         """
         return self.get_connection().getInfo()
 
-    def get_cpu_count(self):
-        """Returns the total numbers of cpu in the host."""
-        return self._get_hardware_info()[2]
-
     def get_memory_mb_total(self):
         """Get the total memory size(MB) of physical computer.
 
@@ -1152,8 +1186,7 @@ class Host(object):
 
         :returns: a list of virNodeDevice instance
         """
-        # TODO(sbauza): Replace that call by a generic _list_devices("pci")
-        return self.get_connection().listDevices("pci", flags)
+        return self._list_devices("pci", flags=flags)
 
     def list_mdev_capable_devices(self, flags=0):
         """Lookup devices supporting mdev capabilities.
@@ -1207,6 +1240,26 @@ class Host(object):
                 return False
         except IOError:
             return False
+
+    @property
+    def has_hyperthreading(self):
+        """Determine if host CPU has SMT, a.k.a. HyperThreading.
+
+        :return: True if the host has SMT enabled, else False.
+        """
+        if self._has_hyperthreading is not None:
+            return self._has_hyperthreading
+
+        self._has_hyperthreading = False
+
+        # we don't use '/capabilities/host/cpu/topology' since libvirt doesn't
+        # guarantee the accuracy of this information
+        for cell in self.get_capabilities().host.topology.cells:
+            if any(len(cpu.siblings) > 1 for cpu in cell.cpus if cpu.siblings):
+                self._has_hyperthreading = True
+                break
+
+        return self._has_hyperthreading
 
     def _kernel_supports_amd_sev(self):
         if not os.path.exists(SEV_KERNEL_PARAM_FILE):

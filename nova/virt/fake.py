@@ -111,6 +111,7 @@ class FakeDriver(driver.ComputeDriver):
         "supports_extend_volume": True,
         "supports_multiattach": True,
         "supports_trusted_certs": True,
+        "supports_pcpus": False,
 
         # Supported image types
         "supports_image_type_raw": True,
@@ -966,7 +967,7 @@ class FakeDriverWithPciResources(SmallFakeDriver):
                 'parent_addr': self.PCI_ADDR_PF1,
                 'numa_node': 0,
                 'label': 'fake-label',
-                "parent_ifname": "ens1",
+                "parent_ifname": self._host + "-ens1",
             },
             {
                 'address': self.PCI_ADDR_PF2,
@@ -987,7 +988,7 @@ class FakeDriverWithPciResources(SmallFakeDriver):
                 'parent_addr': self.PCI_ADDR_PF2,
                 'numa_node': 0,
                 'label': 'fake-label',
-                "parent_ifname": "ens2",
+                "parent_ifname": self._host + "-ens2",
             },
             {
                 'address': self.PCI_ADDR_PF3,
@@ -1008,7 +1009,20 @@ class FakeDriverWithPciResources(SmallFakeDriver):
                 'parent_addr': self.PCI_ADDR_PF3,
                 'numa_node': 0,
                 'label': 'fake-label',
-                "parent_ifname": "ens3",
+                "parent_ifname": self._host + "-ens3",
             },
         ])
         return host_status
+
+
+class FakeDriverWithCaching(FakeDriver):
+    def __init__(self, *a, **k):
+        super(FakeDriverWithCaching, self).__init__(*a, **k)
+        self.cached_images = set()
+
+    def cache_image(self, context, image_id):
+        if image_id in self.cached_images:
+            return False
+        else:
+            self.cached_images.add(image_id)
+            return True

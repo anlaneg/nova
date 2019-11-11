@@ -743,6 +743,7 @@ class ServersController(wsgi.Controller):
                 exception.FlavorMemoryTooSmall,
                 exception.InvalidMetadata,
                 exception.InvalidVolume,
+                exception.MismatchVolumeAZException,
                 exception.MultiplePortsNotApplicable,
                 exception.InvalidFixedIpAndMaxCountRequest,
                 exception.InstanceUserDataMalformed,
@@ -777,8 +778,7 @@ class ServersController(wsgi.Controller):
         except (exception.PortInUse,
                 exception.InstanceExists,
                 exception.NetworkAmbiguous,
-                exception.NoUniqueMatch,
-                exception.VolumeTypeSupportNotYetAvailable) as error:
+                exception.NoUniqueMatch) as error:
             raise exc.HTTPConflict(explanation=error.format_message())
 
         # If the caller wanted a reservation_id, return it
@@ -946,18 +946,8 @@ class ServersController(wsgi.Controller):
                     target={'user_id': instance.user_id,
                             'project_id': instance.project_id})
 
-        # We could potentially move this check to conductor and avoid the
-        # extra API call to neutron when we support move operations with ports
-        # having resource requests.
         if common.instance_has_port_with_resource_request(
-                context, instance_id, self.network_api):
-            if not common.supports_port_resource_request_during_move(req):
-                msg = _("The resize action on a server with ports having "
-                        "resource requests, like a port with a QoS minimum "
-                        "bandwidth policy, is not supported with this "
-                        "microversion")
-                raise exc.HTTPBadRequest(explanation=msg)
-
+                instance_id, self.network_api):
             # TODO(gibi): Remove when nova only supports compute newer than
             # Train
             source_service = objects.Service.get_by_host_and_binary(
@@ -965,8 +955,7 @@ class ServersController(wsgi.Controller):
             if source_service.version < MIN_COMPUTE_MOVE_BANDWIDTH:
                 msg = _("The resize action on a server with ports having "
                         "resource requests, like a port with a QoS "
-                        "minimum bandwidth policy, is not yet supported "
-                        "on the source compute")
+                        "minimum bandwidth policy, is not yet supported.")
                 raise exc.HTTPConflict(explanation=msg)
 
         try:

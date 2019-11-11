@@ -36,11 +36,11 @@ from nova.compute import instance_actions
 from nova.compute import manager as compute_manager
 from nova import context
 from nova import exception
+from nova.network.neutronv2 import api as neutronapi
 from nova.network.neutronv2 import constants
 from nova import objects
 from nova.objects import block_device as block_device_obj
 from nova.scheduler import utils
-from nova.scheduler import weights
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api import client
@@ -59,17 +59,6 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
-class AltHostWeigher(weights.BaseHostWeigher):
-    """Used in the alternate host tests to return a pre-determined list of
-    hosts.
-    """
-    def _weigh_object(self, host_state, weight_properties):
-        """Return a defined order of hosts."""
-        weights = {"selection": 999, "alt_host1": 888, "alt_host2": 777,
-                   "alt_host3": 666, "host1": 0, "host2": 0}
-        return weights.get(host_state.host, 0)
-
-
 class ServersTestBase(integrated_helpers._IntegratedTestBase):
     api_major_version = 'v2'
     _force_delete_parameter = 'forceDelete'
@@ -79,8 +68,6 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
     _access_ipv6_parameter = 'accessIPv6'
     _return_resv_id_parameter = 'return_reservation_id'
     _min_count_parameter = 'min_count'
-
-    USE_NEUTRON = True
 
     def setUp(self):
         self.computes = {}
@@ -1274,8 +1261,10 @@ class ServerTestV269(ServersTestBase):
                 # server is in the down cell.
                 self.assertEqual('UNKNOWN', server['status'])
                 self.assertIn(server['id'], self.down_cell_insts)
-                # the partial construct will have only 5 keys:
-                # created, tenant_id, status, id and links.
+                # the partial construct will only have 5 keys: created,
+                # tenant_id, status, id and links. security_groups should be
+                # present too but isn't since we haven't created a network
+                # interface
                 self.assertEqual(5, len(server))
             else:
                 # server in up cell
@@ -1379,8 +1368,10 @@ class ServerTestV269(ServersTestBase):
                 self.assertEqual('UNKNOWN', server['status'])
                 if server['tenant_id'] != 'faker':
                     self.assertIn(server['id'], self.down_cell_insts)
-                # the partial construct will have only 5 keys:
-                # created, tenant_id, status, id and links
+                # the partial construct will only have 5 keys: created,
+                # tenant_id, status, id and links. security_groups should be
+                # present too but isn't since we haven't created a network
+                # interface
                 self.assertEqual(5, len(server))
             else:
                 # server in up cell
@@ -1626,6 +1617,95 @@ class ServerRebuildTestCase(integrated_helpers._IntegratedTestBase,
                       'volume-backed server', six.text_type(resp))
 
 
+class ServersTestV280(ServersTestBase):
+    api_major_version = 'v2.1'
+
+    def setUp(self):
+        super(ServersTestV280, self).setUp()
+        api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
+            api_version='v2.1'))
+        self.api = api_fixture.api
+        self.admin_api = api_fixture.admin_api
+
+        self.api.microversion = '2.80'
+        self.admin_api.microversion = '2.80'
+
+    def test_get_migrations_after_cold_migrate_server_in_same_project(
+            self):
+        # Create a server by non-admin
+        server = self.api.post_server({
+            'server': {
+                'flavorRef': 1,
+                'imageRef': '155d900f-4e14-4e4c-a73d-069cbf4541e6',
+                'name': 'migrate-server-test',
+                'networks': 'none'
+            }})
+        server_id = server['id']
+
+        # Check it's there
+        found_server = self.api.get_server(server_id)
+        self.assertEqual(server_id, found_server['id'])
+
+        self.start_service('compute', host='host2')
+
+        post = {'migrate': {}}
+        self.admin_api.post_server_action(server_id, post)
+
+        # Get the migration records by admin
+        migrations = self.admin_api.get_migrations(
+            user_id=self.admin_api.auth_user)
+        self.assertEqual(1, len(migrations))
+        self.assertEqual(server_id, migrations[0]['instance_uuid'])
+
+        # Get the migration records by non-admin
+        migrations = self.admin_api.get_migrations(
+            user_id=self.api.auth_user)
+        self.assertEqual([], migrations)
+
+    def test_get_migrations_after_live_migrate_server_in_different_project(
+            self):
+        # Create a server by non-admin
+        server = self.api.post_server({
+            'server': {
+                'flavorRef': 1,
+                'imageRef': '155d900f-4e14-4e4c-a73d-069cbf4541e6',
+                'name': 'migrate-server-test',
+                'networks': 'none'
+            }})
+        server_id = server['id']
+
+        # Check it's there
+        found_server = self.api.get_server(server_id)
+        self.assertEqual(server_id, found_server['id'])
+
+        server = self._wait_for_state_change(found_server, 'BUILD')
+
+        self.start_service('compute', host='host2')
+
+        project_id_1 = '4906260553374bf0a5d566543b320516'
+        project_id_2 = 'c850298c1b6b4796a8f197ac310b2469'
+        new_api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
+            api_version=self.api_major_version, project_id=project_id_1))
+        new_admin_api = new_api_fixture.admin_api
+        new_admin_api.microversion = '2.80'
+
+        post = {
+            'os-migrateLive': {
+                'host': 'host2',
+                'block_migration': True
+            }
+        }
+        new_admin_api.post_server_action(server_id, post)
+        # Get the migration records
+        migrations = new_admin_api.get_migrations(project_id=project_id_1)
+        self.assertEqual(1, len(migrations))
+        self.assertEqual(server_id, migrations[0]['instance_uuid'])
+
+        # Get the migration records by not exist project_id
+        migrations = new_admin_api.get_migrations(project_id=project_id_2)
+        self.assertEqual([], migrations)
+
+
 class ServerMovingTests(integrated_helpers.ProviderUsageBaseTestCase):
     """Tests moving servers while checking the resource allocations and usages
 
@@ -1811,10 +1891,7 @@ class ServerMovingTests(integrated_helpers.ProviderUsageBaseTestCase):
             source_rp_uuid, dest_rp_uuid)
 
         # Confirm the resize and check the usages
-        post = {'confirmResize': None}
-        self.api.post_server_action(
-            server['id'], post, check_response_status=[204])
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._confirm_resize(server)
 
         # After confirming, we should have an allocation only on the
         # destination host
@@ -1889,10 +1966,7 @@ class ServerMovingTests(integrated_helpers.ProviderUsageBaseTestCase):
             server, self.flavor2, self.flavor3, rp_uuid)
 
         # Confirm the resize and check the usages
-        post = {'confirmResize': None}
-        self.api.post_server_action(
-            server['id'], post, check_response_status=[204])
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._confirm_resize(server)
 
         self._run_periodics()
 
@@ -2020,8 +2094,7 @@ class ServerMovingTests(integrated_helpers.ProviderUsageBaseTestCase):
             dest_rp_uuid, self.flavor2, volume_backed=False)
 
         # Now confirm the resize and check hypervisor usage again.
-        self.api.post_server_action(server['id'], {'confirmResize': None})
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._confirm_resize(server)
 
         # There should no resource usage for flavor1 on the source host.
         self.assert_hypervisor_usage(
@@ -3125,11 +3198,7 @@ class ServerMovingTests(integrated_helpers.ProviderUsageBaseTestCase):
         self._wait_for_state_change(self.api, created_server, 'VERIFY_RESIZE')
 
         # Confirm the resize
-        post = {'confirmResize': None}
-        self.api.post_server_action(
-            created_server['id'], post, check_response_status=[204])
-        new_server = self._wait_for_state_change(self.api, created_server,
-                                                 'ACTIVE')
+        new_server = self._confirm_resize(created_server)
         inst_dest_host = new_server["OS-EXT-SRV-ATTR:host"]
 
         self.assertEqual(dest_hostname, inst_dest_host)
@@ -3204,8 +3273,10 @@ class ServerMovingTests(integrated_helpers.ProviderUsageBaseTestCase):
                  {"name": "alt_host3", "uuid": uuid_alt3},
                 ]
 
-        self.flags(weight_classes=[__name__ + '.AltHostWeigher'],
-                   group='filter_scheduler')
+        self.useFixture(nova_fixtures.HostNameWeigherFixture(
+            weights={
+                "selection": 999, "alt_host1": 888, "alt_host2": 777,
+                "alt_host3": 666, "host1": 0, "host2": 0}))
         self.scheduler_service.stop()
         self.scheduler_service = self.start_service('scheduler')
 
@@ -3300,10 +3371,7 @@ class ServerMovingTests(integrated_helpers.ProviderUsageBaseTestCase):
             server, self.flavor1, source_rp_uuid, dest_rp_uuid)
 
         # Confirm the move and check the usages
-        post = {'confirmResize': None}
-        self.api.post_server_action(
-            server['id'], post, check_response_status=[204])
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._confirm_resize(server)
 
         def _check_allocation():
             # the target host usage should be according to the flavor
@@ -3951,8 +4019,7 @@ class VolumeBackedServerTest(integrated_helpers.ProviderUsageBaseTestCase):
             self.admin_api, server, 'VERIFY_RESIZE')
         self.assertEqual('host2', server['OS-EXT-SRV-ATTR:host'])
         # Confirm the cold migration and check usage and the request spec.
-        self.api.post_server_action(server['id'], {'confirmResize': None})
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._confirm_resize(server)
         reqspec = objects.RequestSpec.get_by_instance_uuid(ctxt, server['id'])
         # Make sure it's set.
         self.assertTrue(reqspec.is_bfv)
@@ -5506,6 +5573,9 @@ class PortResourceRequestBasedSchedulingTestBase(
     CUSTOM_PHYSNET1 = 'CUSTOM_PHYSNET1'
     CUSTOM_PHYSNET2 = 'CUSTOM_PHYSNET2'
     CUSTOM_PHYSNET3 = 'CUSTOM_PHYSNET3'
+    PF1 = 'pf1'
+    PF2 = 'pf2'
+    PF3 = 'pf3'
 
     def setUp(self):
         # enable PciPassthroughFilter to support SRIOV before the base class
@@ -5521,8 +5591,13 @@ class PortResourceRequestBasedSchedulingTestBase(
                 FakeDriverWithPciResourcesConfigFixture())
 
         super(PortResourceRequestBasedSchedulingTestBase, self).setUp()
+        # Make ComputeManager._allocate_network_async synchronous to detect
+        # errors in tests that involve rescheduling.
+        self.useFixture(nova_fixtures.SpawnIsSynchronousFixture())
         self.compute1 = self._start_compute('host1')
         self.compute1_rp_uuid = self._get_provider_uuid_by_host('host1')
+        self.compute1_service_id = self.admin_api.get_services(
+            host='host1', binary='nova-compute')[0]['id']
         self.ovs_bridge_rp_per_host = {}
         self.sriov_dev_rp_per_host = {}
         self.flavor = self.api.get_flavors()[0]
@@ -5536,7 +5611,7 @@ class PortResourceRequestBasedSchedulingTestBase(
             self.flavor_with_group_policy['id'],
             {'extra_specs': {'group_policy': 'isolate'}})
 
-        self._create_networking_rp_tree(self.compute1_rp_uuid)
+        self._create_networking_rp_tree('host1', self.compute1_rp_uuid)
 
         # add extra ports and the related network to the neutron fixture
         # specifically for these tests. It cannot be added globally in the
@@ -5642,7 +5717,7 @@ class PortResourceRequestBasedSchedulingTestBase(
             device_rp_uuid,
             traits)
 
-    def _create_sriov_networking_rp_tree(self, compute_rp_uuid):
+    def _create_sriov_networking_rp_tree(self, hostname, compute_rp_uuid):
         # Create a matching RP tree in placement for the PCI devices added to
         # the passthrough_whitelist config during setUp() and PCI devices
         # present in the FakeDriverWithPciResources virt driver.
@@ -5655,19 +5730,20 @@ class PortResourceRequestBasedSchedulingTestBase(
         # physnet2 but it will not have bandwidth inventory.
         self.sriov_dev_rp_per_host[compute_rp_uuid] = {}
 
-        compute_name = compute_rp_uuid
         sriov_agent_rp_uuid = getattr(uuids, compute_rp_uuid + 'sriov agent')
         agent_rp_req = {
-            "name": "%s:NIC Switch agent" % compute_name,
+            "name": "%s:NIC Switch agent" % hostname,
             "uuid": sriov_agent_rp_uuid,
             "parent_provider_uuid": compute_rp_uuid
         }
         self.placement_api.post('/resource_providers',
                                 body=agent_rp_req,
                                 version='1.20')
+        dev_rp_name_prefix = ("%s:NIC Switch agent:" % hostname)
 
         sriov_pf1_rp_uuid = getattr(uuids, sriov_agent_rp_uuid + 'PF1')
-        self.sriov_dev_rp_per_host[compute_rp_uuid]['pf1'] = sriov_pf1_rp_uuid
+        self.sriov_dev_rp_per_host[
+            compute_rp_uuid][self.PF1] = sriov_pf1_rp_uuid
 
         inventories = {
             orc.NET_BW_IGR_KILOBIT_PER_SEC: {"total": 100000},
@@ -5676,10 +5752,11 @@ class PortResourceRequestBasedSchedulingTestBase(
         traits = [self.CUSTOM_VNIC_TYPE_DIRECT, self.CUSTOM_PHYSNET1]
         self._create_pf_device_rp(
             sriov_pf1_rp_uuid, sriov_agent_rp_uuid, inventories, traits,
-            device_rp_name="%s:NIC Switch agent:ens1" % compute_name)
+            device_rp_name=dev_rp_name_prefix + "%s-ens1" % hostname)
 
         sriov_pf2_rp_uuid = getattr(uuids, sriov_agent_rp_uuid + 'PF2')
-        self.sriov_dev_rp_per_host[compute_rp_uuid]['pf2'] = sriov_pf2_rp_uuid
+        self.sriov_dev_rp_per_host[
+            compute_rp_uuid][self.PF2] = sriov_pf2_rp_uuid
         inventories = {
             orc.NET_BW_IGR_KILOBIT_PER_SEC: {"total": 100000},
             orc.NET_BW_EGR_KILOBIT_PER_SEC: {"total": 100000},
@@ -5688,20 +5765,21 @@ class PortResourceRequestBasedSchedulingTestBase(
                   self.CUSTOM_PHYSNET2]
         self._create_pf_device_rp(
             sriov_pf2_rp_uuid, sriov_agent_rp_uuid, inventories, traits,
-            device_rp_name="%s:NIC Switch agent:ens2" % compute_name)
+            device_rp_name=dev_rp_name_prefix + "%s-ens2" % hostname)
 
         sriov_pf3_rp_uuid = getattr(uuids, sriov_agent_rp_uuid + 'PF3')
-        self.sriov_dev_rp_per_host[compute_rp_uuid]['pf3'] = sriov_pf3_rp_uuid
+        self.sriov_dev_rp_per_host[
+            compute_rp_uuid][self.PF3] = sriov_pf3_rp_uuid
         inventories = {}
         traits = [self.CUSTOM_VNIC_TYPE_DIRECT, self.CUSTOM_PHYSNET2]
         self._create_pf_device_rp(
             sriov_pf3_rp_uuid, sriov_agent_rp_uuid, inventories, traits,
-            device_rp_name="%s:NIC Switch agent:ens3" % compute_name)
+            device_rp_name=dev_rp_name_prefix + "%s-ens3" % hostname)
 
-    def _create_networking_rp_tree(self, compute_rp_uuid):
+    def _create_networking_rp_tree(self, hostname, compute_rp_uuid):
         # let's simulate what the neutron would do
         self._create_ovs_networking_rp_tree(compute_rp_uuid)
-        self._create_sriov_networking_rp_tree(compute_rp_uuid)
+        self._create_sriov_networking_rp_tree(hostname, compute_rp_uuid)
 
     def assertPortMatchesAllocation(self, port, allocations):
         port_request = port[constants.RESOURCE_REQUEST]['resources']
@@ -5810,51 +5888,6 @@ class UnsupportedPortResourceRequestBasedSchedulingTest(
             "until microversion 2.72.",
             six.text_type(ex))
 
-    def test_resize_server_with_port_resource_request_old_microversion(self):
-        server = self._create_server(
-            flavor=self.flavor,
-            networks=[{'port': self.neutron.port_1['id']}])
-        self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
-
-        # We need to simulate that the above server has a port that has
-        # resource request; we cannot boot with such a port but legacy servers
-        # can exist with such a port.
-        self._add_resource_request_to_a_bound_port(self.neutron.port_1['id'])
-
-        resize_req = {
-            'resize': {
-                'flavorRef': self.flavor['id']
-            }
-        }
-        ex = self.assertRaises(
-            client.OpenStackApiException,
-            self.api.post_server_action, server['id'], resize_req)
-
-        self.assertEqual(400, ex.response.status_code)
-        self.assertIn(
-            'The resize action on a server with ports having resource '
-            'requests', six.text_type(ex))
-
-    def test_migrate_server_with_port_resource_request_old_microversion(self):
-        server = self._create_server(
-            flavor=self.flavor,
-            networks=[{'port': self.neutron.port_1['id']}])
-        self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
-
-        # We need to simulate that the above server has a port that has
-        # resource request; we cannot boot with such a port but legacy servers
-        # can exist with such a port.
-        self._add_resource_request_to_a_bound_port(self.neutron.port_1['id'])
-
-        ex = self.assertRaises(
-            client.OpenStackApiException,
-            self.api.post_server_action, server['id'], {'migrate': None})
-
-        self.assertEqual(400, ex.response.status_code)
-        self.assertIn(
-            'The migrate action on a server with ports having resource '
-            'requests', six.text_type(ex))
-
     def test_live_migrate_server_with_port_resource_request_old_microversion(
             self):
         server = self._create_server(
@@ -5880,27 +5913,6 @@ class UnsupportedPortResourceRequestBasedSchedulingTest(
         self.assertEqual(400, ex.response.status_code)
         self.assertIn(
             'The os-migrateLive action on a server with ports having resource '
-            'requests', six.text_type(ex))
-
-    def test_evacuate_server_with_port_resource_request_old_microversion(
-            self):
-        server = self._create_server(
-            flavor=self.flavor,
-            networks=[{'port': self.neutron.port_1['id']}])
-        self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
-
-        # We need to simulate that the above server has a port that has
-        # resource request; we cannot boot with such a port but legacy servers
-        # can exist with such a port.
-        self._add_resource_request_to_a_bound_port(self.neutron.port_1['id'])
-
-        ex = self.assertRaises(
-            client.OpenStackApiException,
-            self.api.post_server_action, server['id'], {'evacuate': {}})
-
-        self.assertEqual(400, ex.response.status_code)
-        self.assertIn(
-            'The evacuate action on a server with ports having resource '
             'requests', six.text_type(ex))
 
     def test_unshelve_offloaded_server_with_port_resource_request_old_version(
@@ -5960,6 +5972,31 @@ class UnsupportedPortResourceRequestBasedSchedulingTest(
 
         self.api.post_server_action(server['id'], {'unshelve': None})
         self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+
+
+class NonAdminUnsupportedPortResourceRequestBasedSchedulingTest(
+        UnsupportedPortResourceRequestBasedSchedulingTest):
+
+    def setUp(self):
+        super(
+            NonAdminUnsupportedPortResourceRequestBasedSchedulingTest,
+            self).setUp()
+        # switch to non admin api
+        self.api = self.api_fixture.api
+        self.api.microversion = self.microversion
+
+        # allow non-admin to call the operations
+        self.policy.set_rules({
+            'os_compute_api:os-evacuate': '@',
+            'os_compute_api:servers:create': '@',
+            'os_compute_api:servers:create:attach_network': '@',
+            'os_compute_api:servers:show': '@',
+            'os_compute_api:os-attach-interfaces': '@',
+            'os_compute_api:os-attach-interfaces:create': '@',
+            'os_compute_api:os-shelve:shelve': '@',
+            'os_compute_api:os-shelve:unshelve': '@',
+            'os_compute_api:os-migrate-server:migrate_live': '@',
+        })
 
 
 class PortResourceRequestBasedSchedulingTest(
@@ -6042,7 +6079,7 @@ class PortResourceRequestBasedSchedulingTest(
             self.ovs_bridge_rp_per_host[self.compute1_rp_uuid]]['resources']
         sriov_allocations = allocations[
             self.sriov_dev_rp_per_host[
-                self.compute1_rp_uuid]['pf2']]['resources']
+                self.compute1_rp_uuid][self.PF2]]['resources']
 
         self.assertPortMatchesAllocation(ovs_port, ovs_allocations)
         self.assertPortMatchesAllocation(sriov_port, sriov_allocations)
@@ -6055,7 +6092,7 @@ class PortResourceRequestBasedSchedulingTest(
                          ovs_binding['allocation'])
         sriov_binding = sriov_port['binding:profile']
         self.assertEqual(
-            self.sriov_dev_rp_per_host[self.compute1_rp_uuid]['pf2'],
+            self.sriov_dev_rp_per_host[self.compute1_rp_uuid][self.PF2],
             sriov_binding['allocation'])
 
     def test_interface_detach_with_port_with_bandwidth_request(self):
@@ -6242,7 +6279,7 @@ class PortResourceRequestBasedSchedulingTest(
 
         sriov_allocations = allocations[
             self.sriov_dev_rp_per_host[
-                self.compute1_rp_uuid]['pf2']]['resources']
+                self.compute1_rp_uuid][self.PF2]]['resources']
         self.assertPortMatchesAllocation(
             sriov_port_with_res_req, sriov_allocations)
 
@@ -6251,7 +6288,7 @@ class PortResourceRequestBasedSchedulingTest(
         # request
         sriov_with_req_binding = sriov_port_with_res_req['binding:profile']
         self.assertEqual(
-            self.sriov_dev_rp_per_host[self.compute1_rp_uuid]['pf2'],
+            self.sriov_dev_rp_per_host[self.compute1_rp_uuid][self.PF2],
             sriov_with_req_binding['allocation'])
         # and the port without resource request does not have allocation
         sriov_binding = sriov_port['binding:profile']
@@ -6338,7 +6375,7 @@ class PortResourceRequestBasedSchedulingTest(
             allocations, self.compute1_rp_uuid, self.flavor)
 
         sriov_allocations = allocations[self.sriov_dev_rp_per_host[
-                self.compute1_rp_uuid]['pf2']]['resources']
+                self.compute1_rp_uuid][self.PF2]]['resources']
         self.assertPortMatchesAllocation(
             port, sriov_allocations)
 
@@ -6347,7 +6384,7 @@ class PortResourceRequestBasedSchedulingTest(
         # request
         port_binding = port['binding:profile']
         self.assertEqual(
-            self.sriov_dev_rp_per_host[self.compute1_rp_uuid]['pf2'],
+            self.sriov_dev_rp_per_host[self.compute1_rp_uuid][self.PF2],
             port_binding['allocation'])
 
         # We expect that the selected PCI device matches with the RP from
@@ -6358,15 +6395,6 @@ class PortResourceRequestBasedSchedulingTest(
             port_binding['pci_slot'])
 
 
-class HostNameWeigher(weights.BaseHostWeigher):
-    # Weigher to make the scheduler alternate host list deterministic
-    _weights = {'host1': 100, 'host2': 50, 'host3': 10}
-
-    def _weigh_object(self, host_state, weight_properties):
-        # Any undefined host gets no weight.
-        return self._weights.get(host_state.host, 0)
-
-
 class ServerMoveWithPortResourceRequestTest(
         PortResourceRequestBasedSchedulingTestBase):
 
@@ -6374,47 +6402,58 @@ class ServerMoveWithPortResourceRequestTest(
         # Use our custom weigher defined above to make sure that we have
         # a predictable host order in the alternate list returned by the
         # scheduler for migration.
-        self.flags(weight_classes=[__name__ + '.HostNameWeigher'],
-                   group='filter_scheduler')
+        self.useFixture(nova_fixtures.HostNameWeigherFixture())
         super(ServerMoveWithPortResourceRequestTest, self).setUp()
-
-        # The API actively rejecting the move operations with resource
-        # request so we have to turn off that check.
-        # TODO(gibi): Remove this when the move operations are supported and
-        # the API check is removed.
-        patcher = mock.patch(
-            'nova.api.openstack.common.'
-            'supports_port_resource_request_during_move',
-            return_value=True)
-        self.addCleanup(patcher.stop)
-        patcher.start()
-
         self.compute2 = self._start_compute('host2')
         self.compute2_rp_uuid = self._get_provider_uuid_by_host('host2')
-        self._create_networking_rp_tree(self.compute2_rp_uuid)
+        self._create_networking_rp_tree('host2', self.compute2_rp_uuid)
         self.compute2_service_id = self.admin_api.get_services(
             host='host2', binary='nova-compute')[0]['id']
 
+        # create a bigger flavor to use in resize test
+        self.flavor_with_group_policy_bigger = self.admin_api.post_flavor(
+            {'flavor': {
+                'ram': self.flavor_with_group_policy['ram'],
+                'vcpus': self.flavor_with_group_policy['vcpus'],
+                'name': self.flavor_with_group_policy['name'] + '+',
+                'disk': self.flavor_with_group_policy['disk'] + 1,
+            }})
+        self.admin_api.post_extra_spec(
+            self.flavor_with_group_policy_bigger['id'],
+            {'extra_specs': {'group_policy': 'isolate'}})
+
     def _check_allocation(
             self, server, compute_rp_uuid, non_qos_port, qos_port,
-            migration_uuid=None, source_compute_rp_uuid=None):
+            qos_sriov_port, flavor, migration_uuid=None,
+            source_compute_rp_uuid=None, new_flavor=None):
 
         updated_non_qos_port = self.neutron.show_port(
             non_qos_port['id'])['port']
         updated_qos_port = self.neutron.show_port(qos_port['id'])['port']
+        updated_qos_sriov_port = self.neutron.show_port(
+            qos_sriov_port['id'])['port']
 
         allocations = self.placement_api.get(
             '/allocations/%s' % server['id']).body['allocations']
 
+        # if there is new_flavor then we either have an in progress resize or
+        # a confirmed resize. In both cases the instance allocation should be
+        # according to the new_flavor
+        current_flavor = (new_flavor if new_flavor else flavor)
+
         # We expect one set of allocations for the compute resources on the
-        # compute rp and one set for the networking resources on the ovs bridge
-        # rp due to the qos_port resource request
-        self.assertEqual(2, len(allocations))
+        # compute rp and two sets for the networking resources one on the ovs
+        # bridge rp due to the qos_port resource request and one one the
+        # sriov pf2 due to qos_sriov_port resource request
+        self.assertEqual(3, len(allocations))
         self.assertComputeAllocationMatchesFlavor(
-            allocations, compute_rp_uuid, self.flavor)
-        network_allocations = allocations[
+            allocations, compute_rp_uuid, current_flavor)
+        ovs_allocations = allocations[
             self.ovs_bridge_rp_per_host[compute_rp_uuid]]['resources']
-        self.assertPortMatchesAllocation(qos_port, network_allocations)
+        self.assertPortMatchesAllocation(qos_port, ovs_allocations)
+        sriov_allocations = allocations[
+            self.sriov_dev_rp_per_host[compute_rp_uuid][self.PF2]]['resources']
+        self.assertPortMatchesAllocation(qos_sriov_port, sriov_allocations)
 
         # We expect that only the RP uuid of the networking RP having the port
         # allocation is sent in the port binding for the port having resource
@@ -6422,6 +6461,9 @@ class ServerMoveWithPortResourceRequestTest(
         qos_binding_profile = updated_qos_port['binding:profile']
         self.assertEqual(self.ovs_bridge_rp_per_host[compute_rp_uuid],
                          qos_binding_profile['allocation'])
+        qos_sriov_binding_profile = updated_qos_sriov_port['binding:profile']
+        self.assertEqual(self.sriov_dev_rp_per_host[compute_rp_uuid][self.PF2],
+                         qos_sriov_binding_profile['allocation'])
 
         # And we expect not to have any allocation set in the port binding for
         # the port that doesn't have resource request
@@ -6432,55 +6474,69 @@ class ServerMoveWithPortResourceRequestTest(
                 '/allocations/%s' % migration_uuid).body['allocations']
 
             # We expect one set of allocations for the compute resources on the
-            # compute rp and one set for the networking resources on the ovs
-            # bridge rp due to the qos_port resource request
-            self.assertEqual(2, len(migration_allocations))
+            # compute rp and two sets for the networking resources one on the
+            # ovs bridge rp due to the qos_port resource request and one one
+            # the sriov pf2 due to qos_sriov_port resource request
+            self.assertEqual(3, len(migration_allocations))
             self.assertComputeAllocationMatchesFlavor(
-                migration_allocations, source_compute_rp_uuid, self.flavor)
-            network_allocations = migration_allocations[
+                migration_allocations, source_compute_rp_uuid, flavor)
+            ovs_allocations = migration_allocations[
                 self.ovs_bridge_rp_per_host[
                     source_compute_rp_uuid]]['resources']
-            self.assertPortMatchesAllocation(qos_port, network_allocations)
+            self.assertPortMatchesAllocation(qos_port, ovs_allocations)
+            sriov_allocations = migration_allocations[
+                self.sriov_dev_rp_per_host[
+                    source_compute_rp_uuid][self.PF2]]['resources']
+            self.assertPortMatchesAllocation(qos_sriov_port, sriov_allocations)
 
-    def _create_server_with_ports(self, non_qos_port, qos_port):
+    def _create_server_with_ports(self, *ports):
         server = self._create_server(
-            flavor=self.flavor,
-            networks=[{'port': non_qos_port['id']},
-                      {'port': qos_port['id']}],
+            flavor=self.flavor_with_group_policy,
+            networks=[{'port': port['id']} for port in ports],
             host='host1')
         return self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
 
-    def _delete_server_and_check_allocations(self, qos_port, server):
+    def _delete_server_and_check_allocations(
+            self, qos_port, qos_sriov_port, server):
         self._delete_and_check_allocations(server)
 
         # assert that unbind removes the allocation from the binding of the
-        # port that got allocation during the bind
+        # ports that got allocation during the bind
         updated_qos_port = self.neutron.show_port(qos_port['id'])['port']
         binding_profile = updated_qos_port['binding:profile']
+        self.assertNotIn('allocation', binding_profile)
+        updated_qos_sriov_port = self.neutron.show_port(
+            qos_sriov_port['id'])['port']
+        binding_profile = updated_qos_sriov_port['binding:profile']
         self.assertNotIn('allocation', binding_profile)
 
     def test_migrate_server_with_qos_port_old_dest_compute_no_alternate(self):
         """Create a situation where the only migration target host returned
         by the scheduler is too old and therefore the migration fails.
         """
-        non_qos_port = self.neutron.port_1
-        qos_port = self.neutron.port_with_resource_request
+        non_qos_normal_port = self.neutron.port_1
+        qos_normal_port = self.neutron.port_with_resource_request
+        qos_sriov_port = self.neutron.port_with_sriov_resource_request
 
-        server = self._create_server_with_ports(non_qos_port, qos_port)
+        server = self._create_server_with_ports(
+            non_qos_normal_port, qos_normal_port, qos_sriov_port)
 
         # check that the server allocates from the current host properly
         self._check_allocation(
-            server, self.compute1_rp_uuid, non_qos_port, qos_port)
+            server, self.compute1_rp_uuid, non_qos_normal_port,
+            qos_normal_port, qos_sriov_port, self.flavor_with_group_policy)
 
         orig_get_service = nova.objects.Service.get_by_host_and_binary
 
         def fake_get_service(context, host, binary):
-            if host == 'host1':
-                return orig_get_service(context, host, binary)
+            # host2 is the only migration target, let's make it too old so the
+            # migration will fail
             if host == 'host2':
                 service = orig_get_service(context, host, binary)
                 service.version = 38
                 return service
+            else:
+                return orig_get_service(context, host, binary)
 
         with mock.patch(
                 'nova.objects.Service.get_by_host_and_binary',
@@ -6495,7 +6551,8 @@ class ServerMoveWithPortResourceRequestTest(
 
         # check that the server still allocates from the original host
         self._check_allocation(
-            server, self.compute1_rp_uuid, non_qos_port, qos_port)
+            server, self.compute1_rp_uuid, non_qos_normal_port,
+            qos_normal_port, qos_sriov_port, self.flavor_with_group_policy)
 
         # but the migration allocation is gone
         migration_uuid = self.get_migration_uuid_for_instance(server['id'])
@@ -6503,7 +6560,8 @@ class ServerMoveWithPortResourceRequestTest(
             '/allocations/%s' % migration_uuid).body['allocations']
         self.assertEqual({}, migration_allocations)
 
-        self._delete_server_and_check_allocations(qos_port, server)
+        self._delete_server_and_check_allocations(
+            qos_normal_port, qos_sriov_port, server)
 
     def test_migrate_server_with_qos_port_old_dest_compute_alternate(self):
         """Create a situation where the first migration target host returned
@@ -6512,30 +6570,37 @@ class ServerMoveWithPortResourceRequestTest(
         """
         self._start_compute('host3')
         compute3_rp_uuid = self._get_provider_uuid_by_host('host3')
-        self._create_networking_rp_tree(compute3_rp_uuid)
+        self._create_networking_rp_tree('host3', compute3_rp_uuid)
 
-        non_qos_port = self.neutron.port_1
-        qos_port = self.neutron.port_with_resource_request
+        non_qos_normal_port = self.neutron.port_1
+        qos_normal_port = self.neutron.port_with_resource_request
+        qos_sriov_port = self.neutron.port_with_sriov_resource_request
 
-        server = self._create_server_with_ports(non_qos_port, qos_port)
+        server = self._create_server_with_ports(
+            non_qos_normal_port, qos_normal_port, qos_sriov_port)
 
         # check that the server allocates from the current host properly
         self._check_allocation(
-            server, self.compute1_rp_uuid, non_qos_port, qos_port)
+            server, self.compute1_rp_uuid, non_qos_normal_port,
+            qos_normal_port, qos_sriov_port, self.flavor_with_group_policy)
 
         orig_get_service = nova.objects.Service.get_by_host_and_binary
 
         def fake_get_service(context, host, binary):
-            if host == 'host1':
-                return orig_get_service(context, host, binary)
+            # host2 is the first migration target, let's make it too old so the
+            # migration will skip this host
             if host == 'host2':
                 service = orig_get_service(context, host, binary)
                 service.version = 38
                 return service
-            if host == 'host3':
+            # host3 is the second migration target, let's make it new enough so
+            # the migration task will choose this host
+            elif host == 'host3':
                 service = orig_get_service(context, host, binary)
                 service.version = 39
                 return service
+            else:
+                return orig_get_service(context, host, binary)
 
         with mock.patch(
                 'nova.objects.Service.get_by_host_and_binary',
@@ -6547,35 +6612,96 @@ class ServerMoveWithPortResourceRequestTest(
 
         migration_uuid = self.get_migration_uuid_for_instance(server['id'])
 
-        # check that server allocates from host3
+        # check that server allocates from host3 and the migration allocates
+        # from host1
         self._check_allocation(
-            server, compute3_rp_uuid, non_qos_port, qos_port,
-            migration_uuid, source_compute_rp_uuid=self.compute1_rp_uuid)
+            server, compute3_rp_uuid, non_qos_normal_port, qos_normal_port,
+            qos_sriov_port, self.flavor_with_group_policy, migration_uuid,
+            source_compute_rp_uuid=self.compute1_rp_uuid)
 
-        self.api.post_server_action(server['id'], {'confirmResize': None})
-        self._wait_for_migration_status(server, ['confirmed'])
-
+        self._confirm_resize(server)
         # check that allocation is still OK
         self._check_allocation(
-            server, compute3_rp_uuid, non_qos_port, qos_port)
+            server, compute3_rp_uuid, non_qos_normal_port,
+            qos_normal_port, qos_sriov_port, self.flavor_with_group_policy)
         # but the migration allocation is gone
         migration_allocations = self.placement_api.get(
             '/allocations/%s' % migration_uuid).body['allocations']
         self.assertEqual({}, migration_allocations)
 
-        self._delete_server_and_check_allocations(qos_port, server)
+        self._delete_server_and_check_allocations(
+            qos_normal_port, qos_sriov_port, server)
 
-    def test_migrate_server_with_qos_port(self):
-        non_qos_port = self.neutron.port_1
-        qos_port = self.neutron.port_with_resource_request
+    def _test_resize_or_migrate_server_with_qos_ports(self, new_flavor=None):
+        non_qos_normal_port = self.neutron.port_1
+        qos_normal_port = self.neutron.port_with_resource_request
+        qos_sriov_port = self.neutron.port_with_sriov_resource_request
 
-        server = self._create_server_with_ports(non_qos_port, qos_port)
+        server = self._create_server_with_ports(
+            non_qos_normal_port, qos_normal_port, qos_sriov_port)
 
         # check that the server allocates from the current host properly
         self._check_allocation(
-            server, self.compute1_rp_uuid, non_qos_port, qos_port)
+            server, self.compute1_rp_uuid, non_qos_normal_port,
+            qos_normal_port, qos_sriov_port, self.flavor_with_group_policy)
 
-        self.api.post_server_action(server['id'], {'migrate': None})
+        if new_flavor:
+            self.api_fixture.api.post_server_action(
+                server['id'], {'resize': {"flavorRef": new_flavor['id']}})
+        else:
+            self.api.post_server_action(server['id'], {'migrate': None})
+
+        self._wait_for_state_change(self.api, server, 'VERIFY_RESIZE')
+
+        migration_uuid = self.get_migration_uuid_for_instance(server['id'])
+
+        # check that server allocates from the new host properly
+        self._check_allocation(
+            server, self.compute2_rp_uuid, non_qos_normal_port,
+            qos_normal_port, qos_sriov_port, self.flavor_with_group_policy,
+            migration_uuid, source_compute_rp_uuid=self.compute1_rp_uuid,
+            new_flavor=new_flavor)
+
+        self._confirm_resize(server)
+
+        # check that allocation is still OK
+        self._check_allocation(
+            server, self.compute2_rp_uuid, non_qos_normal_port,
+            qos_normal_port, qos_sriov_port, self.flavor_with_group_policy,
+            new_flavor=new_flavor)
+        migration_allocations = self.placement_api.get(
+            '/allocations/%s' % migration_uuid).body['allocations']
+        self.assertEqual({}, migration_allocations)
+
+        self._delete_server_and_check_allocations(
+            qos_normal_port, qos_sriov_port, server)
+
+    def test_migrate_server_with_qos_ports(self):
+        self._test_resize_or_migrate_server_with_qos_ports()
+
+    def test_resize_server_with_qos_ports(self):
+        self._test_resize_or_migrate_server_with_qos_ports(
+            new_flavor=self.flavor_with_group_policy_bigger)
+
+    def _test_resize_or_migrate_revert_with_qos_ports(self, new_flavor=None):
+        non_qos_port = self.neutron.port_1
+        qos_port = self.neutron.port_with_resource_request
+        qos_sriov_port = self.neutron.port_with_sriov_resource_request
+
+        server = self._create_server_with_ports(
+            non_qos_port, qos_port, qos_sriov_port)
+
+        # check that the server allocates from the current host properly
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_port, qos_port,
+            qos_sriov_port, self.flavor_with_group_policy)
+
+        if new_flavor:
+            self.api_fixture.api.post_server_action(
+                server['id'], {'resize': {"flavorRef": new_flavor['id']}})
+        else:
+            self.api.post_server_action(server['id'], {'migrate': None})
+
         self._wait_for_state_change(self.api, server, 'VERIFY_RESIZE')
 
         migration_uuid = self.get_migration_uuid_for_instance(server['id'])
@@ -6583,20 +6709,577 @@ class ServerMoveWithPortResourceRequestTest(
         # check that server allocates from the new host properly
         self._check_allocation(
             server, self.compute2_rp_uuid, non_qos_port, qos_port,
-            migration_uuid, source_compute_rp_uuid=self.compute1_rp_uuid)
+            qos_sriov_port, self.flavor_with_group_policy, migration_uuid,
+            source_compute_rp_uuid=self.compute1_rp_uuid,
+            new_flavor=new_flavor)
 
-        self.api.post_server_action(server['id'], {'confirmResize': None})
-        self._wait_for_migration_status(server, ['confirmed'])
+        self.api.post_server_action(server['id'], {'revertResize': None})
+        self._wait_for_state_change(self.api, server, 'ACTIVE')
 
-        # check that allocation is still OK
+        # check that allocation is moved back to the source host
         self._check_allocation(
-            server, self.compute2_rp_uuid, non_qos_port, qos_port)
-        # but the migration allocation is gone
+            server, self.compute1_rp_uuid, non_qos_port, qos_port,
+            qos_sriov_port, self.flavor_with_group_policy)
+
+        # check that the target host allocation is cleaned up.
+        self.assertRequestMatchesUsage(
+            {'VCPU': 0, 'MEMORY_MB': 0, 'DISK_GB': 0,
+             'NET_BW_IGR_KILOBIT_PER_SEC': 0, 'NET_BW_EGR_KILOBIT_PER_SEC': 0},
+            self.compute2_rp_uuid)
         migration_allocations = self.placement_api.get(
             '/allocations/%s' % migration_uuid).body['allocations']
         self.assertEqual({}, migration_allocations)
 
-        self._delete_server_and_check_allocations(qos_port, server)
+        self._delete_server_and_check_allocations(
+            qos_port, qos_sriov_port, server)
+
+    def test_migrate_revert_with_qos_ports(self):
+        self._test_resize_or_migrate_revert_with_qos_ports()
+
+    def test_resize_revert_with_qos_ports(self):
+        self._test_resize_or_migrate_revert_with_qos_ports(
+            new_flavor=self.flavor_with_group_policy_bigger)
+
+    def _test_resize_or_migrate_server_with_qos_port_reschedule_success(
+            self, new_flavor=None):
+        self._start_compute('host3')
+        compute3_rp_uuid = self._get_provider_uuid_by_host('host3')
+        self._create_networking_rp_tree('host3', compute3_rp_uuid)
+
+        non_qos_port = self.neutron.port_1
+        qos_port = self.neutron.port_with_resource_request
+        qos_sriov_port = self.neutron.port_with_sriov_resource_request
+
+        server = self._create_server_with_ports(
+            non_qos_port, qos_port, qos_sriov_port)
+
+        # check that the server allocates from the current host properly
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_port, qos_port,
+            qos_sriov_port, self.flavor_with_group_policy)
+
+        # Yes this isn't great in a functional test, but it's simple.
+        original_prep_resize = compute_manager.ComputeManager._prep_resize
+
+        prep_resize_calls = []
+
+        def fake_prep_resize(_self, *args, **kwargs):
+            # Make the first prep_resize fail and the rest passing through
+            # the original _prep_resize call
+            if not prep_resize_calls:
+                prep_resize_calls.append(_self.host)
+                raise test.TestingException('Simulated prep_resize failure.')
+            prep_resize_calls.append(_self.host)
+            original_prep_resize(_self, *args, **kwargs)
+
+        # The patched compute manager will raise from _prep_resize on the
+        # first host of the migration. Then the migration
+        # is reschedule on the other host where it will succeed
+        with mock.patch.object(
+                compute_manager.ComputeManager, '_prep_resize',
+                new=fake_prep_resize):
+            if new_flavor:
+                self.api_fixture.api.post_server_action(
+                    server['id'], {'resize': {"flavorRef": new_flavor['id']}})
+            else:
+                self.api.post_server_action(server['id'], {'migrate': None})
+            self._wait_for_state_change(self.api, server, 'VERIFY_RESIZE')
+
+        # ensure that resize is tried on two hosts, so we had a re-schedule
+        self.assertEqual(['host2', 'host3'], prep_resize_calls)
+
+        migration_uuid = self.get_migration_uuid_for_instance(server['id'])
+
+        # check that server allocates from the final host properly while
+        # the migration holds the allocation on the source host
+        self._check_allocation(
+            server, compute3_rp_uuid, non_qos_port, qos_port, qos_sriov_port,
+            self.flavor_with_group_policy, migration_uuid,
+            source_compute_rp_uuid=self.compute1_rp_uuid,
+            new_flavor=new_flavor)
+
+        self._confirm_resize(server)
+
+        # check that allocation is still OK
+        self._check_allocation(
+            server, compute3_rp_uuid, non_qos_port, qos_port, qos_sriov_port,
+            self.flavor_with_group_policy, new_flavor=new_flavor)
+        migration_allocations = self.placement_api.get(
+            '/allocations/%s' % migration_uuid).body['allocations']
+        self.assertEqual({}, migration_allocations)
+
+        self._delete_server_and_check_allocations(
+            qos_port, qos_sriov_port, server)
+
+    def test_migrate_server_with_qos_port_reschedule_success(self):
+        self._test_resize_or_migrate_server_with_qos_port_reschedule_success()
+
+    def test_resize_server_with_qos_port_reschedule_success(self):
+        self._test_resize_or_migrate_server_with_qos_port_reschedule_success(
+            new_flavor=self.flavor_with_group_policy_bigger)
+
+    def _test_resize_or_migrate_server_with_qos_port_reschedule_failure(
+            self, new_flavor=None):
+        non_qos_port = self.neutron.port_1
+        qos_port = self.neutron.port_with_resource_request
+        qos_sriov_port = self.neutron.port_with_sriov_resource_request
+
+        server = self._create_server_with_ports(
+            non_qos_port, qos_port, qos_sriov_port)
+
+        # check that the server allocates from the current host properly
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_port, qos_port,
+            qos_sriov_port, self.flavor_with_group_policy)
+
+        # The patched compute manager on host2 will raise from _prep_resize.
+        # Then the migration is reschedule but there is no other host to
+        # choose from.
+        with mock.patch.object(
+                compute_manager.ComputeManager, '_prep_resize',
+                side_effect=test.TestingException(
+                    'Simulated prep_resize failure.')):
+            if new_flavor:
+                self.api_fixture.api.post_server_action(
+                    server['id'], {'resize': {"flavorRef": new_flavor['id']}})
+            else:
+                self.api.post_server_action(server['id'], {'migrate': None})
+            self._wait_for_server_parameter(
+                self.api, server,
+                {'OS-EXT-SRV-ATTR:host': 'host1',
+                 'status': 'ERROR'})
+            self._wait_for_migration_status(server, ['error'])
+
+        migration_uuid = self.get_migration_uuid_for_instance(server['id'])
+
+        # as the migration is failed we expect that the migration allocation
+        # is deleted
+        migration_allocations = self.placement_api.get(
+            '/allocations/%s' % migration_uuid).body['allocations']
+        self.assertEqual({}, migration_allocations)
+
+        # and the instance allocates from the source host
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_port, qos_port,
+            qos_sriov_port, self.flavor_with_group_policy)
+
+    def test_migrate_server_with_qos_port_reschedule_failure(self):
+        self._test_resize_or_migrate_server_with_qos_port_reschedule_failure()
+
+    def test_resize_server_with_qos_port_reschedule_failure(self):
+        self._test_resize_or_migrate_server_with_qos_port_reschedule_failure(
+            new_flavor=self.flavor_with_group_policy_bigger)
+
+    def test_migrate_server_with_qos_port_pci_update_fail_not_reschedule(self):
+        # Update the name of the network device RP of PF2 on host2 to something
+        # unexpected. This will cause
+        # _update_pci_request_spec_with_allocated_interface_name() to raise
+        # when the instance is migrated to the host2.
+        rsp = self.placement_api.put(
+            '/resource_providers/%s'
+            % self.sriov_dev_rp_per_host[self.compute2_rp_uuid][self.PF2],
+            {"name": "invalid-device-rp-name"})
+        self.assertEqual(200, rsp.status)
+
+        self._start_compute('host3')
+        compute3_rp_uuid = self._get_provider_uuid_by_host('host3')
+        self._create_networking_rp_tree('host3', compute3_rp_uuid)
+
+        non_qos_port = self.neutron.port_1
+        qos_port = self.neutron.port_with_resource_request
+        qos_sriov_port = self.neutron.port_with_sriov_resource_request
+
+        server = self._create_server_with_ports(
+            non_qos_port, qos_port, qos_sriov_port)
+
+        # check that the server allocates from the current host properly
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_port, qos_port,
+            qos_sriov_port, self.flavor_with_group_policy)
+
+        # The compute manager on host2 will raise from
+        # _update_pci_request_spec_with_allocated_interface_name which will
+        # intentionally not trigger a re-schedule even if there is host3 as an
+        # alternate.
+        self.api.post_server_action(server['id'], {'migrate': None})
+        server = self._wait_for_server_parameter(
+            self.api, server,
+            {'OS-EXT-SRV-ATTR:host': 'host1',
+             # Note that we have to wait for the task_state to be reverted
+             # to None since that happens after the fault is recorded.
+             'OS-EXT-STS:task_state': None,
+             'status': 'ERROR'})
+        self._wait_for_migration_status(server, ['error'])
+
+        self.assertIn(
+            'Build of instance %s aborted' % server['id'],
+            server['fault']['message'])
+
+        self._wait_for_action_fail_completion(
+            server, instance_actions.MIGRATE, 'compute_prep_resize',
+            self.admin_api)
+
+        fake_notifier.wait_for_versioned_notifications(
+            'instance.resize_prep.end')
+        fake_notifier.wait_for_versioned_notifications(
+            'compute.exception')
+
+        migration_uuid = self.get_migration_uuid_for_instance(server['id'])
+
+        # as the migration is failed we expect that the migration allocation
+        # is deleted
+        migration_allocations = self.placement_api.get(
+            '/allocations/%s' % migration_uuid).body['allocations']
+        self.assertEqual({}, migration_allocations)
+
+        # and the instance allocates from the source host
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_port, qos_port,
+            qos_sriov_port, self.flavor_with_group_policy)
+
+    def test_migrate_server_with_qos_port_pinned_compute_rpc(self):
+        # Pin the compute rpc version to 5.1 to test what happens if
+        # resize RPC is called without RequestSpec.
+        # It is OK to set this after the nova services has started in setUp()
+        # as no compute rpc call is made so far.
+        self.flags(compute='5.1', group='upgrade_levels')
+
+        non_qos_normal_port = self.neutron.port_1
+        qos_normal_port = self.neutron.port_with_resource_request
+
+        server = self._create_server_with_ports(
+            non_qos_normal_port, qos_normal_port)
+
+        # This migration expected to fail as the old RPC does not provide
+        # enough information to do a proper port binding on the target host.
+        # The MigrationTask in the conductor checks that the RPC is new enough
+        # for this request for each possible destination provided by the
+        # scheduler and skips the old hosts.
+        ex = self.assertRaises(
+            client.OpenStackApiException, self.api.post_server_action,
+            server['id'], {'migrate': None})
+
+        self.assertEqual(400, ex.response.status_code)
+        self.assertIn('No valid host was found.', six.text_type(ex))
+
+        # The migration is put into error
+        self._wait_for_migration_status(server, ['error'])
+
+        # The migration is rejected so the instance remains on the source host
+        server = self.api.get_server(server['id'])
+        self.assertEqual('ACTIVE', server['status'])
+        self.assertEqual('host1', server['OS-EXT-SRV-ATTR:host'])
+
+        migration_uuid = self.get_migration_uuid_for_instance(server['id'])
+
+        # The migration allocation is deleted
+        migration_allocations = self.placement_api.get(
+            '/allocations/%s' % migration_uuid).body['allocations']
+        self.assertEqual({}, migration_allocations)
+
+        # The instance is still allocated from the source host
+        updated_non_qos_port = self.neutron.show_port(
+            non_qos_normal_port['id'])['port']
+        updated_qos_port = self.neutron.show_port(
+            qos_normal_port['id'])['port']
+        allocations = self.placement_api.get(
+            '/allocations/%s' % server['id']).body['allocations']
+        # We expect one set of allocations for the compute resources on the
+        # compute rp and one set for the networking resources on the ovs
+        # bridge rp due to the qos_port resource request
+        self.assertEqual(2, len(allocations))
+        self.assertComputeAllocationMatchesFlavor(
+            allocations, self.compute1_rp_uuid, self.flavor_with_group_policy)
+        ovs_allocations = allocations[
+            self.ovs_bridge_rp_per_host[self.compute1_rp_uuid]]['resources']
+        self.assertPortMatchesAllocation(qos_normal_port, ovs_allocations)
+
+        # binding:profile still points to the networking RP on the source host
+        qos_binding_profile = updated_qos_port['binding:profile']
+        self.assertEqual(self.ovs_bridge_rp_per_host[self.compute1_rp_uuid],
+                         qos_binding_profile['allocation'])
+        # And we expect not to have any allocation set in the port binding for
+        # the port that doesn't have resource request
+        self.assertNotIn('binding:profile', updated_non_qos_port)
+
+    def _check_allocation_during_evacuate(
+            self, server, flavor, source_compute_rp_uuid, dest_compute_rp_uuid,
+            non_qos_port, qos_port, qos_sriov_port):
+        # evacuate is the only case when the same consumer has allocation from
+        # two different RP trees so we need special checks
+
+        updated_non_qos_port = self.neutron.show_port(
+            non_qos_port['id'])['port']
+        updated_qos_port = self.neutron.show_port(qos_port['id'])['port']
+        updated_qos_sriov_port = self.neutron.show_port(
+            qos_sriov_port['id'])['port']
+
+        allocations = self.placement_api.get(
+            '/allocations/%s' % server['id']).body['allocations']
+
+        # We expect two sets of allocations. One set for the source compute
+        # and one set for the dest compute. Each set we expect 3 allocations
+        # one for the compute RP according to the flavor, one for the ovs port
+        # and one for the SRIOV port.
+        self.assertEqual(6, len(allocations), allocations)
+
+        # 1. source compute allocation
+        compute_allocations = allocations[source_compute_rp_uuid]['resources']
+        self.assertEqual(
+            self._resources_from_flavor(flavor),
+            compute_allocations)
+
+        # 2. source ovs allocation
+        ovs_allocations = allocations[
+            self.ovs_bridge_rp_per_host[source_compute_rp_uuid]]['resources']
+        self.assertPortMatchesAllocation(qos_port, ovs_allocations)
+
+        # 3. source sriov allocation
+        sriov_allocations = allocations[
+            self.sriov_dev_rp_per_host[
+                source_compute_rp_uuid][self.PF2]]['resources']
+        self.assertPortMatchesAllocation(qos_sriov_port, sriov_allocations)
+
+        # 4. dest compute allocation
+        compute_allocations = allocations[dest_compute_rp_uuid]['resources']
+        self.assertEqual(
+            self._resources_from_flavor(flavor),
+            compute_allocations)
+
+        # 5. dest ovs allocation
+        ovs_allocations = allocations[
+            self.ovs_bridge_rp_per_host[dest_compute_rp_uuid]]['resources']
+        self.assertPortMatchesAllocation(qos_port, ovs_allocations)
+
+        # 6. dest SRIOV allocation
+        sriov_allocations = allocations[
+            self.sriov_dev_rp_per_host[
+                dest_compute_rp_uuid][self.PF2]]['resources']
+        self.assertPortMatchesAllocation(qos_sriov_port, sriov_allocations)
+
+        # the qos ports should have their binding pointing to the RPs in the
+        # dest compute RP tree
+        qos_binding_profile = updated_qos_port['binding:profile']
+        self.assertEqual(
+            self.ovs_bridge_rp_per_host[dest_compute_rp_uuid],
+            qos_binding_profile['allocation'])
+
+        qos_sriov_binding_profile = updated_qos_sriov_port['binding:profile']
+        self.assertEqual(
+            self.sriov_dev_rp_per_host[dest_compute_rp_uuid][self.PF2],
+            qos_sriov_binding_profile['allocation'])
+
+        # And we expect not to have any allocation set in the port binding for
+        # the port that doesn't have resource request
+        self.assertNotIn('binding:profile', updated_non_qos_port)
+
+    def _check_allocation_after_evacuation_source_recovered(
+            self, server, flavor, dest_compute_rp_uuid, non_qos_port,
+            qos_port, qos_sriov_port):
+        # check that source allocation is cleaned up and the dest allocation
+        # and the port bindings are not touched.
+
+        updated_non_qos_port = self.neutron.show_port(
+            non_qos_port['id'])['port']
+        updated_qos_port = self.neutron.show_port(qos_port['id'])['port']
+        updated_qos_sriov_port = self.neutron.show_port(
+            qos_sriov_port['id'])['port']
+
+        allocations = self.placement_api.get(
+            '/allocations/%s' % server['id']).body['allocations']
+
+        self.assertEqual(3, len(allocations), allocations)
+
+        # 1. dest compute allocation
+        compute_allocations = allocations[dest_compute_rp_uuid]['resources']
+        self.assertEqual(
+            self._resources_from_flavor(flavor),
+            compute_allocations)
+
+        # 2. dest ovs allocation
+        ovs_allocations = allocations[
+            self.ovs_bridge_rp_per_host[dest_compute_rp_uuid]]['resources']
+        self.assertPortMatchesAllocation(qos_port, ovs_allocations)
+
+        # 3. dest SRIOV allocation
+        sriov_allocations = allocations[
+            self.sriov_dev_rp_per_host[
+                dest_compute_rp_uuid][self.PF2]]['resources']
+        self.assertPortMatchesAllocation(qos_sriov_port, sriov_allocations)
+
+        # the qos ports should have their binding pointing to the RPs in the
+        # dest compute RP tree
+        qos_binding_profile = updated_qos_port['binding:profile']
+        self.assertEqual(
+            self.ovs_bridge_rp_per_host[dest_compute_rp_uuid],
+            qos_binding_profile['allocation'])
+
+        qos_sriov_binding_profile = updated_qos_sriov_port['binding:profile']
+        self.assertEqual(
+            self.sriov_dev_rp_per_host[dest_compute_rp_uuid][self.PF2],
+            qos_sriov_binding_profile['allocation'])
+
+        # And we expect not to have any allocation set in the port binding for
+        # the port that doesn't have resource request
+        self.assertNotIn('binding:profile', updated_non_qos_port)
+
+    def test_evacuate_with_qos_port(self, host=None):
+        non_qos_normal_port = self.neutron.port_1
+        qos_normal_port = self.neutron.port_with_resource_request
+        qos_sriov_port = self.neutron.port_with_sriov_resource_request
+
+        server = self._create_server_with_ports(
+            non_qos_normal_port, qos_normal_port, qos_sriov_port)
+
+        # check that the server allocates from the current host properly
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_normal_port,
+            qos_normal_port, qos_sriov_port, self.flavor_with_group_policy)
+
+        # force source compute down
+        self.compute1.stop()
+        self.admin_api.put_service(
+            self.compute1_service_id, {'forced_down': 'true'})
+
+        req = {'evacuate': {}}
+        if host:
+            req['evacuate']['host'] = host
+
+        self.api.post_server_action(server['id'], req)
+        self._wait_for_server_parameter(
+            self.api, server,
+            {'OS-EXT-SRV-ATTR:host': 'host2',
+             'status': 'ACTIVE'})
+
+        self._check_allocation_during_evacuate(
+            server, self.flavor_with_group_policy, self.compute1_rp_uuid,
+            self.compute2_rp_uuid, non_qos_normal_port, qos_normal_port,
+            qos_sriov_port)
+
+        # recover source compute
+        self.admin_api.put_service(
+            self.compute1_service_id, {'forced_down': 'false'})
+        self.compute1 = self.restart_compute_service(self.compute1)
+
+        # check that source allocation is cleaned up and the dest allocation
+        # and the port bindings are not touched.
+        self._check_allocation_after_evacuation_source_recovered(
+            server, self.flavor_with_group_policy, self.compute2_rp_uuid,
+            non_qos_normal_port, qos_normal_port, qos_sriov_port)
+
+        self._delete_server_and_check_allocations(
+            qos_normal_port, qos_sriov_port, server)
+
+    def test_evacuate_with_target_host_with_qos_port(self):
+        self.test_evacuate_with_qos_port(host='host2')
+
+    def test_evacuate_with_qos_port_fails_recover_source_compute(self):
+        non_qos_normal_port = self.neutron.port_1
+        qos_normal_port = self.neutron.port_with_resource_request
+        qos_sriov_port = self.neutron.port_with_sriov_resource_request
+
+        server = self._create_server_with_ports(
+            non_qos_normal_port, qos_normal_port, qos_sriov_port)
+
+        # check that the server allocates from the current host properly
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_normal_port,
+            qos_normal_port, qos_sriov_port, self.flavor_with_group_policy)
+
+        # force source compute down
+        self.compute1.stop()
+        self.admin_api.put_service(
+            self.compute1_service_id, {'forced_down': 'true'})
+
+        with mock.patch(
+                'nova.compute.resource_tracker.ResourceTracker.rebuild_claim',
+                side_effect=exception.ComputeResourcesUnavailable(
+                    reason='test evacuate failure')):
+            req = {'evacuate': {}}
+            self.api.post_server_action(server['id'], req)
+            # Evacuate does not have reschedule loop so evacuate expected to
+            # simply fail and the server remains on the source host
+            server = self._wait_for_server_parameter(
+                self.api, server,
+                {'OS-EXT-SRV-ATTR:host': 'host1',
+                 'status': 'ERROR'})
+
+        self._wait_for_migration_status(server, ['failed'])
+
+        # As evacuation failed the resource allocation should be untouched
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_normal_port,
+            qos_normal_port, qos_sriov_port, self.flavor_with_group_policy)
+
+        # recover source compute
+        self.admin_api.put_service(
+            self.compute1_service_id, {'forced_down': 'false'})
+        self.compute1 = self.restart_compute_service(self.compute1)
+
+        # check again that even after source host recovery the source
+        # allocation is intact
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_normal_port,
+            qos_normal_port, qos_sriov_port, self.flavor_with_group_policy)
+
+        self._delete_server_and_check_allocations(
+            qos_normal_port, qos_sriov_port, server)
+
+    def test_evacuate_with_qos_port_pci_update_fail(self):
+        # Update the name of the network device RP of PF2 on host2 to something
+        # unexpected. This will cause
+        # _update_pci_request_spec_with_allocated_interface_name() to raise
+        # when the instance is evacuated to the host2.
+        rsp = self.placement_api.put(
+            '/resource_providers/%s'
+            % self.sriov_dev_rp_per_host[self.compute2_rp_uuid][self.PF2],
+            {"name": "invalid-device-rp-name"})
+        self.assertEqual(200, rsp.status)
+
+        non_qos_port = self.neutron.port_1
+        qos_port = self.neutron.port_with_resource_request
+        qos_sriov_port = self.neutron.port_with_sriov_resource_request
+
+        server = self._create_server_with_ports(
+            non_qos_port, qos_port, qos_sriov_port)
+
+        # check that the server allocates from the current host properly
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_port, qos_port,
+            qos_sriov_port, self.flavor_with_group_policy)
+
+        # force source compute down
+        self.compute1.stop()
+        self.admin_api.put_service(
+            self.compute1_service_id, {'forced_down': 'true'})
+
+        # The compute manager on host2 will raise from
+        # _update_pci_request_spec_with_allocated_interface_name
+        self.api.post_server_action(server['id'], {'evacuate': {}})
+        server = self._wait_for_server_parameter(
+            self.api, server,
+            {'OS-EXT-SRV-ATTR:host': 'host1',
+             'OS-EXT-STS:task_state': None,
+             'status': 'ERROR'})
+        self._wait_for_migration_status(server, ['failed'])
+
+        self.assertIn(
+            'Build of instance %s aborted' % server['id'],
+            server['fault']['message'])
+
+        self._wait_for_action_fail_completion(
+            server, instance_actions.EVACUATE, 'compute_rebuild_instance',
+            self.admin_api)
+
+        fake_notifier.wait_for_versioned_notifications(
+            'instance.rebuild.error')
+        fake_notifier.wait_for_versioned_notifications(
+            'compute.exception')
+
+        # and the instance allocates from the source host
+        self._check_allocation(
+            server, self.compute1_rp_uuid, non_qos_port, qos_port,
+            qos_sriov_port, self.flavor_with_group_policy)
 
 
 class PortResourceRequestReSchedulingTest(
@@ -6614,9 +7297,9 @@ class PortResourceRequestReSchedulingTest(
         super(PortResourceRequestReSchedulingTest, self).setUp()
         self.compute2 = self._start_compute('host2')
         self.compute2_rp_uuid = self._get_provider_uuid_by_host('host2')
-        self._create_networking_rp_tree(self.compute2_rp_uuid)
+        self._create_networking_rp_tree('host2', self.compute2_rp_uuid)
 
-    def _create_networking_rp_tree(self, compute_rp_uuid):
+    def _create_networking_rp_tree(self, hostname, compute_rp_uuid):
         # let's simulate what the neutron would do
         self._create_ovs_networking_rp_tree(compute_rp_uuid)
 
@@ -6684,15 +7367,17 @@ class PortResourceRequestReSchedulingTest(
         # First call is during boot, we want that to succeed normally. Then the
         # fake virt driver triggers a re-schedule. During that re-schedule the
         # fill is called again, and we simulate that call raises.
-        fill = nova.scheduler.utils.fill_provider_mapping
+        original_fill = nova.scheduler.utils.fill_provider_mapping
+
+        def stub_fill_provider_mapping(*args, **kwargs):
+            if not mock_fill.called:
+                return original_fill(*args, **kwargs)
+            raise exception.ResourceProviderTraitRetrievalFailed(
+                uuid=uuids.rp1)
 
         with mock.patch(
                 'nova.scheduler.utils.fill_provider_mapping',
-                side_effect=[
-                    fill,
-                    exception.ResourceProviderTraitRetrievalFailed(
-                        uuid=uuids.rp1)],
-                autospec=True):
+                side_effect=stub_fill_provider_mapping) as mock_fill:
             server = self._create_server(
                 flavor=self.flavor,
                 networks=[{'port': port['id']}])
@@ -6707,5 +7392,5 @@ class PortResourceRequestReSchedulingTest(
 
         # assert that unbind removes the allocation from the binding
         updated_port = self.neutron.show_port(port['id'])['port']
-        binding_profile = updated_port['binding:profile']
+        binding_profile = neutronapi.get_binding_profile(updated_port)
         self.assertNotIn('allocation', binding_profile)

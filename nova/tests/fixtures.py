@@ -63,6 +63,7 @@ from nova.objects import service as service_obj
 import nova.privsep
 from nova import quota as nova_quota
 from nova import rpc
+from nova.scheduler import weights
 from nova import service
 from nova.tests.functional.api import client
 from nova.tests.unit import fake_requests
@@ -183,6 +184,8 @@ class StandardLogging(fixtures.Fixture):
             # Don't log every single DB migration step
             std_logging.getLogger(
                 'migrate.versioning.api').setLevel(std_logging.WARNING)
+            # Or alembic for model comparisons.
+            std_logging.getLogger('alembic').setLevel(std_logging.WARNING)
 
         # At times we end up calling back into main() functions in
         # testing. This has the possibility of calling logging.setup
@@ -838,8 +841,14 @@ class WarningsFixture(fixtures.Fixture):
             message='Policy enforcement is depending on the value of is_admin.'
                     ' This key is deprecated. Please update your policy '
                     'file to use the standard policy values.')
-        # NOTE(sdague): mox3 is on life support, don't really care
-        # about any deprecations coming from it
+        # TODO(takashin): Remove filtering warnings about mox
+        # after removing tests which uses mox and are related to
+        # nova-network in the following files.
+        #
+        # - nova/tests/unit/api/openstack/compute/test_floating_ips.py
+        # - nova/tests/unit/api/openstack/compute/test_security_groups.py
+        # - nova/tests/unit/fake_network.py
+        # - nova/tests/unit/network/test_manager.py
         warnings.filterwarnings('ignore',
             module='mox3.mox')
         # NOTE(gibi): we can remove this once we get rid of Mox in nova
@@ -876,9 +885,17 @@ class WarningsFixture(fixtures.Fixture):
         # TODO(mriedem): Change (or remove) this DeprecationWarning once
         # https://bugs.launchpad.net/sqlalchemy-migrate/+bug/1814288 is fixed.
         warnings.filterwarnings(
-            'ignore', message='inspect.getargspec() is deprecated',
+            'ignore', message=r'inspect.getargspec\(\) is deprecated',
             category=DeprecationWarning,
             module='migrate.versioning.script.py')
+
+        # TODO(stephenfin): Remove once we bump our sqlalchemy-migrate version
+        # to whatever is released early in Ussuri and includes change
+        # I319785d7dd83ffe2c6e651a2494b073becc84684
+        warnings.filterwarnings(
+            'ignore', message='The Engine.contextual_connect.*',
+            category=sqla_exc.SADeprecationWarning,
+            module='migrate.changeset.databases.visitor')
 
         self.addCleanup(warnings.resetwarnings)
 
@@ -1214,21 +1231,115 @@ class NeutronFixture(fixtures.Fixture):
 
     # the default project_id in OsaAPIFixtures
     tenant_id = '6f70656e737461636b20342065766572'
+
     network_1 = {
+        'id': '3cb9bc59-5699-4588-a4b1-b87f96708bc6',
+        'name': 'private',
+        'description': '',
         'status': 'ACTIVE',
         'subnets': [],
-        'name': 'private-network',
         'admin_state_up': True,
         'tenant_id': tenant_id,
-        'id': '3cb9bc59-5699-4588-a4b1-b87f96708bc6',
+        'project_id': tenant_id,
         'shared': False,
+        'mtu': 1450,
+        'router:external': False,
+        'availability_zone_hints': [],
+        'availability_zones': [
+            'nova'
+        ],
+        'port_security_enabled': True,
+        'ipv4_address_scope': None,
+        'ipv6_address_scope': None,
+        'provider:network_type': 'vxlan',
+        'provider:physical_network': None,
+        'provider:segmentation_id': 24,
     }
+
+    security_group = {
+        'id': 'aec9df91-db1f-4e04-8ac6-e761d8461c53',
+        'name': 'default',
+        'description': 'Default security group',
+        'tenant_id': tenant_id,
+        'project_id': tenant_id,
+        'security_group_rules': [],  # setup later
+    }
+    security_group_rule_ip4_ingress = {
+        'id': 'e62268aa-1a17-4ff4-ae77-ab348bfe13a7',
+        'description': None,
+        'direction': 'ingress',
+        'ethertype': 'IPv4',
+        'protocol': None,
+        'port_range_min': None,
+        'port_range_max': None,
+        'remote_group_id': 'aec9df91-db1f-4e04-8ac6-e761d8461c53',
+        'remote_ip_prefix': None,
+        'security_group_id': 'aec9df91-db1f-4e04-8ac6-e761d8461c53',
+        'tenant_id': tenant_id,
+        'project_id': tenant_id,
+    }
+    security_group_rule_ip4_egress = {
+        'id': 'adf54daf-2ff9-4462-a0b0-f226abd1db28',
+        'description': None,
+        'direction': 'egress',
+        'ethertype': 'IPv4',
+        'protocol': None,
+        'port_range_min': None,
+        'port_range_max': None,
+        'remote_group_id': None,
+        'remote_ip_prefix': None,
+        'security_group_id': 'aec9df91-db1f-4e04-8ac6-e761d8461c53',
+        'tenant_id': tenant_id,
+        'project_id': tenant_id,
+    }
+    security_group_rule_ip6_ingress = {
+        'id': 'c4194b5c-3b50-4d35-9247-7850766aee2b',
+        'description': None,
+        'direction': 'ingress',
+        'ethertype': 'IPv6',
+        'protocol': None,
+        'port_range_min': None,
+        'port_range_max': None,
+        'remote_group_id': 'aec9df91-db1f-4e04-8ac6-e761d8461c53',
+        'remote_ip_prefix': None,
+        'security_group_id': 'aec9df91-db1f-4e04-8ac6-e761d8461c53',
+        'tenant_id': tenant_id,
+        'project_id': tenant_id,
+    }
+    security_group_rule_ip6_egress = {
+        'id': '16ce6a83-a1db-4d66-a10d-9481d493b072',
+        'description': None,
+        'direction': 'egress',
+        'ethertype': 'IPv6',
+        'protocol': None,
+        'port_range_min': None,
+        'port_range_max': None,
+        'remote_group_id': None,
+        'remote_ip_prefix': None,
+        'security_group_id': 'aec9df91-db1f-4e04-8ac6-e761d8461c53',
+        'tenant_id': tenant_id,
+        'project_id': tenant_id,
+    }
+    security_group['security_group_rules'] = [
+        security_group_rule_ip4_ingress['id'],
+        security_group_rule_ip4_egress['id'],
+        security_group_rule_ip6_ingress['id'],
+        security_group_rule_ip6_egress['id'],
+    ]
+
     subnet_1 = {
+        'id': 'f8a6e8f8-c2ec-497c-9f23-da9616de54ef',
         'name': 'private-subnet',
+        'description': '',
+        'ip_version': 4,
+        'ipv6_address_mode': None,
+        'ipv6_ra_mode': None,
         'enable_dhcp': True,
         'network_id': network_1['id'],
         'tenant_id': tenant_id,
+        'project_id': tenant_id,
         'dns_nameservers': [],
+        'gateway_ip': '192.168.1.1',
         'allocation_pools': [
             {
                 'start': '192.168.1.1',
@@ -1236,15 +1347,36 @@ class NeutronFixture(fixtures.Fixture):
             }
         ],
         'host_routes': [],
-        'ip_version': 4,
-        'gateway_ip': '192.168.1.1',
         'cidr': '192.168.1.1/24',
-        'id': 'f8a6e8f8-c2ec-497c-9f23-da9616de54ef'
     }
-    network_1['subnets'] = [subnet_1['id']]
+    subnet_ipv6_1 = {
+        'id': 'f8fa37b7-c10a-44b8-a5fe-d2e65d40b403',
+        'name': 'ipv6-private-subnet',
+        'description': '',
+        'ip_version': 6,
+        'ipv6_address_mode': 'slaac',
+        'ipv6_ra_mode': 'slaac',
+        'enable_dhcp': True,
+        'network_id': network_1['id'],
+        'tenant_id': tenant_id,
+        'project_id': tenant_id,
+        'dns_nameservers': [],
+        'gateway_ip': 'fd37:44e8:ad06::1',
+        'allocation_pools': [
+            {
+                'start': 'fd37:44e8:ad06::2',
+                'end': 'fd37:44e8:ad06:0:ffff:ffff:ffff:ffff'
+            }
+        ],
+        'host_routes': [],
+        'cidr': 'fd37:44e8:ad06::/64',
+    }
+    network_1['subnets'] = [subnet_1['id'], subnet_ipv6_1['id']]
 
     port_1 = {
         'id': 'ce531f90-199f-48c0-816c-13e38010b442',
+        'name': '',  # yes, this what the neutron API returns
+        'description': '',
         'network_id': network_1['id'],
         'admin_state_up': True,
         'status': 'ACTIVE',
@@ -1258,11 +1390,20 @@ class NeutronFixture(fixtures.Fixture):
             }
         ],
         'tenant_id': tenant_id,
-        'binding:vif_type': 'ovs'
+        'project_id': tenant_id,
+        'device_id': '',
+        'binding:vnic_type': 'normal',
+        'binding:vif_type': 'ovs',
+        'port_security_enabled': True,
+        'security_groups': [
+            security_group['id'],
+        ],
     }
 
     port_2 = {
         'id': '88dae9fa-0dc6-49e3-8c29-3abc41e99ac9',
+        'name': '',
+        'description': '',
         'network_id': network_1['id'],
         'admin_state_up': True,
         'status': 'ACTIVE',
@@ -1274,11 +1415,20 @@ class NeutronFixture(fixtures.Fixture):
             }
         ],
         'tenant_id': tenant_id,
-        'binding:vif_type': 'ovs'
+        'project_id': tenant_id,
+        'device_id': '',
+        'binding:vnic_type': 'normal',
+        'binding:vif_type': 'ovs',
+        'port_security_enabled': True,
+        'security_groups': [
+            security_group['id'],
+        ],
     }
 
     port_with_resource_request = {
         'id': '2f2613ce-95a9-490a-b3c4-5f1c28c1f886',
+        'name': '',
+        'description': '',
         'network_id': network_1['id'],
         'admin_state_up': True,
         'status': 'ACTIVE',
@@ -1290,32 +1440,63 @@ class NeutronFixture(fixtures.Fixture):
             }
         ],
         'tenant_id': tenant_id,
-        neutron_constants.RESOURCE_REQUEST: {
+        'project_id': tenant_id,
+        'device_id': '',
+        'binding:vnic_type': 'normal',
+        'binding:vif_type': 'ovs',
+        'resource_request': {
             "resources": {
                     orc.NET_BW_IGR_KILOBIT_PER_SEC: 1000,
                     orc.NET_BW_EGR_KILOBIT_PER_SEC: 1000},
             "required": ["CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_NORMAL"]
-        }
+        },
+        'port_security_enabled': True,
+        'security_groups': [
+            security_group['id'],
+        ],
     }
 
+    # network_2 does not have security groups enabled - that's okay since most
+    # of these ports are SR-IOV'y anyway
     network_2 = {
+        'id': '1b70879f-fd00-411e-8ea9-143e7820e61d',
+        # TODO(stephenfin): This would be more useful name due to things like
+        # https://bugs.launchpad.net/nova/+bug/1708316
+        'name': 'private',
+        'description': '',
         'status': 'ACTIVE',
         'subnets': [],
-        'name': 'private-network',
         'admin_state_up': True,
         'tenant_id': tenant_id,
-        'id': '1b70879f-fd00-411e-8ea9-143e7820e61d',
+        'project_id': tenant_id,
         'shared': False,
+        'mtu': 1450,
+        'router:external': False,
+        'availability_zone_hints': [],
+        'availability_zones': [
+            'nova'
+        ],
+        'port_security_enabled': False,
+        'ipv4_address_scope': None,
+        'ipv6_address_scope': None,
+        'provider:network_type': 'vlan',
         'provider:physical_network': 'physnet2',
-        "provider:network_type": "vlan",
+        'provider:segmentation_id': 24,
     }
 
     subnet_2 = {
-        'name': 'private-subnet',
+        'id': 'c7ca1baf-f536-4849-89fe-9671318375ff',
+        'name': '',
+        'description': '',
+        'ip_version': 4,
+        'ipv6_address_mode': None,
+        'ipv6_ra_mode': None,
         'enable_dhcp': True,
         'network_id': network_2['id'],
         'tenant_id': tenant_id,
+        'project_id': tenant_id,
         'dns_nameservers': [],
+        'gateway_ip': '192.168.1.1',
         'allocation_pools': [
             {
                 'start': '192.168.13.1',
@@ -1323,15 +1504,14 @@ class NeutronFixture(fixtures.Fixture):
             }
         ],
         'host_routes': [],
-        'ip_version': 4,
-        'gateway_ip': '192.168.1.1',
         'cidr': '192.168.1.1/24',
-        'id': 'c7ca1baf-f536-4849-89fe-9671318375ff'
     }
     network_2['subnets'] = [subnet_2['id']]
 
     sriov_port = {
         'id': '5460ee0c-ffbb-4e45-8d58-37bfceabd084',
+        'name': '',
+        'description': '',
         'network_id': network_2['id'],
         'admin_state_up': True,
         'status': 'ACTIVE',
@@ -1343,12 +1523,17 @@ class NeutronFixture(fixtures.Fixture):
             }
         ],
         'tenant_id': tenant_id,
-        neutron_constants.RESOURCE_REQUEST: {},
+        'project_id': tenant_id,
+        'device_id': '',
+        'resource_request': {},
         'binding:vnic_type': 'direct',
+        'port_security_enabled': False,
     }
 
     port_with_sriov_resource_request = {
         'id': '7059503b-a648-40fd-a561-5ca769304bee',
+        'name': '',
+        'description': '',
         'network_id': network_2['id'],
         'admin_state_up': True,
         'status': 'ACTIVE',
@@ -1361,17 +1546,22 @@ class NeutronFixture(fixtures.Fixture):
             }
         ],
         'tenant_id': tenant_id,
-        neutron_constants.RESOURCE_REQUEST: {
+        'project_id': tenant_id,
+        'device_id': '',
+        'resource_request': {
             "resources": {
                 orc.NET_BW_IGR_KILOBIT_PER_SEC: 10000,
                 orc.NET_BW_EGR_KILOBIT_PER_SEC: 10000},
             "required": ["CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_DIRECT"]
         },
         'binding:vnic_type': 'direct',
+        'port_security_enabled': False,
     }
 
     port_macvtap_with_resource_request = {
         'id': 'cbb9707f-3559-4675-a973-4ea89c747f02',
+        'name': '',
+        'description': '',
         'network_id': network_2['id'],
         'admin_state_up': True,
         'status': 'ACTIVE',
@@ -1384,13 +1574,16 @@ class NeutronFixture(fixtures.Fixture):
             }
         ],
         'tenant_id': tenant_id,
-        neutron_constants.RESOURCE_REQUEST: {
+        'project_id': tenant_id,
+        'device_id': '',
+        'resource_request': {
             "resources": {
                 orc.NET_BW_IGR_KILOBIT_PER_SEC: 10000,
                 orc.NET_BW_EGR_KILOBIT_PER_SEC: 10000},
             "required": ["CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_MACVTAP"]
         },
         'binding:vnic_type': 'macvtap',
+        'port_security_enabled': False,
     }
 
     nw_info = [{
@@ -1445,26 +1638,31 @@ class NeutronFixture(fixtures.Fixture):
     def __init__(self, test):
         super(NeutronFixture, self).__init__()
         self.test = test
+
+        # TODO(stephenfin): This should probably happen in setUp
+
         # The fixture allows port update so we need to deepcopy the class
         # variables to avoid test case interference.
         self._ports = {
             # NOTE(gibi)The port_with_sriov_resource_request cannot be added
             # globally in this fixture as it adds a second network that makes
             # auto allocation based test to fail due to ambiguous networks.
-            NeutronFixture.port_1['id']: copy.deepcopy(NeutronFixture.port_1),
-            NeutronFixture.port_with_resource_request['id']:
-                copy.deepcopy(NeutronFixture.port_with_resource_request)
+            self.port_1['id']: copy.deepcopy(self.port_1),
+            self.port_with_resource_request['id']:
+                copy.deepcopy(self.port_with_resource_request)
         }
 
-        # The fixture does not allow network update so we don't have to
-        # deepcopy here
+        # The fixture does not allow network, subnet or security group updates
+        # so we don't have to deepcopy here
         self._networks = {
-            NeutronFixture.network_1['id']: NeutronFixture.network_1
+            self.network_1['id']: self.network_1
         }
-        # The fixture does not allow network update so we don't have to
-        # deepcopy here
         self._subnets = {
-            NeutronFixture.subnet_1['id']: NeutronFixture.subnet_1
+            self.subnet_1['id']: self.subnet_1,
+            self.subnet_ipv6_1['id']: self.subnet_ipv6_1,
+        }
+        self._security_groups = {
+            self.security_group['id']: self.security_group,
         }
 
     def setUp(self):
@@ -1479,15 +1677,11 @@ class NeutronFixture(fixtures.Fixture):
         self.test.stub_out(
             'nova.network.neutronv2.api.API.add_fixed_ip_to_instance',
             lambda *args, **kwargs: network_model.NetworkInfo.hydrate(
-                NeutronFixture.nw_info))
+                self.nw_info))
         self.test.stub_out(
             'nova.network.neutronv2.api.API.remove_fixed_ip_from_instance',
             lambda *args, **kwargs: network_model.NetworkInfo.hydrate(
-                NeutronFixture.nw_info))
-        self.test.stub_out(
-            'nova.network.security_group.neutron_driver.SecurityGroupAPI.'
-            'get_instances_security_groups_bindings',
-            lambda *args, **kwargs: {})
+                self.nw_info))
 
         # Stub out port binding APIs which go through a KSA client Adapter
         # rather than python-neutronclient.
@@ -1503,7 +1697,20 @@ class NeutronFixture(fixtures.Fixture):
             self.fake_delete_port_binding)
 
         self.test.stub_out('nova.network.neutronv2.api.get_client',
-                           lambda *args, **kwargs: self)
+                           self._get_client)
+
+    def _get_client(self, context, admin=False):
+        # NOTE(gibi): This is a hack. As we return the same fixture for each
+        # get_client call there is no way to later know that a call came
+        # through which client. We store the parameters of the last get_client
+        # call. Later we should return a new client object from this call that
+        # is wrapping the fixture and this client can remember how it was
+        # initialized.
+
+        # This logic is copied from nova.network.neutronv2.api._get_auth_plugin
+        self.is_admin_client = (admin or
+                                (context.is_admin and not context.auth_token))
+        return self
 
     @staticmethod
     def fake_create_port_binding(context, client, port_id, data):
@@ -1517,12 +1724,38 @@ class NeutronFixture(fixtures.Fixture):
         # per port so we can reflect the status accurately.
         return fake_requests.FakeResponse(204)
 
+    @staticmethod
+    def fake_get_instance_security_group_bindings(
+            _, context, servers, detailed=False):
+        if detailed:
+            raise Exception('We do not support detailed view')
+        return {server['id']: [{'name': 'default'}] for server in servers}
+
     def _get_first_id_match(self, id, list):
         filtered_list = [p for p in list if p['id'] == id]
         if len(filtered_list) > 0:
             return filtered_list[0]
         else:
             return None
+
+    def _list_resource(self, resources, retrieve_all, **_params):
+        # If 'fields' is passed we need to strip that out since it will mess
+        # up the filtering as 'fields' is not a filter parameter.
+        _params.pop('fields', None)
+        result = []
+        for resource in resources.values():
+            for key, val in _params.items():
+                # params can be strings or lists/tuples and these need to be
+                # handled differently
+                if isinstance(val, list) or isinstance(val, tuple):
+                    if not any(resource.get(key) == v for v in val):
+                        break
+                else:
+                    if resource.get(key) != val:
+                        break
+            else:  # triggers if we didn't hit a break above
+                result.append(copy.deepcopy(resource))
+        return result
 
     def list_extensions(self, *args, **kwargs):
         return {
@@ -1548,27 +1781,25 @@ class NeutronFixture(fixtures.Fixture):
         if port_id in self._ports:
             del self._ports[port_id]
 
+    def list_ports(self, retrieve_all=True, **_params):
+        ports = self._list_resource(self._ports, retrieve_all, **_params)
+        if not self.is_admin_client:
+            # Neutron returns None instead of the real resource_request if
+            # the ports are queried by a non-admin. So simulate this behavior
+            # here
+            for port in ports:
+                if 'resource_request' in port:
+                    port['resource_request'] = None
+        return {'ports': ports}
+
     def show_network(self, network_id, **_params):
         if network_id not in self._networks:
             raise neutron_client_exc.NetworkNotFoundClient()
         return {'network': copy.deepcopy(self._networks[network_id])}
 
     def list_networks(self, retrieve_all=True, **_params):
-        networks = self._networks.values()
-        if 'id' in _params:
-            networks = [x for x in networks if x['id'] in _params['id']]
-            _params.pop('id')
-        networks = [n for n in networks
-                    if all(n.get(opt) == _params[opt] for opt in _params)]
-        return {'networks': copy.deepcopy(networks)}
-
-    def list_ports(self, retrieve_all=True, **_params):
-        # If 'fields' is passed we need to strip that out since it will mess
-        # up the filtering as 'fields' is not a filter parameter.
-        _params.pop('fields', None)
-        ports = [p for p in self._ports.values()
-                 if all(p.get(opt) == _params[opt] for opt in _params)]
-        return {'ports': copy.deepcopy(ports)}
+        return {'networks': self._list_resource(
+            self._networks, retrieve_all, **_params)}
 
     def list_subnets(self, retrieve_all=True, **_params):
         # NOTE(gibi): The fixture does not support filtering for subnets
@@ -1577,18 +1808,21 @@ class NeutronFixture(fixtures.Fixture):
     def list_floatingips(self, retrieve_all=True, **_params):
         return {'floatingips': []}
 
+    def list_security_groups(self, retrieve_all=True, **_params):
+        return {'security_groups': self._list_resource(
+            self._security_groups, retrieve_all, **_params)}
+
     def create_port(self, body=None):
+        body = body or {'port': {}}
         # Note(gibi): Some of the test expects that a pre-defined port is
         # created. This is port_2. So if that port is not created yet then
         # that is the one created here.
-        if NeutronFixture.port_2['id'] not in self._ports:
-            new_port = copy.deepcopy(NeutronFixture.port_2)
-        else:
+        new_port = copy.deepcopy(body['port'])
+        new_port.update(copy.deepcopy(self.port_2))
+        if self.port_2['id'] in self._ports:
             # If port_2 is already created then create a new port based on
             # the request body, the port_2 as a template, and assign new
             # port_id and mac_address for the new port
-            new_port = copy.deepcopy(body)
-            new_port.update(copy.deepcopy(NeutronFixture.port_2))
             # we need truly random uuids instead of named sentinels as some
             # tests needs more than 3 ports
             new_port.update({
@@ -1612,6 +1846,24 @@ class NeutronFixture(fixtures.Fixture):
     def show_quota(self, project_id):
         # unlimited quota
         return {'quota': {'port': -1}}
+
+    def validate_auto_allocated_topology_requirements(self, project_id):
+        # from https://github.com/openstack/python-neutronclient/blob/6.14.0/
+        #  neutronclient/v2_0/client.py#L2009-L2011
+        return self.get_auto_allocated_topology(project_id, fields=['dry-run'])
+
+    def get_auto_allocated_topology(self, project_id, **_params):
+        # from https://github.com/openstack/neutron/blob/14.0.0/
+        #  neutron/services/auto_allocate/db.py#L134-L162
+        if _params == {'fields': ['dry-run']}:
+            return {'id': 'dry-run=pass', 'tenant_id': project_id}
+
+        return {
+            'auto_allocated_topology': {
+                'id': self.network_1['id'],
+                'tenant_id': project_id,
+            }
+        }
 
 
 class _NoopConductor(object):
@@ -1661,12 +1913,20 @@ class CinderFixture(fixtures.Fixture):
     # as part of volume image metadata
     IMAGE_WITH_TRAITS_BACKED_VOL = '6194fc02-c60e-4a01-a8e5-600798208b5f'
 
-    def __init__(self, test):
+    def __init__(self, test, az='nova'):
+        """Initialize this instance of the CinderFixture.
+
+        :param test: The TestCase using this fixture.
+        :param az: The availability zone to return in volume GET responses.
+            Defaults to "nova" since that is the default we would see
+            from Cinder's storage_availability_zone config option.
+        """
         super(CinderFixture, self).__init__()
         self.test = test
         self.swap_volume_instance_uuid = None
         self.swap_volume_instance_error_uuid = None
         self.attachment_error_id = None
+        self.az = az
         # A dict, keyed by volume id, to a dict, keyed by attachment id,
         # with keys:
         # - id: the attachment id
@@ -1755,6 +2015,9 @@ class CinderFixture(fixtures.Fixture):
                     'multiattach': volume_id == self.MULTIATTACH_VOL,
                     'size': 1
                 }
+
+            if 'availability_zone' not in volume:
+                volume['availability_zone'] = self.az
 
             # Check for our special image-backed volume.
             if volume_id in (self.IMAGE_BACKED_VOL,
@@ -2147,3 +2410,52 @@ class OpenStackSDKFixture(fixtures.Fixture):
         self.useFixture(fixtures.MockPatchObject(
             service_description.ServiceDescription, '_make_proxy',
             fake_make_proxy))
+
+
+class HostNameWeigher(weights.BaseHostWeigher):
+    """Weigher to make the scheduler host selection deterministic.
+
+    Note that this weigher is supposed to be used via
+    HostNameWeigherFixture and will fail to instantiate if used without that
+    fixture.
+    """
+
+    def __init__(self):
+        self.weights = self.get_weights()
+
+    def get_weights(self):
+        raise NotImplemented()
+
+    def _weigh_object(self, host_state, weight_properties):
+        # Any unspecified host gets no weight.
+        return self.weights.get(host_state.host, 0)
+
+
+class HostNameWeigherFixture(fixtures.Fixture):
+    """Fixture to make the scheduler host selection deterministic.
+
+    Note that this fixture needs to be used before the scheduler service is
+    started as it changes the scheduler configuration.
+    """
+
+    def __init__(self, weights=None):
+        """Create the fixture
+        :param weights: A dict of weights keyed by host names. Defaulted to
+            {'host1': 100, 'host2': 50, 'host3': 10}"
+        """
+        if weights:
+            self.weights = weights
+        else:
+            # default weights good for most of the functional tests
+            self.weights = {'host1': 100, 'host2': 50, 'host3': 10}
+
+    def setUp(self):
+        super(HostNameWeigherFixture, self).setUp()
+        # Make sure that when the scheduler instantiate the HostNameWeigher it
+        # is initialized with the weights that is configured in this fixture
+        self.useFixture(fixtures.MockPatchObject(
+            HostNameWeigher, 'get_weights', return_value=self.weights))
+        # Make sure that the scheduler loads the HostNameWeigher and only that
+        self.useFixture(ConfPatcher(
+            weight_classes=[__name__ + '.HostNameWeigher'],
+            group='filter_scheduler'))

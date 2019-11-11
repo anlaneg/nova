@@ -27,6 +27,7 @@ import os_traits
 from oslo_log import log as logging
 from oslo_utils.fixture import uuidsentinel as uuids
 
+from nova.compute import instance_actions
 from nova.compute import utils as compute_utils
 import nova.conf
 from nova import context
@@ -75,11 +76,10 @@ def generate_new_element(items, prefix, numeric=False):
 class _IntegratedTestBase(test.TestCase):
     REQUIRES_LOCKING = True
     ADMIN_API = False
-    # Override this in subclasses which use the NeutronFixture. New tests
-    # should rely on Neutron since nova-network is deprecated. The default
-    # value of False here is only temporary while we update the existing
-    # functional tests to use Neutron.
-    USE_NEUTRON = False
+    # Override this in subclasses which use the legacy nova-network service.
+    # New tests should rely on Neutron and old ones migrated to use this since
+    # nova-network is deprecated.
+    USE_NEUTRON = True
 
     def setUp(self):
         super(_IntegratedTestBase, self).setUp()
@@ -97,6 +97,9 @@ class _IntegratedTestBase(test.TestCase):
         self.useFixture(cast_as_call.CastAsCall(self))
         placement = self.useFixture(func_fixtures.PlacementFixture())
         self.placement_api = placement.api
+
+        if self.USE_NEUTRON:
+            self.neutron = self.useFixture(nova_fixtures.NeutronFixture(self))
 
         self._setup_services()
 
@@ -116,9 +119,7 @@ class _IntegratedTestBase(test.TestCase):
             self.flags(transport_url=self.cell_mappings['cell1'].transport_url)
         self.conductor = self.start_service('conductor')
 
-        if self.USE_NEUTRON:
-            self.neutron = self.useFixture(nova_fixtures.NeutronFixture(self))
-        else:
+        if not self.USE_NEUTRON:
             self.network = self.start_service('network',
                                               manager=CONF.network_manager)
         self.scheduler = self._setup_scheduler_service()
@@ -207,7 +208,9 @@ class _IntegratedTestBase(test.TestCase):
     def _build_server(self, flavor_id, image=None):
         server = {}
         if image is None:
-            image = self.api.get_images()[0]
+            # TODO(stephenfin): We need to stop relying on this API
+            with utils.temporary_mutation(self.api, microversion='2.35'):
+                image = self.api.get_images()[0]
             LOG.debug("Image: %s", image)
 
             # We now have a valid imageId
@@ -309,12 +312,21 @@ class InstanceHelperMixin(object):
         """
         if api is None:
             api = self.api
-        completion_event = None
+        return self._wait_for_instance_action_event(
+            api, server, expected_action, event_name, event_result='error')
+
+    def _wait_for_instance_action_event(
+            self, api, server, action_name, event_name, event_result):
+        """Polls the instance action events for the given instance, action,
+        event, and event result until it finds the event.
+        """
+        actions = []
+        events = []
         for attempt in range(10):
             actions = api.get_instance_actions(server['id'])
-            # Look for the migrate action.
+            # The API returns the newest event first
             for action in actions:
-                if action['action'] == expected_action:
+                if action['action'] == action_name:
                     events = (
                         api.api_get(
                             '/servers/%s/os-instance-actions/%s' %
@@ -322,21 +334,18 @@ class InstanceHelperMixin(object):
                         ).body['instanceAction']['events'])
                     # Look for the action event being in error state.
                     for event in events:
+                        result = event['result']
                         if (event['event'] == event_name and
-                                event['result'] is not None and
-                                event['result'].lower() == 'error'):
-                            completion_event = event
-                            # Break out of the events loop.
-                            break
-                    if completion_event:
-                        # Break out of the actions loop.
-                        break
+                                result is not None and
+                                result.lower() == event_result.lower()):
+                            return event
             # We didn't find the completion event yet, so wait a bit.
             time.sleep(0.5)
 
-        if completion_event is None:
-            self.fail('Timed out waiting for %s failure event. Current '
-                      'instance actions: %s' % (event_name, actions))
+        self.fail(
+            'Timed out waiting for %s instance action event. Current instance '
+            'actions: %s. Events in the last matching action: %s'
+            % (event_name, actions, events))
 
     def _wait_for_migration_status(self, server, expected_statuses):
         """Waits for a migration record with the given statuses to be found
@@ -417,7 +426,7 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
         self.flags(compute_driver=self.compute_driver)
         super(ProviderUsageBaseTestCase, self).setUp()
 
-        self.useFixture(policy_fixture.RealPolicyFixture())
+        self.policy = self.useFixture(policy_fixture.RealPolicyFixture())
         self.neutron = self.useFixture(nova_fixtures.NeutronFixture(self))
         self.useFixture(nova_fixtures.AllServicesCurrent())
 
@@ -426,10 +435,10 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
 
         placement = self.useFixture(func_fixtures.PlacementFixture())
         self.placement_api = placement.api
-        api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
+        self.api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
 
-        self.admin_api = api_fixture.admin_api
+        self.admin_api = self.api_fixture.admin_api
         self.admin_api.microversion = self.microversion
         self.api = self.admin_api
 
@@ -912,3 +921,21 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
         # Account for reserved_host_cpus.
         expected_vcpu_usage = CONF.reserved_host_cpus + flavor['vcpus']
         self.assertEqual(expected_vcpu_usage, hypervisor['vcpus_used'])
+
+    def _confirm_resize(self, server):
+        self.api.post_server_action(server['id'], {'confirmResize': None})
+        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._wait_for_instance_action_event(
+            self.api, server, instance_actions.CONFIRM_RESIZE,
+            'compute_confirm_resize', 'success')
+        return server
+
+    def get_unused_flavor_name_id(self):
+        flavors = self.api.get_flavors()
+        flavor_names = list()
+        flavor_ids = list()
+        [(flavor_names.append(flavor['name']),
+         flavor_ids.append(flavor['id']))
+         for flavor in flavors]
+        return (generate_new_element(flavor_names, 'flavor'),
+                int(generate_new_element(flavor_ids, '', True)))

@@ -293,6 +293,17 @@ class TestInstanceNotificationSampleWithMultipleCompute(
         migration_id = migrations[0]['id']
         self.admin_api.force_complete_migration(server['id'], migration_id)
 
+        # Note that we wait for instance.live_migration_force_complete.end but
+        # by the time we check versioned notifications received we could have
+        # entered ComputeManager._post_live_migration which could emit up to
+        # four other notifications:
+        # - instance.live_migration_post.start
+        # - instance.live_migration_post_dest.start
+        # - instance.live_migration_post_dest.end
+        # - instance.live_migration_post.end
+        # We are not concerned about those in this test so that's why we stop
+        # once we get instance.live_migration_force_complete.end and assert
+        # we got at least 6 notifications.
         self._wait_for_notification(
             'instance.live_migration_force_complete.end')
 
@@ -302,8 +313,8 @@ class TestInstanceNotificationSampleWithMultipleCompute(
         # 3. instance.live_migration_pre.end
         # 4. instance.live_migration_force_complete.start
         # 5. instance.live_migration_force_complete.end
-        self.assertEqual(6, len(fake_notifier.VERSIONED_NOTIFICATIONS),
-                         fake_notifier.VERSIONED_NOTIFICATIONS)
+        self.assertGreaterEqual(len(fake_notifier.VERSIONED_NOTIFICATIONS), 6,
+                                fake_notifier.VERSIONED_NOTIFICATIONS)
         self._verify_notification(
             'instance-live_migration_force_complete-start',
             replacements={
@@ -638,7 +649,7 @@ class TestInstanceNotificationSample(
                      "port_uuid": "ce531f90-199f-48c0-816c-13e38010b442",
                      "meta": {},
                      "version": 4,
-                     "label": "private-network",
+                     "label": "private",
                      "device_name": "tapce531f90-19"
                  }}]
             },
@@ -691,7 +702,7 @@ class TestInstanceNotificationSample(
                  {'nova_object.namespace': 'nova',
                   'nova_object.name': 'BandwidthPayload',
                   'nova_object.data':
-                      {'network_name': 'private-network',
+                      {'network_name': 'private',
                        'out_bytes': 0,
                        'in_bytes': 0},
                   'nova_object.version': '1.0'}],

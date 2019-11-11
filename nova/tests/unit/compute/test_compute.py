@@ -1042,17 +1042,12 @@ class ComputeVolumeTestCase(BaseTestCase):
         def fake_get(self, context, res_id):
             return {'id': res_id, 'size': 4, 'multiattach': False}
 
-        def fake_check_availability_zone(*args, **kwargs):
-            pass
-
         def fake_attachment_create(_self, ctxt, vol_id, *args, **kwargs):
             # Return a unique attachment id per volume.
             return {'id': getattr(uuids, vol_id)}
 
         self.stub_out('nova.volume.cinder.API.get', fake_get)
         self.stub_out('nova.volume.cinder.API.get_snapshot', fake_get)
-        self.stub_out('nova.volume.cinder.API.check_availability_zone',
-                       fake_check_availability_zone)
         self.stub_out('nova.volume.cinder.API.attachment_create',
                       fake_attachment_create)
 
@@ -1105,8 +1100,12 @@ class ComputeVolumeTestCase(BaseTestCase):
                 self.context, mappings)
 
         # Make sure it passes at first
+        volumes = {
+            volume_id: fake_get(None, None, volume_id)
+        }
         self.compute_api._validate_bdm(self.context, instance,
-                                       instance_type, mappings)
+                                       instance_type, mappings, {},
+                                       volumes)
         self.assertEqual(4, mappings[1].volume_size)
         self.assertEqual(6, mappings[2].volume_size)
 
@@ -1115,7 +1114,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         self.assertRaises(exception.InvalidBDMBootSequence,
                           self.compute_api._validate_bdm,
                           self.context, instance, instance_type,
-                          mappings)
+                          mappings, {}, volumes)
         mappings[2].boot_index = 0
 
         # number of local block_devices
@@ -1123,7 +1122,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         self.assertRaises(exception.InvalidBDMLocalsLimit,
                           self.compute_api._validate_bdm,
                           self.context, instance, instance_type,
-                          mappings)
+                          mappings, {}, volumes)
         ephemerals = [
             fake_block_device.FakeDbBlockDeviceDict({
                 'device_name': '/dev/vdb',
@@ -1152,7 +1151,8 @@ class ComputeVolumeTestCase(BaseTestCase):
         mappings_ = mappings[:]
         mappings_.objects.extend(ephemerals)
         self.compute_api._validate_bdm(self.context, instance,
-                                       instance_type, mappings_)
+                                       instance_type, mappings_, {},
+                                       volumes)
 
         # Ephemerals over the size limit
         ephemerals[0].volume_size = 3
@@ -1161,14 +1161,14 @@ class ComputeVolumeTestCase(BaseTestCase):
         self.assertRaises(exception.InvalidBDMEphemeralSize,
                           self.compute_api._validate_bdm,
                           self.context, instance, instance_type,
-                          mappings_)
+                          mappings_, {}, volumes)
 
         # Swap over the size limit
         mappings[0].volume_size = 3
         self.assertRaises(exception.InvalidBDMSwapSize,
                           self.compute_api._validate_bdm,
                           self.context, instance, instance_type,
-                          mappings)
+                          mappings, {}, volumes)
         mappings[0].volume_size = 1
 
         additional_swap = [
@@ -1191,7 +1191,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         self.assertRaises(exception.InvalidBDMFormat,
                           self.compute_api._validate_bdm,
                           self.context, instance, instance_type,
-                          mappings_)
+                          mappings_, {}, volumes)
 
         image_no_size = [
             fake_block_device.FakeDbBlockDeviceDict({
@@ -1210,7 +1210,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         self.assertRaises(exception.InvalidBDM,
                           self.compute_api._validate_bdm,
                           self.context, instance, instance_type,
-                          mappings_)
+                          mappings_, {}, volumes)
 
         # blank device without a specified size fails
         blank_no_size = [
@@ -1229,7 +1229,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         self.assertRaises(exception.InvalidBDM,
                           self.compute_api._validate_bdm,
                           self.context, instance, instance_type,
-                          mappings_)
+                          mappings_, {}, volumes)
 
     def test_validate_bdm_with_more_than_one_default(self):
         instance_type = {'swap': 1, 'ephemeral_gb': 1}
@@ -1259,19 +1259,15 @@ class ComputeVolumeTestCase(BaseTestCase):
                          'boot_index': -1}, anon=True)]
         all_mappings = block_device_obj.block_device_make_list_from_dicts(
                 self.context, all_mappings)
-
+        image_cache = volumes = {}
         self.assertRaises(exception.InvalidBDMEphemeralSize,
                           self.compute_api._validate_bdm,
                           self.context, self.instance,
-                          instance_type, all_mappings)
+                          instance_type, all_mappings, image_cache, volumes)
 
-    @mock.patch.object(cinder.API, 'get')
-    @mock.patch.object(cinder.API, 'check_availability_zone')
     @mock.patch.object(cinder.API, 'attachment_create',
                        side_effect=exception.InvalidVolume(reason='error'))
-    def test_validate_bdm_media_service_invalid_volume(self, mock_att_create,
-                                                       mock_check_av_zone,
-                                                       mock_get):
+    def test_validate_bdm_media_service_invalid_volume(self, mock_att_create):
         volume_id = uuids.volume_id
         instance_type = {'swap': 1, 'ephemeral_gb': 1}
         bdms = [fake_block_device.FakeDbBlockDeviceDict({
@@ -1299,54 +1295,27 @@ class ComputeVolumeTestCase(BaseTestCase):
 
         for status, attach_status in status_values:
             if attach_status == 'attached':
-                mock_get.return_value = {'id': volume_id,
-                                         'status': status,
-                                         'attach_status': attach_status,
-                                         'multiattach': False,
-                                         'attachments': {}}
-
+                volumes = {volume_id: {'id': volume_id,
+                                       'status': status,
+                                       'attach_status': attach_status,
+                                       'multiattach': False,
+                                       'attachments': {}}}
             else:
-                mock_get.return_value = {'id': volume_id,
-                                         'status': status,
-                                         'attach_status': attach_status,
-                                         'multiattach': False}
+                volumes = {volume_id: {'id': volume_id,
+                                       'status': status,
+                                       'attach_status': attach_status,
+                                       'multiattach': False}}
 
             self.assertRaises(exception.InvalidVolume,
                               self.compute_api._validate_bdm,
                               self.context, self.instance_object,
-                              instance_type, bdms)
-            mock_get.assert_called_with(self.context, volume_id)
+                              instance_type, bdms, {}, volumes)
 
-    @mock.patch.object(cinder.API, 'get')
-    def test_validate_bdm_media_service_volume_not_found(self, mock_get):
-        volume_id = uuids.volume_id
-        instance_type = {'swap': 1, 'ephemeral_gb': 1}
-        bdms = [fake_block_device.FakeDbBlockDeviceDict({
-                         'id': 1,
-                         'no_device': None,
-                         'source_type': 'volume',
-                         'destination_type': 'volume',
-                         'snapshot_id': None,
-                         'volume_id': volume_id,
-                         'device_name': 'vda',
-                         'boot_index': 0,
-                         'delete_on_termination': False}, anon=True)]
-        bdms = block_device_obj.block_device_make_list_from_dicts(self.context,
-                                                                  bdms)
-
-        mock_get.side_effect = exception.VolumeNotFound(volume_id)
-        self.assertRaises(exception.InvalidBDMVolume,
-                          self.compute_api._validate_bdm,
-                          self.context, self.instance,
-                          instance_type, bdms)
-
-    @mock.patch.object(cinder.API, 'get')
     @mock.patch.object(cinder.API, 'check_availability_zone')
     @mock.patch.object(cinder.API, 'attachment_create',
                        return_value={'id': uuids.attachment_id})
     def test_validate_bdm_media_service_valid(self, mock_att_create,
-                                              mock_check_av_zone,
-                                              mock_get):
+                                              mock_check_av_zone):
         volume_id = uuids.volume_id
         instance_type = {'swap': 1, 'ephemeral_gb': 1}
         bdms = [fake_block_device.FakeDbBlockDeviceDict({
@@ -1366,12 +1335,12 @@ class ComputeVolumeTestCase(BaseTestCase):
                   'attach_status': 'detached',
                   'multiattach': False}
 
-        mock_get.return_value = volume
+        image_cache = {}
+        volumes = {volume_id: volume}
         self.compute_api._validate_bdm(self.context, self.instance_object,
-                                       instance_type, bdms)
-        mock_get.assert_called_once_with(self.context, volume_id)
-        mock_check_av_zone.assert_called_once_with(
-            self.context, volume, instance=self.instance_object)
+                                       instance_type, bdms, image_cache,
+                                       volumes)
+        mock_check_av_zone.assert_not_called()
         mock_att_create.assert_called_once_with(
             self.context, volume_id, self.instance_object.uuid)
 
@@ -5701,7 +5670,8 @@ class ComputeTestCase(BaseTestCase,
         # are used
         cell1 = objects.NUMACell(
             id=0,
-            cpuset=set([1, 2]),
+            cpuset=set(),
+            pcpuset=set([1, 2]),
             memory=512,
             pagesize=2048,
             cpu_usage=2,
@@ -5714,7 +5684,8 @@ class ComputeTestCase(BaseTestCase,
         # are free (on current host)
         cell2 = objects.NUMACell(
             id=1,
-            cpuset=set([3, 4]),
+            cpuset=set(),
+            pcpuset=set([3, 4]),
             pinned_cpus=set(),
             memory=512,
             pagesize=2048,
@@ -5763,7 +5734,6 @@ class ComputeTestCase(BaseTestCase,
         # after confirming resize all cpus on currect host must be free
         self.assertEqual(2, len(updated_topology.cells))
         for cell in updated_topology.cells:
-            self.assertEqual(0, cell.cpu_usage)
             self.assertEqual(set(), cell.pinned_cpus)
 
     def _test_resize_with_pci(self, method, expected_pci_addr):
@@ -6635,54 +6605,6 @@ class ComputeTestCase(BaseTestCase,
                 'Migrating instance to desthost finished successfully.',
                 self.stdlog.logger.output)
 
-    def test_post_live_migration_terminate_volume_connections(self):
-        c = context.get_admin_context()
-        instance = self._create_fake_instance_obj({
-                                        'host': self.compute.host,
-                                        'state_description': 'migrating',
-                                        'state': power_state.PAUSED},
-                                        ctxt=c)
-        instance.update({'task_state': task_states.MIGRATING,
-                         'power_state': power_state.PAUSED})
-        instance.save()
-
-        bdms = block_device_obj.block_device_make_list(c,
-                [fake_block_device.FakeDbBlockDeviceDict({
-                    'source_type': 'blank', 'guest_format': None,
-                    'destination_type': 'local'}),
-                 fake_block_device.FakeDbBlockDeviceDict({
-                    'source_type': 'volume', 'destination_type': 'volume',
-                    'volume_id': uuids.volume_id}),
-                 ])
-
-        with test.nested(
-            mock.patch.object(self.compute.network_api,
-                              'migrate_instance_start'),
-            mock.patch.object(self.compute.compute_rpcapi,
-                              'post_live_migration_at_destination'),
-            mock.patch.object(self.compute.network_api,
-                              'setup_networks_on_host'),
-            mock.patch.object(self.compute.instance_events,
-                              'clear_events_for_instance'),
-            mock.patch.object(self.compute,
-                              '_get_instance_block_device_info'),
-            mock.patch.object(self.compute.driver, 'get_volume_connector'),
-            mock.patch.object(cinder.API, 'terminate_connection'),
-        ) as (
-            migrate_instance_start, post_live_migration_at_destination,
-            setup_networks_on_host, clear_events_for_instance,
-            get_instance_volume_block_device_info, get_volume_connector,
-            terminate_connection,
-        ):
-            get_volume_connector.return_value = 'fake-connector'
-
-            self.compute._post_live_migration(c, instance, 'dest_host',
-                                              migrate_data=mock.MagicMock(),
-                                              source_bdms=bdms)
-
-            terminate_connection.assert_called_once_with(
-                    c, uuids.volume_id, 'fake-connector')
-
     @mock.patch.object(objects.ComputeNode,
                        'get_by_host_and_nodename')
     @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid')
@@ -6691,7 +6613,9 @@ class ComputeTestCase(BaseTestCase,
         c = context.get_admin_context()
         instance = mock.MagicMock()
         migration = objects.Migration(uuid=uuids.migration)
-        migrate_data = objects.LibvirtLiveMigrateData(migration=migration)
+        migrate_data = objects.LibvirtLiveMigrateData(
+            migration=migration,
+            src_supports_numa_live_migration=True)
         source_bdms = objects.BlockDeviceMappingList()
 
         dest_node = objects.ComputeNode(host='foo', uuid=uuids.dest_node)
@@ -6704,7 +6628,10 @@ class ComputeTestCase(BaseTestCase,
         @mock.patch.object(self.compute, '_revert_allocation')
         @mock.patch.object(self.compute, '_live_migration_cleanup_flags')
         @mock.patch.object(self.compute, 'network_api')
-        def _test(mock_nw_api, mock_lmcf, mock_ra, mock_mig_save, mock_notify):
+        @mock.patch.object(compute_rpcapi.ComputeAPI,
+                           'drop_move_claim_at_destination')
+        def _test(mock_drop_claim, mock_nw_api, mock_lmcf, mock_ra,
+                  mock_mig_save, mock_notify):
             mock_lmcf.return_value = False, False
             if migration_status:
                 self.compute._rollback_live_migration(
@@ -6715,6 +6642,7 @@ class ComputeTestCase(BaseTestCase,
                 self.compute._rollback_live_migration(
                     c, instance, 'foo', migrate_data=migrate_data,
                     source_bdms=source_bdms)
+            mock_drop_claim.assert_called_once_with(c, instance, 'foo')
             mock_notify.assert_has_calls([
                 mock.call(c, instance, self.compute.host,
                           action='live_migration_rollback', phase='start',
@@ -7733,11 +7661,17 @@ class ComputeTestCase(BaseTestCase,
         mock_get_inst.return_value = instances
         mock_get_blk.return_value = 'fake_bdi'
         mock_is_inst.return_value = True
+        node_cache = {
+            self.rt.compute_nodes[NODENAME].uuid:
+                objects.ComputeNode(
+                    uuid=self.rt.compute_nodes[NODENAME].uuid,
+                    hypervisor_hostname=NODENAME)
+        }
 
         with mock.patch.object(
                 self.compute.network_api, 'get_instance_nw_info',
                 return_value='fake_network_info') as mock_get_nw:
-            self.compute._destroy_evacuated_instances(fake_context)
+            self.compute._destroy_evacuated_instances(fake_context, node_cache)
 
         mock_get_filter.assert_called_once_with(fake_context,
                                          {'source_compute': self.compute.host,
@@ -7800,11 +7734,17 @@ class ComputeTestCase(BaseTestCase,
         mock_get_blk.return_value = 'fake-bdi'
         mock_check_local.return_value = {'filename': 'tmpfilename'}
         mock_check.return_value = False
+        node_cache = {
+            self.rt.compute_nodes[NODENAME].uuid:
+                objects.ComputeNode(
+                    uuid=self.rt.compute_nodes[NODENAME].uuid,
+                    hypervisor_hostname=NODENAME)
+        }
 
         with mock.patch.object(
                 self.compute.network_api, 'get_instance_nw_info',
                 return_value='fake_network_info') as mock_get_nw:
-            self.compute._destroy_evacuated_instances(fake_context)
+            self.compute._destroy_evacuated_instances(fake_context, node_cache)
 
         mock_get_drv.assert_called_once_with(fake_context)
         mock_get_nw.assert_called_once_with(fake_context, evacuated_instance)
@@ -7864,11 +7804,17 @@ class ComputeTestCase(BaseTestCase,
         mock_get_inst.return_value = instances
         mock_get_blk.return_value = 'fake_bdi'
         mock_check_local.side_effect = NotImplementedError
+        node_cache = {
+            self.rt.compute_nodes[NODENAME].uuid:
+                objects.ComputeNode(
+                    uuid=self.rt.compute_nodes[NODENAME].uuid,
+                    hypervisor_hostname=NODENAME)
+        }
 
         with mock.patch.object(
                 self.compute.network_api, 'get_instance_nw_info',
                 return_value='fake_network_info') as mock_get_nw:
-            self.compute._destroy_evacuated_instances(fake_context)
+            self.compute._destroy_evacuated_instances(fake_context, node_cache)
 
         mock_get_inst.assert_called_once_with(fake_context)
         mock_get_nw.assert_called_once_with(fake_context, evacuated_instance)
@@ -7925,7 +7871,7 @@ class ComputeTestCase(BaseTestCase,
         instance = self._create_fake_instance_obj()
         instance.vcpus = 1
 
-        self.compute.rt.instance_claim(admin_context, instance, NODENAME)
+        self.compute.rt.instance_claim(admin_context, instance, NODENAME, None)
         self.assertEqual(1, cn.vcpus_used)
 
         self.compute.terminate_instance(admin_context, instance, [])
@@ -7948,7 +7894,7 @@ class ComputeTestCase(BaseTestCase,
 
         self.assertEqual(0, cn.vcpus_used)
 
-        self.compute.rt.instance_claim(admin_context, instance, NODENAME)
+        self.compute.rt.instance_claim(admin_context, instance, NODENAME, None)
         self.compute._init_instance(admin_context, instance)
         self.assertEqual(1, cn.vcpus_used)
 
@@ -12765,6 +12711,12 @@ class EvacuateHostTestCase(BaseTestCase):
             node = NODENAME
             limits = {}
 
+        @mock.patch(
+            'nova.compute.manager.ComputeManager._get_request_group_mapping',
+            return_value=mock.sentinel.mapping)
+        @mock.patch(
+            'nova.compute.manager.ComputeManager'
+            '._update_pci_request_spec_with_allocated_interface_name')
         @mock.patch('nova.compute.utils.notify_about_instance_action')
         @mock.patch('nova.compute.utils.notify_about_instance_rebuild')
         @mock.patch.object(network_api, 'setup_networks_on_host')
@@ -12772,7 +12724,8 @@ class EvacuateHostTestCase(BaseTestCase):
         @mock.patch('nova.context.RequestContext.elevated', return_value=ctxt)
         def _test_rebuild(mock_context, mock_setup_instance_network_on_host,
                           mock_setup_networks_on_host, mock_notify_rebuild,
-                          mock_notify_action, vm_is_stopped=False):
+                          mock_notify_action, mock_update_pci_req,
+                          mock_get_mapping, vm_is_stopped=False):
             orig_image_ref = None
             image_ref = None
             injected_files = None
@@ -12805,7 +12758,12 @@ class EvacuateHostTestCase(BaseTestCase):
             mock_setup_networks_on_host.assert_called_once_with(
                 ctxt, self.inst, self.inst.host)
             mock_setup_instance_network_on_host.assert_called_once_with(
-                ctxt, self.inst, self.inst.host, migration)
+                ctxt, self.inst, self.inst.host, migration,
+                provider_mappings=mock.sentinel.mapping)
+            self.mock_get_allocs.assert_called_once_with(ctxt, self.inst.uuid)
+
+            mock_update_pci_req.assert_called_once_with(
+                ctxt, self.inst, mock.sentinel.mapping)
 
         _test_rebuild(vm_is_stopped=vm_states_is_stopped)
 
