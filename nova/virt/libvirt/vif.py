@@ -31,7 +31,6 @@ from oslo_utils import strutils
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova.network import linux_net
 from nova.network import model as network_model
 from nova.network import os_vif_util
 from nova import objects
@@ -113,6 +112,42 @@ def set_vf_interface_vlan(pci_addr, mac_addr, vlan=0):
     port_state = 'up' if vlan_id > 0 else 'down'
     nova.privsep.linux_net.set_device_macaddr(vf_ifname, mac_addr,
                                               port_state=port_state)
+
+
+def set_vf_trusted(pci_addr, trusted):
+    """Configures the VF to be trusted or not
+
+    :param pci_addr: PCI slot of the device
+    :param trusted: Boolean value to indicate whether to
+                    enable/disable 'trusted' capability
+    """
+    pf_ifname = pci_utils.get_ifname_by_pci_address(pci_addr,
+                                                    pf_interface=True)
+    vf_num = pci_utils.get_vf_num_by_pci_address(pci_addr)
+    nova.privsep.linux_net.set_device_trust(
+        pf_ifname, vf_num, trusted)
+
+
+@utils.synchronized('lock_vlan', external=True)
+def ensure_vlan(vlan_num, bridge_interface, mac_address=None, mtu=None,
+                interface=None):
+    """Create a vlan unless it already exists."""
+    if interface is None:
+        interface = 'vlan%s' % vlan_num
+    if not nova.privsep.linux_net.device_exists(interface):
+        LOG.debug('Starting VLAN interface %s', interface)
+        nova.privsep.linux_net.add_vlan(bridge_interface, interface,
+                                        vlan_num)
+        # (danwent) the bridge will inherit this address, so we want to
+        # make sure it is the value set from the NetworkManager
+        if mac_address:
+            nova.privsep.linux_net.set_device_macaddr(
+                interface, mac_address)
+        nova.privsep.linux_net.set_device_enabled(interface)
+    # NOTE(vish): set mtu every time to ensure that changes to mtu get
+    #             propagated
+    nova.privsep.linux_net.set_device_mtu(interface, mtu)
+    return interface
 
 
 @profiler.trace_cls("vif_driver")
@@ -225,6 +260,13 @@ class LibvirtGenericVIFDriver(object):
         return (driver, vhost_queues)
 
     def _get_max_tap_queues(self):
+        # Note(sean-k-mooney): some linux distros have backported
+        # changes for newer kernels which make the kernel version
+        # number unreliable to determine the max queues supported
+        # To address this without making the code distro dependent
+        # we introduce a new config option and prefer it if set.
+        if CONF.libvirt.max_queues:
+            return CONF.libvirt.max_queues
         # NOTE(kengo.sakai): In kernels prior to 3.0,
         # multiple queues on a tap interface is not supported.
         # In kernels 3.x, the number of queues on a tap interface
@@ -247,17 +289,6 @@ class LibvirtGenericVIFDriver(object):
         return (("qvb%s" % iface_id)[:network_model.NIC_NAME_LEN],
                 ("qvo%s" % iface_id)[:network_model.NIC_NAME_LEN])
 
-    @staticmethod
-    def is_no_op_firewall():
-        return CONF.firewall_driver == "nova.virt.firewall.NoopFirewallDriver"
-
-    def get_firewall_required_os_vif(self, vif):
-        if vif.has_traffic_filtering:
-            return False
-        if self.is_no_op_firewall():
-            return False
-        return True
-
     def get_config_bridge(self, instance, vif, image_meta,
                           inst_type, virt_type, host):
         """Get VIF configurations for bridge type."""
@@ -269,10 +300,6 @@ class LibvirtGenericVIFDriver(object):
             conf, self.get_bridge_name(vif),
             self.get_vif_devname(vif))
 
-        mac_id = vif['address'].replace(':', '')
-        name = "nova-instance-" + instance.name + "-" + mac_id
-        if self.get_firewall_required(vif):
-            conf.filtername = name
         designer.set_vif_bandwidth_config(conf, inst_type)
 
         self._set_mtu_config(vif, host, conf)
@@ -460,11 +487,6 @@ class LibvirtGenericVIFDriver(object):
         conf.source_dev = vif.bridge_name
         conf.target_dev = vif.vif_name
 
-        if self.get_firewall_required_os_vif(vif):
-            mac_id = vif.address.replace(':', '')
-            name = "nova-instance-" + instance.name + "-" + mac_id
-            conf.filtername = name
-
     def _set_config_VIFOpenVSwitch(self, instance, vif, conf, host=None):
         conf.net_type = "bridge"
         conf.source_dev = vif.bridge_name
@@ -643,7 +665,7 @@ class LibvirtGenericVIFDriver(object):
             trusted = strutils.bool_from_string(
                 vif['profile'].get('trusted', "False"))
             if trusted:
-                linux_net.set_vf_trusted(vif['profile']['pci_slot'], True)
+                set_vf_trusted(vif['profile']['pci_slot'], True)
 
     def plug_macvtap(self, instance, vif):
         vif_details = vif['details']
@@ -652,8 +674,7 @@ class LibvirtGenericVIFDriver(object):
             vlan_name = vif_details.get(
                                     network_model.VIF_DETAILS_MACVTAP_SOURCE)
             phys_if = vif_details.get(network_model.VIF_DETAILS_PHYS_INTERFACE)
-            linux_net.LinuxBridgeInterfaceDriver.ensure_vlan(
-                vlan, phys_if, interface=vlan_name)
+            ensure_vlan(vlan, phys_if, interface=vlan_name)
 
     def plug_midonet(self, instance, vif):
         """Plug into MidoNet's network port
@@ -776,7 +797,7 @@ class LibvirtGenericVIFDriver(object):
                                   mac_addr='00:00:00:00:00:00')
         elif vif['vnic_type'] == network_model.VNIC_TYPE_DIRECT:
             if "trusted" in vif['profile']:
-                linux_net.set_vf_trusted(vif['profile']['pci_slot'], False)
+                set_vf_trusted(vif['profile']['pci_slot'], False)
 
     def unplug_midonet(self, instance, vif):
         """Unplug from MidoNet network port

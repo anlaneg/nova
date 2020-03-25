@@ -45,7 +45,6 @@ class SchedulerOnlyChecksTargetTest(test.TestCase,
         self.useFixture(policy_fixture.RealPolicyFixture())
 
         # The NeutronFixture is needed to stub out validate_networks in API.
-        self.flags(use_neutron=True)
         self.useFixture(nova_fixtures.NeutronFixture(self))
 
         # We need the computes reporting into placement for the filter
@@ -64,10 +63,6 @@ class SchedulerOnlyChecksTargetTest(test.TestCase,
         self.addCleanup(image_fake.FakeImageService_reset)
 
         self.start_service('conductor')
-
-        # We have to get the image before we use 2.latest otherwise we'll get
-        # a 404 on the /images proxy API because of 2.36.
-        self.image_id = self.api.get_images()[0]['id']
 
         # Use the latest microversion available to make sure something does
         # not regress in new microversions; cap as necessary.
@@ -94,13 +89,11 @@ class SchedulerOnlyChecksTargetTest(test.TestCase,
 
     def test_evacuate_server(self):
         # We first create the instance
-        server = self.admin_api.post_server(
-            dict(server=self._build_minimal_create_server_request(
-                self.api, 'my-pretty-instance-to-evacuate', self.image_id,
-                networks='none')))
+        server = self._build_server(networks='none')
+        server = self.admin_api.post_server({'server': server})
         server_id = server['id']
         self.addCleanup(self.api.delete_server, server_id)
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._wait_for_state_change(server, 'ACTIVE')
 
         # We need to get instance details for knowing its host
         server = self.admin_api.get_server(server_id)
@@ -126,7 +119,7 @@ class SchedulerOnlyChecksTargetTest(test.TestCase,
         }
         self.admin_api.post_server_action(server['id'], evacuate)
 
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._wait_for_state_change(server, 'ACTIVE')
         server = self.admin_api.get_server(server_id)
 
         # Yeepee, that works!

@@ -37,12 +37,10 @@ import nova.conf
 from nova import context
 from nova.db.sqlalchemy import models
 from nova import exception as exc
-from nova.network.security_group import security_group_base
 from nova import objects
 from nova.objects import base
 from nova import quota
 from nova.tests.unit import fake_block_device
-from nova.tests.unit import fake_network
 from nova.tests.unit.objects import test_keypair
 from nova import utils
 
@@ -179,10 +177,6 @@ class stub_out_compute_api_backup(object):
         return dict(id='123', status='ACTIVE', name=name, properties=props)
 
 
-def stub_out_nw_api_get_instance_nw_info(test, num_networks=1, func=None):
-    fake_network.stub_out_nw_api_get_instance_nw_info(test)
-
-
 def stub_out_nw_api(test, cls=None, private=None, publics=None):
     if not private:
         private = '192.168.0.3'
@@ -202,47 +196,40 @@ def stub_out_nw_api(test, cls=None, private=None, publics=None):
         def validate_networks(self, context, networks, max_count):
             return max_count
 
-        def create_resource_requests(self, context, requested_networks,
-                                     pci_requests):
+        def create_resource_requests(
+                self, context, requested_networks,
+                pci_requests=None, affinity_policy=None):
             return None, []
 
     if cls is None:
         cls = Fake
-    if CONF.use_neutron:
-        test.stub_out('nova.network.neutronv2.api.API', cls)
-    else:
-        test.stub_out('nova.network.api.API', cls)
-        fake_network.stub_out_nw_api_get_instance_nw_info(test)
+
+    test.stub_out('nova.network.neutron.API', cls)
 
 
 def stub_out_secgroup_api(test, security_groups=None):
 
-    class FakeSecurityGroupAPI(security_group_base.SecurityGroupBase):
-        """This handles both nova-network and neutron style security group APIs
-        """
-        def get_instances_security_groups_bindings(
-                self, context, servers, detailed=False):
-            # This method shouldn't be called unless using neutron.
-            if not CONF.use_neutron:
-                raise Exception('Invalid security group API call for nova-net')
-            instances_security_group_bindings = {}
-            if servers:
-                instances_security_group_bindings = {
-                    server['id']: [] for server in servers
-                }
-            return instances_security_group_bindings
+    def get_instances_security_groups_bindings(
+            context, servers, detailed=False):
+        instances_security_group_bindings = {}
+        if servers:
+            # we don't get security group information for down cells
+            instances_security_group_bindings = {
+                server['id']: security_groups or [] for server in servers
+                if server['status'] != 'UNKNOWN'
+            }
+        return instances_security_group_bindings
 
-        def get_instance_security_groups(
-                self, context, instance, detailed=False):
-            return security_groups if security_groups is not None else []
+    def get_instance_security_groups(context, instance, detailed=False):
+        return security_groups if security_groups is not None else []
 
-    if CONF.use_neutron:
-        test.stub_out(
-            'nova.network.security_group.neutron_driver.SecurityGroupAPI',
-            FakeSecurityGroupAPI)
-    else:
-        test.stub_out(
-            'nova.compute.api.SecurityGroupAPI', FakeSecurityGroupAPI)
+    test.stub_out(
+        'nova.network.security_group_api'
+        '.get_instances_security_groups_bindings',
+        get_instances_security_groups_bindings)
+    test.stub_out(
+        'nova.network.security_group_api.get_instance_security_groups',
+        get_instance_security_groups)
 
 
 class FakeToken(object):

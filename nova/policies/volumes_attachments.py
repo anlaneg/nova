@@ -23,57 +23,62 @@ POLICY_ROOT = 'os_compute_api:os-volumes-attachments:%s'
 
 volumes_attachments_policies = [
     policy.DocumentedRuleDefault(
-        POLICY_ROOT % 'index',
-        base.RULE_ADMIN_OR_OWNER,
-        "List volume attachments for an instance",
-        [
+        name=POLICY_ROOT % 'index',
+        check_str=base.PROJECT_READER_OR_SYSTEM_READER,
+        description="List volume attachments for an instance",
+        operations=[
             {'method': 'GET',
              'path': '/servers/{server_id}/os-volume_attachments'
             }
-        ]),
+        ],
+        scope_types=['system', 'project']),
     policy.DocumentedRuleDefault(
-        POLICY_ROOT % 'create',
-        base.RULE_ADMIN_OR_OWNER,
-        "Attach a volume to an instance",
-        [
+        name=POLICY_ROOT % 'create',
+        check_str=base.PROJECT_MEMBER_OR_SYSTEM_ADMIN,
+        description="Attach a volume to an instance",
+        operations=[
             {
                 'method': 'POST',
                 'path': '/servers/{server_id}/os-volume_attachments'
             }
-        ]),
+        ],
+        scope_types=['system', 'project']),
     policy.DocumentedRuleDefault(
-        POLICY_ROOT % 'show',
-        base.RULE_ADMIN_OR_OWNER,
-        "Show details of a volume attachment",
-        [
+        name=POLICY_ROOT % 'show',
+        check_str=base.PROJECT_READER_OR_SYSTEM_READER,
+        description="Show details of a volume attachment",
+        operations=[
             {
                 'method': 'GET',
                 'path':
                  '/servers/{server_id}/os-volume_attachments/{volume_id}'
             }
-        ]),
+        ],
+        scope_types=['system', 'project']),
     policy.DocumentedRuleDefault(
-        POLICY_ROOT % 'update',
-        base.RULE_ADMIN_API,
-        "Update a volume attachment",
-        [
+        name=POLICY_ROOT % 'update',
+        check_str=base.SYSTEM_ADMIN,
+        description="Update a volume attachment",
+        operations=[
             {
                 'method': 'PUT',
                 'path':
                  '/servers/{server_id}/os-volume_attachments/{volume_id}'
             }
-        ]),
+        ],
+        scope_types=['system']),
     policy.DocumentedRuleDefault(
-        POLICY_ROOT % 'delete',
-        base.RULE_ADMIN_OR_OWNER,
-        "Detach a volume from an instance",
-        [
+        name=POLICY_ROOT % 'delete',
+        check_str=base.PROJECT_MEMBER_OR_SYSTEM_ADMIN,
+        description="Detach a volume from an instance",
+        operations=[
             {
                 'method': 'DELETE',
                 'path':
                  '/servers/{server_id}/os-volume_attachments/{volume_id}'
             }
-        ]),
+        ],
+        scope_types=['system', 'project']),
 ]
 
 

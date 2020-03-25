@@ -28,9 +28,9 @@ from oslo_utils import timeutils
 import nova.conf
 import nova.context
 from nova import exception
-from nova import image as image_api
-from nova import network
+from nova.image import glance
 from nova.network import model as network_model
+from nova.network import neutron
 from nova.notifications.objects import base as notification_base
 from nova.notifications.objects import instance as instance_notification
 from nova import objects
@@ -287,7 +287,7 @@ def bandwidth_usage(context, instance_ref, audit_start,
                 return cached_info
             return network_model.NetworkInfo.hydrate(cached_info)
         try:
-            return network.API().get_instance_nw_info(admin_context,
+            return neutron.API().get_instance_nw_info(admin_context,
                                                       instance_ref)
         except Exception:
             try:
@@ -370,7 +370,7 @@ def info_from_instance(context, instance, network_info,
             # NOTE(mriedem): We can eventually drop this when we no longer
             # support legacy notifications since versioned notifications don't
             # use this.
-            image_ref_url = image_api.API().generate_image_url(
+            image_ref_url = glance.API().generate_image_url(
                 instance.image_ref, context)
 
         except ks_exc.EndpointNotFound:

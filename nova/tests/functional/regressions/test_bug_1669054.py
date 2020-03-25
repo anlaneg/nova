@@ -15,8 +15,7 @@ from nova import objects
 from nova.tests.functional import integrated_helpers
 
 
-class ResizeEvacuateTestCase(integrated_helpers._IntegratedTestBase,
-                             integrated_helpers.InstanceHelperMixin):
+class ResizeEvacuateTestCase(integrated_helpers._IntegratedTestBase):
     """Regression test for bug 1669054 introduced in Newton.
 
     When resizing a server, if CONF.allow_resize_to_same_host is False,
@@ -40,9 +39,9 @@ class ResizeEvacuateTestCase(integrated_helpers._IntegratedTestBase,
         # Create a server. At this point there is only one compute service.
         flavors = self.api.get_flavors()
         flavor1 = flavors[0]['id']
-        server = self._build_server(flavor1)
+        server = self._build_server(flavor_id=flavor1)
         server = self.api.post_server({'server': server})
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._wait_for_state_change(server, 'ACTIVE')
 
         # Start up another compute service so we can resize.
         host2 = self.start_service('compute', host='host2')
@@ -51,10 +50,10 @@ class ResizeEvacuateTestCase(integrated_helpers._IntegratedTestBase,
         flavor2 = flavors[1]['id']
         req = {'resize': {'flavorRef': flavor2}}
         self.api.post_server_action(server['id'], req)
-        server = self._wait_for_state_change(self.api, server, 'VERIFY_RESIZE')
+        server = self._wait_for_state_change(server, 'VERIFY_RESIZE')
         self.assertEqual('host2', server['OS-EXT-SRV-ATTR:host'])
         self.api.post_server_action(server['id'], {'confirmResize': None})
-        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        server = self._wait_for_state_change(server, 'ACTIVE')
 
         # Disable the host on which the server is now running (host2).
         host2.stop()
@@ -62,7 +61,7 @@ class ResizeEvacuateTestCase(integrated_helpers._IntegratedTestBase,
         # Now try to evacuate the server back to the original source compute.
         req = {'evacuate': {'onSharedStorage': False}}
         self.api.post_server_action(server['id'], req)
-        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        server = self._wait_for_state_change(server, 'ACTIVE')
         # The evacuate flow in the compute manager is annoying in that it
         # sets the instance status to ACTIVE before updating the host, so we
         # have to wait for the migration record to be 'done' to avoid a race.

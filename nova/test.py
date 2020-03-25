@@ -46,18 +46,15 @@ from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_versionedobjects import fixture as ovo_fixture
+from oslotest import base
 from oslotest import mock_fixture
-from oslotest import moxstubout
 import six
 from six.moves import builtins
 import testtools
 
 from nova.compute import rpcapi as compute_rpcapi
 from nova import context
-from nova.db import api as db
 from nova import exception
-from nova.network import manager as network_manager
-from nova.network.security_group import openstack_driver
 from nova import objects
 from nova.objects import base as objects_base
 from nova import quota
@@ -88,70 +85,8 @@ CELL1_NAME = 'cell1'
 nested = utils.nested_contexts
 
 
-class SampleNetworks(fixtures.Fixture):
-
-    """Create sample networks in the database."""
-
-    def __init__(self, host=None):
-        self.host = host
-
-    def setUp(self):
-        super(SampleNetworks, self).setUp()
-        ctxt = context.get_admin_context()
-        network = network_manager.VlanManager(host=self.host)
-        bridge_interface = CONF.flat_interface or CONF.vlan_interface
-        network.create_networks(ctxt,
-                                label='test',
-                                cidr='10.0.0.0/8',
-                                multi_host=CONF.multi_host,
-                                num_networks=CONF.num_networks,
-                                network_size=CONF.network_size,
-                                cidr_v6=CONF.fixed_range_v6,
-                                gateway=CONF.gateway,
-                                gateway_v6=CONF.gateway_v6,
-                                bridge=CONF.flat_network_bridge,
-                                bridge_interface=bridge_interface,
-                                vpn_start=CONF.vpn_start,
-                                vlan_start=CONF.vlan_start,
-                                dns1=CONF.flat_network_dns)
-        for net in db.network_get_all(ctxt):
-            network.set_network_host(ctxt, net)
-
-
 class TestingException(Exception):
     pass
-
-
-class skipIf(object):
-    def __init__(self, condition, reason):
-        self.condition = condition
-        self.reason = reason
-
-    def __call__(self, func_or_cls):
-        condition = self.condition
-        reason = self.reason
-        if inspect.isfunction(func_or_cls):
-            @six.wraps(func_or_cls)
-            def wrapped(*args, **kwargs):
-                if condition:
-                    raise testtools.TestCase.skipException(reason)
-                return func_or_cls(*args, **kwargs)
-
-            return wrapped
-        elif inspect.isclass(func_or_cls):
-            orig_func = getattr(func_or_cls, 'setUp')
-
-            @six.wraps(orig_func)
-            def new_func(self, *args, **kwargs):
-                if condition:
-                    raise testtools.TestCase.skipException(reason)
-                orig_func(self, *args, **kwargs)
-
-            func_or_cls.setUp = new_func
-            return func_or_cls
-        else:
-            raise TypeError('skipUnless can be used only with functions or '
-                            'classes')
 
 
 # NOTE(claudiub): this needs to be called before any mock.patch calls are
@@ -159,6 +94,39 @@ class skipIf(object):
 # the mock.patch autospec issue:
 # https://github.com/testing-cabal/mock/issues/396
 mock_fixture.patch_mock_module()
+
+
+def _poison_unfair_compute_resource_semaphore_locking():
+    """Ensure that every locking on COMPUTE_RESOURCE_SEMAPHORE is called with
+    fair=True.
+    """
+    orig_synchronized = utils.synchronized
+
+    def poisoned_synchronized(*args, **kwargs):
+        # Only check fairness if the decorator is used with
+        # COMPUTE_RESOURCE_SEMAPHORE. But the name of the semaphore can be
+        # passed as args or as kwargs.
+        # Note that we cannot import COMPUTE_RESOURCE_SEMAPHORE as that would
+        # apply the decorators we want to poison here.
+        if len(args) >= 1:
+            name = args[0]
+        else:
+            name = kwargs.get("name")
+        if name == "compute_resources" and not kwargs.get("fair", False):
+            raise AssertionError(
+                'Locking on COMPUTE_RESOURCE_SEMAPHORE should always be fair. '
+                'See bug 1864122.')
+        # go and act like the original decorator
+        return orig_synchronized(*args, **kwargs)
+
+    # replace the synchronized decorator factory with our own that checks the
+    # params passed in
+    utils.synchronized = poisoned_synchronized
+
+
+# NOTE(gibi): This poisoning needs to be done in import time as decorators are
+# applied in import time on the ResourceTracker
+_poison_unfair_compute_resource_semaphore_locking()
 
 
 class NovaExceptionReraiseFormatError(object):
@@ -181,7 +149,7 @@ class NovaExceptionReraiseFormatError(object):
 NovaExceptionReraiseFormatError.patch()
 
 
-class TestCase(testtools.TestCase):
+class TestCase(base.BaseTestCase):
     """Test case base class for all unit tests.
 
     Due to the slowness of DB access, please consider deriving from
@@ -205,29 +173,21 @@ class TestCase(testtools.TestCase):
     # base class when USES_DB is True.
     NUMBER_OF_CELLS = 1
 
-    TIMEOUT_SCALING_FACTOR = 1
-
     def setUp(self):
         """Run before each test method to initialize test environment."""
-        super(TestCase, self).setUp()
-        self.useFixture(nova_fixtures.Timeout(
-            os.environ.get('OS_TEST_TIMEOUT', 0),
-            self.TIMEOUT_SCALING_FACTOR))
+        # Ensure BaseTestCase's ConfigureLogging fixture is disabled since
+        # we're using our own (StandardLogging).
+        with fixtures.EnvironmentVariable('OS_LOG_CAPTURE', '0'):
+            super(TestCase, self).setUp()
 
         # How many of which service we've started. {$service-name: $count}
         self._service_fixture_count = collections.defaultdict(int)
 
         self.useFixture(nova_fixtures.OpenStackSDKFixture())
 
-        self.useFixture(fixtures.NestedTempfile())
-        self.useFixture(fixtures.TempHomeDir())
         self.useFixture(log_fixture.get_logging_handle_error_fixture())
 
-        self.output = nova_fixtures.OutputStreamCapture()
-        self.useFixture(self.output)
-
-        self.stdlog = nova_fixtures.StandardLogging()
-        self.useFixture(self.stdlog)
+        self.stdlog = self.useFixture(nova_fixtures.StandardLogging())
 
         # NOTE(sdague): because of the way we were using the lock
         # wrapper we ended up with a lot of tests that started
@@ -296,35 +256,17 @@ class TestCase(testtools.TestCase):
 
         self.useFixture(ovo_fixture.StableObjectJsonFixture())
 
-        # NOTE(mnaser): All calls to utils.is_neutron() are cached in
-        # nova.utils._IS_NEUTRON.  We set it to None to avoid any
-        # caching of that value.
-        utils._IS_NEUTRON = None
-
         # Reset the global QEMU version flag.
         images.QEMU_VERSION = None
 
         # Reset the compute RPC API globals (mostly the _ROUTER).
         compute_rpcapi.reset_globals()
 
-        # TODO(takashin): Remove MoxStubout fixture
-        # after removing tests which uses mox and are related to
-        # nova-network in the following files.
-        #
-        # - nova/tests/unit/api/openstack/compute/test_floating_ips.py
-        # - nova/tests/unit/api/openstack/compute/test_security_groups.py
-        # - nova/tests/unit/fake_network.py
-        # - nova/tests/unit/network/test_manager.py
-        mox_fixture = self.useFixture(moxstubout.MoxStubout())
-        self.mox = mox_fixture.mox
-        self.stubs = mox_fixture.stubs
         self.addCleanup(self._clear_attrs)
         self.useFixture(fixtures.EnvironmentVariable('http_proxy'))
         self.policy = self.useFixture(policy_fixture.PolicyFixture())
 
         self.useFixture(nova_fixtures.PoisonFunctions())
-
-        openstack_driver.DRIVER_CACHE = {}
 
         self.useFixture(nova_fixtures.ForbidNewLegacyNotificationFixture())
 
@@ -402,9 +344,6 @@ class TestCase(testtools.TestCase):
         Use the monkey patch fixture to replace a function for the
         duration of a test. Useful when you want to provide fake
         methods instead of mocks during testing.
-
-        This should be used instead of self.stubs.Set (which is based
-        on mox) going forward.
         """
         self.useFixture(fixtures.MonkeyPatch(old, new))
 
@@ -786,12 +725,9 @@ class BaseHookTestCase(NoDBTestCase):
 class MatchType(object):
     """Matches any instance of a specified type
 
-    The MatchType class is a helper for use with the
-    mock.assert_called_with() method that lets you
-    assert that a particular parameter has a specific
-    data type. It enables strict check than the built
-    in mock.ANY helper, and is the equivalent of the
-    mox.IsA() function from the legacy mox library
+    The MatchType class is a helper for use with the mock.assert_called_with()
+    method that lets you assert that a particular parameter has a specific data
+    type. It enables stricter checking than the built in mock.ANY helper.
 
     Example usage could be:
 
@@ -833,11 +769,9 @@ class MatchObjPrims(object):
 class ContainKeyValue(object):
     """Checks whether a key/value pair is in a dict parameter.
 
-    The ContainKeyValue class is a helper for use with the
-    mock.assert_*() method that lets you assert that a particular
-    dict contain a key/value pair. It enables strict check than
-    the built in mock.ANY helper, and is the equivalent of the
-    mox.ContainsKeyValue() function from the legacy mox library
+    The ContainKeyValue class is a helper for use with the mock.assert_*()
+    method that lets you assert that a particular dict contain a key/value
+    pair. It enables stricter checking than the built in mock.ANY helper.
 
     Example usage could be:
 

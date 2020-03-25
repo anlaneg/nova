@@ -22,9 +22,9 @@ import math
 import traceback
 
 import netifaces
-import os_resource_classes as orc
 from oslo_log import log
 from oslo_serialization import jsonutils
+from oslo_utils import excutils
 import six
 
 from nova import block_device
@@ -56,6 +56,18 @@ from nova.virt import driver
 
 CONF = nova.conf.CONF
 LOG = log.getLogger(__name__)
+
+# These properties are specific to a particular image by design.  It
+# does not make sense for them to be inherited by server snapshots.
+# This list is distinct from the configuration option of the same
+# (lowercase) name.
+NON_INHERITABLE_IMAGE_PROPERTIES = frozenset([
+    'cinder_encryption_key_id',
+    'cinder_encryption_key_deletion_policy',
+    'img_signature',
+    'img_signature_hash_method',
+    'img_signature_key_type',
+    'img_signature_certificate_uuid'])
 
 
 def exception_to_dict(fault, message=None):
@@ -1214,7 +1226,7 @@ def create_image(context, instance, name, image_type, image_api,
     :param instance: nova.objects.instance.Instance object
     :param name: string for name of the snapshot
     :param image_type: snapshot | backup
-    :param image_api: instance of nova.image.API
+    :param image_api: instance of nova.image.glance.API
     :param extra_properties: dict of extra image properties to include
 
     """
@@ -1276,7 +1288,9 @@ def initialize_instance_snapshot_metadata(context, instance, name,
 
     # Delete properties that are non-inheritable
     properties = image_meta['properties']
-    for key in CONF.non_inheritable_image_properties:
+    keys_to_pop = set(CONF.non_inheritable_image_properties).union(
+        NON_INHERITABLE_IMAGE_PROPERTIES)
+    for key in keys_to_pop:
         properties.pop(key, None)
 
     # The properties in extra_properties have precedence
@@ -1365,13 +1379,19 @@ def get_stashed_volume_connector(bdm, instance):
 
 
 class EventReporter(object):
-    """Context manager to report instance action events."""
+    """Context manager to report instance action events.
 
-    def __init__(self, context, event_name, host, *instance_uuids):
+    If constructed with ``graceful_exit=True`` the __exit__ function will
+    handle and not re-raise on InstanceActionNotFound.
+    """
+
+    def __init__(self, context, event_name, host, *instance_uuids,
+                 graceful_exit=False):
         self.context = context
         self.event_name = event_name
         self.instance_uuids = instance_uuids
         self.host = host
+        self.graceful_exit = graceful_exit
 
     def __enter__(self):
         for uuid in self.instance_uuids:
@@ -1383,17 +1403,31 @@ class EventReporter(object):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         for uuid in self.instance_uuids:
-            objects.InstanceActionEvent.event_finish_with_failure(
-                self.context, uuid, self.event_name, exc_val=exc_val,
-                exc_tb=exc_tb, want_result=False)
+            try:
+                objects.InstanceActionEvent.event_finish_with_failure(
+                    self.context, uuid, self.event_name, exc_val=exc_val,
+                    exc_tb=exc_tb, want_result=False)
+            except exception.InstanceActionNotFound:
+                # If the instance action was not found then determine if we
+                # should re-raise based on the graceful_exit attribute.
+                with excutils.save_and_reraise_exception(
+                        reraise=not self.graceful_exit):
+                    if self.graceful_exit:
+                        return True
         return False
 
 
-def wrap_instance_event(prefix):
+def wrap_instance_event(prefix, graceful_exit=False):
     """Wraps a method to log the event taken on the instance, and result.
 
     This decorator wraps a method to log the start and result of an event, as
     part of an action taken on an instance.
+
+    :param prefix: prefix for the event name, usually a service binary like
+        "compute" or "conductor" to indicate the origin of the event.
+    :param graceful_exit: True if the decorator should gracefully handle
+        InstanceActionNotFound errors, False otherwise. This should rarely be
+        True.
     """
     @utils.expects_func_args('instance')
     def helper(function):
@@ -1407,7 +1441,8 @@ def wrap_instance_event(prefix):
 
             event_name = '{0}_{1}'.format(prefix, function.__name__)
             host = self.host if hasattr(self, 'host') else None
-            with EventReporter(context, event_name, host, instance_uuid):
+            with EventReporter(context, event_name, host, instance_uuid,
+                               graceful_exit=graceful_exit):
                 return function(self, context, *args, **kwargs)
         return decorated_function
     return helper
@@ -1463,45 +1498,53 @@ def notify_about_instance_delete(notifier, context, instance,
                 phase=fields.NotificationPhase.END)
 
 
-def compute_node_to_inventory_dict(compute_node):
-    """Given a supplied `objects.ComputeNode` object, return a dict, keyed
-    by resource class, of various inventory information.
+def update_pci_request_spec_with_allocated_interface_name(
+        context, report_client, instance, provider_mapping):
+    """Update the instance's PCI request based on the request group -
+    resource provider mapping and the device RP name from placement.
 
-    :param compute_node: `objects.ComputeNode` object to translate
+    :param context: the request context
+    :param report_client: a SchedulerReportClient instance
+    :param instance: an Instance object to be updated
+    :param provider_mapping: the request group - resource provider mapping
+        in the form returned by the RequestSpec.get_request_group_mapping()
+        call.
+    :raises AmbigousResourceProviderForPCIRequest: if more than one
+        resource provider provides resource for the given PCI request.
+    :raises UnexpectResourceProviderNameForPCIRequest: if the resource
+        provider, which provides resource for the pci request, does not
+        have a well formatted name so we cannot parse the parent interface
+        name out of it.
     """
-    result = {}
+    if not instance.pci_requests:
+        return
 
-    # NOTE(jaypipes): Ironic virt driver will return 0 values for vcpus,
-    # memory_mb and disk_gb if the Ironic node is not available/operable
-    if compute_node.vcpus > 0:
-        result[orc.VCPU] = {
-            'total': compute_node.vcpus,
-            'reserved': CONF.reserved_host_cpus,
-            'min_unit': 1,
-            'max_unit': compute_node.vcpus,
-            'step_size': 1,
-            'allocation_ratio': compute_node.cpu_allocation_ratio,
-        }
-    if compute_node.memory_mb > 0:
-        result[orc.MEMORY_MB] = {
-            'total': compute_node.memory_mb,
-            'reserved': CONF.reserved_host_memory_mb,
-            'min_unit': 1,
-            'max_unit': compute_node.memory_mb,
-            'step_size': 1,
-            'allocation_ratio': compute_node.ram_allocation_ratio,
-        }
-    if compute_node.local_gb > 0:
-        # TODO(johngarbutt) We should either move to reserved_host_disk_gb
-        # or start tracking DISK_MB.
-        reserved_disk_gb = convert_mb_to_ceil_gb(
-            CONF.reserved_host_disk_mb)
-        result[orc.DISK_GB] = {
-            'total': compute_node.local_gb,
-            'reserved': reserved_disk_gb,
-            'min_unit': 1,
-            'max_unit': compute_node.local_gb,
-            'step_size': 1,
-            'allocation_ratio': compute_node.disk_allocation_ratio,
-        }
-    return result
+    def needs_update(pci_request, mapping):
+        return (pci_request.requester_id and
+                pci_request.requester_id in mapping)
+
+    for pci_request in instance.pci_requests.requests:
+        if needs_update(pci_request, provider_mapping):
+
+            provider_uuids = provider_mapping[pci_request.requester_id]
+            if len(provider_uuids) != 1:
+                raise exception.AmbiguousResourceProviderForPCIRequest(
+                    providers=provider_uuids,
+                    requester=pci_request.requester_id)
+
+            dev_rp_name = report_client.get_resource_provider_name(
+                context,
+                provider_uuids[0])
+
+            # NOTE(gibi): the device RP name reported by neutron is
+            # structured like <hostname>:<agentname>:<interfacename>
+            rp_name_pieces = dev_rp_name.split(':')
+            if len(rp_name_pieces) != 3:
+                ex = exception.UnexpectedResourceProviderNameForPCIRequest
+                raise ex(
+                    provider=provider_uuids[0],
+                    requester=pci_request.requester_id,
+                    provider_name=dev_rp_name)
+
+            for spec in pci_request.spec:
+                spec['parent_ifname'] = rp_name_pieces[2]

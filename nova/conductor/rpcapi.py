@@ -21,6 +21,7 @@ from oslo_versionedobjects import base as ovo_base
 
 import nova.conf
 from nova import exception
+from nova.i18n import _
 from nova.objects import base as objects_base
 from nova import profiler
 from nova import rpc
@@ -283,6 +284,8 @@ class ComputeTaskAPI(object):
     1.20 - migrate_server() now gets a 'host_list' parameter that represents
            potential alternate hosts for retries within a cell.
     1.21 - Added cache_images()
+    1.22 - Added confirm_snapshot_based_resize()
+    1.23 - Added revert_snapshot_based_resize()
     """
 
     def __init__(self):
@@ -311,7 +314,7 @@ class ComputeTaskAPI(object):
     def migrate_server(self, context, instance, scheduler_hint, live, rebuild,
                   flavor, block_migration, disk_over_commit,
                   reservations=None, clean_shutdown=True, request_spec=None,
-                  host_list=None):
+                  host_list=None, do_cast=False):
         kw = {'instance': instance, 'scheduler_hint': scheduler_hint,
               'live': live, 'rebuild': rebuild, 'flavor': flavor,
               'block_migration': block_migration,
@@ -342,6 +345,8 @@ class ComputeTaskAPI(object):
             version=version,
             call_monitor_timeout=CONF.rpc_response_timeout,
             timeout=CONF.long_rpc_timeout)
+        if do_cast:
+            return cctxt.cast(context, 'migrate_server', **kw)
         return cctxt.call(context, 'migrate_server', **kw)
 
     def build_instances(self, context, instances, image, filter_properties,
@@ -452,3 +457,22 @@ class ComputeTaskAPI(object):
         cctxt = self.client.prepare(version=version)
         cctxt.cast(ctxt, 'cache_images', aggregate=aggregate,
                    image_ids=image_ids)
+
+    def confirm_snapshot_based_resize(
+            self, ctxt, instance, migration, do_cast=True):
+        version = '1.22'
+        if not self.client.can_send_version(version):
+            raise exception.ServiceTooOld(_('nova-conductor too old'))
+        kw = {'instance': instance, 'migration': migration}
+        cctxt = self.client.prepare(version=version)
+        if do_cast:
+            return cctxt.cast(ctxt, 'confirm_snapshot_based_resize', **kw)
+        return cctxt.call(ctxt, 'confirm_snapshot_based_resize', **kw)
+
+    def revert_snapshot_based_resize(self, ctxt, instance, migration):
+        version = '1.23'
+        if not self.client.can_send_version(version):
+            raise exception.ServiceTooOld(_('nova-conductor too old'))
+        kw = {'instance': instance, 'migration': migration}
+        cctxt = self.client.prepare(version=version)
+        return cctxt.cast(ctxt, 'revert_snapshot_based_resize', **kw)

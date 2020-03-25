@@ -46,7 +46,6 @@ from requests import adapters
 from sqlalchemy import exc as sqla_exc
 from wsgi_intercept import interceptor
 
-from nova.api.openstack.compute import tenant_networks
 from nova.api.openstack import wsgi_app
 from nova.api import wsgi
 from nova.compute import multi_cell_list
@@ -55,8 +54,8 @@ from nova import context
 from nova.db import migration
 from nova.db.sqlalchemy import api as session
 from nova import exception
+from nova.network import constants as neutron_constants
 from nova.network import model as network_model
-from nova.network.neutronv2 import constants as neutron_constants
 from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import service as service_obj
@@ -96,11 +95,6 @@ class ServiceFixture(fixtures.Fixture):
         self.ctxt = context.get_admin_context()
         if self.cell:
             context.set_target_cell(self.ctxt, self.cell)
-
-        # NOTE(mikal): we don't have root to manipulate iptables, so just
-        # zero that bit out.
-        self.useFixture(fixtures.MockPatch(
-            'nova.network.linux_net.IptablesManager._apply'))
 
         with mock.patch('nova.context.get_admin_context',
                         return_value=self.ctxt):
@@ -205,63 +199,6 @@ class StandardLogging(fixtures.Fixture):
         self.logger._output.truncate(0)
 
 
-class OutputStreamCapture(fixtures.Fixture):
-    """Capture output streams during tests.
-
-    This fixture captures errant printing to stderr / stdout during
-    the tests and lets us see those streams at the end of the test
-    runs instead. Useful to see what was happening during failed
-    tests.
-    """
-    def setUp(self):
-        super(OutputStreamCapture, self).setUp()
-        if os.environ.get('OS_STDOUT_CAPTURE') in _TRUE_VALUES:
-            self.out = self.useFixture(fixtures.StringStream('stdout'))
-            self.useFixture(
-                fixtures.MonkeyPatch('sys.stdout', self.out.stream))
-        if os.environ.get('OS_STDERR_CAPTURE') in _TRUE_VALUES:
-            self.err = self.useFixture(fixtures.StringStream('stderr'))
-            self.useFixture(
-                fixtures.MonkeyPatch('sys.stderr', self.err.stream))
-
-    @property
-    def stderr(self):
-        return self.err._details["stderr"].as_text()
-
-    @property
-    def stdout(self):
-        return self.out._details["stdout"].as_text()
-
-
-class Timeout(fixtures.Fixture):
-    """Setup per test timeouts.
-
-    In order to avoid test deadlocks we support setting up a test
-    timeout parameter read from the environment. In almost all
-    cases where the timeout is reached this means a deadlock.
-
-    A class level TIMEOUT_SCALING_FACTOR also exists, which allows
-    extremely long tests to specify they need more time.
-    """
-
-    def __init__(self, timeout, scaling=1):
-        super(Timeout, self).__init__()
-        try:
-            self.test_timeout = int(timeout)
-        except ValueError:
-            # If timeout value is invalid do not set a timeout.
-            self.test_timeout = 0
-        if scaling >= 1:
-            self.test_timeout *= scaling
-        else:
-            raise ValueError('scaling value must be >= 1')
-
-    def setUp(self):
-        super(Timeout, self).setUp()
-        if self.test_timeout > 0:
-            self.useFixture(fixtures.Timeout(self.test_timeout, gentle=True))
-
-
 class DatabasePoisonFixture(fixtures.Fixture):
     def setUp(self):
         super(DatabasePoisonFixture, self).setUp()
@@ -343,7 +280,7 @@ class SingleCellSimple(fixtures.Fixture):
             self._fake_target_cell))
         self.useFixture(fixtures.MonkeyPatch(
             'nova.context.set_target_cell',
-            lambda c, m: None))
+            self._fake_set_target_cell))
 
     def _fake_hostmapping_get(self, *args):
         return {'id': 1,
@@ -392,6 +329,14 @@ class SingleCellSimple(fixtures.Fixture):
         # NOTE(danms): Just pass through the context without actually
         # targeting anything.
         yield context
+
+    def _fake_set_target_cell(self, context, cell_mapping):
+        # Just do something simple and set/unset the cell_uuid on the context.
+        if cell_mapping:
+            context.cell_uuid = getattr(cell_mapping, 'uuid',
+                                        uuidsentinel.cell1)
+        else:
+            context.cell_uuid = None
 
 
 class CheatingSerializer(rpc.RequestContextSerializer):
@@ -841,18 +786,6 @@ class WarningsFixture(fixtures.Fixture):
             message='Policy enforcement is depending on the value of is_admin.'
                     ' This key is deprecated. Please update your policy '
                     'file to use the standard policy values.')
-        # TODO(takashin): Remove filtering warnings about mox
-        # after removing tests which uses mox and are related to
-        # nova-network in the following files.
-        #
-        # - nova/tests/unit/api/openstack/compute/test_floating_ips.py
-        # - nova/tests/unit/api/openstack/compute/test_security_groups.py
-        # - nova/tests/unit/fake_network.py
-        # - nova/tests/unit/network/test_manager.py
-        warnings.filterwarnings('ignore',
-            module='mox3.mox')
-        # NOTE(gibi): we can remove this once we get rid of Mox in nova
-        warnings.filterwarnings('ignore', message="Using class 'MoxStubout'")
         # NOTE(mriedem): Ignore scope check UserWarnings from oslo.policy.
         warnings.filterwarnings('ignore',
                                 message="Policy .* failed scope check",
@@ -881,21 +814,6 @@ class WarningsFixture(fixtures.Fixture):
         warnings.filterwarnings(
             'ignore', message=".* 'VIFPortProfileOVSRepresentor' .* "
             "is deprecated", category=PendingDeprecationWarning)
-
-        # TODO(mriedem): Change (or remove) this DeprecationWarning once
-        # https://bugs.launchpad.net/sqlalchemy-migrate/+bug/1814288 is fixed.
-        warnings.filterwarnings(
-            'ignore', message=r'inspect.getargspec\(\) is deprecated',
-            category=DeprecationWarning,
-            module='migrate.versioning.script.py')
-
-        # TODO(stephenfin): Remove once we bump our sqlalchemy-migrate version
-        # to whatever is released early in Ussuri and includes change
-        # I319785d7dd83ffe2c6e651a2494b073becc84684
-        warnings.filterwarnings(
-            'ignore', message='The Engine.contextual_connect.*',
-            category=sqla_exc.SADeprecationWarning,
-            module='migrate.changeset.databases.visitor')
 
         self.addCleanup(warnings.resetwarnings)
 
@@ -955,18 +873,21 @@ class OSAPIFixture(fixtures.Fixture):
     """
 
     def __init__(self, api_version='v2',
-                 project_id='6f70656e737461636b20342065766572'):
+                 project_id='6f70656e737461636b20342065766572',
+                 use_project_id_in_urls=False):
         """Constructor
 
         :param api_version: the API version that we're interested in
         using. Currently this expects 'v2' or 'v2.1' as possible
         options.
         :param project_id: the project id to use on the API.
-
+        :param use_project_id_in_urls: If True, act like the "endpoint" in the
+            "service catalog" has the legacy format including the project_id.
         """
         super(OSAPIFixture, self).__init__()
         self.api_version = api_version
         self.project_id = project_id
+        self.use_project_id_in_urls = use_project_id_in_urls
 
     def setUp(self):
         super(OSAPIFixture, self).setUp()
@@ -981,6 +902,23 @@ class OSAPIFixture(fixtures.Fixture):
             'debug': True,
         }
         self.useFixture(ConfPatcher(**conf_overrides))
+
+        # Stub out authentication middleware
+        # TODO(efried): Use keystonemiddleware.fixtures.AuthTokenFixture
+        self.useFixture(fixtures.MockPatch(
+            'keystonemiddleware.auth_token.filter_factory',
+            return_value=lambda _app: _app))
+
+        # Stub out context middleware
+        def fake_ctx(env, **kwargs):
+            user_id = env['HTTP_X_AUTH_USER']
+            project_id = env['HTTP_X_AUTH_PROJECT_ID']
+            is_admin = user_id == 'admin'
+            return context.RequestContext(
+                user_id, project_id, is_admin=is_admin, **kwargs)
+
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.api.auth.NovaKeystoneContext._create_context', fake_ctx))
 
         # Turn off manipulation of socket_options in TCPKeepAliveAdapter
         # to keep wsgi-intercept happy. Replace it with the method
@@ -999,12 +937,15 @@ class OSAPIFixture(fixtures.Fixture):
         intercept.install_intercept()
         self.addCleanup(intercept.uninstall_intercept)
 
-        self.auth_url = 'http://%(host)s:%(port)s/%(api_version)s' % ({
+        base_url = 'http://%(host)s:%(port)s/%(api_version)s' % ({
             'host': hostname, 'port': port, 'api_version': self.api_version})
-        self.api = client.TestOpenStackClient('fake', 'fake', self.auth_url,
-                                              self.project_id)
+        if self.use_project_id_in_urls:
+            base_url += '/' + self.project_id
+
+        self.api = client.TestOpenStackClient(
+            'fake', base_url, project_id=self.project_id)
         self.admin_api = client.TestOpenStackClient(
-            'admin', 'admin', self.auth_url, self.project_id)
+            'admin', base_url, project_id=self.project_id)
         # Provide a way to access the wsgi application to tests using
         # the fixture.
         self.app = app
@@ -1032,12 +973,6 @@ class OSMetadataServer(fixtures.Fixture):
         }
         self.useFixture(ConfPatcher(**conf_overrides))
 
-        # NOTE(mikal): we don't have root to manipulate iptables, so just
-        # zero that bit out.
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.network.linux_net.IptablesManager._apply',
-            lambda _: None))
-
         self.metadata = service.WSGIService("metadata")
         self.metadata.start()
         self.addCleanup(self.metadata.stop)
@@ -1059,6 +994,15 @@ class PoisonFunctions(fixtures.Fixture):
     def setUp(self):
         super(PoisonFunctions, self).setUp()
 
+        try:
+            self._poison_libvirt_driver()
+        except ImportError:
+            # The libvirt driver uses modules that are not available
+            # on Windows.
+            if os.name != 'nt':
+                raise
+
+    def _poison_libvirt_driver(self):
         # The nova libvirt driver starts an event thread which only
         # causes trouble in tests. Make sure that if tests don't
         # properly patch it the test explodes.
@@ -1214,16 +1158,30 @@ class AllServicesCurrent(fixtures.Fixture):
         return service_obj.SERVICE_VERSION
 
 
-class RegisterNetworkQuota(fixtures.Fixture):
-    def setUp(self):
-        super(RegisterNetworkQuota, self).setUp()
-        # Quota resource registration modifies the global QUOTAS engine, so
-        # this fixture registers and unregisters network quota for a test.
-        tenant_networks._register_network_quota()
-        self.addCleanup(self.cleanup)
+class _FakeNeutronClient(object):
+    """Class representing a Neutron client which wraps a NeutronFixture.
 
-    def cleanup(self):
-        nova_quota.QUOTAS._resources.pop('networks', None)
+    This wrapper class stores an instance of a NeutronFixture and whether the
+    Neutron client is an admin client.
+
+    For supported methods, (example: list_ports), this class will call the
+    NeutronFixture's class method with an additional 'is_admin' keyword
+    argument indicating whether the client is an admin client and the
+    NeutronFixture method handles it accordingly.
+
+    For all other methods, this wrapper class simply calls through to the
+    corresponding NeutronFixture class method without any modifications.
+    """
+    def __init__(self, fixture, is_admin):
+        self.fixture = fixture
+        self.is_admin = is_admin
+
+    def __getattr__(self, name):
+        return getattr(self.fixture, name)
+
+    def list_ports(self, retrieve_all=True, **_params):
+        return self.fixture.list_ports(self.is_admin,
+                                       retrieve_all=retrieve_all, **_params)
 
 
 class NeutronFixture(fixtures.Fixture):
@@ -1392,6 +1350,7 @@ class NeutronFixture(fixtures.Fixture):
         'tenant_id': tenant_id,
         'project_id': tenant_id,
         'device_id': '',
+        'binding:profile': {},
         'binding:vnic_type': 'normal',
         'binding:vif_type': 'ovs',
         'port_security_enabled': True,
@@ -1417,6 +1376,7 @@ class NeutronFixture(fixtures.Fixture):
         'tenant_id': tenant_id,
         'project_id': tenant_id,
         'device_id': '',
+        'binding:profile': {},
         'binding:vnic_type': 'normal',
         'binding:vif_type': 'ovs',
         'port_security_enabled': True,
@@ -1442,6 +1402,7 @@ class NeutronFixture(fixtures.Fixture):
         'tenant_id': tenant_id,
         'project_id': tenant_id,
         'device_id': '',
+        'binding:profile': {},
         'binding:vnic_type': 'normal',
         'binding:vif_type': 'ovs',
         'resource_request': {
@@ -1526,6 +1487,7 @@ class NeutronFixture(fixtures.Fixture):
         'project_id': tenant_id,
         'device_id': '',
         'resource_request': {},
+        'binding:profile': {},
         'binding:vnic_type': 'direct',
         'port_security_enabled': False,
     }
@@ -1554,6 +1516,7 @@ class NeutronFixture(fixtures.Fixture):
                 orc.NET_BW_EGR_KILOBIT_PER_SEC: 10000},
             "required": ["CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_DIRECT"]
         },
+        'binding:profile': {},
         'binding:vnic_type': 'direct',
         'port_security_enabled': False,
     }
@@ -1582,6 +1545,7 @@ class NeutronFixture(fixtures.Fixture):
                 orc.NET_BW_EGR_KILOBIT_PER_SEC: 10000},
             "required": ["CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_MACVTAP"]
         },
+        'binding:profile': {},
         'binding:vnic_type': 'macvtap',
         'port_security_enabled': False,
     }
@@ -1651,6 +1615,10 @@ class NeutronFixture(fixtures.Fixture):
             self.port_with_resource_request['id']:
                 copy.deepcopy(self.port_with_resource_request)
         }
+        # Store multiple port bindings per port in a dict keyed by the host.
+        # At startup we assume that none of the ports are bound.
+        # {<port_id>: {<hostname>: <binding>}}
+        self._port_bindings = collections.defaultdict(dict)
 
         # The fixture does not allow network, subnet or security group updates
         # so we don't have to deepcopy here
@@ -1668,75 +1636,116 @@ class NeutronFixture(fixtures.Fixture):
     def setUp(self):
         super(NeutronFixture, self).setUp()
 
+        # NOTE(gibi): This is the simplest way to unblock nova during live
+        # migration. A nicer way would be to actually send network-vif-plugged
+        # events to the nova-api from NeutronFixture when the port is bound but
+        # calling nova API from this fixture needs a big surgery and sending
+        # event right at the binding request means that such event will arrive
+        # to nova earlier than the compute manager starts waiting for it.
+        self.test.flags(vif_plugging_timeout=0)
+
         self.test.stub_out(
-            'nova.network.neutronv2.api.API.setup_networks_on_host',
-            lambda *args, **kwargs: None)
-        self.test.stub_out(
-            'nova.network.neutronv2.api.API.migrate_instance_start',
-            lambda *args, **kwargs: None)
-        self.test.stub_out(
-            'nova.network.neutronv2.api.API.add_fixed_ip_to_instance',
+            'nova.network.neutron.API.add_fixed_ip_to_instance',
             lambda *args, **kwargs: network_model.NetworkInfo.hydrate(
                 self.nw_info))
         self.test.stub_out(
-            'nova.network.neutronv2.api.API.remove_fixed_ip_from_instance',
+            'nova.network.neutron.API.remove_fixed_ip_from_instance',
             lambda *args, **kwargs: network_model.NetworkInfo.hydrate(
                 self.nw_info))
 
         # Stub out port binding APIs which go through a KSA client Adapter
         # rather than python-neutronclient.
         self.test.stub_out(
-            'nova.network.neutronv2.api._get_ksa_client',
+            'nova.network.neutron._get_ksa_client',
             lambda *args, **kwargs: mock.Mock(
                 spec=ksa_adap.Adapter))
         self.test.stub_out(
-            'nova.network.neutronv2.api.API._create_port_binding',
-            self.fake_create_port_binding)
+            'nova.network.neutron.API._create_port_binding',
+            self.create_port_binding)
         self.test.stub_out(
-            'nova.network.neutronv2.api.API._delete_port_binding',
-            self.fake_delete_port_binding)
+            'nova.network.neutron.API._delete_port_binding',
+            self.delete_port_binding)
+        self.test.stub_out(
+            'nova.network.neutron.API._activate_port_binding',
+            self.activate_port_binding)
+        self.test.stub_out(
+            'nova.network.neutron.API._get_port_binding',
+            self.get_port_binding)
 
-        self.test.stub_out('nova.network.neutronv2.api.get_client',
+        self.test.stub_out('nova.network.neutron.get_client',
                            self._get_client)
 
     def _get_client(self, context, admin=False):
-        # NOTE(gibi): This is a hack. As we return the same fixture for each
-        # get_client call there is no way to later know that a call came
-        # through which client. We store the parameters of the last get_client
-        # call. Later we should return a new client object from this call that
-        # is wrapping the fixture and this client can remember how it was
-        # initialized.
+        # This logic is copied from nova.network.neutron._get_auth_plugin
+        admin = admin or context.is_admin and not context.auth_token
+        return _FakeNeutronClient(self, admin)
 
-        # This logic is copied from nova.network.neutronv2.api._get_auth_plugin
-        self.is_admin_client = (admin or
-                                (context.is_admin and not context.auth_token))
-        return self
+    def create_port_binding(self, context, client, port_id, data):
+        if port_id not in self._ports:
+            return fake_requests.FakeResponse(
+                404, content='Port %s not found' % port_id)
 
-    @staticmethod
-    def fake_create_port_binding(context, client, port_id, data):
-        # TODO(mriedem): Make this smarter by keeping track of our bindings
-        # per port so we can reflect the status accurately.
+        host = data['binding']['host']
+        # We assume that every binding that is created is inactive.
+        # This is only true from the current nova code perspective where
+        # explicit binding creation only happen for migration where the port
+        # is already actively bound to the source host.
+        # TODO(gibi): enhance update_port to detect if the port is bound by
+        # the update and create a binding internally in _port_bindings. Then
+        # we can change the logic here to mimic neutron better by making the
+        # first binding active by default.
+        data['binding']['status'] = 'INACTIVE'
+        self._port_bindings[port_id][host] = copy.deepcopy(data['binding'])
+
         return fake_requests.FakeResponse(200, content=jsonutils.dumps(data))
 
-    @staticmethod
-    def fake_delete_port_binding(context, client, port_id, host):
-        # TODO(mriedem): Make this smarter by keeping track of our bindings
-        # per port so we can reflect the status accurately.
+    def _get_failure_response_if_port_or_binding_not_exists(
+            self, port_id, host):
+        if port_id not in self._ports:
+            return fake_requests.FakeResponse(
+                404, content='Port %s not found' % port_id)
+        if host not in self._port_bindings[port_id]:
+            return fake_requests.FakeResponse(
+                404,
+                content='Binding for host %s for port %s not found'
+                        % (host, port_id))
+
+    def delete_port_binding(self, context, client, port_id, host):
+        failure = self._get_failure_response_if_port_or_binding_not_exists(
+            port_id, host)
+        if failure is not None:
+            return failure
+
+        del self._port_bindings[port_id][host]
+
         return fake_requests.FakeResponse(204)
 
-    @staticmethod
-    def fake_get_instance_security_group_bindings(
-            _, context, servers, detailed=False):
-        if detailed:
-            raise Exception('We do not support detailed view')
-        return {server['id']: [{'name': 'default'}] for server in servers}
+    def activate_port_binding(self, context, client, port_id, host):
+        failure = self._get_failure_response_if_port_or_binding_not_exists(
+            port_id, host)
+        if failure is not None:
+            return failure
 
-    def _get_first_id_match(self, id, list):
-        filtered_list = [p for p in list if p['id'] == id]
-        if len(filtered_list) > 0:
-            return filtered_list[0]
-        else:
-            return None
+        # It makes sure that only one binding is active for a port
+        for h, binding in self._port_bindings[port_id].items():
+            if h == host:
+                # NOTE(gibi): neutron returns 409 if this binding is already
+                # active but nova does not depend on this behaviour yet.
+                binding['status'] = 'ACTIVE'
+            else:
+                binding['status'] = 'INACTIVE'
+
+        return fake_requests.FakeResponse(200)
+
+    def get_port_binding(self, context, client, port_id, host):
+        failure = self._get_failure_response_if_port_or_binding_not_exists(
+            port_id, host)
+        if failure is not None:
+            return failure
+
+        binding = {"binding": self._port_bindings[port_id][host]}
+        return fake_requests.FakeResponse(
+            200, content=jsonutils.dumps(binding))
 
     def _list_resource(self, resources, retrieve_all, **_params):
         # If 'fields' is passed we need to strip that out since it will mess
@@ -1772,24 +1781,55 @@ class NeutronFixture(fixtures.Fixture):
             ]
         }
 
+    def _get_active_binding(self, port_id):
+        for host, binding in self._port_bindings[port_id].items():
+            if binding['status'] == 'ACTIVE':
+                return binding
+
+    def _merge_in_active_binding(self, port):
+        """Update the port dict with the currently active port binding"""
+        if port['id'] not in self._port_bindings:
+            return
+
+        binding = self._get_active_binding(port['id']) or {}
+        for key, value in binding.items():
+            # keys in the binding is like 'vnic_type' but in the port response
+            # they are like 'binding:vnic_type'. Except for the host_id that
+            # is called 'host' in the binding but 'binding:host_id' in the
+            # port response.
+            if key != 'host':
+                port['binding:' + key] = value
+            else:
+                port['binding:host_id'] = binding['host']
+
     def show_port(self, port_id, **_params):
         if port_id not in self._ports:
             raise exception.PortNotFound(port_id=port_id)
-        return {'port': copy.deepcopy(self._ports[port_id])}
+        port = copy.deepcopy(self._ports[port_id])
+        self._merge_in_active_binding(port)
+        return {'port': port}
 
     def delete_port(self, port_id, **_params):
         if port_id in self._ports:
             del self._ports[port_id]
+            # Not all flow use explicit binding creation by calling
+            # neutronv2.api.API.bind_ports_to_host(). Non live migration flows
+            # simply update the port to bind it. So we need to delete bindings
+            # conditionally
+            if port_id in self._port_bindings:
+                del self._port_bindings[port_id]
 
-    def list_ports(self, retrieve_all=True, **_params):
+    def list_ports(self, is_admin, retrieve_all=True, **_params):
         ports = self._list_resource(self._ports, retrieve_all, **_params)
-        if not self.is_admin_client:
+        for port in ports:
+            self._merge_in_active_binding(port)
             # Neutron returns None instead of the real resource_request if
             # the ports are queried by a non-admin. So simulate this behavior
             # here
-            for port in ports:
+            if not is_admin:
                 if 'resource_request' in port:
                     port['resource_request'] = None
+
         return {'ports': ports}
 
     def show_network(self, network_id, **_params):
@@ -1837,6 +1877,9 @@ class NeutronFixture(fixtures.Fixture):
         return {'port': copy.deepcopy(new_port)}
 
     def update_port(self, port_id, body=None):
+        # TODO(gibi): check if the port update binds the port and update the
+        # internal _port_bindings dict accordingly. Such a binding always
+        # becomes and active port binding of the port.
         port = self._ports[port_id]
         # We need to deepcopy here as well as the body can have a nested dict
         # which can be modified by the caller after this update_port call
@@ -1946,6 +1989,14 @@ class CinderFixture(fixtures.Fixture):
                     # so yield rather than return
                     yield volume_id
                     break
+
+    def attachment_ids_for_instance(self, instance_uuid):
+        attachment_ids = []
+        for volume_id, attachments in self.volume_to_attachment.items():
+            for attachment in attachments.values():
+                if attachment['instance_uuid'] == instance_uuid:
+                    attachment_ids.append(attachment['id'])
+        return attachment_ids
 
     def setUp(self):
         super(CinderFixture, self).setUp()
@@ -2350,7 +2401,7 @@ class AvailabilityZoneFixture(fixtures.Fixture):
 
         def fake_get_availability_zones(
                 ctxt, hostapi, get_only_available=False,
-                with_hosts=False, enabled_services=None):
+                with_hosts=False, services=None):
             # A 2-item tuple is returned if get_only_available=False.
             if not get_only_available:
                 return self.zones, []
@@ -2424,7 +2475,7 @@ class HostNameWeigher(weights.BaseHostWeigher):
         self.weights = self.get_weights()
 
     def get_weights(self):
-        raise NotImplemented()
+        raise NotImplementedError()
 
     def _weigh_object(self, host_state, weight_properties):
         # Any unspecified host gets no weight.

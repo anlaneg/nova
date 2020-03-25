@@ -24,10 +24,8 @@ OpenStack Compute consists of the following areas and their components:
   orchestration activities, such as running an instance.
 
 ``nova-api-metadata`` service
-  Accepts metadata requests from instances. The ``nova-api-metadata`` service
-  is generally used when you run in multi-host mode with ``nova-network``
-  installations. For details, see :ref:`metadata-service-deploy`
-  in the Compute Administrator Guide.
+  Accepts metadata requests from instances. For more information, refer to
+  :doc:`/admin/metadata-service`.
 
 ``nova-compute`` service
   A worker daemon that creates and terminates virtual machine instances through
@@ -62,15 +60,6 @@ OpenStack Compute consists of the following areas and their components:
 ``nova-spicehtml5proxy`` daemon
   Provides a proxy for accessing running instances through a SPICE connection.
   Supports browser-based HTML5 client.
-
-``nova-xvpvncproxy`` daemon
-  Provides a proxy for accessing running instances through a VNC connection.
-  Supports an OpenStack-specific Java client.
-
-  .. deprecated:: 19.0.0
-
-     :program:`nova-xvpvnxproxy` is deprecated since 19.0.0 (Stein) and will be
-     removed in an upcoming release.
 
 The queue
   A central hub for passing messages between daemons. Usually implemented with

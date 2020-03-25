@@ -1,5 +1,6 @@
 # See https://docs.openstack.org/infra/manual/drivers.html#naming-with-zuul-v3
 # for job naming conventions.
+
 - job:
     name: nova-dsvm-multinode-base
     parent: legacy-dsvm-base-multinode
@@ -20,21 +21,21 @@
       - ^doc/.*$
       - ^nova/hacking/.*$
       - ^nova/locale/.*$
+      - ^nova/policies/.*$
       - ^nova/tests/.*$
       - ^nova/test.py$
       - ^releasenotes/.*$
       - ^setup.cfg$
-      - ^tests-py3.txt$
       - ^tools/.*$
       - ^tox.ini$
 
 - job:
-    name: nova-tox-functional
-    parent: openstack-tox
+    name: nova-tox-functional-py36
+    parent: openstack-tox-functional-py36
     description: |
-      Run tox-based functional tests for the OpenStack Nova project with Nova
-      specific irrelevant-files list. Uses tox with the ``functional``
-      environment.
+      Run tox-based functional tests for the OpenStack Nova project
+      under cPython version 3.6 with Nova specific irrelevant-files list.
+      Uses tox with the ``functional-py36`` environment.
 
       This job also provides a parent for other projects to run the nova
       functional tests on their own changes.
@@ -52,38 +53,12 @@
       # explicitly stating the work dir makes this job reusable by other
       # projects
       zuul_work_dir: src/opendev.org/openstack/nova
-      tox_envlist: functional
-      tox_install_siblings: true
-    timeout: 3600
-
-- job:
-    name: nova-tox-functional-py36
-    parent: openstack-tox
-    nodeset: ubuntu-bionic
-    description: |
-      Run tox-based functional tests for the OpenStack Nova project
-      under cPython version 3.6 with Nova specific irrelevant-files list.
-      Uses tox with the ``functional-py36`` environment.
-
-      This job also provides a parent for other projects (notably placement)
-      to run the nova functional tests on their own changes.
-    required-projects:
-      # including nova here makes this job reusable by other projects
-      - openstack/nova
-      - openstack/placement
-    irrelevant-files: *functional-irrelevant-files
-    vars:
-      # explicitly stating the work dir makes this job reusable by other
-      # projects
-      zuul_work_dir: src/opendev.org/openstack/nova
-      tox_envlist: functional-py36
       bindep_profile: test py36
     timeout: 3600
 
 - job:
     name: nova-tox-functional-py37
-    parent: openstack-tox
-    nodeset: ubuntu-bionic
+    parent: openstack-tox-functional-py37
     description: |
       Run tox-based functional tests for the OpenStack Nova project
       under cPython version 3.7 with Nova specific irrelevant-files list.
@@ -100,9 +75,7 @@
       # explicitly stating the work dir makes this job reusable by other
       # projects
       zuul_work_dir: src/opendev.org/openstack/nova
-      tox_envlist: functional-py37
       bindep_profile: test py37
-      python_version: 3.7
     timeout: 3600
 
 - job:
@@ -112,7 +85,7 @@
       Run tempest live migration tests against both local storage and shared
       storage using ceph (the environment is reconfigured for ceph after the
       local storage tests are run). Also runs simple evacuate tests.
-      Config drive is forced on all instances.
+      Config drive is forced on all instances. Runs with python 3.
     run: playbooks/legacy/nova-live-migration/run.yaml
     post-run: playbooks/legacy/nova-live-migration/post.yaml
     irrelevant-files: *dsvm-irrelevant-files
@@ -138,7 +111,6 @@
       - ^nova/test.py$
       - ^releasenotes/.*$
       - ^setup.cfg$
-      - ^tests-py3.txt$
       - ^tools/.*$
       - ^tox.ini$
     # TODO(mriedem): Make this voting and gating once bug 1771700 is fixed
@@ -161,7 +133,6 @@
               resize: false
               cold_migration: false
       devstack_localrc:
-        USE_PYTHON3: True
         NOVA_BACKEND: LVM
         # Do not waste time clearing volumes.
         LVM_VOLUME_CLEAR: none
@@ -222,6 +193,10 @@
             ovs:
               bridge_mappings: public:br-ex
               resource_provider_bandwidths: br-ex:1000000:1000000
+        test-config:
+          $TEMPEST_CONFIG:
+            network-feature-enabled:
+              qos_placement_physnet: public
       devstack_localrc:
         # Added in Pike.
         NOVA_USE_SERVICE_TOKEN: True
@@ -230,6 +205,8 @@
         NOVA_CONSOLE_PROXY_COMPUTE_TLS: True
         # Added in Stein.
         ENABLE_VOLUME_MULTIATTACH: True
+        # Added in Ussuri.
+        FORCE_CONFIG_DRIVE: True
       devstack_services:
         tls-proxy: true
         # neutron-* needed for QoS port heal allocation testing.
@@ -245,6 +222,7 @@
         devstack_localrc:
           NOVA_USE_SERVICE_TOKEN: True
           NOVA_CONSOLE_PROXY_COMPUTE_TLS: True
+          FORCE_CONFIG_DRIVE: True
         devstack_services:
           tls-proxy: true
           c-bak: false
@@ -266,7 +244,7 @@
 
 - job:
     name: nova-tempest-full-oslo.versionedobjects
-    parent: tempest-full
+    parent: tempest-full-py3
     description: |
       Run test with git version of oslo.versionedobjects to check that
       changes to nova will work with the next released version of
@@ -278,7 +256,8 @@
     name: nova-grenade-multinode
     parent: nova-dsvm-multinode-base
     description: |
-      Multi-node grenade job which runs gate/live_migration/hooks tests.
+      Multi-node grenade job which runs gate/live_migration/hooks tests under
+      python 3.
       In other words, this tests live and cold migration and resize with
       mixed-version compute services which is important for things like
       rolling upgrade support.
@@ -308,26 +287,28 @@
       tempest_test_regex: ^tempest\.(scenario|(api\.compute))
       tempest_test_blacklist: '{{ ansible_user_dir }}/{{ zuul.projects["opendev.org/openstack/nova"].src_dir }}/devstack/nova-multi-cell-blacklist.txt'
       devstack_local_conf:
+        post-config:
+          $NOVA_CONF:
+            oslo_policy:
+              # The default policy file is policy.json but the
+              # setup-multi-cell-policy role will write to policy.yaml.
+              policy_file: policy.yaml
         test-config:
           $TEMPEST_CONFIG:
             compute-feature-enabled:
-              # TODO(mriedem): Enable cold migration once cross-cell resize is
-              # supported. We cannot enable it until then because this job has
-              # one compute in each cell and with
-              # allow_resize_to_same_host=True cold migrate will try to migrate
-              # on the same host which is not supported by the libvirt driver.
-              cold_migration: false
+              # Enable cold migration for migrating across cells. Note that
+              # because NOVA_ALLOW_MOVE_TO_SAME_HOST=false, all cold migrations
+              # will move across cells.
+              cold_migration: true
       devstack_services:
         # Disable other non-essential services that we don't need for this job.
         c-bak: false
       devstack_localrc:
         # Setup two non-cell0 cells (cell1 and cell2).
         NOVA_NUM_CELLS: 2
-        # Resize to the same host is supported for now since we only have
-        # two computes and they are in different cells.
-        # TODO(mriedem): Disable resize to the same host once cross-cell resize
-        # is supported so all resizes will move across cells.
-        NOVA_ALLOW_MOVE_TO_SAME_HOST: true
+        # Disable resize to the same host so all resizes will move across
+        # cells.
+        NOVA_ALLOW_MOVE_TO_SAME_HOST: false
         # We only have two computes and we don't yet support cross-cell live
         # migration.
         LIVE_MIGRATION_AVAILABLE: false
@@ -344,6 +325,9 @@
           # Disable other non-essential services that we don't need for this
           # job.
           c-bak: false
+    # Perform setup for the multi-cell environment. Note that this runs
+    # before devstack is setup on the controller host.
+    pre-run: playbooks/nova-multi-cell/pre.yaml
 
 - job:
     name: nova-osprofiler-redis
@@ -367,8 +351,7 @@
       - integrated-gate-compute
       - openstack-cover-jobs
       - openstack-lower-constraints-jobs
-      - openstack-python-jobs
-      - openstack-python3-train-jobs
+      - openstack-python3-ussuri-jobs
       - periodic-stable-jobs
       - publish-openstack-docs-pti
       - release-notes-jobs-python3
@@ -382,8 +365,6 @@
         - devstack-plugin-ceph-tempest-py3:
             voting: false
             irrelevant-files: *dsvm-irrelevant-files
-        - neutron-grenade-multinode:
-            irrelevant-files: *dsvm-irrelevant-files
         - neutron-tempest-linuxbridge:
             irrelevant-files:
               # NOTE(mriedem): This job has its own irrelevant-files section
@@ -396,27 +377,46 @@
         - nova-lvm
         - nova-multi-cell
         - nova-next
-        - nova-tox-functional
         - nova-tox-functional-py36
         - tempest-integrated-compute:
-            irrelevant-files: *dsvm-irrelevant-files
+            # NOTE(gmann): Policies changes do not need to run all the
+            # integration test jobs. Running only tempest and grenade
+            # common jobs will be enough along with nova functional
+            # and unit tests.
+            irrelevant-files: &policies-irrelevant-files
+              - ^api-.*$
+              - ^(test-|)requirements.txt$
+              - ^.*\.rst$
+              - ^.git.*$
+              - ^doc/.*$
+              - ^nova/hacking/.*$
+              - ^nova/locale/.*$
+              - ^nova/tests/.*$
+              - ^nova/test.py$
+              - ^releasenotes/.*$
+              - ^setup.cfg$
+              - ^tools/.*$
+              - ^tox.ini$
         - grenade-py3:
-            irrelevant-files: *dsvm-irrelevant-files
+            irrelevant-files: *policies-irrelevant-files
         - tempest-ipv6-only:
+            irrelevant-files: *dsvm-irrelevant-files
+        - openstacksdk-functional-devstack:
             irrelevant-files: *dsvm-irrelevant-files
     gate:
       jobs:
         - nova-grenade-multinode
         - nova-live-migration
-        - nova-tox-functional
         - nova-tox-functional-py36
         - nova-multi-cell
         - nova-next
         - tempest-integrated-compute:
-            irrelevant-files: *dsvm-irrelevant-files
+            irrelevant-files: *policies-irrelevant-files
         - grenade-py3:
-            irrelevant-files: *dsvm-irrelevant-files
+            irrelevant-files: *policies-irrelevant-files
         - tempest-ipv6-only:
+            irrelevant-files: *dsvm-irrelevant-files
+        - openstacksdk-functional-devstack:
             irrelevant-files: *dsvm-irrelevant-files
     experimental:
       jobs:
@@ -428,7 +428,7 @@
             irrelevant-files: *dsvm-irrelevant-files
         - legacy-grenade-dsvm-neutron-multinode-zero-downtime:
             irrelevant-files: *dsvm-irrelevant-files
-        - legacy-tempest-dsvm-full-devstack-plugin-nfs:
+        - devstack-plugin-nfs-tempest-full:
             irrelevant-files: *dsvm-irrelevant-files
         - nova-osprofiler-redis
         - tempest-full-py3-opensuse15:
@@ -452,3 +452,7 @@
         # NOTE(mriedem): Consider moving nova-tox-functional-py37 to the
         # check and gate queues once it's stable (like openstack-python37-jobs)
         - nova-tox-functional-py37
+        - devstack-platform-fedora-latest:
+            irrelevant-files: *dsvm-irrelevant-files
+        - devstack-platform-fedora-latest-virt-preview:
+            irrelevant-files: *dsvm-irrelevant-files

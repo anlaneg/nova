@@ -42,6 +42,7 @@ from nova.objects import base
 from nova.objects import block_device as block_device_obj
 from nova.objects import fields
 from nova import rpc
+from nova.scheduler.client import report
 from nova import test
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_crypto
@@ -392,19 +393,12 @@ class UsageInfoTestCase(test.TestCase):
         self.public_key = fake_crypto.get_ssh_public_key()
         self.fingerprint = '1e:2c:9b:56:79:4b:45:77:f9:ca:7a:98:2c:b0:d5:3c'
 
-        def fake_get_nw_info(cls, ctxt, instance):
-            self.assertTrue(ctxt.is_admin)
-            return fake_network.fake_get_instance_nw_info(self, 1, 1)
-
         super(UsageInfoTestCase, self).setUp()
-        self.stub_out('nova.network.api.get_instance_nw_info',
-                      fake_get_nw_info)
 
         fake_notifier.stub_notifier(self)
         self.addCleanup(fake_notifier.reset)
 
-        self.flags(compute_driver='fake.FakeDriver',
-                   network_manager='nova.network.manager.FlatManager')
+        self.flags(compute_driver='fake.FakeDriver')
         self.compute = manager.ComputeManager()
         self.user_id = 'fake'
         self.project_id = 'fake'
@@ -1076,7 +1070,8 @@ class ComputeUtilsTestCase(test.NoDBTestCase):
         fake_event(self.compute, self.context, instance=inst)
         # if the class doesn't include a self.host, the default host is None
         mock_event.assert_called_once_with(self.context, 'compute_fake_event',
-                                           None, uuids.instance)
+                                           None, uuids.instance,
+                                           graceful_exit=False)
 
     @mock.patch.object(objects.InstanceActionEvent, 'event_start')
     @mock.patch.object(objects.InstanceActionEvent,
@@ -1126,6 +1121,37 @@ class ComputeUtilsTestCase(test.NoDBTestCase):
         self.assertTrue(mock_finish.called)
         args, kwargs = mock_finish.call_args
         self.assertIsInstance(kwargs['exc_val'], exception.NovaException)
+
+    @mock.patch('nova.objects.InstanceActionEvent.event_start')
+    @mock.patch('nova.objects.InstanceActionEvent.event_finish_with_failure')
+    def _test_event_reporter_graceful_exit(self, error, mock_event_finish,
+                                           mock_event_start):
+        with compute_utils.EventReporter(self.context, 'fake_event',
+                                         'fake.host', uuids.instance,
+                                         graceful_exit=True):
+            mock_event_finish.side_effect = error
+        mock_event_start.assert_called_once_with(
+            self.context, uuids.instance, 'fake_event', want_result=False,
+            host='fake.host')
+        mock_event_finish.assert_called_once_with(
+            self.context, uuids.instance, 'fake_event', exc_val=None,
+            exc_tb=None, want_result=False)
+
+    def test_event_reporter_graceful_exit_action_not_found(self):
+        """Tests that when graceful_exit=True and InstanceActionNotFound is
+        raised it is handled and not re-raised.
+        """
+        error = exception.InstanceActionNotFound(
+            request_id=self.context.request_id, instance_uuid=uuids.instance)
+        self._test_event_reporter_graceful_exit(error)
+
+    def test_event_reporter_graceful_exit_unexpected_error(self):
+        """Tests that even if graceful_exit=True the EventReporter will
+        re-raise an unexpected exception.
+        """
+        error = test.TestingException('uh oh')
+        self.assertRaises(test.TestingException,
+                          self._test_event_reporter_graceful_exit, error)
 
     @mock.patch('netifaces.interfaces')
     def test_get_machine_ips_value_error(self, mock_interfaces):
@@ -1488,63 +1514,134 @@ class IsVolumeBackedInstanceTestCase(test.TestCase):
         mock_bdms.assert_called_with(ctxt, instance.uuid)
 
 
-class TestComputeNodeToInventoryDict(test.NoDBTestCase):
-    def test_compute_node_inventory(self):
-        uuid = uuids.compute_node
-        name = 'computehost'
-        compute_node = objects.ComputeNode(uuid=uuid,
-                                           hypervisor_hostname=name,
-                                           vcpus=2,
-                                           cpu_allocation_ratio=16.0,
-                                           memory_mb=1024,
-                                           ram_allocation_ratio=1.5,
-                                           local_gb=10,
-                                           disk_allocation_ratio=1.0)
+class ComputeUtilsImageFunctionsTestCase(test.TestCase):
+    def setUp(self):
+        super(ComputeUtilsImageFunctionsTestCase, self).setUp()
+        self.context = context.RequestContext('fake', 'fake')
 
-        self.flags(reserved_host_memory_mb=1000)
-        self.flags(reserved_host_disk_mb=200)
-        self.flags(reserved_host_cpus=1)
+    def test_initialize_instance_snapshot_metadata_no_metadata(self):
+        # show no borkage from empty system meta
+        ctxt = self.context
+        instance = create_instance(ctxt)
+        image_meta = compute_utils.initialize_instance_snapshot_metadata(
+            ctxt, instance, 'empty properties')
+        self.assertEqual({}, image_meta['properties'])
 
-        result = compute_utils.compute_node_to_inventory_dict(compute_node)
-
-        expected = {
-            'VCPU': {
-                'total': compute_node.vcpus,
-                'reserved': CONF.reserved_host_cpus,
-                'min_unit': 1,
-                'max_unit': compute_node.vcpus,
-                'step_size': 1,
-                'allocation_ratio': compute_node.cpu_allocation_ratio,
-            },
-            'MEMORY_MB': {
-                'total': compute_node.memory_mb,
-                'reserved': CONF.reserved_host_memory_mb,
-                'min_unit': 1,
-                'max_unit': compute_node.memory_mb,
-                'step_size': 1,
-                'allocation_ratio': compute_node.ram_allocation_ratio,
-            },
-            'DISK_GB': {
-                'total': compute_node.local_gb,
-                'reserved': 1,  # this is ceil(1000/1024)
-                'min_unit': 1,
-                'max_unit': compute_node.local_gb,
-                'step_size': 1,
-                'allocation_ratio': compute_node.disk_allocation_ratio,
-            },
+    def test_initialize_instance_snapshot_metadata_removed_metadata(self):
+        # show non-inheritable properties are excluded
+        ctxt = self.context
+        instance = create_instance(ctxt)
+        instance.system_metadata = {
+            'image_img_signature': 'an-image-signature',
+            'image_cinder_encryption_key_id':
+            'deeeeeac-d75e-11e2-8271-1234567897d6',
+            'image_some_key': 'some_value',
+            'image_fred': 'barney',
+            'image_cache_in_nova': 'true'
         }
-        self.assertEqual(expected, result)
+        image_meta = compute_utils.initialize_instance_snapshot_metadata(
+            ctxt, instance, 'removed properties')
+        properties = image_meta['properties']
+        self.assertGreater(len(properties), 0)
+        self.assertIn('some_key', properties)
+        self.assertIn('fred', properties)
+        for p in compute_utils.NON_INHERITABLE_IMAGE_PROPERTIES:
+            self.assertNotIn(p, properties)
+        for p in CONF.non_inheritable_image_properties:
+            self.assertNotIn(p, properties)
 
-    def test_compute_node_inventory_empty(self):
-        uuid = uuids.compute_node
-        name = 'computehost'
-        compute_node = objects.ComputeNode(uuid=uuid,
-                                           hypervisor_hostname=name,
-                                           vcpus=0,
-                                           cpu_allocation_ratio=16.0,
-                                           memory_mb=0,
-                                           ram_allocation_ratio=1.5,
-                                           local_gb=0,
-                                           disk_allocation_ratio=1.0)
-        result = compute_utils.compute_node_to_inventory_dict(compute_node)
-        self.assertEqual({}, result)
+
+class PciRequestUpdateTestCase(test.NoDBTestCase):
+    def setUp(self):
+        super().setUp()
+        self.context = context.RequestContext('fake', 'fake')
+
+    def test_no_pci_request(self):
+        instance = objects.Instance(
+            pci_requests=objects.InstancePCIRequests(requests=[]))
+        provider_mapping = {}
+
+        compute_utils.update_pci_request_spec_with_allocated_interface_name(
+            self.context, mock.sentinel.report_client, instance,
+            provider_mapping)
+
+    def test_pci_request_from_flavor(self):
+        instance = objects.Instance(
+            pci_requests=objects.InstancePCIRequests(requests=[
+                objects.InstancePCIRequest(requester_id=None)
+            ]))
+        provider_mapping = {}
+
+        compute_utils.update_pci_request_spec_with_allocated_interface_name(
+            self.context, mock.sentinel.report_client, instance,
+            provider_mapping)
+
+    def test_pci_request_has_no_mapping(self):
+        instance = objects.Instance(
+            pci_requests=objects.InstancePCIRequests(requests=[
+                objects.InstancePCIRequest(requester_id=uuids.port_1)
+            ]))
+        provider_mapping = {}
+
+        compute_utils.update_pci_request_spec_with_allocated_interface_name(
+            self.context, mock.sentinel.report_client, instance,
+            provider_mapping)
+
+    def test_pci_request_ambiguous_mapping(self):
+        instance = objects.Instance(
+            pci_requests=objects.InstancePCIRequests(requests=[
+                objects.InstancePCIRequest(requester_id=uuids.port_1)
+            ]))
+        provider_mapping = {uuids.port_1: [uuids.rp1, uuids.rp2]}
+
+        self.assertRaises(
+            exception.AmbiguousResourceProviderForPCIRequest,
+            (compute_utils.
+             update_pci_request_spec_with_allocated_interface_name),
+            self.context, mock.sentinel.report_client, instance,
+            provider_mapping)
+
+    def test_unexpected_provider_name(self):
+        report_client = mock.Mock(spec=report.SchedulerReportClient)
+        report_client.get_resource_provider_name.return_value = 'unexpected'
+        instance = objects.Instance(
+            pci_requests=objects.InstancePCIRequests(requests=[
+                objects.InstancePCIRequest(
+                    requester_id=uuids.port_1,
+                    spec=[{}])
+            ]))
+        provider_mapping = {uuids.port_1: [uuids.rp1]}
+
+        self.assertRaises(
+            exception.UnexpectedResourceProviderNameForPCIRequest,
+            (compute_utils.
+             update_pci_request_spec_with_allocated_interface_name),
+            self.context, report_client, instance,
+            provider_mapping)
+
+        report_client.get_resource_provider_name.assert_called_once_with(
+            self.context, uuids.rp1)
+        self.assertNotIn(
+            'parent_ifname', instance.pci_requests.requests[0].spec[0])
+
+    def test_pci_request_updated(self):
+        report_client = mock.Mock(spec=report.SchedulerReportClient)
+        report_client.get_resource_provider_name.return_value = (
+            'host:agent:enp0s31f6')
+        instance = objects.Instance(
+            pci_requests=objects.InstancePCIRequests(requests=[
+                objects.InstancePCIRequest(
+                    requester_id=uuids.port_1,
+                    spec=[{}],
+                )
+            ]))
+        provider_mapping = {uuids.port_1: [uuids.rp1]}
+
+        compute_utils.update_pci_request_spec_with_allocated_interface_name(
+            self.context, report_client, instance, provider_mapping)
+
+        report_client.get_resource_provider_name.assert_called_once_with(
+            self.context, uuids.rp1)
+        self.assertEqual(
+            'enp0s31f6',
+            instance.pci_requests.requests[0].spec[0]['parent_ifname'])

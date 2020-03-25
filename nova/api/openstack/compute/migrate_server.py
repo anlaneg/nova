@@ -26,7 +26,7 @@ from nova.api import validation
 from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
-from nova import network
+from nova.network import neutron
 from nova import objects
 from nova.policies import migrate_server as ms_policies
 
@@ -39,7 +39,7 @@ class MigrateServerController(wsgi.Controller):
     def __init__(self):
         super(MigrateServerController, self).__init__()
         self.compute_api = compute.API()
-        self.network_api = network.API()
+        self.network_api = neutron.API()
 
     @wsgi.response(202)
     @wsgi.expected_errors((400, 403, 404, 409))
@@ -56,7 +56,7 @@ class MigrateServerController(wsgi.Controller):
             host_name = body['migrate'].get('host')
 
         instance = common.get_instance(self.compute_api, context, id,
-                                       expected_attrs=['flavor'])
+                                       expected_attrs=['flavor', 'services'])
 
         if common.instance_has_port_with_resource_request(
                 instance.uuid, self.network_api):
@@ -77,15 +77,15 @@ class MigrateServerController(wsgi.Controller):
         except (exception.TooManyInstances, exception.QuotaError) as e:
             raise exc.HTTPForbidden(explanation=e.format_message())
         except (exception.InstanceIsLocked,
-                exception.CannotMigrateWithTargetHost,
-                exception.AllocationMoveFailed) as e:
+                exception.InstanceNotReady,
+                exception.ServiceUnavailable) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'migrate', id)
         except exception.InstanceNotFound as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
-        except (exception.NoValidHost, exception.ComputeHostNotFound,
+        except (exception.ComputeHostNotFound,
                 exception.CannotMigrateToSameHost) as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
 
@@ -133,11 +133,15 @@ class MigrateServerController(wsgi.Controller):
         # having resource requests.
         if (common.instance_has_port_with_resource_request(
                     instance.uuid, self.network_api) and not
-                common.supports_port_resource_request_during_move(req)):
+                common.supports_port_resource_request_during_move()):
+            LOG.warning("The os-migrateLive action on a server with ports "
+                        "having resource requests, like a port with a QoS "
+                        "minimum bandwidth policy, is not supported until "
+                        "every nova-compute is upgraded to Ussuri")
             msg = _("The os-migrateLive action on a server with ports having "
                     "resource requests, like a port with a QoS minimum "
-                    "bandwidth policy, is not supported with this "
-                    "microversion")
+                    "bandwidth policy, is not supported by this cluster right "
+                    "now")
             raise exc.HTTPBadRequest(explanation=msg)
 
         try:

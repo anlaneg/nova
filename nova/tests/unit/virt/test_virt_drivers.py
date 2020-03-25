@@ -592,31 +592,6 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         self.assertIn('username', console_pool)
         self.assertIn('password', console_pool)
 
-    @catch_notimplementederror
-    def test_refresh_security_group_rules(self):
-        # FIXME: Create security group and add the instance to it
-        instance_ref, network_info = self._get_running_instance()
-        self.connection.refresh_security_group_rules(1)
-
-    @catch_notimplementederror
-    def test_refresh_instance_security_rules(self):
-        # FIXME: Create security group and add the instance to it
-        instance_ref, network_info = self._get_running_instance()
-        self.connection.refresh_instance_security_rules(instance_ref)
-
-    @catch_notimplementederror
-    def test_ensure_filtering_for_instance(self):
-        instance = test_utils.get_test_instance(obj=True)
-        network_info = test_utils.get_test_network_info()
-        self.connection.ensure_filtering_rules_for_instance(instance,
-                                                            network_info)
-
-    @catch_notimplementederror
-    def test_unfilter_instance(self):
-        instance_ref = test_utils.get_test_instance()
-        network_info = test_utils.get_test_network_info()
-        self.connection.unfilter_instance(instance_ref, network_info)
-
     def test_live_migration(self):
         instance_ref, network_info = self._get_running_instance()
         fake_context = context.RequestContext('fake', 'fake')
@@ -895,9 +870,9 @@ class LibvirtConnTestCase(_VirtDriverTestCase, test.TestCase):
         # This is needed for the live migration tests which spawn off the
         # operation for monitoring.
         self.useFixture(nova_fixtures.SpawnIsSynchronousFixture())
-        # When using CONF.use_neutron=True and destroying an instance os-vif
-        # will try to execute some commands which hangs tests so let's just
-        # stub out the unplug call to os-vif since we don't care about it.
+        # When destroying an instance, os-vif will try to execute some commands
+        # which hang tests so let's just stub out the unplug call to os-vif
+        # since we don't care about it.
         self.stub_out('os_vif.unplug', lambda a, kw: None)
         self.stub_out('nova.compute.utils.get_machine_ips', lambda: [])
 

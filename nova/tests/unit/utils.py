@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
 import errno
 import platform
 import socket
@@ -26,7 +27,6 @@ import nova.context
 from nova.db import api as db
 from nova import exception
 from nova.image import glance
-from nova.network import minidns
 from nova.network import model as network_model
 from nova import objects
 from nova.objects import base as obj_base
@@ -134,8 +134,6 @@ FAKE_VIF_MAC = 'de:ad:be:ef:ca:fe'
 
 
 def get_test_network_info(count=1):
-    ipv6 = CONF.use_ipv6
-
     def current():
         subnet_4 = network_model.Subnet(
             cidr=FAKE_NETWORK_IP4_CIDR,
@@ -154,9 +152,7 @@ def get_test_network_info(count=1):
                  network_model.IP(FAKE_NETWORK_IP6_ADDR3)],
             routes=None,
             version=6)
-        subnets = [subnet_4]
-        if ipv6:
-            subnets.append(subnet_6)
+        subnets = [subnet_4, subnet_6]
         network = network_model.Network(
             id=FAKE_NETWORK_UUID,
             bridge=FAKE_NETWORK_BRIDGE,
@@ -165,15 +161,11 @@ def get_test_network_info(count=1):
             vlan=FAKE_NETWORK_VLAN,
             bridge_interface=FAKE_NETWORK_INTERFACE,
             injected=False)
-        if CONF.use_neutron:
-            vif_type = network_model.VIF_TYPE_OVS
-        else:
-            vif_type = network_model.VIF_TYPE_BRIDGE
         vif = network_model.VIF(
             id=FAKE_VIF_UUID,
             address=FAKE_VIF_MAC,
             network=network,
-            type=vif_type,
+            type=network_model.VIF_TYPE_OVS,
             devname=None,
             ovs_interfaceid=None)
 
@@ -188,23 +180,6 @@ def is_osx():
 
 def is_linux():
     return platform.system() == 'Linux'
-
-
-test_dns_managers = []
-
-
-def dns_manager():
-    global test_dns_managers
-    manager = minidns.MiniDNS()
-    test_dns_managers.append(manager)
-    return manager
-
-
-def cleanup_dns_managers():
-    global test_dns_managers
-    for manager in test_dns_managers:
-        manager.delete_dns_file()
-    test_dns_managers = []
 
 
 def killer_xml_body():
@@ -297,6 +272,45 @@ class CustomMockCallMatcher(object):
 
     def __eq__(self, other):
         return self.comparator(other)
+
+
+class ItemsMatcher(CustomMockCallMatcher):
+    """Convenience matcher for iterables (mainly lists) where the order is
+    unpredictable.
+
+    Usage::
+
+        my_mock.assert_called_once_with(
+            ...,
+            listy_kwarg=ItemsMatcher(['foo', 'bar', 'baz']),
+            ...)
+
+    Will pass if the mock is called with a listy_kwarg containing 'foo', 'bar',
+    'baz' in any order. E.g. the following will all pass::
+
+        # Called with a list in some other order
+        my_mock(..., listy_kwarg=['baz', 'foo', 'bar'], ...)
+        # Called with a set
+        my_mock(..., listy_kwarg={'baz', 'foo', 'bar'}, ...)
+        # Called with a tuple in some other order
+        my_mock(..., listy_kwarg=('baz', 'foo', 'bar'), ...)
+
+    But the following will fail::
+        my_mock(..., listy_kwarg=['foo', 'bar'], ...)
+    """
+    def __init__(self, iterable):
+        # NOTE(gibi): we need the extra iter() call as Counter handles dicts
+        # directly to initialize item count. However if a dict passed to
+        # ItemMatcher we want to use the keys of such dict as an iterable to
+        # initialize the Counter instead.
+        self.bag = collections.Counter(iter(iterable))
+
+        super(ItemsMatcher, self).__init__(
+            lambda other: self.bag == collections.Counter(iter(other)))
+
+    def __repr__(self):
+        """This exists so a failed assertion prints something useful."""
+        return 'ItemsMatcher(%r)' % list(self.bag.elements())
 
 
 def assert_instance_delete_notification_by_uuid(

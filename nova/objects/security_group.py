@@ -12,6 +12,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+# TODO(stephenfin): This is all nova-network related and can be deleted as soon
+# as we remove the 'security_group' field from the 'Instance' object
+
 from oslo_utils import uuidutils
 from oslo_utils import versionutils
 
@@ -49,7 +52,7 @@ class SecurityGroup(base.NovaPersistentObject, base.NovaObject):
     @staticmethod
     def _from_db_object(context, secgroup, db_secgroup):
         for field in secgroup.fields:
-            if field is not 'uuid':
+            if field != 'uuid':
                 setattr(secgroup, field, db_secgroup[field])
         secgroup._context = context
         secgroup.obj_reset_changes()
@@ -173,8 +176,7 @@ def make_secgroup_list(security_groups):
             # This is a neutron security group uuid so store in the uuid field.
             secgroup.uuid = sg
         else:
-            # This is either a nova-network security group name, or it's the
-            # special 'default' security group in the case of neutron.
+            # This is neutron's special 'default' security group
             secgroup.name = sg
         secgroups.objects.append(secgroup)
     return secgroups

@@ -24,7 +24,7 @@ from nova.cmd import manage
 from nova import config
 from nova import context
 from nova import exception
-from nova.network.neutronv2 import constants
+from nova.network import constants
 from nova import objects
 from nova import test
 from nova.tests import fixtures as nova_fixtures
@@ -413,9 +413,9 @@ class TestNovaManagePlacementHealAllocations(
         :returns: two-item tuple of the server and the compute node resource
                   provider uuid
         """
-        server_req = self._build_minimal_create_server_request(
-            self.api, 'some-server', flavor_id=flavor['id'],
+        server_req = self._build_server(
             image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
+            flavor_id=flavor['id'],
             networks='none')
         server_req['availability_zone'] = 'nova:%s' % hostname
         if volume_backed:
@@ -428,8 +428,7 @@ class TestNovaManagePlacementHealAllocations(
             }]
             server_req['imageRef'] = ''
         created_server = self.api.post_server({'server': server_req})
-        server = self._wait_for_state_change(
-            self.admin_api, created_server, 'ACTIVE')
+        server = self._wait_for_state_change(created_server, 'ACTIVE')
 
         # Verify that our source host is what the server ended up on
         self.assertEqual(hostname, server['OS-EXT-SRV-ATTR:host'])
@@ -564,8 +563,7 @@ class TestNovaManagePlacementHealAllocations(
         # The server status goes to SHELVED_OFFLOADED before the host/node
         # is nulled out in the compute service, so we also have to wait for
         # that so we don't race when we run heal_allocations.
-        server = self._wait_for_server_parameter(
-            self.admin_api, server,
+        server = self._wait_for_server_parameter(server,
             {'OS-EXT-SRV-ATTR:host': None, 'status': 'SHELVED_OFFLOADED'})
         result = self.cli.heal_allocations(verbose=True)
         self.assertEqual(4, result, self.output.getvalue())
@@ -610,8 +608,7 @@ class TestNovaManagePlacementHealAllocations(
         self._boot_and_assert_no_allocations(self.flavor, 'cell1')
         # and another that we'll delete
         server, _ = self._boot_and_assert_no_allocations(self.flavor, 'cell1')
-        self.api.delete_server(server['id'])
-        self._wait_until_deleted(server)
+        self._delete_server(server)
         result = self.cli.heal_allocations(verbose=True)
         self.assertEqual(0, result, self.output.getvalue())
         self.assertIn('Processed 1 instances.', self.output.getvalue())
@@ -788,7 +785,7 @@ class TestNovaManagePlacementHealPortAllocations(
         server = self._create_server(
             flavor=self.flavor,
             networks=[{'port': port['id']} for port in ports])
-        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        server = self._wait_for_state_change(server, 'ACTIVE')
 
         # This is a hack to simulate that we have a server that is missing
         # allocation for its port
@@ -1417,7 +1414,7 @@ class TestDBArchiveDeletedRows(integrated_helpers._IntegratedTestBase):
             {'name': 'test_archive_instance_group_members',
              'policies': ['affinity']})
         # Create two servers in the group.
-        server = self._build_minimal_create_server_request()
+        server = self._build_server()
         server['min_count'] = 2
         server_req = {
             'server': server, 'os:scheduler_hints': {'group': group['id']}}
@@ -1431,10 +1428,7 @@ class TestDBArchiveDeletedRows(integrated_helpers._IntegratedTestBase):
             2, len(self.api.get_server_group(group['id'])['members']))
         # Now delete one server and then we can archive.
         server = self.api.get_server(server['id'])
-        self.api.delete_server(server['id'])
-        helper = integrated_helpers.InstanceHelperMixin()
-        helper.api = self.api
-        helper._wait_until_deleted(server)
+        self._delete_server(server)
         # Now archive.
         self.cli.archive_deleted_rows(verbose=True)
         # Assert only one instance_group_member record was deleted.
@@ -1481,24 +1475,21 @@ class TestDBArchiveDeletedRowsMultiCell(integrated_helpers.InstanceHelperMixin,
         admin_context = context.get_admin_context(read_deleted='yes')
         # Boot a server to cell1
         server_ids = {}
-        server = self._build_minimal_create_server_request(
-            self.api, 'cell1-server', az='nova:host1')
+        server = self._build_server(az='nova:host1')
         created_server = self.api.post_server({'server': server})
-        self._wait_for_state_change(self.api, created_server, 'ACTIVE')
+        self._wait_for_state_change(created_server, 'ACTIVE')
         server_ids['cell1'] = created_server['id']
         # Boot a server to cell2
-        server = self._build_minimal_create_server_request(
-            self.api, 'cell2-server', az='nova:host2')
+        server = self._build_server(az='nova:host2')
         created_server = self.api.post_server({'server': server})
-        self._wait_for_state_change(self.api, created_server, 'ACTIVE')
+        self._wait_for_state_change(created_server, 'ACTIVE')
         server_ids['cell2'] = created_server['id']
         # Boot a server to cell0 (cause ERROR state prior to schedule)
-        server = self._build_minimal_create_server_request(
-            self.api, 'cell0-server')
+        server = self._build_server()
         # Flavor m1.xlarge cannot be fulfilled
         server['flavorRef'] = 'http://fake.server/5'
         created_server = self.api.post_server({'server': server})
-        self._wait_for_state_change(self.api, created_server, 'ERROR')
+        self._wait_for_state_change(created_server, 'ERROR')
         server_ids['cell0'] = created_server['id']
         # Verify all the servers are in the databases
         for cell_name, server_id in server_ids.items():

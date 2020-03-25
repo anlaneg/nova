@@ -953,13 +953,6 @@ Requires:
 """),
 ]
 
-libvirt_imagecache_opts = [
-    cfg.IntOpt('remove_unused_resized_minimum_age_seconds',
-               default=3600,
-               help='Unused resized base images younger than this will not be '
-                    'removed'),
-]
-
 libvirt_lvm_opts = [
     cfg.StrOpt('volume_clear',
         default='zero',
@@ -1319,6 +1312,14 @@ Configure virtio tx queue size.
 This option is only usable for virtio-net device with vhost-user
 backend. Available only with QEMU/KVM. Requires libvirt v3.7 QEMU
 v2.10."""),
+     cfg.IntOpt('max_queues', default=None, min=1, help="""
+The maximum number of virtio queue pairs that can be enabled
+when creating a multiqueue guest. The number of virtio queues
+allocated will be the lesser of the CPUs requested by the guest
+and the max value defined. By default, this value is set to none
+meaning the legacy limits based on the reported kernel
+major version will be used.
+"""),
 
 ]
 
@@ -1364,7 +1365,6 @@ For example::
 ALL_OPTS = list(itertools.chain(
     libvirt_general_opts,
     libvirt_imagebackend_opts,
-    libvirt_imagecache_opts,
     libvirt_lvm_opts,
     libvirt_utils_opts,
     libvirt_vif_opts,

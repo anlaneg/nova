@@ -15,8 +15,11 @@ import copy
 import mock
 from oslo_messaging import exceptions as messaging_exceptions
 from oslo_utils.fixture import uuidsentinel as uuids
+from oslo_utils import timeutils
 import six
 
+from nova.compute import instance_actions
+from nova.compute import power_state
 from nova.compute import task_states
 from nova.compute import utils as compute_utils
 from nova.compute import vm_states
@@ -26,6 +29,7 @@ from nova import exception
 from nova.network import model as network_model
 from nova import objects
 from nova.objects import base as obj_base
+from nova.objects import fields
 from nova.objects import instance as instance_obj
 from nova import test
 from nova.tests.unit.db import test_db_api
@@ -42,8 +46,29 @@ from nova.tests.unit.objects import test_service
 from nova.tests.unit.objects import test_vcpu_model
 
 
-class TargetDBSetupTaskTestCase(
-        test.TestCase, test_db_api.ModelsObjectComparatorMixin):
+class ObjectComparatorMixin(test_db_api.ModelsObjectComparatorMixin):
+    """Mixin class to aid in comparing two objects."""
+
+    def _compare_objs(self, obj1, obj2, ignored_keys=None):
+        # We can always ignore id since it is not deterministic when records
+        # are copied over to the target cell database.
+        if ignored_keys is None:
+            ignored_keys = []
+        if 'id' not in ignored_keys:
+            ignored_keys.append('id')
+        prim1 = obj1.obj_to_primitive()['nova_object.data']
+        prim2 = obj2.obj_to_primitive()['nova_object.data']
+        if isinstance(obj1, obj_base.ObjectListBase):
+            self.assertEqual(len(obj1), len(obj2))
+            prim1 = [o['nova_object.data'] for o in prim1['objects']]
+            prim2 = [o['nova_object.data'] for o in prim2['objects']]
+            self._assertEqualListsOfObjects(
+                prim1, prim2, ignored_keys=ignored_keys)
+        else:
+            self._assertEqualObjects(prim1, prim2, ignored_keys=ignored_keys)
+
+
+class TargetDBSetupTaskTestCase(test.TestCase, ObjectComparatorMixin):
 
     def setUp(self):
         super(TargetDBSetupTaskTestCase, self).setUp()
@@ -199,24 +224,6 @@ class TargetDBSetupTaskTestCase(
         inst = objects.Instance.get_by_uuid(
             self.source_context, inst.uuid, expected_attrs=expected_attrs)
         return inst, migration
-
-    def _compare_objs(self, obj1, obj2, ignored_keys=None):
-        # We can always ignore id since it is not deterministic when records
-        # are copied over to the target cell database.
-        if ignored_keys is None:
-            ignored_keys = []
-        if 'id' not in ignored_keys:
-            ignored_keys.append('id')
-        prim1 = obj1.obj_to_primitive()['nova_object.data']
-        prim2 = obj2.obj_to_primitive()['nova_object.data']
-        if isinstance(obj1, obj_base.ObjectListBase):
-            self.assertEqual(len(obj1), len(obj2))
-            prim1 = [o['nova_object.data'] for o in prim1['objects']]
-            prim2 = [o['nova_object.data'] for o in prim2['objects']]
-            self._assertEqualListsOfObjects(
-                prim1, prim2, ignored_keys=ignored_keys)
-        else:
-            self._assertEqualObjects(prim1, prim2, ignored_keys=ignored_keys)
 
     def test_execute_and_rollback(self):
         """Happy path test which creates an instance with related records
@@ -553,7 +560,7 @@ class CrossCellMigrationTaskTestCase(test.NoDBTestCase):
         # A clone of the MigrationContext returned from execute() should be
         # stored on the source instance with the internal context targeted
         # at the source cell context and the migration_id updated.
-        self.assertIsNotNone('migration_context', self.task.instance)
+        self.assertIsNotNone(self.task.instance.migration_context)
         self.assertEqual(self.task.source_migration.id,
                          self.task.instance.migration_context.migration_id)
         source_inst_save.assert_called_once_with()
@@ -928,6 +935,11 @@ class FinishResizeAtDestTaskTestCase(test.TestCase):
         source_instance = self._create_instance(
             self.source_context, create_instance_mapping=True,
             hidden=False)
+        # Create the instance action record in the source cell which is needed
+        # by the EventReporter.
+        objects.InstanceAction.action_start(
+            self.source_context, source_instance.uuid,
+            instance_actions.RESIZE, want_result=False)
         # Create the target cell instance which would normally be a clone of
         # the source cell instance but the only thing these tests care about
         # is that the UUID matches. The target cell instance is also hidden.
@@ -942,20 +954,25 @@ class FinishResizeAtDestTaskTestCase(test.TestCase):
 
     def test_execute(self):
         """Tests the happy path scenario for the task execution."""
-        with mock.patch.object(
+        with test.nested(
+            mock.patch.object(
                 self.task.compute_rpcapi,
-                'finish_snapshot_based_resize_at_dest') as finish_resize:
+                'finish_snapshot_based_resize_at_dest'),
+            mock.patch.object(self.task.instance, 'refresh')
+        ) as (
+            finish_resize, refresh
+        ):
             self.task.execute()
         # _finish_snapshot_based_resize_at_dest will set the instance
         # task_state to resize_migrated, save the change, and call the
         # finish_snapshot_based_resize_at_dest method.
         target_instance = self.task.instance
-        target_instance.refresh()
         self.assertEqual(task_states.RESIZE_MIGRATED,
                          self.task.instance.task_state)
         finish_resize.assert_called_once_with(
             self.task.context, target_instance, self.task.migration,
             self.task.snapshot_id, self.task.request_spec)
+        refresh.assert_called_once_with()
         # _update_instance_mapping will swap the hidden fields and update
         # the instance mapping to point at the target cell.
         self.assertFalse(target_instance.hidden,
@@ -977,12 +994,10 @@ class FinishResizeAtDestTaskTestCase(test.TestCase):
         with test.nested(
             mock.patch.object(self.task.compute_rpcapi,
                               'finish_snapshot_based_resize_at_dest',
-                              side_effect=test.TestingException),
+                              side_effect=test.TestingException('oops')),
             mock.patch.object(self.task, '_copy_latest_fault'),
-            mock.patch.object(
-                self.task, '_copy_finish_snapshot_based_resize_at_dest_event'),
         ) as (
-            finish_resize, copy_fault, copy_event
+            finish_resize, copy_fault
         ):
             self.assertRaises(test.TestingException,
                               self.task._finish_snapshot_based_resize_at_dest)
@@ -994,7 +1009,20 @@ class FinishResizeAtDestTaskTestCase(test.TestCase):
         # And the latest fault and instance action event should have been
         # copied from the target cell DB to the source cell DB.
         copy_fault.assert_called_once_with(self.source_context)
-        copy_event.assert_called_once_with(self.source_context)
+        # Assert the event was recorded in the source cell DB.
+        event_name = 'compute_finish_snapshot_based_resize_at_dest'
+        action = objects.InstanceAction.get_by_request_id(
+            source_instance._context, source_instance.uuid,
+            source_instance._context.request_id)
+        self.assertIsNotNone(action, 'InstanceAction not found.')
+        events = objects.InstanceActionEventList.get_by_action(
+            source_instance._context, action.id)
+        self.assertEqual(1, len(events), events)
+        self.assertEqual(event_name, events[0].event)
+        self.assertEqual('Error', events[0].result)
+        self.assertIn('_finish_snapshot_based_resize_at_dest',
+                      events[0].traceback)
+        self.assertEqual(self.task.migration.dest_compute, events[0].host)
         # Assert the instance mapping was never updated.
         mock_im_save.assert_not_called()
 
@@ -1027,70 +1055,595 @@ class FinishResizeAtDestTaskTestCase(test.TestCase):
         self.assertIn('Failed to copy instance fault from target cell DB',
                       mock_log.call_args[0][0])
 
-    @mock.patch('nova.conductor.tasks.cross_cell_migrate.LOG.warning')
-    def test_copy_finish_snapshot_based_resize_at_dest_event(self, mock_warn):
-        """Tests _copy_finish_snapshot_based_resize_at_dest_event working
-        without errors (but also warning cases).
+
+class UtilityTestCase(test.NoDBTestCase):
+    """Tests utility methods in the cross_cell_migrate module."""
+
+    @mock.patch('nova.objects.HostMapping.get_by_host',
+                return_value=objects.HostMapping(
+                    cell_mapping=objects.CellMapping(uuid=uuids.cell)))
+    @mock.patch('nova.objects.Instance.get_by_uuid')
+    def test_get_inst_and_cell_map_from_source(self, mock_get_inst,
+                                               mock_get_by_host):
+        target_cell_context = nova_context.get_admin_context()
+        # Stub out Instance.get_by_uuid to make sure a copy of the context is
+        # targeted at the source cell mapping.
+
+        def stub_get_by_uuid(ctxt, *args, **kwargs):
+            self.assertIsNot(ctxt, target_cell_context)
+            self.assertEqual(uuids.cell, ctxt.cell_uuid)
+            return mock.sentinel.instance
+        mock_get_inst.side_effect = stub_get_by_uuid
+        inst, cell_mapping = (
+            cross_cell_migrate.get_inst_and_cell_map_from_source(
+                target_cell_context, 'source-host', uuids.instance))
+        self.assertIs(inst, mock.sentinel.instance)
+        self.assertIs(cell_mapping, mock_get_by_host.return_value.cell_mapping)
+        mock_get_by_host.assert_called_once_with(
+            target_cell_context, 'source-host')
+        mock_get_inst.assert_called_once_with(
+            test.MatchType(nova_context.RequestContext), uuids.instance,
+            expected_attrs=['flavor', 'info_cache', 'system_metadata'])
+
+
+class ConfirmResizeTaskTestCase(test.NoDBTestCase):
+
+    def setUp(self):
+        super(ConfirmResizeTaskTestCase, self).setUp()
+        context = nova_context.get_admin_context()
+        compute_rpcapi = mock.Mock()
+        self.task = cross_cell_migrate.ConfirmResizeTask(
+            context,
+            objects.Instance(context, uuid=uuids.instance,
+                             host='target-host', vm_state=vm_states.RESIZED,
+                             system_metadata={
+                                 'old_vm_state': vm_states.ACTIVE}),
+            objects.Migration(context, uuid=uuids.migration,
+                              dest_compute='target-host',
+                              source_compute='source-host',
+                              status='confirming'),
+            mock.sentinel.legacy_notifier,
+            compute_rpcapi)
+
+    @mock.patch('nova.conductor.tasks.cross_cell_migrate.'
+                'get_inst_and_cell_map_from_source')
+    def test_execute(self, mock_get_instance):
+        source_cell_instance = objects.Instance(
+            mock.MagicMock(), uuid=uuids.instance)
+        source_cell_instance.destroy = mock.Mock()
+        mock_get_instance.return_value = (
+            source_cell_instance, objects.CellMapping())
+        with test.nested(
+            mock.patch.object(self.task, '_send_resize_confirm_notification'),
+            mock.patch.object(self.task, '_cleanup_source_host'),
+            mock.patch.object(self.task, '_finish_confirm_in_target_cell')
+        ) as (
+            _send_resize_confirm_notification, _cleanup_source_host,
+            _finish_confirm_in_target_cell
+        ):
+            self.task.execute()
+        mock_get_instance.assert_called_once_with(
+            self.task.context, self.task.migration.source_compute,
+            self.task.instance.uuid)
+        self.assertEqual(2, _send_resize_confirm_notification.call_count)
+        _send_resize_confirm_notification.assert_has_calls([
+            mock.call(source_cell_instance, fields.NotificationPhase.START),
+            mock.call(self.task.instance, fields.NotificationPhase.END)])
+        _cleanup_source_host.assert_called_once_with(source_cell_instance)
+        source_cell_instance.destroy.assert_called_once_with(
+            hard_delete=True)
+        _finish_confirm_in_target_cell.assert_called_once_with()
+
+    @mock.patch('nova.conductor.tasks.cross_cell_migrate.'
+                'get_inst_and_cell_map_from_source',
+                side_effect=exception.InstanceNotFound(
+                    instance_id=uuids.instance))
+    @mock.patch('nova.objects.Migration.save')
+    @mock.patch('nova.objects.RequestSpec.get_by_instance_uuid')
+    @mock.patch('nova.scheduler.utils.set_vm_state_and_notify')
+    def test_rollback(self, mock_set_state_notify, mock_get_reqspec,
+                      mock_mig_save, mock_get_instance):
+        self.assertRaises(exception.InstanceNotFound, self.task.execute)
+        mock_get_instance.assert_called_once_with(
+            self.task.context, self.task.migration.source_compute,
+            self.task.instance.uuid)
+        self.assertEqual('error', self.task.migration.status)
+        mock_mig_save.assert_called_once_with()
+        mock_get_reqspec.assert_called_once_with(
+            self.task.context, self.task.instance.uuid)
+        mock_set_state_notify.assert_called_once_with(
+            self.task.context, self.task.instance.uuid, 'compute_task',
+            'migrate_server',
+            {'vm_state': vm_states.ERROR, 'task_state': None},
+            mock_get_instance.side_effect,
+            mock_get_reqspec.return_value)
+
+    @mock.patch('nova.compute.utils.notify_about_instance_usage')
+    @mock.patch('nova.compute.utils.notify_about_instance_action')
+    def test_send_resize_confirm_notification(self, mock_versioned_notify,
+                                              mock_legacy_notify):
+        self.flags(host='fake-conductor-host')
+        instance = self.task.instance
+        self.task._send_resize_confirm_notification(instance, 'fake-phase')
+        mock_legacy_notify.assert_called_once_with(
+            self.task.legacy_notifier, instance._context, instance,
+            'resize.confirm.fake-phase')
+        mock_versioned_notify.assert_called_once_with(
+            instance._context, instance, 'fake-conductor-host',
+            action=fields.NotificationAction.RESIZE_CONFIRM,
+            phase='fake-phase')
+
+    @mock.patch('nova.objects.InstanceAction.action_start')
+    @mock.patch('nova.objects.Migration.get_by_uuid')
+    @mock.patch('nova.objects.InstanceActionEvent')  # stub EventReporter calls
+    def test_cleanup_source_host(
+            self, mock_action_event, mock_get_mig, mock_action_start):
+        instance = objects.Instance(nova_context.get_admin_context(),
+                                    uuid=uuids.instance,
+                                    flavor=objects.Flavor())
+        self.task._cleanup_source_host(instance)
+        self.assertIs(instance.old_flavor, instance.flavor)
+        mock_action_start.assert_called_once_with(
+            instance._context, instance.uuid, instance_actions.CONFIRM_RESIZE,
+            want_result=False)
+        mock_get_mig.assert_called_once_with(
+            instance._context, self.task.migration.uuid)
+        self.task.compute_rpcapi.confirm_snapshot_based_resize_at_source.\
+            assert_called_once_with(instance._context, instance,
+                                    mock_get_mig.return_value)
+        mock_action_event.event_start.assert_called_once_with(
+            self.task.context, uuids.instance,
+            'compute_confirm_snapshot_based_resize_at_source',
+            want_result=False, host=mock_get_mig.return_value.source_compute)
+        mock_action_event.event_finish_with_failure.assert_called_once_with(
+            self.task.context, uuids.instance,
+            'compute_confirm_snapshot_based_resize_at_source',
+            exc_val=None, exc_tb=None, want_result=False)
+
+    @mock.patch('nova.objects.Migration.save')
+    @mock.patch('nova.objects.Instance.save')
+    @mock.patch('nova.objects.Instance.drop_migration_context')
+    def test_finish_confirm_in_target_cell(self, mock_drop_ctx, mock_inst_save,
+                                           mock_mig_save):
+        with mock.patch.object(
+                self.task, '_set_vm_and_task_state') as mock_set_state:
+            self.task._finish_confirm_in_target_cell()
+        self.assertEqual('confirmed', self.task.migration.status)
+        mock_mig_save.assert_called_once_with()
+        self.assertNotIn('old_vm_state', self.task.instance.system_metadata)
+        self.assertIsNone(self.task.instance.old_flavor)
+        self.assertIsNone(self.task.instance.new_flavor)
+        mock_set_state.assert_called_once_with()
+        mock_drop_ctx.assert_called_once_with()
+        mock_inst_save.assert_called_once_with(expected_task_state=[
+            None, task_states.DELETING, task_states.SOFT_DELETING])
+
+    def test_set_vm_and_task_state_shutdown(self):
+        self.task.instance.power_state = power_state.SHUTDOWN
+        self.task._set_vm_and_task_state()
+        self.assertEqual(vm_states.STOPPED, self.task.instance.vm_state)
+        self.assertIsNone(self.task.instance.task_state)
+
+    def test_set_vm_and_task_state_active(self):
+        self.task.instance.power_state = power_state.RUNNING
+        self.task._set_vm_and_task_state()
+        self.assertEqual(vm_states.ACTIVE, self.task.instance.vm_state)
+        self.assertIsNone(self.task.instance.task_state)
+
+
+class RevertResizeTaskTestCase(test.NoDBTestCase, ObjectComparatorMixin):
+
+    def setUp(self):
+        super(RevertResizeTaskTestCase, self).setUp()
+        target_cell_context = nova_context.get_admin_context()
+        target_cell_context.cell_uuid = uuids.target_cell
+        instance = fake_instance.fake_instance_obj(
+            target_cell_context, **{
+                'vm_state': vm_states.RESIZED,
+                'task_state': task_states.RESIZE_REVERTING,
+                'expected_attrs': ['system_metadata', 'flavor']
+            })
+        migration = objects.Migration(
+            target_cell_context, uuid=uuids.migration, status='reverting',
+            source_compute='source-host', dest_compute='dest-host')
+        legacy_notifier = mock.MagicMock()
+        compute_rpcapi = mock.MagicMock()
+        self.task = cross_cell_migrate.RevertResizeTask(
+            target_cell_context, instance, migration, legacy_notifier,
+            compute_rpcapi)
+
+    def _generate_source_cell_instance(self):
+        source_cell_context = nova_context.get_admin_context()
+        source_cell_context.cell_uuid = uuids.source_cell
+        source_cell_instance = self.task.instance.obj_clone()
+        source_cell_instance._context = source_cell_context
+        return source_cell_instance
+
+    @mock.patch('nova.conductor.tasks.cross_cell_migrate.'
+                'get_inst_and_cell_map_from_source')
+    @mock.patch('nova.objects.InstanceActionEvent')  # Stub EventReport calls.
+    def test_execute(self, mock_action_event, mock_get_instance):
+        """Happy path test for the execute method."""
+        # Setup mocks.
+        source_cell_instance = self._generate_source_cell_instance()
+        source_cell_context = source_cell_instance._context
+        source_cell_mapping = objects.CellMapping(source_cell_context,
+                                                  uuid=uuids.source_cell)
+        mock_get_instance.return_value = (source_cell_instance,
+                                          source_cell_mapping)
+
+        def stub_update_instance_in_source_cell(*args, **kwargs):
+            # Ensure _update_instance_mapping is not called before
+            # _update_instance_in_source_cell.
+            _update_instance_mapping.assert_not_called()
+            return mock.sentinel.source_cell_migration
+
+        with test.nested(
+            mock.patch.object(self.task, '_send_resize_revert_notification'),
+            mock.patch.object(self.task, '_update_instance_in_source_cell',
+                              side_effect=stub_update_instance_in_source_cell),
+            mock.patch.object(self.task, '_update_instance_mapping'),
+            mock.patch.object(self.task.instance, 'destroy'),
+            mock.patch.object(source_cell_instance, 'refresh'),
+        ) as (
+            _send_resize_revert_notification, _update_instance_in_source_cell,
+            _update_instance_mapping, mock_inst_destroy, mock_inst_refresh,
+        ):
+            # Run the code.
+            self.task.execute()
+        # Should have sent a start and end notification.
+        self.assertEqual(2, _send_resize_revert_notification.call_count,
+                         _send_resize_revert_notification.calls)
+        _send_resize_revert_notification.assert_has_calls([
+            mock.call(self.task.instance, fields.NotificationPhase.START),
+            mock.call(source_cell_instance, fields.NotificationPhase.END),
+        ])
+        mock_get_instance.assert_called_once_with(
+            self.task.context, self.task.migration.source_compute,
+            self.task.instance.uuid)
+        _update_instance_in_source_cell.assert_called_once_with(
+            source_cell_instance)
+        _update_instance_mapping.assert_called_once_with(
+            source_cell_instance, source_cell_mapping)
+        # _source_cell_instance and _source_cell_migration should have been
+        # set for rollbacks
+        self.assertIs(self.task._source_cell_instance, source_cell_instance)
+        self.assertIs(self.task._source_cell_migration,
+                      mock.sentinel.source_cell_migration)
+        # Cleanup at dest host.
+        self.task.compute_rpcapi.revert_snapshot_based_resize_at_dest.\
+            assert_called_once_with(self.task.context, self.task.instance,
+                                    self.task.migration)
+        # EventReporter should have been used.
+        event_name = 'compute_revert_snapshot_based_resize_at_dest'
+        mock_action_event.event_start.assert_called_once_with(
+            source_cell_context, source_cell_instance.uuid, event_name,
+            want_result=False, host=self.task.migration.dest_compute)
+        mock_action_event.event_finish_with_failure.assert_called_once_with(
+            source_cell_context, source_cell_instance.uuid, event_name,
+            exc_val=None, exc_tb=None, want_result=False)
+        mock_action_event.event_finish.assert_called_once_with(
+            source_cell_context, source_cell_instance.uuid,
+            'conductor_revert_snapshot_based_resize', want_result=False)
+        # Destroy the instance in the target cell.
+        mock_inst_destroy.assert_called_once_with(hard_delete=True)
+        # Cleanup at source host.
+        self.task.compute_rpcapi.\
+            finish_revert_snapshot_based_resize_at_source.\
+            assert_called_once_with(
+                source_cell_context, source_cell_instance,
+                mock.sentinel.source_cell_migration)
+        # Refresh the source cell instance so we have the latest data.
+        mock_inst_refresh.assert_called_once_with()
+
+    @mock.patch('nova.conductor.tasks.cross_cell_migrate.RevertResizeTask.'
+                '_execute')
+    @mock.patch('nova.objects.RequestSpec.get_by_instance_uuid')
+    @mock.patch('nova.scheduler.utils.set_vm_state_and_notify')
+    def test_rollback_target_cell(
+            self, mock_set_state_notify, mock_get_reqspec, mock_execute):
+        """Tests the case that we did not update the instance mapping
+        so we set the target cell migration to error status.
         """
-        # First run it without any action record created and we should get a
-        # warning logged that the action could not be found.
-        self.task._copy_finish_snapshot_based_resize_at_dest_event(
-            self.source_context)
-        mock_warn.assert_called_once()
-        self.assertIn('Failed to find InstanceAction by request_id',
-                      mock_warn.call_args[0][0])
+        error = test.TestingException('zoinks!')
+        mock_execute.side_effect = error
+        with mock.patch.object(self.task.migration, 'save') as mock_save:
+            self.assertRaises(test.TestingException, self.task.execute)
+        self.assertEqual('error', self.task.migration.status)
+        mock_save.assert_called_once_with()
+        mock_get_reqspec.assert_called_once_with(
+            self.task.context, self.task.instance.uuid)
+        mock_set_state_notify.assert_called_once_with(
+            self.task.instance._context, self.task.instance.uuid,
+            'compute_task', 'migrate_server',
+            {'vm_state': vm_states.ERROR, 'task_state': None}, error,
+            mock_get_reqspec.return_value)
+        self.assertIn('The instance is mapped to the target cell',
+                      self.stdlog.logger.output)
 
-        # The source and target context must have the same request_id for this
-        # to work.
-        self.assertEqual(self.source_context.request_id,
-                         self.target_context.request_id)
-        # Create an action record in the source cell database. This is needed
-        # to find the action for the events when they get copied over.
-        src_action = objects.InstanceAction.action_start(
-            self.source_context, self.task.instance.uuid, 'resize')
-        # Create the same action in the target cell database.
-        objects.InstanceAction.action_start(
-            self.target_context, self.task.instance.uuid, 'resize')
-
-        # Now run it again without creating the underlying event record and
-        # we should log a warning that no event was found.
-        mock_warn.reset_mock()
-        self.task._copy_finish_snapshot_based_resize_at_dest_event(
-            self.source_context)
-        mock_warn.assert_called_once()
-        self.assertIn('Failed to find InstanceActionEvent',
-                      mock_warn.call_args[0][0])
-
-        # Generate the event in the target cell database.
-
-        @compute_utils.wrap_instance_event(prefix='compute')
-        def finish_snapshot_based_resize_at_dest(_self, context, instance):
-            raise test.TestingException('oops')
-        self.assertRaises(test.TestingException,
-                          finish_snapshot_based_resize_at_dest,
-                          mock.Mock(host='dest-host'),
-                          self.target_context, self.task.instance)
-
-        self.task._copy_finish_snapshot_based_resize_at_dest_event(
-            self.source_context)
-        # There should now be one InstanceActionEvent in the source cell DB.
-        src_events = objects.InstanceActionEventList.get_by_action(
-            self.source_context, src_action.id)
-        self.assertEqual(1, len(src_events))
-        self.assertEqual('compute_finish_snapshot_based_resize_at_dest',
-                         src_events[0].event)
-        self.assertEqual('Error', src_events[0].result)
-
-    @mock.patch('nova.conductor.tasks.cross_cell_migrate.LOG.exception')
-    @mock.patch('nova.objects.InstanceAction.get_by_request_id',
-                side_effect=test.TestingException)
-    def test_copy_finish_snapshot_based_resize_at_dest_event_error(
-            self, get_by_request_id, mock_log):
-        """Tests that _copy_finish_snapshot_based_resize_at_dest_event errors
-        are swallowed.
+    @mock.patch('nova.conductor.tasks.cross_cell_migrate.RevertResizeTask.'
+                '_execute')
+    @mock.patch('nova.objects.RequestSpec.get_by_instance_uuid')
+    @mock.patch('nova.scheduler.utils.set_vm_state_and_notify')
+    def test_rollback_source_cell(
+            self, mock_set_state_notify, mock_get_reqspec, mock_execute):
+        """Tests the case that we did update the instance mapping
+        so we set the source cell migration to error status.
         """
-        self.task._copy_finish_snapshot_based_resize_at_dest_event(
-            self.source_context)
-        mock_log.assert_called_once()
-        self.assertIn('Failed to copy %s instance action event from target',
-                      mock_log.call_args[0][0])
+        source_cell_instance = self._generate_source_cell_instance()
+        source_cell_context = source_cell_instance._context
+        self.task._source_cell_instance = source_cell_instance
+        self.task._source_cell_migration = objects.Migration(
+            source_cell_context, status='reverting', dest_compute='dest-host')
+        error = test.TestingException('jinkies!')
+        mock_execute.side_effect = error
+        with mock.patch.object(self.task._source_cell_migration,
+                               'save') as mock_save:
+            self.assertRaises(test.TestingException, self.task.execute)
+        self.assertEqual('error', self.task._source_cell_migration.status)
+        mock_save.assert_called_once_with()
+        mock_get_reqspec.assert_called_once_with(
+            self.task.context, self.task.instance.uuid)
+        mock_set_state_notify.assert_called_once_with(
+            source_cell_context, source_cell_instance.uuid,
+            'compute_task', 'migrate_server',
+            {'vm_state': vm_states.ERROR, 'task_state': None}, error,
+            mock_get_reqspec.return_value)
+        self.assertIn('The instance is mapped to the source cell',
+                      self.stdlog.logger.output)
+
+    @mock.patch('nova.compute.utils.notify_about_instance_usage')
+    @mock.patch('nova.compute.utils.notify_about_instance_action')
+    def test_send_resize_revert_notification(self, mock_notify_action,
+                                             mock_notify_usage):
+        self.flags(host='fake-conductor-host')
+        instance = self.task.instance
+        self.task._send_resize_revert_notification(instance, 'foo')
+        # Assert the legacy notification was sent.
+        mock_notify_usage.assert_called_once_with(
+            self.task.legacy_notifier, instance._context, instance,
+            'resize.revert.foo')
+        # Assert the versioned notification was sent.
+        mock_notify_action.assert_called_once_with(
+            instance._context, instance, 'fake-conductor-host',
+            action=fields.NotificationAction.RESIZE_REVERT, phase='foo')
+
+    def test_update_instance_in_source_cell(self):
+        # Setup mocks.
+        source_cell_instance = self._generate_source_cell_instance()
+        source_cell_instance.task_state = None
+        self.task.instance.system_metadata = {'old_vm_state': vm_states.ACTIVE}
+        with test.nested(
+            mock.patch.object(source_cell_instance, 'save'),
+            mock.patch.object(self.task, '_update_bdms_in_source_cell'),
+            mock.patch.object(self.task,
+                              '_update_instance_actions_in_source_cell'),
+            mock.patch.object(self.task, '_update_migration_in_source_cell')
+        ) as (
+            mock_inst_save, _update_bdms_in_source_cell,
+            _update_instance_actions_in_source_cell,
+            _update_migration_in_source_cell
+        ):
+            # Run the code.
+            source_cell_migration = self.task._update_instance_in_source_cell(
+                source_cell_instance)
+        # The returned object should be the updated migration object from the
+        # source cell database.
+        self.assertIs(source_cell_migration,
+                      _update_migration_in_source_cell.return_value)
+        # Fields on the source cell instance should have been updated.
+        self.assertEqual(vm_states.ACTIVE,
+                         source_cell_instance.system_metadata['old_vm_state'])
+        self.assertIs(source_cell_instance.old_flavor,
+                      source_cell_instance.flavor)
+        self.assertEqual(task_states.RESIZE_REVERTING,
+                         source_cell_instance.task_state)
+        mock_inst_save.assert_called_once_with()
+        _update_bdms_in_source_cell.assert_called_once_with(
+            source_cell_instance._context)
+        _update_instance_actions_in_source_cell.assert_called_once_with(
+            source_cell_instance._context)
+        _update_migration_in_source_cell.assert_called_once_with(
+            source_cell_instance._context)
+
+    @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid')
+    @mock.patch('nova.conductor.tasks.cross_cell_migrate.'
+                'clone_creatable_object')
+    def test_update_bdms_in_source_cell(self, mock_clone, mock_get_bdms):
+        """Test updating BDMs from the target cell to the source cell."""
+        source_cell_context = nova_context.get_admin_context()
+        source_cell_context.cell_uuid = uuids.source_cell
+        # Setup fake bdms.
+        bdm1 = objects.BlockDeviceMapping(
+            source_cell_context, uuid=uuids.bdm1, volume_id='vol1',
+            attachment_id=uuids.attach1)
+        bdm2 = objects.BlockDeviceMapping(
+            source_cell_context, uuid=uuids.bdm2, volume_id='vol2',
+            attachment_id=uuids.attach2)
+        source_bdms = objects.BlockDeviceMappingList(objects=[bdm1, bdm2])
+        # With the target BDMs bdm1 from the source is gone and bdm3 is new
+        # to simulate bdm1 being detached and bdm3 being attached while the
+        # instance was in VERIFY_RESIZE status.
+        bdm3 = objects.BlockDeviceMapping(
+            self.task.context, uuid=uuids.bdm3, volume_id='vol3',
+            attachment_id=uuids.attach1)
+        target_bdms = objects.BlockDeviceMappingList(objects=[bdm2, bdm3])
+
+        def stub_get_bdms(ctxt, *args, **kwargs):
+            if ctxt.cell_uuid == uuids.source_cell:
+                return source_bdms
+            return target_bdms
+        mock_get_bdms.side_effect = stub_get_bdms
+
+        def stub_mock_clone(ctxt, obj, *args, **kwargs):
+            # We want to make assertions on our mocks so do not create a copy.
+            return obj
+        mock_clone.side_effect = stub_mock_clone
+
+        with test.nested(
+            mock.patch.object(self.task.volume_api, 'attachment_create',
+                              return_value={'id': uuids.attachment_id}),
+            mock.patch.object(self.task.volume_api, 'attachment_delete'),
+            mock.patch.object(bdm3, 'create'),
+            mock.patch.object(bdm1, 'destroy')
+        ) as (
+            mock_attachment_create, mock_attachment_delete,
+            mock_bdm_create, mock_bdm_destroy
+        ):
+            self.task._update_bdms_in_source_cell(source_cell_context)
+        # Should have gotten BDMs from the source and target cell (order does
+        # not matter).
+        self.assertEqual(2, mock_get_bdms.call_count, mock_get_bdms.calls)
+        mock_get_bdms.assert_has_calls([
+            mock.call(source_cell_context, self.task.instance.uuid),
+            mock.call(self.task.context, self.task.instance.uuid)],
+            any_order=True)
+        # Since bdm3 was new in the target cell an attachment should have been
+        # created for it in the source cell.
+        mock_attachment_create.assert_called_once_with(
+            source_cell_context, bdm3.volume_id, self.task.instance.uuid)
+        self.assertEqual(uuids.attachment_id, bdm3.attachment_id)
+        # And bdm3 should have been created in the source cell.
+        mock_bdm_create.assert_called_once_with()
+        # Since bdm1 was not in the target cell it should be destroyed in the
+        # source cell since we can assume it was detached from the target host
+        # in the target cell while the instance was in VERIFY_RESIZE status.
+        mock_attachment_delete.assert_called_once_with(
+            bdm1._context, bdm1.attachment_id)
+        mock_bdm_destroy.assert_called_once_with()
+
+    @mock.patch('nova.objects.BlockDeviceMapping.destroy')
+    def test_delete_orphan_source_cell_bdms_attach_delete_fails(self, destroy):
+        """Tests attachment_delete failing but not being fatal."""
+        source_cell_context = nova_context.get_admin_context()
+        bdm1 = objects.BlockDeviceMapping(
+            source_cell_context, volume_id='vol1', attachment_id=uuids.attach1)
+        bdm2 = objects.BlockDeviceMapping(
+            source_cell_context, volume_id='vol2', attachment_id=uuids.attach2)
+        source_cell_bdms = objects.BlockDeviceMappingList(objects=[bdm1, bdm2])
+        with mock.patch.object(self.task.volume_api,
+                               'attachment_delete') as attachment_delete:
+            # First call to attachment_delete fails, second is OK.
+            attachment_delete.side_effect = [
+                test.TestingException('cinder is down'), None]
+            self.task._delete_orphan_source_cell_bdms(source_cell_bdms)
+        attachment_delete.assert_has_calls([
+            mock.call(bdm1._context, bdm1.attachment_id),
+            mock.call(bdm2._context, bdm2.attachment_id)])
+        self.assertEqual(2, destroy.call_count, destroy.mock_calls)
+        self.assertIn('cinder is down', self.stdlog.logger.output)
+
+    @mock.patch('nova.objects.InstanceAction.get_by_request_id')
+    @mock.patch('nova.objects.InstanceActionEventList.get_by_action')
+    @mock.patch('nova.objects.InstanceAction.create')
+    @mock.patch('nova.objects.InstanceActionEvent.create')
+    def test_update_instance_actions_in_source_cell(
+            self, mock_event_create, mock_action_create, mock_get_events,
+            mock_get_action):
+        """Tests copying instance actions from the target to source cell."""
+        source_cell_context = nova_context.get_admin_context()
+        source_cell_context.cell_uuid = uuids.source_cell
+        # Setup a fake action and fake event.
+        action = objects.InstanceAction(
+            id=1, action=instance_actions.REVERT_RESIZE,
+            instance_uuid=self.task.instance.uuid,
+            request_id=self.task.context.request_id)
+        mock_get_action.return_value = action
+        event = objects.InstanceActionEvent(
+            id=2, action_id=action.id,
+            event='conductor_revert_snapshot_based_resize')
+        mock_get_events.return_value = objects.InstanceActionEventList(
+            objects=[event])
+        # Run the code.
+        self.task._update_instance_actions_in_source_cell(source_cell_context)
+        # Should have created a clone of the action and event.
+        mock_get_action.assert_called_once_with(
+            self.task.context, self.task.instance.uuid,
+            self.task.context.request_id)
+        mock_get_events.assert_called_once_with(self.task.context, action.id)
+        mock_action_create.assert_called_once_with()
+        mock_event_create.assert_called_once_with(
+            action.instance_uuid, action.request_id)
+
+    def test_update_source_obj_from_target_cell(self):
+        # Create a fake source object to be updated.
+        t1 = timeutils.utcnow()
+        source_obj = objects.Migration(id=1, created_at=t1, updated_at=t1,
+                                       uuid=uuids.migration,
+                                       status='post-migrating')
+        t2 = timeutils.utcnow()
+        target_obj = objects.Migration(id=2, created_at=t2, updated_at=t2,
+                                       uuid=uuids.migration,
+                                       status='reverting',
+                                       # Add a field that is not in source_obj.
+                                       migration_type='resize')
+        # Run the copy code.
+        self.task._update_source_obj_from_target_cell(source_obj, target_obj)
+        # First make sure that id, created_at and updated_at are not changed.
+        ignored_keys = ['id', 'created_at', 'updated_at']
+        for field in ignored_keys:
+            self.assertNotEqual(getattr(source_obj, field),
+                                getattr(target_obj, field))
+        # Now make sure the rest of the fields are the same.
+        self._compare_objs(source_obj, target_obj, ignored_keys=ignored_keys)
+
+    def test_update_source_obj_from_target_cell_nested_object(self):
+        """Tests that calling _update_source_obj_from_target_cell with an
+        object that has nested object fields will raise ObjectActionError.
+        """
+        source = objects.Instance(flavor=objects.Flavor(flavorid='a'))
+        target = objects.Instance(flavor=objects.Flavor(flavorid='b'))
+        ex = self.assertRaises(exception.ObjectActionError,
+                               self.task._update_source_obj_from_target_cell,
+                               source, target)
+        self.assertIn('nested objects are not supported', six.text_type(ex))
+
+    @mock.patch('nova.objects.Migration.get_by_uuid')
+    def test_update_migration_in_source_cell(self, mock_get_migration):
+        """Tests updating the migration record in the source cell from the
+        target cell.
+        """
+        source_cell_context = nova_context.get_admin_context()
+        with mock.patch.object(
+                self.task,
+                '_update_source_obj_from_target_cell') as mock_update_obj:
+            source_cell_migration = \
+                self.task._update_migration_in_source_cell(source_cell_context)
+        mock_get_migration.assert_called_once_with(source_cell_context,
+                                                   self.task.migration.uuid)
+        mock_update_obj.assert_called_once_with(source_cell_migration,
+                                                self.task.migration)
+        self.assertIs(source_cell_migration, mock_get_migration.return_value)
+        source_cell_migration.save.assert_called_once_with()
+
+    @mock.patch('nova.objects.InstanceMapping.get_by_instance_uuid')
+    def test_update_instance_mapping(self, get_inst_map):
+        """Tests updating the instance mapping from the target to source cell.
+        """
+        source_cell_instance = self._generate_source_cell_instance()
+        source_cell_context = source_cell_instance._context
+        source_cell_mapping = objects.CellMapping(source_cell_context,
+                                                  uuid=uuids.source_cell)
+        inst_map = objects.InstanceMapping(
+            cell_mapping=objects.CellMapping(uuids.target_cell))
+        get_inst_map.return_value = inst_map
+        with test.nested(
+            mock.patch.object(source_cell_instance, 'save'),
+            mock.patch.object(self.task.instance, 'save'),
+            mock.patch.object(inst_map, 'save')
+        ) as (
+            source_inst_save, target_inst_save, inst_map_save
+        ):
+            self.task._update_instance_mapping(source_cell_instance,
+                                               source_cell_mapping)
+        get_inst_map.assert_called_once_with(self.task.context,
+                                             self.task.instance.uuid)
+        # The source cell instance should not be hidden.
+        self.assertFalse(source_cell_instance.hidden)
+        source_inst_save.assert_called_once_with()
+        # The instance mapping should point at the source cell.
+        self.assertIs(source_cell_mapping, inst_map.cell_mapping)
+        inst_map_save.assert_called_once_with()
+        # The target cell instance should be hidden.
+        self.assertTrue(self.task.instance.hidden)
+        target_inst_save.assert_called_once_with()

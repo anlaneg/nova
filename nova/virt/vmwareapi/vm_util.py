@@ -46,6 +46,14 @@ ALL_SUPPORTED_NETWORK_DEVICES = ['VirtualE1000', 'VirtualE1000e',
                                  'VirtualPCNet32', 'VirtualSriovEthernetCard',
                                  'VirtualVmxnet', 'VirtualVmxnet3']
 
+CONTROLLER_TO_ADAPTER_TYPE = {
+    "VirtualLsiLogicController": constants.DEFAULT_ADAPTER_TYPE,
+    "VirtualBusLogicController": constants.ADAPTER_TYPE_BUSLOGIC,
+    "VirtualIDEController": constants.ADAPTER_TYPE_IDE,
+    "VirtualLsiLogicSASController": constants.ADAPTER_TYPE_LSILOGICSAS,
+    "ParaVirtualSCSIController": constants.ADAPTER_TYPE_PARAVIRTUAL
+}
+
 # A simple cache for storing inventory folder references.
 # Format: {inventory_path: folder_ref}
 _FOLDER_PATH_REF_MAPPING = {}
@@ -674,14 +682,17 @@ def _get_device_disk_type(device):
             return constants.DEFAULT_DISK_TYPE
 
 
-def get_vmdk_info(session, vm_ref, uuid=None):
-    """Returns information for the primary VMDK attached to the given VM."""
+def get_hardware_devices(session, vm_ref):
     hardware_devices = session._call_method(vutil,
                                             "get_object_property",
                                             vm_ref,
                                             "config.hardware.device")
-    if hardware_devices.__class__.__name__ == "ArrayOfVirtualDevice":
-        hardware_devices = hardware_devices.VirtualDevice
+    return vim_util.get_array_items(hardware_devices)
+
+
+def get_vmdk_info(session, vm_ref, uuid=None):
+    """Returns information for the primary VMDK attached to the given VM."""
+    hardware_devices = get_hardware_devices(session, vm_ref)
     vmdk_file_path = None
     vmdk_controller_key = None
     disk_type = None
@@ -703,16 +714,9 @@ def get_vmdk_info(session, vm_ref, uuid=None):
                 if root_disk and path.basename == root_disk:
                     root_device = device
                 vmdk_device = device
-        elif device.__class__.__name__ == "VirtualLsiLogicController":
-            adapter_type_dict[device.key] = constants.DEFAULT_ADAPTER_TYPE
-        elif device.__class__.__name__ == "VirtualBusLogicController":
-            adapter_type_dict[device.key] = constants.ADAPTER_TYPE_BUSLOGIC
-        elif device.__class__.__name__ == "VirtualIDEController":
-            adapter_type_dict[device.key] = constants.ADAPTER_TYPE_IDE
-        elif device.__class__.__name__ == "VirtualLsiLogicSASController":
-            adapter_type_dict[device.key] = constants.ADAPTER_TYPE_LSILOGICSAS
-        elif device.__class__.__name__ == "ParaVirtualSCSIController":
-            adapter_type_dict[device.key] = constants.ADAPTER_TYPE_PARAVIRTUAL
+        elif device.__class__.__name__ in CONTROLLER_TO_ADAPTER_TYPE:
+            adapter_type_dict[device.key] = CONTROLLER_TO_ADAPTER_TYPE[
+                device.__class__.__name__]
 
     if root_disk:
         vmdk_device = root_device
@@ -1020,25 +1024,6 @@ def get_machine_id_change_spec(client_factory, machine_id_str):
     opt.value = machine_id_str
     virtual_machine_config_spec.extraConfig = [opt]
     return virtual_machine_config_spec
-
-
-def get_add_vswitch_port_group_spec(client_factory, vswitch_name,
-                                    port_group_name, vlan_id):
-    """Builds the virtual switch port group add spec."""
-    vswitch_port_group_spec = client_factory.create('ns0:HostPortGroupSpec')
-    vswitch_port_group_spec.name = port_group_name
-    vswitch_port_group_spec.vswitchName = vswitch_name
-
-    # VLAN ID of 0 means that VLAN tagging is not to be done for the network.
-    vswitch_port_group_spec.vlanId = int(vlan_id)
-
-    policy = client_factory.create('ns0:HostNetworkPolicy')
-    nicteaming = client_factory.create('ns0:HostNicTeamingPolicy')
-    nicteaming.notifySwitches = True
-    policy.nicTeaming = nicteaming
-
-    vswitch_port_group_spec.policy = policy
-    return vswitch_port_group_spec
 
 
 def get_vnc_config_spec(client_factory, port):

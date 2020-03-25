@@ -22,7 +22,7 @@ from nova.conductor.tasks import migrate
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova import network
+from nova.network import neutron
 from nova import objects
 from nova.objects import fields as obj_fields
 from nova.objects import migrate_data as migrate_data_obj
@@ -66,7 +66,7 @@ class LiveMigrationTask(base.TaskBase):
         self.request_spec = request_spec
         self._source_cn = None
         self._held_allocations = None
-        self.network_api = network.API()
+        self.network_api = neutron.API()
 
     def _execute(self):
         self._check_instance_is_active()
@@ -241,6 +241,22 @@ class LiveMigrationTask(base.TaskBase):
                        "source and destination nodes do not support "
                        "the operation.")
 
+    def _check_can_migrate_specific_resources(self):
+        """Checks that an instance can migrate with specific resources.
+
+        For virtual persistent memory resource:
+            1. check if Instance contains vpmem resources
+            2. check if live migration with vpmem is supported
+        """
+        if not self.instance.resources:
+            return
+
+        for resource in self.instance.resources:
+            if resource.resource_class.startswith("CUSTOM_PMEM_NAMESPACE_"):
+                raise exception.MigrationPreCheckError(
+                    reason="Cannot live migration with virtual persistent "
+                           "memory, the operation is not supported.")
+
     def _check_host_is_up(self, host):
         service = objects.Service.get_by_compute_host(self.context, host)
 
@@ -257,7 +273,12 @@ class LiveMigrationTask(base.TaskBase):
         self._check_destination_has_enough_memory()
         source_node, dest_node = self._check_compatible_with_source_hypervisor(
             self.destination)
-        self._call_livem_checks_on_host(self.destination)
+        # NOTE(gibi): This code path is used when the live migration is forced
+        # to a target host and skipping the scheduler. Such operation is
+        # rejected for servers with nested resource allocations since
+        # I7cbd5d9fb875ebf72995362e0b6693492ce32051. So here we can safely
+        # assume that the provider mapping is empty.
+        self._call_livem_checks_on_host(self.destination, {})
         # Make sure the forced destination host is in the same cell that the
         # instance currently lives in.
         # NOTE(mriedem): This can go away if/when the forced destination host
@@ -276,9 +297,6 @@ class LiveMigrationTask(base.TaskBase):
                     instance_id=self.instance.uuid, host=self.destination)
 
     def _check_destination_has_enough_memory(self):
-        # TODO(mriedem): This method can be removed when the forced host
-        # scenario is calling select_destinations() in the scheduler because
-        # Placement will be used to filter allocation candidates by MEMORY_MB.
         compute = self._get_compute_info(self.destination)
         free_ram_mb = compute.free_ram_mb
         total_ram_mb = compute.memory_mb
@@ -319,7 +337,8 @@ class LiveMigrationTask(base.TaskBase):
             raise exception.DestinationHypervisorTooOld()
         return source_info, destination_info
 
-    def _call_livem_checks_on_host(self, destination):
+    def _call_livem_checks_on_host(self, destination, provider_mapping):
+        self._check_can_migrate_specific_resources()
         self._check_can_migrate_pci(self.source, destination)
         try:
             self.migrate_data = self.compute_rpcapi.\
@@ -341,11 +360,25 @@ class LiveMigrationTask(base.TaskBase):
                 self.migrate_data.vifs = migrate_data_obj.VIFMigrateData.\
                     create_skeleton_migrate_vifs(
                     self.instance.get_network_info())
-            bindings = self._bind_ports_on_destination(destination)
+            bindings = self._bind_ports_on_destination(
+                destination, provider_mapping)
             self._update_migrate_vifs_from_bindings(self.migrate_data.vifs,
                                                     bindings)
 
-    def _bind_ports_on_destination(self, destination):
+    @staticmethod
+    def _get_port_profile_from_provider_mapping(port_id, provider_mappings):
+        if port_id in provider_mappings:
+            # NOTE(gibi): In the resource provider mapping there can be
+            # more than one RP fulfilling a request group. But resource
+            # requests of a Neutron port is always mapped to a
+            # numbered request group that is always fulfilled by one
+            # resource provider. So we only pass that single RP UUID
+            # here.
+            return {'allocation': provider_mappings[port_id][0]}
+        else:
+            return {}
+
+    def _bind_ports_on_destination(self, destination, provider_mappings):
         LOG.debug('Start binding ports on destination host: %s', destination,
                   instance=self.instance)
         # Bind ports on the destination host; returns a dict, keyed by
@@ -358,15 +391,18 @@ class LiveMigrationTask(base.TaskBase):
             # if that is the case, it may have updated the required port
             # profile for the destination node (e.g new PCI address if SR-IOV)
             # perform port binding against the requested profile
-            migrate_vifs_with_profile = [mig_vif for mig_vif in
-                                         self.migrate_data.vifs
-                                         if 'profile_json' in mig_vif]
-
-            ports_profile = None
-            if migrate_vifs_with_profile:
-                # Update to the port profile is required
-                ports_profile = {mig_vif.port_id: mig_vif.profile
-                                 for mig_vif in migrate_vifs_with_profile}
+            ports_profile = {}
+            for mig_vif in self.migrate_data.vifs:
+                profile = mig_vif.profile if 'profile_json' in mig_vif else {}
+                # NOTE(gibi): provider_mappings also contribute to the
+                # binding profile of the ports if the port has resource
+                # request. So we need to merge the profile information from
+                # both sources.
+                profile.update(
+                    self._get_port_profile_from_provider_mapping(
+                        mig_vif.port_id, provider_mappings))
+                if profile:
+                    ports_profile[mig_vif.port_id] = profile
 
             bindings = self.network_api.bind_ports_to_host(
                 context=self.context, instance=self.instance, host=destination,
@@ -428,8 +464,15 @@ class LiveMigrationTask(base.TaskBase):
         # is not forced to be the original host
         request_spec.reset_forced_destinations()
 
-        # TODO(gibi): We need to make sure that the requested_resources field
-        # is re calculated based on neutron ports.
+        port_res_req = (
+            self.network_api.get_requested_resource_for_instance(
+                self.context, self.instance.uuid))
+        # NOTE(gibi): When cyborg or other module wants to handle
+        # similar non-nova resources then here we have to collect
+        # all the external resource requests in a single list and
+        # add them to the RequestSpec.
+        request_spec.requested_resources = port_res_req
+
         scheduler_utils.setup_instance_group(self.context, request_spec)
 
         # We currently only support live migrating to hosts in the same
@@ -479,9 +522,23 @@ class LiveMigrationTask(base.TaskBase):
                 # ex.exc_type.
                 raise exception.MigrationSchedulerRPCError(
                     reason=six.text_type(ex))
+
+            scheduler_utils.fill_provider_mapping(request_spec, selection)
+
+            provider_mapping = request_spec.get_request_group_mapping()
+
+            if provider_mapping:
+                # NOTE(gibi): this call might update the pci_requests of the
+                # instance based on the destination host if so then such change
+                # will be persisted when post_live_migration_at_destination
+                # runs.
+                compute_utils.\
+                    update_pci_request_spec_with_allocated_interface_name(
+                        self.context, self.report_client, self.instance,
+                        provider_mapping)
             try:
                 self._check_compatible_with_source_hypervisor(host)
-                self._call_livem_checks_on_host(host)
+                self._call_livem_checks_on_host(host, provider_mapping)
             except (exception.Invalid, exception.MigrationPreCheckError) as e:
                 LOG.debug("Skipping host: %(host)s because: %(e)s",
                     {"host": host, "e": e})
@@ -489,38 +546,23 @@ class LiveMigrationTask(base.TaskBase):
                 # The scheduler would have created allocations against the
                 # selected destination host in Placement, so we need to remove
                 # those before moving on.
-                self._remove_host_allocations(host, selection.nodename)
+                self._remove_host_allocations(selection.compute_node_uuid)
                 host = None
         # TODO(artom) We should probably just return the whole selection object
         # at this point.
         return (selection.service_host, selection.nodename, selection.limits)
 
-    def _remove_host_allocations(self, host, node):
-        """Removes instance allocations against the given host from Placement
+    def _remove_host_allocations(self, compute_node_uuid):
+        """Removes instance allocations against the given node from Placement
 
-        :param host: The name of the host.
-        :param node: The name of the node.
+        :param compute_node_uuid: UUID of ComputeNode resource provider
         """
-        # Get the compute node object since we need the UUID.
-        # TODO(mriedem): If the result of select_destinations eventually
-        # returns the compute node uuid, we wouldn't need to look it
-        # up via host/node and we can save some time.
-        try:
-            compute_node = objects.ComputeNode.get_by_host_and_nodename(
-                self.context, host, node)
-        except exception.ComputeHostNotFound:
-            # This shouldn't happen, but we're being careful.
-            LOG.info('Unable to remove instance allocations from host %s '
-                     'and node %s since it was not found.', host, node,
-                     instance=self.instance)
-            return
-
         # Now remove the allocations for our instance against that node.
         # Note that this does not remove allocations against any other node
         # or shared resource provider, it's just undoing what the scheduler
         # allocated for the given (destination) node.
         self.report_client.remove_provider_tree_from_instance_allocation(
-            self.context, self.instance.uuid, compute_node.uuid)
+            self.context, self.instance.uuid, compute_node_uuid)
 
     def _check_not_over_max_retries(self, attempted_hosts):
         if CONF.migrate_max_retries == -1:

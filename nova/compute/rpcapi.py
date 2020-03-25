@@ -18,7 +18,6 @@ Client side of the compute RPC API.
 from oslo_concurrency import lockutils
 from oslo_log import log as logging
 import oslo_messaging as messaging
-from oslo_serialization import jsonutils
 from oslo_utils import excutils
 
 import nova.conf
@@ -375,6 +374,9 @@ class ComputeAPI(object):
         * 5.5 - Add prep_snapshot_based_resize_at_dest()
         * 5.6 - Add prep_snapshot_based_resize_at_source()
         * 5.7 - Add finish_snapshot_based_resize_at_dest()
+        * 5.8 - Add confirm_snapshot_based_resize_at_source()
+        * 5.9 - Add revert_snapshot_based_resize_at_dest()
+        * 5.10 - Add finish_revert_snapshot_based_resize_at_source()
     '''
 
     VERSION_ALIASES = {
@@ -601,6 +603,41 @@ class ComputeAPI(object):
         return rpc_method(ctxt, 'confirm_resize',
                           instance=instance, migration=migration)
 
+    def confirm_snapshot_based_resize_at_source(
+            self, ctxt, instance, migration):
+        """Confirms a snapshot-based resize on the source host.
+
+        Cleans the guest from the source hypervisor including disks and drops
+        the MoveClaim which will free up "old_flavor" usage from the
+        ResourceTracker.
+
+        Deletes the allocations held by the migration consumer against the
+        source compute node resource provider.
+
+        This is a synchronous RPC call using the ``long_rpc_timeout``
+        configuration option.
+
+        :param ctxt: nova auth request context targeted at the source cell
+        :param instance: Instance object being resized which should have the
+            "old_flavor" attribute set
+        :param migration: Migration object for the resize operation
+        :raises: nova.exception.MigrationError if the source compute is too
+            old to perform the operation
+        :raises: oslo_messaging.exceptions.MessagingTimeout if the RPC call
+            times out
+        """
+        version = '5.8'
+        client = self.router.client(ctxt)
+        if not client.can_send_version(version):
+            raise exception.MigrationError(reason=_('Compute too old'))
+        cctxt = client.prepare(server=migration.source_compute,
+                               version=version,
+                               call_monitor_timeout=CONF.rpc_response_timeout,
+                               timeout=CONF.long_rpc_timeout)
+        return cctxt.call(
+            ctxt, 'confirm_snapshot_based_resize_at_source',
+            instance=instance, migration=migration)
+
     def detach_interface(self, ctxt, instance, port_id):
         version = '5.0'
         cctxt = self.router.client(ctxt).prepare(
@@ -697,6 +734,41 @@ class ComputeAPI(object):
             instance=instance, migration=migration, snapshot_id=snapshot_id,
             request_spec=request_spec)
 
+    def finish_revert_snapshot_based_resize_at_source(
+            self, ctxt, instance, migration):
+        """Reverts a snapshot-based resize at the source host.
+
+        Spawn the guest and re-connect volumes/VIFs on the source host and
+        revert the instance to use the old_flavor for resource usage reporting.
+
+        Updates allocations in the placement service to move the source node
+        allocations, held by the migration record, to the instance and drop
+        the allocations held by the instance on the destination node.
+
+        This is a synchronous RPC call using the ``long_rpc_timeout``
+        configuration option.
+
+        :param ctxt: nova auth request context targeted at the source cell
+        :param instance: Instance object whose vm_state is "resized" and
+            task_state is "resize_reverting".
+        :param migration: Migration object whose status is "reverting".
+        :raises: nova.exception.MigrationError if the source compute is too
+            old to perform the operation
+        :raises: oslo_messaging.exceptions.MessagingTimeout if the RPC call
+            times out
+        """
+        version = '5.10'
+        client = self.router.client(ctxt)
+        if not client.can_send_version(version):
+            raise exception.MigrationError(reason=_('Compute too old'))
+        cctxt = client.prepare(server=migration.source_compute,
+                               version=version,
+                               call_monitor_timeout=CONF.rpc_response_timeout,
+                               timeout=CONF.long_rpc_timeout)
+        return cctxt.call(
+            ctxt, 'finish_revert_snapshot_based_resize_at_source',
+            instance=instance, migration=migration)
+
     def get_console_output(self, ctxt, instance, tail_length):
         version = '5.0'
         cctxt = self.router.client(ctxt).prepare(
@@ -711,6 +783,7 @@ class ComputeAPI(object):
         return cctxt.call(ctxt, 'get_console_pool_info',
                           console_type=console_type)
 
+    # TODO(stephenfin): This is no longer used and can be removed in v6.0
     def get_console_topic(self, ctxt, host):
         version = '5.0'
         cctxt = self.router.client(ctxt).prepare(
@@ -869,11 +942,6 @@ class ComputeAPI(object):
         # compute but that also requires plumbing changes through the resize
         # flow for other methods like resize_instance and finish_resize.
         image_p = objects_base.obj_to_primitive(image)
-        # FIXME(sbauza): Serialize/Unserialize the legacy dict because of
-        # oslo.messaging #1529084 to transform datetime values into strings.
-        # tl;dr: datetimes in dicts are not accepted as correct values by the
-        # rpc fake driver.
-        image_p = jsonutils.loads(jsonutils.dumps(image_p))
         msg_args = {'instance': instance,
                     'instance_type': instance_type,
                     'image': image_p,
@@ -1053,6 +1121,7 @@ class ComputeAPI(object):
                 server=_compute_host(None, instance), version=version)
         cctxt.cast(ctxt, 'rescue_instance', **msg_args)
 
+    # Remove as it only supports nova network
     def reset_network(self, ctxt, instance):
         version = '5.0'
         cctxt = self.router.client(ctxt).prepare(
@@ -1102,6 +1171,37 @@ class ComputeAPI(object):
         cctxt = client.prepare(
                 server=_compute_host(host, instance), version=version)
         cctxt.cast(ctxt, 'revert_resize', **msg_args)
+
+    def revert_snapshot_based_resize_at_dest(self, ctxt, instance, migration):
+        """Reverts a snapshot-based resize at the destination host.
+
+        Cleans the guest from the destination compute service host hypervisor
+        and related resources (ports, volumes) and frees resource usage from
+        the compute service on that host.
+
+        This is a synchronous RPC call using the ``long_rpc_timeout``
+        configuration option.
+
+        :param ctxt: nova auth request context targeted at the target cell
+        :param instance: Instance object whose vm_state is "resized" and
+            task_state is "resize_reverting".
+        :param migration: Migration object whose status is "reverting".
+        :raises: nova.exception.MigrationError if the destination compute
+            service is too old to perform the operation
+        :raises: oslo_messaging.exceptions.MessagingTimeout if the RPC call
+            times out
+        """
+        version = '5.9'
+        client = self.router.client(ctxt)
+        if not client.can_send_version(version):
+            raise exception.MigrationError(reason=_('Compute too old'))
+        cctxt = client.prepare(server=migration.dest_compute,
+                               version=version,
+                               call_monitor_timeout=CONF.rpc_response_timeout,
+                               timeout=CONF.long_rpc_timeout)
+        return cctxt.call(
+            ctxt, 'revert_snapshot_based_resize_at_dest',
+            instance=instance, migration=migration)
 
     def rollback_live_migration_at_destination(self, ctxt, instance, host,
                                                destroy_disks,
@@ -1176,7 +1276,9 @@ class ComputeAPI(object):
         version = '5.0'
         client = self.router.client(ctxt)
         cctxt = client.prepare(server=_compute_host(None, instance),
-                               version=version)
+                               version=version,
+                               call_monitor_timeout=CONF.rpc_response_timeout,
+                               timeout=CONF.long_rpc_timeout)
         return cctxt.call(ctxt, 'reserve_block_device_name', **kw)
 
     def backup_instance(self, ctxt, instance, image_id, backup_type,
@@ -1354,6 +1456,7 @@ class ComputeAPI(object):
         cctxt.cast(ctxt, 'unquiesce_instance', instance=instance,
                    mapping=mapping)
 
+    # TODO(stephenfin): Remove this as it's nova-network only
     def refresh_instance_security_rules(self, ctxt, instance, host):
         version = '5.0'
         client = self.router.client(ctxt)

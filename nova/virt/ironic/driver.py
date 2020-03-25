@@ -52,7 +52,6 @@ from nova import servicegroup
 from nova import utils
 from nova.virt import configdrive
 from nova.virt import driver as virt_driver
-from nova.virt import firewall
 from nova.virt import hardware
 from nova.virt.ironic import client_wrapper
 from nova.virt.ironic import ironic_states
@@ -176,6 +175,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         "supports_image_type_vhd": False,
         "supports_image_type_vhdx": False,
         "supports_image_type_vmdk": False,
+        "supports_image_type_ploop": False,
     }
 
     # This driver is capable of rebalancing nodes between computes.
@@ -193,8 +193,6 @@ class IronicDriver(virt_driver.ComputeDriver):
                 ironic.client = importutils.import_module(
                                                     'ironicclient.client')
 
-        self.firewall_driver = firewall.load_driver(
-            default='nova.virt.firewall.NoopFirewallDriver')
         self.node_cache = {}
         self.node_cache_time = 0
         self.servicegroup_api = servicegroup.API()
@@ -380,14 +378,6 @@ class IronicDriver(virt_driver.ComputeDriver):
         }
         return dic
 
-    def _start_firewall(self, instance, network_info):
-        self.firewall_driver.setup_basic_filtering(instance, network_info)
-        self.firewall_driver.prepare_instance_filter(instance, network_info)
-        self.firewall_driver.apply_instance_filter(instance, network_info)
-
-    def _stop_firewall(self, instance, network_info):
-        self.firewall_driver.unfilter_instance(instance, network_info)
-
     def _set_instance_id(self, node, instance):
         try:
             # NOTE(TheJulia): Assert an instance ID to lock the node
@@ -520,7 +510,6 @@ class IronicDriver(virt_driver.ComputeDriver):
                         remove_instance_info=True):
         self._cleanup_volume_target_info(instance)
         self._unplug_vifs(node, instance, network_info)
-        self._stop_firewall(instance, network_info)
         if remove_instance_info:
             self._remove_instance_info_from_node(node, instance)
 
@@ -597,9 +586,9 @@ class IronicDriver(virt_driver.ComputeDriver):
         extra_specs. Since existing ironic instances will not have this in
         their extra_specs, they will only have allocations against
         VCPU/RAM/disk. By adding just the custom RC to the existing flavor
-        extra_specs, the periodic call to update_available_resources() will add
+        extra_specs, the periodic call to update_available_resource() will add
         an allocation against the custom resource class, and prevent placement
-        from thinking that that node is available. This code can be removed in
+        from thinking that node is available. This code can be removed in
         Queens, and will need to be updated to also alter extra_specs to
         zero-out the old-style standard resource classes of VCPU, MEMORY_MB,
         and DISK_GB.
@@ -784,14 +773,15 @@ class IronicDriver(virt_driver.ComputeDriver):
             if peer_list is None or svc.host in peer_list:
                 is_up = self.servicegroup_api.service_is_up(svc)
                 if is_up:
-                    services.add(svc.host)
+                    services.add(svc.host.lower())
         # NOTE(jroll): always make sure this service is in the list, because
         # only services that have something registered in the compute_nodes
         # table will be here so far, and we might be brand new.
-        services.add(CONF.host)
+        services.add(CONF.host.lower())
 
         self.hash_ring = hash_ring.HashRing(services,
                                             partitions=_HASH_RING_PARTITIONS)
+        LOG.debug('Hash ring members are %s', services)
 
     def _refresh_cache(self):
         ctxt = nova_context.get_admin_context()
@@ -835,7 +825,7 @@ class IronicDriver(virt_driver.ComputeDriver):
             # nova while the service was down, and not yet reaped, will not be
             # reported until the periodic task cleans it up.
             elif (node.instance_uuid is None and
-                  CONF.host in
+                  CONF.host.lower() in
                   self.hash_ring.get_nodes(node.uuid.encode('utf-8'))):
                 node_cache[node.uuid] = node
 
@@ -1048,14 +1038,6 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         return hardware.InstanceInfo(state=map_power_state(node.power_state))
 
-    def deallocate_networks_on_reschedule(self, instance):
-        """Does the driver want networks deallocated on reschedule?
-
-        :param instance: the instance object.
-        :returns: Boolean value. If True deallocate networks on reschedule.
-        """
-        return True
-
     def _get_network_metadata(self, node, network_info):
         """Gets a more complete representation of the instance network info.
 
@@ -1227,17 +1209,6 @@ class IronicDriver(virt_driver.ComputeDriver):
                    'deploy': validate_chk.deploy,
                    'power': validate_chk.power,
                    'storage': validate_chk.storage})
-
-        # prepare for the deploy
-        try:
-            self._start_firewall(instance, network_info)
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                LOG.error("Error preparing deploy for instance "
-                          "%(instance)s on baremetal node %(node)s.",
-                          {'instance': instance.uuid,
-                           'node': node_uuid})
-                self._cleanup_deploy(node, instance, network_info)
 
         # Config drive
         configdrive_value = None
@@ -1561,47 +1532,6 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         LOG.info('Successfully triggered crash dump into Ironic node %s',
                  node.uuid, instance=instance)
-
-    def refresh_security_group_rules(self, security_group_id):
-        """Refresh security group rules from data store.
-
-        Invoked when security group rules are updated.
-
-        :param security_group_id: The security group id.
-
-        """
-        self.firewall_driver.refresh_security_group_rules(security_group_id)
-
-    def refresh_instance_security_rules(self, instance):
-        """Refresh security group rules from data store.
-
-        Gets called when an instance gets added to or removed from
-        the security group the instance is a member of or if the
-        group gains or loses a rule.
-
-        :param instance: The instance object.
-
-        """
-        self.firewall_driver.refresh_instance_security_rules(instance)
-
-    def ensure_filtering_rules_for_instance(self, instance, network_info):
-        """Set up filtering rules.
-
-        :param instance: The instance object.
-        :param network_info: Instance network information.
-
-        """
-        self.firewall_driver.setup_basic_filtering(instance, network_info)
-        self.firewall_driver.prepare_instance_filter(instance, network_info)
-
-    def unfilter_instance(self, instance, network_info):
-        """Stop filtering instance.
-
-        :param instance: The instance object.
-        :param network_info: Instance network information.
-
-        """
-        self.firewall_driver.unfilter_instance(instance, network_info)
 
     def _plug_vif(self, node, port_id):
         last_attempt = 5

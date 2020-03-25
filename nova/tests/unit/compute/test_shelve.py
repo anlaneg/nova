@@ -25,7 +25,7 @@ from nova.compute import vm_states
 import nova.conf
 from nova.db import api as db
 from nova import exception
-from nova.network.neutronv2 import api as neutron_api
+from nova.network import neutron as neutron_api
 from nova import objects
 from nova import test
 from nova.tests.unit.compute import test_compute
@@ -141,7 +141,6 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         mock_power_off_call_list = []
         mock_get_power_state_call_list = [
             mock.call(self.context, instance)]
-        mock_cleanup_call_list = []
 
         if clean_shutdown:
             if guest_power_state == power_state.PAUSED:
@@ -160,17 +159,11 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             mock_power_off_call_list.append(mock.call(instance, 0, 0))
             mock_get_power_state_call_list.append(mock.call(self.context,
                                                             instance))
-            # instance.host is replaced with host because
-            # original instance.host is clear after
-            # ComputeManager.shelve_instance execute with
-            # shelved_offload_time == 0
-            mock_cleanup_call_list.append(mock.call(self.context, instance,
-                                                    host))
 
         mock_notify_instance_usage.assert_has_calls(
             mock_notify_instance_usage_call_list)
         mock_power_off.assert_has_calls(mock_power_off_call_list)
-        mock_cleanup.assert_has_calls(mock_cleanup_call_list)
+        mock_cleanup.assert_not_called()
         mock_snapshot.assert_called_once_with(self.context, instance,
                                               'fake_image_id', mock.ANY)
         mock_get_power_state.assert_has_calls(mock_get_power_state_call_list)
@@ -267,10 +260,14 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         mock_event.assert_called_once_with(self.context,
                                            'compute_shelve_offload_instance',
                                            CONF.host,
-                                           instance.uuid)
+                                           instance.uuid,
+                                           graceful_exit=False)
 
         return instance
 
+    @mock.patch('nova.compute.utils.'
+                'update_pci_request_spec_with_allocated_interface_name',
+                new=mock.NonCallableMock())
     @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid')
     @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch.object(nova.compute.manager.ComputeManager,
@@ -364,8 +361,8 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             mock_notify_instance_usage_call_list)
         mock_prep_block_device.assert_called_once_with(self.context,
             instance, mock.ANY)
-        mock_setup_network.assert_called_once_with(self.context, instance,
-                                                   self.compute.host)
+        mock_setup_network.assert_called_once_with(
+            self.context, instance, self.compute.host, provider_mappings=None)
         mock_spawn.assert_called_once_with(self.context, instance,
                 test.MatchType(objects.ImageMeta), injected_files=[],
                 admin_password=None, allocations={}, network_info=[],
@@ -464,8 +461,8 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             mock_notify_instance_usage_call_list)
         mock_prep_block_device.assert_called_once_with(self.context, instance,
                 mock.ANY)
-        mock_setup_network.assert_called_once_with(self.context, instance,
-                                                   self.compute.host)
+        mock_setup_network.assert_called_once_with(
+            self.context, instance, self.compute.host, provider_mappings=None)
         mock_instance_claim.assert_called_once_with(self.context, instance,
                                                     test_compute.NODENAME,
                                                     {}, limits)
@@ -551,8 +548,8 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             self.context, instance, 'unshelve.start')
         mock_prep_block_device.assert_called_once_with(
             self.context, instance, mock_bdms)
-        mock_setup_network.assert_called_once_with(self.context, instance,
-                                                   self.compute.host)
+        mock_setup_network.assert_called_once_with(
+            self.context, instance, self.compute.host, provider_mappings=None)
         mock_instance_claim.assert_called_once_with(self.context, instance,
                                                     test_compute.NODENAME,
                                                     {}, limits)
@@ -562,6 +559,54 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             allocations={}, network_info=[], block_device_info='fake_bdm')
         mock_terminate_volume_connections.assert_called_once_with(
             self.context, instance, mock_bdms)
+
+    @mock.patch('nova.network.neutron.API.setup_instance_network_on_host')
+    @mock.patch('nova.compute.utils.'
+                'update_pci_request_spec_with_allocated_interface_name')
+    def test_unshelve_with_resource_request(
+            self, mock_update_pci, mock_setup_network):
+        requested_res = [objects.RequestGroup(
+            requester_id=uuids.port_1,
+            provider_uuids=[uuids.rp1])]
+        request_spec = objects.RequestSpec(requested_resources=requested_res)
+        instance = self._create_fake_instance_obj()
+
+        self.compute.unshelve_instance(
+            self.context, instance, image=None,
+            filter_properties={}, node='fake-node', request_spec=request_spec)
+
+        mock_update_pci.assert_called_once_with(
+            self.context, self.compute.reportclient, instance,
+            {uuids.port_1: [uuids.rp1]})
+        mock_setup_network.assert_called_once_with(
+            self.context, instance, self.compute.host,
+            provider_mappings={uuids.port_1: [uuids.rp1]})
+
+    @mock.patch('nova.network.neutron.API.setup_instance_network_on_host',
+                new=mock.NonCallableMock())
+    @mock.patch('nova.compute.utils.'
+                'update_pci_request_spec_with_allocated_interface_name')
+    def test_unshelve_with_resource_request_update_raises(
+            self, mock_update_pci):
+        requested_res = [objects.RequestGroup(
+            requester_id=uuids.port_1,
+            provider_uuids=[uuids.rp1])]
+        request_spec = objects.RequestSpec(requested_resources=requested_res)
+        instance = self._create_fake_instance_obj()
+        mock_update_pci.side_effect = (
+            exception.UnexpectedResourceProviderNameForPCIRequest(
+                provider=uuids.rp1,
+                requester=uuids.port1,
+                provider_name='unexpected'))
+
+        self.assertRaises(
+            exception.UnexpectedResourceProviderNameForPCIRequest,
+            self.compute.unshelve_instance, self.context, instance, image=None,
+            filter_properties={}, node='fake-node', request_spec=request_spec)
+
+        mock_update_pci.assert_called_once_with(
+            self.context, self.compute.reportclient, instance,
+            {uuids.port_1: [uuids.rp1]})
 
     @mock.patch.object(objects.InstanceList, 'get_by_filters')
     def test_shelved_poll_none_offloaded(self, mock_get_by_filters):

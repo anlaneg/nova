@@ -53,7 +53,6 @@ from six.moves import range
 import nova.conf
 from nova import exception
 from nova.i18n import _, _LE, _LW
-import nova.network
 from nova import safe_utils
 
 profiler = importutils.try_import('osprofiler.profiler')
@@ -62,8 +61,6 @@ profiler = importutils.try_import('osprofiler.profiler')
 CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
-
-_IS_NEUTRON = None
 
 synchronized = lockutils.synchronized_with_prefix('nova-')
 
@@ -361,19 +358,17 @@ def make_dev_path(dev, partition=None, base='/dev'):
 
 
 def sanitize_hostname(hostname, default_name=None):
-    """Return a hostname which conforms to RFC-952 and RFC-1123 specs except
-       the length of hostname.
+    """Sanitize a given hostname.
 
-       Window, Linux, and Dnsmasq has different limitation:
+    Return a hostname which conforms to RFC-952 and RFC-1123 specs except the
+    length of hostname. Window, Linux, and dnsmasq has different limitation:
 
-       Windows: 255 (net_bios limits to 15, but window will truncate it)
-       Linux: 64
-       Dnsmasq: 63
+    - Windows: 255 (net_bios limits to 15, but window will truncate it)
+    - Linux: 64
+    - dnsmasq: 63
 
-       Due to nova-network will leverage dnsmasq to set hostname, so we chose
-       63.
-
-       """
+    We choose the lowest of these (so 63).
+    """
 
     def truncate_hostname(name):
         if len(name) > 63:
@@ -710,17 +705,6 @@ def is_none_string(val):
         return False
 
     return val.lower() == 'none'
-
-#检查网络是否为neutron
-def is_neutron():
-    global _IS_NEUTRON
-
-    if _IS_NEUTRON is not None:
-        return _IS_NEUTRON
-
-    _IS_NEUTRON = nova.network.is_neutron()
-    return _IS_NEUTRON
-
 
 def is_auto_disk_config_disabled(auto_disk_config_raw):
     auto_disk_config_disabled = False
@@ -1093,49 +1077,6 @@ else:
     def nested_contexts(*contexts):
         with contextlib.ExitStack() as stack:
             yield [stack.enter_context(c) for c in contexts]
-
-
-def run_once(message, logger, cleanup=None):
-    """This is a utility function decorator to ensure a function
-    is run once and only once in an interpreter instance.
-    The decorated function object can be reset by calling its
-    reset function. All exceptions raised by the wrapped function,
-    logger and cleanup function will be propagated to the caller.
-    """
-    def outer_wrapper(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            if not wrapper.called:
-                # Note(sean-k-mooney): the called state is always
-                # updated even if the wrapped function completes
-                # by raising an exception. If the caller catches
-                # the exception it is their responsibility to call
-                # reset if they want to re-execute the wrapped function.
-                try:
-                    return func(*args, **kwargs)
-                finally:
-                    wrapper.called = True
-            else:
-                logger(message)
-
-        wrapper.called = False
-
-        def reset(wrapper, *args, **kwargs):
-            # Note(sean-k-mooney): we conditionally call the
-            # cleanup function if one is provided only when the
-            # wrapped function has been called previously. We catch
-            # and reraise any exception that may be raised and update
-            # the called state in a finally block to ensure its
-            # always updated if reset is called.
-            try:
-                if cleanup and wrapper.called:
-                    return cleanup(*args, **kwargs)
-            finally:
-                wrapper.called = False
-
-        wrapper.reset = functools.partial(reset, wrapper)
-        return wrapper
-    return outer_wrapper
 
 
 def normalize_rc_name(rc_name):

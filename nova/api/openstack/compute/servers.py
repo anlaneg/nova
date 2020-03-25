@@ -40,8 +40,8 @@ import nova.conf
 from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
-from nova.image import api as image_api
-from nova import network as network_api
+from nova.image import glance
+from nova.network import neutron
 from nova import objects
 from nova.policies import servers as server_policies
 from nova import utils
@@ -67,6 +67,7 @@ INVALID_FLAVOR_IMAGE_EXCEPTIONS = (
     exception.ImageNUMATopologyForbidden,
     exception.ImageNUMATopologyIncomplete,
     exception.ImageNUMATopologyMemoryOutOfRange,
+    exception.ImageNUMATopologyRebuildConflict,
     exception.ImagePMUConflict,
     exception.ImageSerialPortNumberExceedFlavorValue,
     exception.ImageSerialPortNumberInvalid,
@@ -112,7 +113,7 @@ class ServersController(wsgi.Controller):
         #创建compute对应的api,此对象将用来处理创建请求（在这一层我们主要是
         #实现api的转换，实现扩展的调用，检查配置的权限）
         self.compute_api = compute.API()
-        self.network_api = network_api.API()
+        self.network_api = neutron.API()
 
     @wsgi.expected_errors((400, 403))
     @validation.query_schema(schema_servers.query_params_v275, '2.75')
@@ -349,7 +350,7 @@ class ServersController(wsgi.Controller):
         return response
 
     def _get_server(self, context, req, instance_uuid, is_detail=False,
-                    cell_down_support=False):
+                    cell_down_support=False, columns_to_join=None):
         """Utility function for looking up an instance by uuid.
 
         :param context: request context for auth
@@ -361,6 +362,8 @@ class ServersController(wsgi.Controller):
                                   returning a minimal instance
                                   construct if the relevant cell is
                                   down.
+        :param columns_to_join: optional list of extra fields to join on the
+            Instance object
         """
         expected_attrs = ['flavor', 'numa_topology']
         if is_detail:
@@ -370,6 +373,8 @@ class ServersController(wsgi.Controller):
                 expected_attrs.append("trusted_certs")
             expected_attrs = self._view_builder.get_show_expected_attrs(
                                                             expected_attrs)
+        if columns_to_join:
+            expected_attrs.extend(columns_to_join)
         instance = common.get_instance(self.compute_api, context,
                                        instance_uuid,
                                        expected_attrs=expected_attrs,
@@ -380,10 +385,7 @@ class ServersController(wsgi.Controller):
     def _validate_network_id(net_id, network_uuids):
         """Validates that a requested network id.
 
-        This method performs two checks:
-
-        1. That the network id is in the proper uuid format.
-        2. That the network is not a duplicate when using nova-network.
+        This method checks that the network id is in the proper UUID format.
 
         :param net_id: The network id to validate.
         :param network_uuids: A running list of requested network IDs that have
@@ -391,19 +393,9 @@ class ServersController(wsgi.Controller):
         :raises: webob.exc.HTTPBadRequest if validation fails
         """
         if not uuidutils.is_uuid_like(net_id):
-            # NOTE(mriedem): Neutron would allow a network id with a br- prefix
-            # back in Folsom so continue to honor that.
-            # TODO(mriedem): Need to figure out if this is still a valid case.
-            br_uuid = net_id.split('-', 1)[-1]
-            if not uuidutils.is_uuid_like(br_uuid):
-                msg = _("Bad networks format: network uuid is "
-                        "not in proper format (%s)") % net_id
-                raise exc.HTTPBadRequest(explanation=msg)
-
-        # duplicate networks are allowed only for neutron v2.0
-        if net_id in network_uuids and not utils.is_neutron():
-            expl = _("Duplicate networks (%s) are not allowed") % net_id
-            raise exc.HTTPBadRequest(explanation=expl)
+            msg = _("Bad networks format: network uuid is "
+                    "not in proper format (%s)") % net_id
+            raise exc.HTTPBadRequest(explanation=msg)
 
     def _get_requested_networks(self, requested_networks):
         """Create a list of requested networks from the networks attribute."""
@@ -431,10 +423,6 @@ class ServersController(wsgi.Controller):
 
                 if request.port_id:
                     request.network_id = None
-                    if not utils.is_neutron():
-                        # port parameter is only for neutron v2.0
-                        msg = _("Unknown argument: port")
-                        raise exc.HTTPBadRequest(explanation=msg)
                     if request.address is not None:
                         msg = _("Specified Fixed IP '%(addr)s' cannot be used "
                                 "with port '%(port)s': the two cannot be "
@@ -737,6 +725,7 @@ class ServersController(wsgi.Controller):
         except (exception.ImageNotActive,
                 exception.ImageBadRequest,
                 exception.ImageNotAuthorized,
+                exception.ImageUnacceptable,
                 exception.FixedIpNotFoundForAddress,
                 exception.FlavorNotFound,
                 exception.FlavorDiskTooSmall,
@@ -938,10 +927,11 @@ class ServersController(wsgi.Controller):
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'reboot', id)
 
-    def _resize(self, req, instance_id, flavor_id, **kwargs):
+    def _resize(self, req, instance_id, flavor_id, auto_disk_config=None):
         """Begin the resize process with given instance/flavor."""
         context = req.environ["nova.context"]
-        instance = self._get_server(context, req, instance_id)
+        instance = self._get_server(context, req, instance_id,
+                                    columns_to_join=['services'])
         context.can(server_policies.SERVERS % 'resize',
                     target={'user_id': instance.user_id,
                             'project_id': instance.project_id})
@@ -959,12 +949,14 @@ class ServersController(wsgi.Controller):
                 raise exc.HTTPConflict(explanation=msg)
 
         try:
-            self.compute_api.resize(context, instance, flavor_id, **kwargs)
+            self.compute_api.resize(context, instance, flavor_id,
+                                    auto_disk_config=auto_disk_config)
         except exception.QuotaError as error:
             raise exc.HTTPForbidden(
                 explanation=error.format_message())
         except (exception.InstanceIsLocked,
-                exception.AllocationMoveFailed) as e:
+                exception.InstanceNotReady,
+                exception.ServiceUnavailable) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
@@ -980,8 +972,7 @@ class ServersController(wsgi.Controller):
         except (exception.AutoDiskConfigDisabledByImage,
                 exception.CannotResizeDisk,
                 exception.CannotResizeToSameFlavor,
-                exception.FlavorNotFound,
-                exception.NoValidHost) as e:
+                exception.FlavorNotFound) as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
         except INVALID_FLAVOR_IMAGE_EXCEPTIONS as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
@@ -1136,6 +1127,7 @@ class ServersController(wsgi.Controller):
                 exception.ImageNotActive,
                 exception.ImageUnacceptable,
                 exception.InvalidMetadata,
+                exception.InvalidArchitectureName,
                 ) as error:
             raise exc.HTTPBadRequest(explanation=error.format_message())
         except INVALID_FLAVOR_IMAGE_EXCEPTIONS as error:
@@ -1252,7 +1244,7 @@ class ServersController(wsgi.Controller):
 
         # build location of newly-created image entity
         image_id = str(image['id'])
-        image_ref = image_api.API().generate_image_url(image_id, context)
+        image_ref = glance.API().generate_image_url(image_id, context)
 
         resp = webob.Response(status_int=202)
         resp.headers['Location'] = image_ref

@@ -24,6 +24,7 @@ import requests_mock
 
 from nova import context
 from nova import exception
+from nova.policies import servers as servers_policy
 from nova import policy
 from nova import test
 from nova.tests.unit import fake_policy
@@ -185,6 +186,22 @@ class PolicyTestCase(test.NoDBTestCase):
                 "project_id:%(project_id)s")])
         mock_warning.assert_not_called()
 
+    @requests_mock.mock()
+    def test_authorize_raise_invalid_scope(self, req_mock):
+        req_mock.post('http://www.example.com/',
+                      text='False')
+        action = "example:get_http"
+        target = {}
+        with mock.patch('oslo_policy.policy.Enforcer.authorize') as auth_mock:
+            auth_mock.side_effect = oslo_policy.InvalidScope(
+                action, self.context.system_scope, 'invalid_scope')
+            exc = self.assertRaises(exception.PolicyNotAuthorized,
+                                    policy.authorize, self.context,
+                                    action, target)
+            self.assertEqual(
+                "Policy doesn't allow %s to be performed." % action,
+                exc.format_message())
+
     @mock.patch.object(policy.LOG, 'warning')
     def test_verify_deprecated_policy_using_old_action(self, mock_warning):
 
@@ -256,7 +273,7 @@ class IsAdminCheckTestCase(test.NoDBTestCase):
         mock_auth.assert_called_once_with(
             'context_is_admin',
             {'user_id': 'fake-user', 'project_id': 'fake-project'},
-            ctxt.to_policy_values())
+            ctxt)
 
 
 class AdminRolePolicyTestCase(test.NoDBTestCase):
@@ -330,13 +347,11 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-lock-server:unlock:unlock_override",
 "os_compute_api:os-migrate-server:migrate",
 "os_compute_api:os-migrate-server:migrate_live",
-"os_compute_api:os-networks",
-"os_compute_api:os-networks-associate",
 "os_compute_api:os-quota-sets:update",
 "os_compute_api:os-quota-sets:delete",
-"os_compute_api:os-security-group-default-rules",
 "os_compute_api:os-server-diagnostics",
-"os_compute_api:os-services",
+"os_compute_api:os-services:update",
+"os_compute_api:os-services:delete",
 "os_compute_api:os-shelve:shelve_offload",
 "os_compute_api:os-simple-tenant-usage:list",
 "os_compute_api:os-availability-zone:detail",
@@ -400,22 +415,17 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:servers:update",
 "os_compute_api:servers:create_image:allow_volume_backed",
 "os_compute_api:os-admin-password",
-"os_compute_api:os-attach-interfaces",
 "os_compute_api:os-attach-interfaces:create",
 "os_compute_api:os-attach-interfaces:delete",
-"os_compute_api:os-consoles:create",
-"os_compute_api:os-consoles:delete",
-"os_compute_api:os-consoles:index",
-"os_compute_api:os-consoles:show",
 "os_compute_api:os-console-output",
 "os_compute_api:os-remote-consoles",
-"os_compute_api:os-deferred-delete",
+"os_compute_api:os-deferred-delete:restore",
+"os_compute_api:os-deferred-delete:force",
 "os_compute_api:os-flavor-access",
 "os_compute_api:os-flavor-extra-specs:index",
 "os_compute_api:os-flavor-extra-specs:show",
 "os_compute_api:os-floating-ip-pools",
 "os_compute_api:os-floating-ips",
-"os_compute_api:os-instance-actions",
 "os_compute_api:limits",
 "os_compute_api:os-multinic",
 "os_compute_api:os-networks:view",
@@ -435,16 +445,31 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-shelve:shelve",
 "os_compute_api:os-shelve:unshelve",
 "os_compute_api:os-volumes",
-"os_compute_api:os-volumes-attachments:index",
-"os_compute_api:os-volumes-attachments:show",
 "os_compute_api:os-volumes-attachments:create",
 "os_compute_api:os-volumes-attachments:delete",
-"os_compute_api:os-availability-zone:list",
 )
 
         self.allow_all_rules = (
 "os_compute_api:os-quota-sets:defaults",
+"os_compute_api:os-availability-zone:list",
 )
+
+        self.system_reader_rules = (
+"os_compute_api:os-services:list",
+)
+
+        self.system_reader_or_owner_rules = (
+"os_compute_api:os-volumes-attachments:index",
+"os_compute_api:os-volumes-attachments:show",
+"os_compute_api:os-attach-interfaces:list",
+"os_compute_api:os-attach-interfaces:show",
+"os_compute_api:os-instance-actions:list",
+"os_compute_api:os-instance-actions:show",
+)
+
+        self.allow_nobody_rules = (
+            servers_policy.CROSS_CELL_RESIZE,
+        )
 
     def test_all_rules_in_sample_file(self):
         special_rules = ["context_is_admin", "admin_or_owner", "default"]
@@ -471,14 +496,25 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
         for rule in self.allow_all_rules:
             policy.authorize(self.non_admin_context, rule, self.target)
 
+    def test_allow_nobody_rules(self):
+        """No one can perform these operations, not even admin."""
+        for rule in self.allow_nobody_rules:
+            self.assertRaises(exception.PolicyNotAuthorized, policy.authorize,
+                              self.admin_context, rule, self.target)
+
     def test_rule_missing(self):
         rules = policy.get_rules()
         # eliqiao os_compute_api:os-quota-class-sets:show requires
         # admin=True or quota_class match, this rule won't belong to
         # admin_only, non_admin, admin_or_user, empty_rule
         special_rules = ('admin_api', 'admin_or_owner', 'context_is_admin',
-                         'os_compute_api:os-quota-class-sets:show')
+                         'os_compute_api:os-quota-class-sets:show',
+                         'system_admin_api', 'system_reader_api',
+                         'project_member_api', 'project_reader_api',
+                         'system_admin_or_owner', 'system_or_project_reader')
         result = set(rules.keys()) - set(self.admin_only_rules +
             self.admin_or_owner_rules +
-            self.allow_all_rules + special_rules)
+            self.allow_all_rules + self.system_reader_rules +
+            self.system_reader_or_owner_rules +
+            self.allow_nobody_rules + special_rules)
         self.assertEqual(set([]), result)

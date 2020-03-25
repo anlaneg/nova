@@ -65,7 +65,7 @@ def format_event(event, project_id, expect_traceback=True, expect_host=False,
                  expect_hostId=False):
     '''Remove keys that aren't serialized.'''
     to_delete = ['id', 'created_at', 'updated_at', 'deleted_at', 'deleted',
-                 'action_id']
+                 'action_id', 'details']
     if not expect_traceback:
         to_delete.append('traceback')
     if not expect_host:
@@ -84,45 +84,6 @@ def format_event(event, project_id, expect_traceback=True, expect_host=False,
     return event
 
 
-class InstanceActionsPolicyTestV21(test.NoDBTestCase):
-    instance_actions = instance_actions_v21
-
-    def setUp(self):
-        super(InstanceActionsPolicyTestV21, self).setUp()
-        self.controller = self.instance_actions.InstanceActionsController()
-
-    def _get_http_req(self, action):
-        fake_url = '/%s/servers/12/%s' % (fakes.FAKE_PROJECT_ID, action)
-        return fakes.HTTPRequest.blank(fake_url)
-
-    def _get_instance_other_project(self, req):
-        context = req.environ['nova.context']
-        project_id = '%s_unequal' % context.project_id
-        return objects.Instance(project_id=project_id)
-
-    def _set_policy_rules(self):
-        rules = {'compute:get': '',
-                 'os_compute_api:os-instance-actions':
-                     'project_id:%(project_id)s'}
-        policy.set_rules(oslo_policy.Rules.from_dict(rules))
-
-    @mock.patch('nova.api.openstack.common.get_instance')
-    def test_list_actions_restricted_by_project(self, mock_instance_get):
-        self._set_policy_rules()
-        req = self._get_http_req('os-instance-actions')
-        mock_instance_get.return_value = self._get_instance_other_project(req)
-        self.assertRaises(exception.Forbidden, self.controller.index, req,
-                          uuids.fake)
-
-    @mock.patch('nova.api.openstack.common.get_instance')
-    def test_get_action_restricted_by_project(self, mock_instance_get):
-        self._set_policy_rules()
-        req = self._get_http_req('os-instance-actions/1')
-        mock_instance_get.return_value = self._get_instance_other_project(req)
-        self.assertRaises(exception.Forbidden, self.controller.show, req,
-                          uuids.fake, '1')
-
-
 class InstanceActionsTestV21(test.NoDBTestCase):
     instance_actions = instance_actions_v21
     wsgi_api_version = os_wsgi.DEFAULT_API_VERSION
@@ -132,7 +93,8 @@ class InstanceActionsTestV21(test.NoDBTestCase):
 
     def fake_get(self, context, instance_uuid, expected_attrs=None,
                  cell_down_support=False):
-        return objects.Instance(uuid=instance_uuid)
+        return objects.Instance(
+            context, id=1, uuid=instance_uuid, project_id=context.project_id)
 
     def setUp(self):
         super(InstanceActionsTestV21, self).setUp()
@@ -159,7 +121,7 @@ class InstanceActionsTestV21(test.NoDBTestCase):
 
     def _set_policy_rules(self):
         rules = {'compute:get': '',
-                 'os_compute_api:os-instance-actions': '',
+                 'os_compute_api:os-instance-actions:show': '',
                  'os_compute_api:os-instance-actions:events': 'is_admin:True'}
         policy.set_rules(oslo_policy.Rules.from_dict(rules))
 
@@ -273,7 +235,8 @@ class InstanceActionsTestV221(InstanceActionsTestV21):
     def fake_get(self, context, instance_uuid, expected_attrs=None,
                  cell_down_support=False):
         self.assertEqual('yes', context.read_deleted)
-        return objects.Instance(uuid=instance_uuid)
+        return objects.Instance(
+            context, id=1, uuid=instance_uuid, project_id=context.project_id)
 
 
 class InstanceActionsTestV251(InstanceActionsTestV221):

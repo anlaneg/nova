@@ -59,16 +59,12 @@ Swap
   Amount of swap space (in megabytes) to use. This property is optional. If
   unspecified, the value is ``0`` by default.
 
-RXTX Factor
-  The receive/transmit factor of any network ports on the instance. This
-  property is optional. If unspecified, the value is ``1.0`` by default.
-
-  .. note::
-
-     This property only applies if using the ``xen`` compute driver with the
-     ``nova-network`` network driver. It will likely be deprecated in a future
-     release. ``neutron`` users should refer to the :neutron-doc:`neutron QoS
-     documentation <admin/config-qos.html>`
+RXTX Factor (DEPRECATED)
+  This value was only applicable when using the ``xen`` compute driver with the
+  ``nova-network`` network driver. Since ``nova-network`` has been removed,
+  this no longer applies and should not be specified. It will likely be
+  removed in a future release. ``neutron`` users should refer to the
+  :neutron-doc:`neutron QoS documentation <admin/config-qos.html>`
 
 Is Public
   Boolean value that defines whether the flavor is available to all users or
@@ -483,6 +479,42 @@ CPU pinning policy
 
      The ``hw:cpu_thread_policy`` option is only valid if ``hw:cpu_policy`` is
      set to ``dedicated``.
+
+.. _pci_numa_affinity_policy:
+
+PCI NUMA Affinity Policy
+  For the libvirt driver, you can specify the NUMA affinity policy for
+  PCI passthrough devices and neutron SR-IOV interfaces via the
+  ``hw:pci_numa_affinity_policy`` flavor extra spec or
+  ``hw_pci_numa_affinity_policy``  image property. The allowed values are
+  ``required``,``preferred`` or ``legacy`` (default).
+
+  **required**
+      This value will mean that nova will boot instances with PCI devices
+      **only** if at least one of the NUMA nodes of the instance is associated
+      with these PCI devices. It means that if NUMA node info for some PCI
+      devices could not be determined, those PCI devices wouldn't be consumable
+      by the instance. This provides maximum performance.
+
+  **preferred**
+      This value will mean that ``nova-scheduler`` will choose a compute host
+      with minimal consideration for the NUMA affinity of PCI devices.
+      ``nova-compute`` will attempt a best effort selection of PCI devices
+      based on NUMA affinity, however, if this is not possible then
+      ``nova-compute`` will fall back to scheduling on a NUMA node that is not
+      associated with the PCI device.
+
+  **legacy**
+      This is the default value and it describes the current nova behavior.
+      Usually we have information about association of PCI devices with NUMA
+      nodes. However, some PCI devices do not provide such information. The
+      ``legacy`` value will mean that nova will boot instances with PCI device
+      if either:
+
+      * The PCI device is associated with at least one NUMA nodes on which the
+        instance will be booted
+
+      * There is no information about PCI-NUMA affinity available
 
 .. _extra-specs-numa-topology:
 

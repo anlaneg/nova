@@ -178,8 +178,15 @@ class MigrationTask(base.TaskBase):
         # cell.
         cross_cell_allowed = (
             self.request_spec.requested_destination.allow_cross_cell_move)
-        self.request_spec.requested_destination.cell = (
-            instance_mapping.cell_mapping)
+        if targeted and cross_cell_allowed:
+            # If a target host is specified it might be in another cell so
+            # we cannot restrict the cell in this case. We would not prefer
+            # the source cell in that case either since we know where the
+            # user wants it to go. We just let the scheduler figure it out.
+            self.request_spec.requested_destination.cell = None
+        else:
+            self.request_spec.requested_destination.cell = (
+                instance_mapping.cell_mapping)
 
         # NOTE(takashin): In the case that the target host is specified,
         # if the migration is failed, it is not necessary to retry
@@ -190,7 +197,10 @@ class MigrationTask(base.TaskBase):
             self.request_spec.retry = None
 
         # Log our plan before calling the scheduler.
-        if cross_cell_allowed:
+        if cross_cell_allowed and targeted:
+            LOG.debug('Not restricting cell for targeted cold migration.',
+                      instance=self.instance)
+        elif cross_cell_allowed:
             LOG.debug('Allowing migration from cell %(cell)s',
                       {'cell': instance_mapping.cell_mapping.identity},
                       instance=self.instance)
@@ -390,8 +400,6 @@ class MigrationTask(base.TaskBase):
             selection = self._reschedule()
 
         scheduler_utils.populate_filter_properties(legacy_props, selection)
-        # context is not serializable
-        legacy_props.pop('context', None)
 
         (host, node) = (selection.service_host, selection.nodename)
 
@@ -431,8 +439,7 @@ class MigrationTask(base.TaskBase):
         selection, self.host_list = self._get_host_supporting_request(
             selection_list)
 
-        scheduler_utils.fill_provider_mapping(
-            self.context, self.reportclient, self.request_spec, selection)
+        scheduler_utils.fill_provider_mapping(self.request_spec, selection)
         return selection
 
     def _reschedule(self):
@@ -469,8 +476,7 @@ class MigrationTask(base.TaskBase):
                     selection.allocation_request_version)
                 if host_available:
                     scheduler_utils.fill_provider_mapping(
-                        self.context, self.reportclient, self.request_spec,
-                        selection)
+                        self.request_spec, selection)
             else:
                 # Some deployments use different schedulers that do not
                 # use Placement, so they will not have an

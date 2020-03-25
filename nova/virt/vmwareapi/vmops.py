@@ -45,7 +45,7 @@ from nova.console import type as ctype
 from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
-from nova import network
+from nova.network import neutron
 from nova import objects
 from nova.objects import fields
 from nova import utils
@@ -146,20 +146,20 @@ class VMwareVMOps(object):
         self._datastore_browser_mapping = {}
         self._imagecache = imagecache.ImageCacheManager(self._session,
                                                         self._base_folder)
-        self._network_api = network.API()
+        self._network_api = neutron.API()
 
     def _get_base_folder(self):
         # Enable more than one compute node to run on the same host
         if CONF.vmware.cache_prefix:
             base_folder = '%s%s' % (CONF.vmware.cache_prefix,
-                                    CONF.image_cache_subdirectory_name)
+                                    CONF.image_cache.subdirectory_name)
         # Ensure that the base folder is unique per compute node
-        elif CONF.remove_unused_base_images:
+        elif CONF.image_cache.remove_unused_base_images:
             base_folder = '%s%s' % (CONF.my_ip,
-                                    CONF.image_cache_subdirectory_name)
+                                    CONF.image_cache.subdirectory_name)
         else:
             # Aging disable ensures backward compatibility
-            base_folder = CONF.image_cache_subdirectory_name
+            base_folder = CONF.image_cache.subdirectory_name
         return base_folder
 
     def _extend_virtual_disk(self, instance, requested_size, name, dc_ref):
@@ -274,7 +274,6 @@ class VMwareVMOps(object):
                               metadata):
         vif_infos = vmwarevif.get_vif_info(self._session,
                                            self._cluster,
-                                           utils.is_neutron(),
                                            image_info.vif_model,
                                            network_info)
         LOG.debug('Instance VIF info %s', vif_infos, instance=instance)
@@ -1373,6 +1372,8 @@ class VMwareVMOps(object):
         vm_util.reconfigure_vm(self._session, vm_ref, vm_resize_spec)
 
     def _resize_disk(self, instance, vm_ref, vmdk, flavor):
+        extra_specs = self._get_extra_specs(instance.flavor,
+                                            instance.image_meta)
         if (flavor.root_gb > instance.flavor.root_gb and
             flavor.root_gb > vmdk.capacity_in_bytes / units.Gi):
             root_disk_in_kb = flavor.root_gb * units.Mi
@@ -1393,9 +1394,12 @@ class VMwareVMOps(object):
                               original_disk)
             ds_util.disk_move(self._session, dc_info.ref, resized_disk,
                               vmdk.path)
-            self._volumeops.attach_disk_to_vm(vm_ref, instance,
-                                              vmdk.adapter_type,
-                                              vmdk.disk_type, vmdk.path)
+        else:
+            self._volumeops.detach_disk_from_vm(vm_ref, instance, vmdk.device)
+
+        self._volumeops.attach_disk_to_vm(
+            vm_ref, instance, vmdk.adapter_type, vmdk.disk_type, vmdk.path,
+            disk_io_limits=extra_specs.disk_io_limits)
 
     def _remove_ephemerals_and_swap(self, vm_ref):
         devices = vm_util.get_ephemerals(self._session, vm_ref)
@@ -1493,6 +1497,8 @@ class VMwareVMOps(object):
 
     def _revert_migration_update_disks(self, vm_ref, instance, vmdk,
                                        block_device_info):
+        extra_specs = self._get_extra_specs(instance.flavor,
+                                            instance.image_meta)
         ds_ref = vmdk.device.backing.datastore
         dc_info = self.get_datacenter_ref_and_name(ds_ref)
         folder = ds_obj.DatastorePath.parse(vmdk.path).dirname
@@ -1508,9 +1514,12 @@ class VMwareVMOps(object):
             ds_util.disk_delete(self._session, dc_info.ref, vmdk.path)
             ds_util.disk_move(self._session, dc_info.ref,
                               str(original_disk), vmdk.path)
-            self._volumeops.attach_disk_to_vm(vm_ref, instance,
-                                              vmdk.adapter_type,
-                                              vmdk.disk_type, vmdk.path)
+        else:
+            self._volumeops.detach_disk_from_vm(vm_ref, instance,
+                                                vmdk.device)
+        self._volumeops.attach_disk_to_vm(
+            vm_ref, instance, vmdk.adapter_type, vmdk.disk_type, vmdk.path,
+            disk_io_limits=extra_specs.disk_io_limits)
         # Reconfigure ephemerals
         self._remove_ephemerals_and_swap(vm_ref)
         self._resize_create_ephemerals_and_swap(vm_ref, instance,
@@ -1644,7 +1653,7 @@ class VMwareVMOps(object):
             constants.DEFAULT_VIF_MODEL)
         for vif in network_info:
             vif_info = vmwarevif.get_vif_dict(
-                self._session, cluster_ref, vif_model, utils.is_neutron(), vif)
+                self._session, cluster_ref, vif_model, vif)
             device = vmwarevif.get_network_device(hardware_devices,
                                                   vif['address'])
             devices.append(vm_util.update_vif_spec(client_factory, vif_info,
@@ -1855,7 +1864,7 @@ class VMwareVMOps(object):
         self._set_machine_id(client_factory, instance, network_info)
 
     def manage_image_cache(self, context, instances):
-        if not CONF.remove_unused_base_images:
+        if not CONF.image_cache.remove_unused_base_images:
             LOG.debug("Image aging disabled. Aging will not be done.")
             return
 
@@ -1905,7 +1914,7 @@ class VMwareVMOps(object):
                                               constants.DEFAULT_VIF_MODEL)
         vif_model = vm_util.convert_vif_model(vif_model)
         vif_info = vmwarevif.get_vif_dict(self._session, self._cluster,
-                                          vif_model, utils.is_neutron(), vif)
+                                          vif_model, vif)
         vm_ref = vm_util.get_vm_ref(self._session, instance)
         # Ensure that there is not a race with the port index management
         with lockutils.lock(instance.uuid,

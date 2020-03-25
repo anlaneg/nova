@@ -463,48 +463,6 @@ class ComputeHostAPITestCase(test.TestCase):
             [mock.call(ctxt, uuids.service_uuid)] * 2)
         self.assertEqual('db://fake2', ctxt.db_connection)
 
-    @mock.patch('nova.context.set_target_cell')
-    @mock.patch('nova.compute.api.load_cells')
-    @mock.patch('nova.objects.Service.get_by_id')
-    def test_service_delete(self, get_by_id, load_cells, set_target):
-        compute.CELLS = [
-            objects.CellMapping(),
-            objects.CellMapping(),
-            objects.CellMapping(),
-        ]
-
-        service = mock.MagicMock()
-        get_by_id.side_effect = [exception.ServiceNotFound(service_id=1),
-                                 service,
-                                 exception.ServiceNotFound(service_id=1)]
-        self.host_api.service_delete(self.ctxt, 1)
-        get_by_id.assert_has_calls([mock.call(self.ctxt, 1),
-                                    mock.call(self.ctxt, 1),
-                                    mock.call(self.ctxt, 1)])
-        service.destroy.assert_called_once_with()
-        set_target.assert_called_once_with(self.ctxt, compute.CELLS[1])
-
-    @mock.patch('nova.context.set_target_cell')
-    @mock.patch('nova.compute.api.load_cells')
-    @mock.patch('nova.objects.Service.get_by_id')
-    def test_service_delete_ambiguous(self, get_by_id, load_cells, set_target):
-        compute.CELLS = [
-            objects.CellMapping(),
-            objects.CellMapping(),
-            objects.CellMapping(),
-        ]
-
-        service1 = mock.MagicMock()
-        service2 = mock.MagicMock()
-        get_by_id.side_effect = [exception.ServiceNotFound(service_id=1),
-                                 service1,
-                                 service2]
-        self.assertRaises(exception.ServiceNotUnique,
-                          self.host_api.service_delete, self.ctxt, 1)
-        self.assertFalse(service1.destroy.called)
-        self.assertFalse(service2.destroy.called)
-        self.assertFalse(set_target.called)
-
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'aggregate_remove_host')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
@@ -513,11 +471,12 @@ class ComputeHostAPITestCase(test.TestCase):
     @mock.patch.object(objects.HostMapping, 'get_by_host')
     def test_service_delete_compute_in_aggregate(
             self, mock_hm, mock_get_cn, mock_add_host, mock_remove_host):
-        compute = self.host_api.db.service_create(self.ctxt,
-            {'host': 'fake-compute-host',
-             'binary': 'nova-compute',
-             'topic': 'compute',
-             'report_count': 0})
+        compute = objects.Service(self.ctxt,
+                                  **{'host': 'fake-compute-host',
+                                     'binary': 'nova-compute',
+                                     'topic': 'compute',
+                                     'report_count': 0})
+        compute.create()
         # This is needed because of lazy-loading service.compute_node
         cn = objects.ComputeNode(uuid=uuids.cn, host="fake-compute-host",
                                  hypervisor_hostname="fake-compute-host")
@@ -653,42 +612,36 @@ class ComputeAggregateAPITestCase(test.TestCase):
 
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'aggregate_add_host')
-    @mock.patch.object(compute.LOG, 'warning')
-    def test_aggregate_add_host_bad_placement(
-            self, mock_log, mock_pc_add_host):
+    def test_aggregate_add_host_bad_placement(self, mock_pc_add_host):
         hostname = 'fake-host'
         mock_pc_add_host.side_effect = exception.PlacementAPIConnectFailure
         aggregate = self.aggregate_api.create_aggregate(
             self.ctxt, 'aggregate', None)
         agg_uuid = aggregate.uuid
-        self.aggregate_api.add_host_to_aggregate(
-            self.ctxt, aggregate.id, hostname)
-        # Nothing should blow up in Rocky, but we should get a warning about
-        # placement connectivity failure
-        msg = ("Failed to associate %s with a placement "
-               "aggregate: %s. There was a failure to communicate "
-               "with the placement service.")
-        mock_log.assert_called_with(msg, hostname, agg_uuid)
+        self.assertRaises(exception.PlacementAPIConnectFailure,
+                          self.aggregate_api.add_host_to_aggregate,
+                          self.ctxt, aggregate.id, hostname)
+        mock_pc_add_host.assert_called_once_with(
+            self.ctxt, agg_uuid, host_name=hostname)
 
     @mock.patch('nova.objects.Aggregate.delete_host')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'aggregate_remove_host')
-    @mock.patch.object(compute.LOG, 'warning')
     def test_aggregate_remove_host_bad_placement(
-            self, mock_log, mock_pc_remove_host, mock_agg_obj_delete_host):
+            self, mock_pc_remove_host, mock_agg_obj_delete_host):
         hostname = 'fake-host'
         mock_pc_remove_host.side_effect = exception.PlacementAPIConnectFailure
         aggregate = self.aggregate_api.create_aggregate(
             self.ctxt, 'aggregate', None)
         agg_uuid = aggregate.uuid
-        self.aggregate_api.remove_host_from_aggregate(
-            self.ctxt, aggregate.id, hostname)
-        # Nothing should blow up in Rocky, but we should get a warning about
-        # placement connectivity failure
-        msg = ("Failed to remove association of %s with a placement "
-               "aggregate: %s. There was a failure to communicate "
-               "with the placement service.")
-        mock_log.assert_called_with(msg, hostname, agg_uuid)
+        self.assertRaises(exception.PlacementAPIConnectFailure,
+                          self.aggregate_api.remove_host_from_aggregate,
+                          self.ctxt, aggregate.id, hostname)
+        mock_pc_remove_host.assert_called_once_with(
+            self.ctxt, agg_uuid, hostname)
+        # Make sure mock_agg_obj_delete_host wasn't called since placement
+        # should be tried first and failed with a server failure.
+        mock_agg_obj_delete_host.assert_not_called()
 
     @mock.patch('nova.objects.Aggregate.delete_host')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
@@ -705,6 +658,8 @@ class ComputeAggregateAPITestCase(test.TestCase):
             self.ctxt, aggregate.id, hostname)
         # Nothing should blow up in Rocky, but we should get a warning
         msg = ("Failed to remove association of %s with a placement "
-               "aggregate: %s. This may be corrected after running "
-               "nova-manage placement sync_aggregates.")
+               "aggregate: %s.")
         mock_log.assert_called_with(msg, hostname, err)
+        # In this case Aggregate.delete_host is still called because the
+        # ResourceProviderNotFound error is just logged.
+        mock_agg_obj_delete_host.assert_called_once_with(hostname)

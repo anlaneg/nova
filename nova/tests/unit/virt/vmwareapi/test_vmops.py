@@ -36,7 +36,6 @@ from nova.tests.unit import fake_instance
 import nova.tests.unit.image.fake
 from nova.tests.unit.virt.vmwareapi import fake as vmwareapi_fake
 from nova.tests.unit.virt.vmwareapi import stubs
-from nova import utils
 from nova import version
 from nova.virt import hardware
 from nova.virt.vmwareapi import constants
@@ -64,8 +63,8 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         vmwareapi_fake.reset()
         stubs.set_stubs(self)
         self.flags(enabled=True, group='vnc')
-        self.flags(image_cache_subdirectory_name='vmware_base',
-                   my_ip='',
+        self.flags(subdirectory_name='vmware_base', group='image_cache')
+        self.flags(my_ip='',
                    flat_injected=True)
         self._context = context.RequestContext('fake_user', 'fake_project')
         self._session = driver.VMwareAPISession()
@@ -384,7 +383,7 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
     def test_get_datacenter_ref_and_name_with_no_datastore(self):
         self._test_get_datacenter_ref_and_name()
 
-    @mock.patch('nova.image.api.API.get')
+    @mock.patch('nova.image.glance.API.get')
     @mock.patch.object(vm_util, 'power_off_instance')
     @mock.patch.object(ds_util, 'disk_copy')
     @mock.patch.object(vm_util, 'get_vm_ref', return_value='fake-ref')
@@ -786,7 +785,8 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
                 '[fake] uuid/root.vmdk')
             mock_attach_disk.assert_called_once_with(
                     'fake-ref', self._instance, 'fake-adapter', 'fake-disk',
-                    '[fake] uuid/root.vmdk')
+                    '[fake] uuid/root.vmdk',
+                    disk_io_limits=extra_specs.disk_io_limits)
             fake_remove_ephemerals_and_swap.assert_called_once_with('fake-ref')
             fake_resize_create_ephemerals_and_swap.assert_called_once_with(
                 'fake-ref', self._instance, None)
@@ -949,10 +949,11 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
                                                  'vm-ref', 'fake-spec')
 
     @mock.patch.object(vmops.VMwareVMOps, '_extend_virtual_disk')
+    @mock.patch.object(vmops.VMwareVMOps, '_get_extra_specs')
     @mock.patch.object(ds_util, 'disk_move')
     @mock.patch.object(ds_util, 'disk_copy')
     def test_resize_disk(self, fake_disk_copy, fake_disk_move,
-                         fake_extend):
+                         fake_get_extra_specs, fake_extend):
         datastore = ds_obj.Datastore(ref='fake-ref', name='fake')
         device = vmwareapi_fake.DataObject()
         backing = vmwareapi_fake.DataObject()
@@ -971,6 +972,8 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
             mock_attach_disk = self._vmops._volumeops.attach_disk_to_vm
             mock_detach_disk = self._vmops._volumeops.detach_disk_from_vm
 
+            extra_specs = vm_util.ExtraSpecs()
+            fake_get_extra_specs.return_value = extra_specs
             flavor = fake_flavor.fake_flavor_obj(self._context,
                          root_gb=self._instance.flavor.root_gb + 1)
             self._vmops._resize_disk(self._instance, 'fake-ref', vmdk, flavor)
@@ -995,7 +998,8 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
 
             mock_attach_disk.assert_called_once_with(
                     'fake-ref', self._instance, 'fake-adapter', 'fake-disk',
-                    '[fake] uuid/root.vmdk')
+                    '[fake] uuid/root.vmdk',
+                    disk_io_limits=extra_specs.disk_io_limits)
 
     @mock.patch.object(vm_util, 'detach_devices_from_vm')
     @mock.patch.object(vm_util, 'get_swap')
@@ -1134,7 +1138,7 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         mock_attach_cdrom_to_vm.assert_called_once_with(
                 vm_ref, self._instance, self._ds.ref, str(upload_iso_path))
 
-    @mock.patch('nova.image.api.API.get')
+    @mock.patch('nova.image.glance.API.get')
     @mock.patch.object(vmops.LOG, 'debug')
     @mock.patch.object(vmops.VMwareVMOps, '_fetch_image_if_missing')
     @mock.patch.object(vmops.VMwareVMOps, '_get_vm_config_info')
@@ -1582,8 +1586,6 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         'nova.virt.vmwareapi.vmops.VMwareVMOps.get_datacenter_ref_and_name')
     @mock.patch('nova.virt.vmwareapi.vif.get_vif_info',
                 return_value=[])
-    @mock.patch('nova.utils.is_neutron',
-                return_value=False)
     @mock.patch('nova.virt.vmwareapi.vm_util.get_vm_create_spec',
                 return_value='fake_create_spec')
     @mock.patch('nova.virt.vmwareapi.vm_util.create_vm',
@@ -1606,7 +1608,6 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
                    mock_mkdir,
                    mock_create_vm,
                    mock_get_create_spec,
-                   mock_is_neutron,
                    mock_get_vif_info,
                    mock_get_datacenter_ref_and_name,
                    mock_get_datastore,
@@ -1649,7 +1650,7 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
                 mock.patch.object(uuidutils, 'generate_uuid',
                                   return_value='tmp-uuid'),
                 mock.patch.object(images, 'fetch_image'),
-                mock.patch('nova.image.api.API.get'),
+                mock.patch('nova.image.glance.API.get'),
                 mock.patch.object(vutil, 'get_inventory_path',
                                   return_value=self._dc_info.name),
                 mock.patch.object(self._vmops, '_get_extra_specs',
@@ -1665,12 +1666,10 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
                               network_info=network_info,
                               block_device_info=block_device_info)
 
-            mock_is_neutron.assert_called_once_with()
-
             self.assertEqual(2, mock_mkdir.call_count)
 
             mock_get_vif_info.assert_called_once_with(
-                    self._session, self._cluster.obj, False,
+                    self._session, self._cluster.obj,
                     constants.DEFAULT_VIF_MODEL, network_info)
             mock_get_create_spec.assert_called_once_with(
                     self._session.vim.client.factory,
@@ -2723,19 +2722,19 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         self.assertEqual('flavor-policy', extra_specs.storage_policy)
 
     def test_get_base_folder_not_set(self):
-        self.flags(image_cache_subdirectory_name='vmware_base')
+        self.flags(subdirectory_name='vmware_base', group='image_cache')
         base_folder = self._vmops._get_base_folder()
         self.assertEqual('vmware_base', base_folder)
 
     def test_get_base_folder_host_ip(self):
-        self.flags(my_ip='7.7.7.7',
-                   image_cache_subdirectory_name='_base')
+        self.flags(my_ip='7.7.7.7')
+        self.flags(subdirectory_name='_base', group='image_cache')
         base_folder = self._vmops._get_base_folder()
         self.assertEqual('7.7.7.7_base', base_folder)
 
     def test_get_base_folder_cache_prefix(self):
         self.flags(cache_prefix='my_prefix', group='vmware')
-        self.flags(image_cache_subdirectory_name='_base')
+        self.flags(subdirectory_name='_base', group='image_cache')
         base_folder = self._vmops._get_base_folder()
         self.assertEqual('my_prefix_base', base_folder)
 
@@ -2849,9 +2848,7 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         self._vmops._network_api = _network_api
 
         vif_info = vif.get_vif_dict(self._session, self._cluster,
-                                    'VirtualE1000',
-                                    utils.is_neutron(),
-                                    self._network_values)
+                                    'VirtualE1000', self._network_values)
         extra_specs = vm_util.ExtraSpecs()
         mock_extra_specs.return_value = extra_specs
         self._vmops.attach_interface(self._context, self._instance,
@@ -2955,9 +2952,7 @@ class VMwareVMOpsTestCase(test.NoDBTestCase):
         self._vmops._network_api = _network_api
 
         vif_info = vif.get_vif_dict(self._session, self._cluster,
-                                    'VirtualE1000',
-                                    utils.is_neutron(),
-                                    self._network_values)
+                                    'VirtualE1000', self._network_values)
         vif_limits = vm_util.Limits(shares_level='custom',
                                     shares_share=40)
         extra_specs = vm_util.ExtraSpecs(vif_limits=vif_limits)

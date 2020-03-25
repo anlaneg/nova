@@ -59,8 +59,15 @@ Limitations
   See the `feature support matrix`_ for information on which drivers support
   the feature at any given release.
 
+* As of the 18.0.0 Rocky release, image signature and trusted image
+  certification validation is not supported with the Libvirt compute driver
+  when using the ``rbd`` image backend (``[libvirt]/images_type=rbd``) and
+  ``RAW`` formatted images. This is due to the images being cloned directly in
+  the ``RBD`` backend avoiding calls to download and verify on the compute.
+
 * As of the 18.0.0 Rocky release, trusted image certification validation is
-  not supported with volume-backed (boot from volume) instances. The block
+  not supported with volume-backed
+  (:term:`boot from volume <Boot From Volume>`) instances. The block
   storage service support may be available in a future release:
 
   https://blueprints.launchpad.net/cinder/+spec/certificate-validate

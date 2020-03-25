@@ -875,6 +875,10 @@ class LibvirtConfigGuestDevice(LibvirtConfigObject):
     def __init__(self, **kwargs):
         super(LibvirtConfigGuestDevice, self).__init__(**kwargs)
 
+    @property
+    def uses_virtio(self):
+        return False
+
 
 class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
 
@@ -983,6 +987,10 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
 
         if len(iotune) > 0:
             dev.append(iotune)
+
+    @property
+    def uses_virtio(self):
+        return 'virtio' == self.target_bus
 
     def format_dom(self):
         dev = super(LibvirtConfigGuestDisk, self).format_dom()
@@ -1573,6 +1581,10 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
         self.device_addr = None
         self.mtu = None
 
+    @property
+    def uses_virtio(self):
+        return 'virtio' == self.model
+
     def format_dom(self):
         dev = super(LibvirtConfigGuestInterface, self).format_dom()
 
@@ -1861,6 +1873,10 @@ class LibvirtConfigGuestVideo(LibvirtConfigGuestDevice):
         self.heads = None
         self.driver_iommu = False
 
+    @property
+    def uses_virtio(self):
+        return 'virtio' == self.type
+
     def format_dom(self):
         dev = super(LibvirtConfigGuestVideo, self).format_dom()
 
@@ -1890,6 +1906,10 @@ class LibvirtConfigMemoryBalloon(LibvirtConfigGuestDevice):
         self.period = None
         self.driver_iommu = False
 
+    @property
+    def uses_virtio(self):
+        return 'virtio' == self.model
+
     def format_dom(self):
         dev = super(LibvirtConfigMemoryBalloon, self).format_dom()
         dev.set('model', str(self.model))
@@ -1910,6 +1930,12 @@ class LibvirtConfigGuestController(LibvirtConfigGuestDevice):
         self.index = None
         self.model = None
         self.driver_iommu = False
+
+    @property
+    def uses_virtio(self):
+        model_is_virtio = 'virtio-scsi' == self.model
+        type_is_virtio = 'virtio-serial' == self.type
+        return model_is_virtio or type_is_virtio
 
     def format_dom(self):
         controller = super(LibvirtConfigGuestController, self).format_dom()
@@ -3015,6 +3041,10 @@ class LibvirtConfigGuestRng(LibvirtConfigGuestDevice):
         self.rate_period = None
         self.rate_bytes = None
         self.driver_iommu = False
+
+    @property
+    def uses_virtio(self):
+        return 'virtio' == self.device_model
 
     def format_dom(self):
         dev = super(LibvirtConfigGuestRng, self).format_dom()

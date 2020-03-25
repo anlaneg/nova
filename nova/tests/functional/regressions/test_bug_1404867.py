@@ -16,8 +16,7 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import integrated_helpers
 
 
-class DeleteWithReservedVolumes(integrated_helpers._IntegratedTestBase,
-                                integrated_helpers.InstanceHelperMixin):
+class DeleteWithReservedVolumes(integrated_helpers._IntegratedTestBase):
     """Test deleting of an instance in error state that has a reserved volume.
 
     This test boots a server from volume which will fail to be scheduled,
@@ -55,7 +54,7 @@ class DeleteWithReservedVolumes(integrated_helpers._IntegratedTestBase,
                 ]
             }
         })
-        return self._wait_for_state_change(self.api, server, 'ERROR')
+        return self._wait_for_state_change(server, 'ERROR')
 
     def test_delete_with_reserved_volumes_new(self):
         self.cinder = self.useFixture(

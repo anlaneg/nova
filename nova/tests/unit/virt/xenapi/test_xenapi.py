@@ -31,7 +31,6 @@ from oslo_config import fixture as config_fixture
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
-from oslo_utils import importutils
 from oslo_utils import uuidutils
 import testtools
 
@@ -232,8 +231,6 @@ class XenAPIVolumeTestCase(stubs.XenAPITestBaseNoDB):
         self.fixture = self.useFixture(config_fixture.Config(lockutils.CONF))
         self.fixture.config(disable_process_locking=True,
                             group='oslo_concurrency')
-        self.flags(firewall_driver='nova.virt.xenapi.firewall.'
-                                   'Dom0IptablesFirewallDriver')
         self.flags(connection_url='http://localhost',
                    connection_password='test_pass',
                    group='xenserver')
@@ -285,14 +282,10 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
     """Unit tests for VM operations."""
     def setUp(self):
         super(XenAPIVMTestCase, self).setUp()
-        self.useFixture(test.SampleNetworks())
-        self.network = importutils.import_object(CONF.network_manager)
         self.fixture = self.useFixture(config_fixture.Config(lockutils.CONF))
         self.fixture.config(disable_process_locking=True,
                             group='oslo_concurrency')
-        self.flags(instance_name_template='%d',
-                   firewall_driver='nova.virt.xenapi.firewall.'
-                                   'Dom0IptablesFirewallDriver')
+        self.flags(instance_name_template='%d')
         self.flags(connection_url='http://localhost',
                    connection_password='test_pass',
                    group='xenserver')
@@ -334,12 +327,6 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
     def tearDown(self):
         fake_image.FakeImageService_reset()
         super(XenAPIVMTestCase, self).tearDown()
-
-    def stubout_firewall_driver(self):
-        self.stub_out('nova.virt.firewall.IptablesFirewallDriver.'
-                      'prepare_instance_filter', lambda *args: None)
-        self.stub_out('nova.virt.firewall.IptablesFirewallDriver.'
-                      'instance_filter_exists', lambda *args: None)
 
     def stubout_instance_snapshot(self):
         self.stub_out('nova.virt.xenapi.vm_utils._fetch_image',
@@ -611,9 +598,6 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
 
         mock_create_vbd.side_effect = create_bad_vbd
         self.stubout_instance_snapshot()
-        # Stubbing out firewall driver as previous stub sets alters
-        # xml rpc result parsing
-        self.stubout_firewall_driver()
         instance = self._create_instance()
 
         image_id = "my_snapshot_id"
@@ -636,9 +620,6 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
 
         self.stubout_instance_snapshot()
         self.stubout_is_snapshot()
-        # Stubbing out firewall driver as previous stub sets alters
-        # xml rpc result parsing
-        self.stubout_firewall_driver()
 
         instance = self._create_instance()
 
@@ -738,10 +719,6 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
                                         'gateway': '2001:db8:0:1::1'}],
                               'ips': [{'enabled': '1',
                                        'ip': '192.168.1.100',
-                                       'netmask': '255.255.255.0',
-                                       'gateway': '192.168.1.1'},
-                                      {'enabled': '1',
-                                       'ip': '192.168.1.101',
                                        'netmask': '255.255.255.0',
                                        'gateway': '192.168.1.1'}],
                               'label': 'test1',
@@ -1133,65 +1110,6 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
 
         mock_inject_auto_disk_config.assert_called_once_with(instance,
                                                              mock.ANY)
-
-    @mock.patch.object(vmops.VMOps, '_create_vifs')
-    @mock.patch('nova.privsep.linux_net.add_bridge', return_value=('', ''))
-    @mock.patch('nova.privsep.linux_net.set_device_mtu')
-    @mock.patch('nova.privsep.linux_net.set_device_enabled')
-    @mock.patch('nova.privsep.linux_net.set_device_macaddr')
-    @mock.patch('nova.privsep.linux_net.change_ip')
-    @mock.patch('nova.privsep.linux_net.address_command_deprecated')
-    @mock.patch('nova.privsep.linux_net.ipv4_forwarding_check',
-                return_value=False)
-    @mock.patch('nova.privsep.linux_net._enable_ipv4_forwarding_inner')
-    @mock.patch('nova.privsep.linux_net.add_vlan')
-    @mock.patch('nova.privsep.linux_net.iptables_get_rules',
-                return_value=('', ''))
-    @mock.patch('nova.privsep.linux_net.iptables_set_rules',
-                return_value=('', ''))
-    @mock.patch('nova.privsep.linux_net.bridge_setfd')
-    @mock.patch('nova.privsep.linux_net.bridge_disable_stp')
-    @mock.patch('nova.privsep.linux_net.bridge_add_interface',
-                return_value=('', ''))
-    def test_spawn_vlanmanager(self, mock_bridge_add_interface,
-                               mock_bridge_disable_stp,
-                               mock_bridge_setfd,
-                               mock_iptables_set_rules,
-                               mock_iptables_get_rules,
-                               mock_add_vlan, mock_forwarding_enable,
-                               mock_forwarding_check,
-                               mock_address_command_horrid,
-                               mock_change_ip, mock_set_macaddr,
-                               mock_set_enabled, mock_set_mtu, mock_add_bridge,
-                               mock_create_vifs):
-        self.flags(network_manager='nova.network.manager.VlanManager',
-                   vlan_interface='fake0')
-        # Reset network table
-        xenapi_fake.reset_table('network')
-        # Instance 2 will use vlan network (see db/fakes.py)
-        ctxt = self.context.elevated()
-        inst2 = self._create_instance(False, obj=True)
-        networks = self.network.db.network_get_all(ctxt)
-        with mock.patch('nova.objects.network.Network._from_db_object'):
-            for network in networks:
-                self.network.set_network_host(ctxt, network)
-
-        self.network.allocate_for_instance(ctxt,
-                          instance_id=inst2.id,
-                          instance_uuid=inst2.uuid,
-                          host=CONF.host,
-                          vpn=None,
-                          rxtx_factor=3,
-                          project_id=self.project_id,
-                          macs=None)
-        self._test_spawn(IMAGE_MACHINE,
-                         IMAGE_KERNEL,
-                         IMAGE_RAMDISK,
-                         instance_id=inst2.id,
-                         create_record=False)
-        # TODO(salvatore-orlando): a complete test here would require
-        # a check for making sure the bridge for the VM's VIF is
-        # consistent with bridge specified in nova db
 
     def test_spawn_with_network_qos(self):
         self._create_instance()
@@ -1730,8 +1648,6 @@ class XenAPIMigrateInstance(stubs.XenAPITestBase):
         self.flags(connection_url='http://localhost',
                    connection_password='test_pass',
                    group='xenserver')
-        self.flags(firewall_driver='nova.virt.xenapi.firewall.'
-                                   'Dom0IptablesFirewallDriver')
         stubs.stubout_session(self, stubs.FakeSessionForVMTests)
         db_fakes.stub_out_db_instance_api(self)
         xenapi_fake.create_network('fake', 'fake_br1')
@@ -2529,8 +2445,6 @@ class XenAPIAutoDiskConfigTestCase(stubs.XenAPITestBase):
         self.flags(connection_url='http://localhost',
                    connection_password='test_pass',
                    group='xenserver')
-        self.flags(firewall_driver='nova.virt.xenapi.firewall.'
-                                   'Dom0IptablesFirewallDriver')
         stubs.stubout_session(self, stubs.FakeSessionForVMTests)
         self.conn = xenapi_conn.XenAPIDriver(fake.FakeVirtAPI(), False)
 
@@ -2642,8 +2556,6 @@ class XenAPIGenerateLocal(stubs.XenAPITestBase):
         self.flags(connection_url='http://localhost',
                    connection_password='test_pass',
                    group='xenserver')
-        self.flags(firewall_driver='nova.virt.xenapi.firewall.'
-                                   'Dom0IptablesFirewallDriver')
         stubs.stubout_session(self, stubs.FakeSessionForVMTests)
         db_fakes.stub_out_db_instance_api(self)
         self.conn = xenapi_conn.XenAPIDriver(fake.FakeVirtAPI(), False)
@@ -2753,8 +2665,6 @@ class XenAPIBWCountersTestCase(stubs.XenAPITestBaseNoDB):
         self.flags(connection_url='http://localhost',
                    connection_password='test_pass',
                    group='xenserver')
-        self.flags(firewall_driver='nova.virt.xenapi.firewall.'
-                                   'Dom0IptablesFirewallDriver')
         stubs.stubout_session(self, stubs.FakeSessionForVMTests)
         self.conn = xenapi_conn.XenAPIDriver(fake.FakeVirtAPI(), False)
 
@@ -2813,282 +2723,6 @@ class XenAPIBWCountersTestCase(stubs.XenAPITestBaseNoDB):
         instances = [dict(name='instance-0001', uuid='1-2-3-4-5')]
         result = self.conn.get_all_bw_counters(instances)
         self.assertEqual(result, [])
-
-
-# TODO(salvatore-orlando): this class and
-# nova.tests.unit.virt.test_libvirt.IPTablesFirewallDriverTestCase
-# share a lot of code.  Consider abstracting common code in a base
-# class for firewall driver testing.
-#
-# FIXME(sirp): convert this to use XenAPITestBaseNoDB
-class XenAPIDom0IptablesFirewallTestCase(stubs.XenAPITestBase):
-
-    REQUIRES_LOCKING = True
-
-    _in_rules = [
-      '# Generated by iptables-save v1.4.10 on Sat Feb 19 00:03:19 2011',
-      '*nat',
-      ':PREROUTING ACCEPT [1170:189210]',
-      ':INPUT ACCEPT [844:71028]',
-      ':OUTPUT ACCEPT [5149:405186]',
-      ':POSTROUTING ACCEPT [5063:386098]',
-      '# Completed on Mon Dec  6 11:54:13 2010',
-      '# Generated by iptables-save v1.4.4 on Mon Dec  6 11:54:13 2010',
-      '*mangle',
-      ':INPUT ACCEPT [969615:281627771]',
-      ':FORWARD ACCEPT [0:0]',
-      ':OUTPUT ACCEPT [915599:63811649]',
-      ':nova-block-ipv4 - [0:0]',
-      '[0:0] -A INPUT -i virbr0 -p tcp -m tcp --dport 67 -j ACCEPT ',
-      '[0:0] -A FORWARD -d 192.168.122.0/24 -o virbr0 -m state --state RELATED'
-      ',ESTABLISHED -j ACCEPT ',
-      '[0:0] -A FORWARD -s 192.168.122.0/24 -i virbr0 -j ACCEPT ',
-      '[0:0] -A FORWARD -i virbr0 -o virbr0 -j ACCEPT ',
-      '[0:0] -A FORWARD -o virbr0 -j REJECT '
-      '--reject-with icmp-port-unreachable ',
-      '[0:0] -A FORWARD -i virbr0 -j REJECT '
-      '--reject-with icmp-port-unreachable ',
-      'COMMIT',
-      '# Completed on Mon Dec  6 11:54:13 2010',
-      '# Generated by iptables-save v1.4.4 on Mon Dec  6 11:54:13 2010',
-      '*filter',
-      ':INPUT ACCEPT [969615:281627771]',
-      ':FORWARD ACCEPT [0:0]',
-      ':OUTPUT ACCEPT [915599:63811649]',
-      ':nova-block-ipv4 - [0:0]',
-      '[0:0] -A INPUT -i virbr0 -p tcp -m tcp --dport 67 -j ACCEPT ',
-      '[0:0] -A FORWARD -d 192.168.122.0/24 -o virbr0 -m state --state RELATED'
-      ',ESTABLISHED -j ACCEPT ',
-      '[0:0] -A FORWARD -s 192.168.122.0/24 -i virbr0 -j ACCEPT ',
-      '[0:0] -A FORWARD -i virbr0 -o virbr0 -j ACCEPT ',
-      '[0:0] -A FORWARD -o virbr0 -j REJECT '
-      '--reject-with icmp-port-unreachable ',
-      '[0:0] -A FORWARD -i virbr0 -j REJECT '
-      '--reject-with icmp-port-unreachable ',
-      'COMMIT',
-      '# Completed on Mon Dec  6 11:54:13 2010',
-    ]
-
-    _in6_filter_rules = [
-      '# Generated by ip6tables-save v1.4.4 on Tue Jan 18 23:47:56 2011',
-      '*filter',
-      ':INPUT ACCEPT [349155:75810423]',
-      ':FORWARD ACCEPT [0:0]',
-      ':OUTPUT ACCEPT [349256:75777230]',
-      'COMMIT',
-      '# Completed on Tue Jan 18 23:47:56 2011',
-    ]
-
-    def setUp(self):
-        super(XenAPIDom0IptablesFirewallTestCase, self).setUp()
-        self.flags(connection_url='http://localhost',
-                   connection_password='test_pass',
-                   group='xenserver')
-        self.flags(instance_name_template='%d',
-                   firewall_driver='nova.virt.xenapi.firewall.'
-                                   'Dom0IptablesFirewallDriver')
-        self.user_id = 'mappin'
-        self.project_id = 'fake'
-        stubs.stubout_session(self, stubs.FakeSessionForFirewallTests,
-                              test_case=self)
-        self.context = context.RequestContext(self.user_id, self.project_id)
-        self.network = importutils.import_object(CONF.network_manager)
-        self.conn = xenapi_conn.XenAPIDriver(fake.FakeVirtAPI(), False)
-        self.fw = self.conn._vmops.firewall_driver
-
-    def _create_instance_ref(self):
-        return db.instance_create(self.context,
-                                  {'user_id': self.user_id,
-                                   'project_id': self.project_id,
-                                   'instance_type_id': 1})
-
-    def _create_test_security_group(self):
-        admin_ctxt = context.get_admin_context()
-        secgroup = db.security_group_create(admin_ctxt,
-                                {'user_id': self.user_id,
-                                 'project_id': self.project_id,
-                                 'name': 'testgroup',
-                                 'description': 'test group'})
-        db.security_group_rule_create(admin_ctxt,
-                                      {'parent_group_id': secgroup['id'],
-                                       'protocol': 'icmp',
-                                       'from_port': -1,
-                                       'to_port': -1,
-                                       'cidr': '192.168.11.0/24'})
-
-        db.security_group_rule_create(admin_ctxt,
-                                      {'parent_group_id': secgroup['id'],
-                                       'protocol': 'icmp',
-                                       'from_port': 8,
-                                       'to_port': -1,
-                                       'cidr': '192.168.11.0/24'})
-
-        db.security_group_rule_create(admin_ctxt,
-                                      {'parent_group_id': secgroup['id'],
-                                       'protocol': 'tcp',
-                                       'from_port': 80,
-                                       'to_port': 81,
-                                       'cidr': '192.168.10.0/24'})
-        return secgroup
-
-    def _validate_security_group(self):
-        in_rules = [l for l in self._in_rules if not l.startswith('#')]
-        for rule in in_rules:
-            if 'nova' not in rule:
-                self.assertIn(rule, self._out_rules,
-                              'Rule went missing: %s' % rule)
-
-        instance_chain = None
-        for rule in self._out_rules:
-            # This is pretty crude, but it'll do for now
-            # last two octets change
-            if re.search('-d 192.168.[0-9]{1,3}.[0-9]{1,3} -j', rule):
-                instance_chain = rule.split(' ')[-1]
-                break
-        self.assertTrue(instance_chain, "The instance chain wasn't added")
-        security_group_chain = None
-        for rule in self._out_rules:
-            # This is pretty crude, but it'll do for now
-            if '-A %s -j' % instance_chain in rule:
-                security_group_chain = rule.split(' ')[-1]
-                break
-        self.assertTrue(security_group_chain,
-                        "The security group chain wasn't added")
-
-        regex = re.compile(r'\[0\:0\] -A .* -j ACCEPT -p icmp'
-                           ' -s 192.168.11.0/24')
-        match_rules = [rule for rule in self._out_rules if regex.match(rule)]
-        self.assertGreater(len(match_rules), 0,
-                           "ICMP acceptance rule wasn't added")
-
-        regex = re.compile(r'\[0\:0\] -A .* -j ACCEPT -p icmp -m icmp'
-                           ' --icmp-type 8 -s 192.168.11.0/24')
-        match_rules = [rule for rule in self._out_rules if regex.match(rule)]
-        self.assertGreater(len(match_rules), 0,
-                           "ICMP Echo Request acceptance rule wasn't added")
-
-        regex = re.compile(r'\[0\:0\] -A .* -j ACCEPT -p tcp --dport 80:81'
-                           ' -s 192.168.10.0/24')
-        match_rules = [rule for rule in self._out_rules if regex.match(rule)]
-        self.assertGreater(len(match_rules), 0,
-                           "TCP port 80/81 acceptance rule wasn't added")
-
-    def test_static_filters(self):
-        instance_ref = self._create_instance_ref()
-        src_instance_ref = self._create_instance_ref()
-        admin_ctxt = context.get_admin_context()
-        secgroup = self._create_test_security_group()
-
-        src_secgroup = db.security_group_create(admin_ctxt,
-                                                {'user_id': self.user_id,
-                                                 'project_id': self.project_id,
-                                                 'name': 'testsourcegroup',
-                                                 'description': 'src group'})
-        db.security_group_rule_create(admin_ctxt,
-                                      {'parent_group_id': secgroup['id'],
-                                       'protocol': 'tcp',
-                                       'from_port': 80,
-                                       'to_port': 81,
-                                       'group_id': src_secgroup['id']})
-
-        db.instance_add_security_group(admin_ctxt, instance_ref['uuid'],
-                                       secgroup['id'])
-        db.instance_add_security_group(admin_ctxt, src_instance_ref['uuid'],
-                                       src_secgroup['id'])
-        instance_ref = db.instance_get(admin_ctxt, instance_ref['id'])
-        src_instance_ref = db.instance_get(admin_ctxt, src_instance_ref['id'])
-
-        network_model = fake_network.fake_get_instance_nw_info(self, 1)
-
-        self.stub_out('nova.objects.Instance.get_network_info',
-                      lambda instance: network_model)
-
-        self.fw.prepare_instance_filter(instance_ref, network_model)
-        self.fw.apply_instance_filter(instance_ref, network_model)
-
-        self._validate_security_group()
-        # Extra test for TCP acceptance rules
-        for ip in network_model.fixed_ips():
-            if ip['version'] != 4:
-                continue
-            regex = re.compile(r'\[0\:0\] -A .* -j ACCEPT -p tcp'
-                               ' --dport 80:81 -s %s' % ip['address'])
-            match_rules = [rule for rule in self._out_rules
-                           if regex.match(rule)]
-            self.assertGreater(len(match_rules), 0,
-                               "TCP port 80/81 acceptance rule wasn't added")
-
-        db.instance_destroy(admin_ctxt, instance_ref['uuid'])
-
-    def test_filters_for_instance_with_ip_v6(self):
-        self.flags(use_ipv6=True)
-        network_info = fake_network.fake_get_instance_nw_info(self, 1)
-        rulesv4, rulesv6 = self.fw._filters_for_instance("fake", network_info)
-        self.assertEqual(len(rulesv4), 2)
-        self.assertEqual(len(rulesv6), 1)
-
-    def test_filters_for_instance_without_ip_v6(self):
-        self.flags(use_ipv6=False)
-        network_info = fake_network.fake_get_instance_nw_info(self, 1)
-        rulesv4, rulesv6 = self.fw._filters_for_instance("fake", network_info)
-        self.assertEqual(len(rulesv4), 2)
-        self.assertEqual(len(rulesv6), 0)
-
-    def test_multinic_iptables(self):
-        ipv4_rules_per_addr = 1
-        ipv4_addr_per_network = 2
-        ipv6_rules_per_addr = 1
-        ipv6_addr_per_network = 1
-        networks_count = 5
-        instance_ref = self._create_instance_ref()
-        _get_instance_nw_info = fake_network.fake_get_instance_nw_info
-        network_info = _get_instance_nw_info(self,
-                                             networks_count,
-                                             ipv4_addr_per_network)
-        network_info[0]['network']['subnets'][0]['meta']['dhcp_server'] = \
-            '1.1.1.1'
-        ipv4_len = len(self.fw.iptables.ipv4['filter'].rules)
-        ipv6_len = len(self.fw.iptables.ipv6['filter'].rules)
-        inst_ipv4, inst_ipv6 = self.fw.instance_rules(instance_ref,
-                                                      network_info)
-        self.fw.prepare_instance_filter(instance_ref, network_info)
-        ipv4 = self.fw.iptables.ipv4['filter'].rules
-        ipv6 = self.fw.iptables.ipv6['filter'].rules
-        ipv4_network_rules = len(ipv4) - len(inst_ipv4) - ipv4_len
-        ipv6_network_rules = len(ipv6) - len(inst_ipv6) - ipv6_len
-        # Extra rules are for the DHCP request
-        rules = (ipv4_rules_per_addr * ipv4_addr_per_network *
-                 networks_count) + 2
-        self.assertEqual(ipv4_network_rules, rules)
-        self.assertEqual(ipv6_network_rules,
-                  ipv6_rules_per_addr * ipv6_addr_per_network * networks_count)
-
-    def test_do_refresh_security_group_rules(self):
-        admin_ctxt = context.get_admin_context()
-        instance_ref = self._create_instance_ref()
-        network_info = fake_network.fake_get_instance_nw_info(self, 1, 1)
-        secgroup = self._create_test_security_group()
-        db.instance_add_security_group(admin_ctxt, instance_ref['uuid'],
-                                       secgroup['id'])
-        self.fw.prepare_instance_filter(instance_ref, network_info)
-        self.fw.instance_info[instance_ref['id']] = (instance_ref,
-                                                     network_info)
-        self._validate_security_group()
-        # add a rule to the security group
-        db.security_group_rule_create(admin_ctxt,
-                                      {'parent_group_id': secgroup['id'],
-                                       'protocol': 'udp',
-                                       'from_port': 200,
-                                       'to_port': 299,
-                                       'cidr': '192.168.99.0/24'})
-        # validate the extra rule
-        self.fw.refresh_security_group_rules(secgroup)
-        regex = re.compile(r'\[0\:0\] -A .* -j ACCEPT -p udp --dport 200:299'
-                           ' -s 192.168.99.0/24')
-        match_rules = [rule for rule in self._out_rules if regex.match(rule)]
-        self.assertGreater(len(match_rules), 0,
-                           "Rules were not updated properly. "
-                           "The rule for UDP acceptance is missing")
 
 
 class XenAPISRSelectionTestCase(stubs.XenAPITestBaseNoDB):
@@ -3152,11 +2786,11 @@ def _create_service_entries(context, values={'avail_zone1': ['fake_host1',
                                          'avail_zone2': ['fake_host3'], }):
     for hosts in values.values():
         for service_host in hosts:
-            db.service_create(context,
-                              {'host': service_host,
+            objects.Service(context,
+                            **{'host': service_host,
                                'binary': 'nova-compute',
                                'topic': 'compute',
-                               'report_count': 0})
+                               'report_count': 0}).create()
     return values
 
 
@@ -3170,8 +2804,6 @@ class XenAPIAggregateTestCase(stubs.XenAPITestBase):
                    connection_password='test_pass',
                    group='xenserver')
         self.flags(instance_name_template='%d',
-                   firewall_driver='nova.virt.xenapi.firewall.'
-                                   'Dom0IptablesFirewallDriver',
                    host='host',
                    compute_driver='xenapi.XenAPIDriver',
                    default_availability_zone='avail_zone1')
@@ -3526,9 +3158,7 @@ class XenAPILiveMigrateTestCase(stubs.XenAPITestBaseNoDB):
         self.flags(connection_url='http://localhost',
                    connection_password='test_pass',
                    group='xenserver')
-        self.flags(firewall_driver='nova.virt.xenapi.firewall.'
-                                   'Dom0IptablesFirewallDriver',
-                   host='host')
+        self.flags(host='host')
         db_fakes.stub_out_db_instance_api(self)
         self.context = context.get_admin_context()
 
@@ -3552,12 +3182,6 @@ class XenAPILiveMigrateTestCase(stubs.XenAPITestBaseNoDB):
             self.assertTrue(result)
             pre.assert_called_with("ctx", "inst", "bdi", "nw", "di", "data")
 
-    @mock.patch('nova.virt.firewall.IptablesFirewallDriver.'
-                'apply_instance_filter')
-    @mock.patch('nova.virt.firewall.IptablesFirewallDriver.'
-                'prepare_instance_filter')
-    @mock.patch('nova.virt.firewall.IptablesFirewallDriver.'
-                'setup_basic_filtering')
     @mock.patch.object(vm_utils, 'create_kernel_and_ramdisk',
                        return_value=('fake-kernel-file', 'fake-ramdisk-file'))
     @mock.patch.object(vm_utils, 'strip_base_mirror_from_vdis')
@@ -3565,9 +3189,7 @@ class XenAPILiveMigrateTestCase(stubs.XenAPITestBaseNoDB):
     @mock.patch.object(vmops.VMOps, '_post_start_actions')
     def test_post_live_migration_at_destination(
             self, mock_post_action, mock_get_vm_opaque_ref,
-            mock_strip_base_mirror_from_vdis, mock_create_kernel_and_ramdisk,
-            mock_setup_basic_filtering, mock_prepare_instance_filter,
-            mock_apply_instance_filter):
+            mock_strip_base_mirror_from_vdis, mock_create_kernel_and_ramdisk):
         # ensure method is present
         stubs.stubout_session(self, stubs.FakeSessionForVMTests)
         self.conn = xenapi_conn.XenAPIDriver(fake.FakeVirtAPI(), False)
@@ -3583,12 +3205,6 @@ class XenAPILiveMigrateTestCase(stubs.XenAPITestBaseNoDB):
         mock_create_kernel_and_ramdisk.assert_called_once_with(
             self.context, self.conn._session, fake_instance,
             fake_instance['name'])
-        mock_setup_basic_filtering.assert_called_once_with(fake_instance,
-                                                           fake_network_info)
-        mock_prepare_instance_filter.assert_called_once_with(fake_instance,
-                                                             fake_network_info)
-        mock_apply_instance_filter.assert_called_once_with(fake_instance,
-                                                           fake_network_info)
 
     @mock.patch.object(vm_utils, 'host_in_this_pool')
     def test_check_can_live_migrate_destination_with_block_migration(
@@ -4028,8 +3644,6 @@ class XenAPIInjectMetadataTestCase(stubs.XenAPITestBaseNoDB):
         self.flags(connection_url='http://localhost',
                    connection_password='test_pass',
                    group='xenserver')
-        self.flags(firewall_driver='nova.virt.xenapi.firewall.'
-                                   'Dom0IptablesFirewallDriver')
         stubs.stubout_session(self, stubs.FakeSessionForVMTests)
         self.conn = xenapi_conn.XenAPIDriver(fake.FakeVirtAPI(), False)
 

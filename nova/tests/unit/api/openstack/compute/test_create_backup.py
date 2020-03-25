@@ -340,8 +340,7 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
         self.assertIn("Cannot 'createBackup' instance %(id)s"
                       % {'id': instance.uuid}, ex.explanation)
 
-    @mock.patch.object(common, 'check_img_metadata_properties_quota')
-    def test_create_backup_with_non_existed_instance(self, mock_check_image):
+    def test_create_backup_with_non_existed_instance(self):
         body_map = {
             'createBackup': {
                 'name': 'Backup 1',
@@ -355,7 +354,6 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
         self.assertRaises(webob.exc.HTTPNotFound,
                           self.controller._create_backup,
                           self.req, uuid, body=body_map)
-        mock_check_image.assert_called_once_with(self.context, {})
 
     def test_create_backup_with_invalid_create_backup(self):
         body = {
@@ -396,34 +394,6 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
         mock_is_volume_backed.assert_called_once_with(self.context, instance)
         self.assertIn('Backup is not supported for volume-backed instances',
                       six.text_type(ex))
-
-
-class CreateBackupPolicyEnforcementv21(test.NoDBTestCase):
-
-    def setUp(self):
-        super(CreateBackupPolicyEnforcementv21, self).setUp()
-        self.controller = create_backup_v21.CreateBackupController()
-        self.req = fakes.HTTPRequest.blank('')
-
-    def test_create_backup_policy_failed(self):
-        rule_name = "os_compute_api:os-create-backup"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        metadata = {'123': 'asdf'}
-        body = {
-            'createBackup': {
-                'name': 'Backup 1',
-                'backup_type': 'daily',
-                'rotation': 1,
-                'metadata': metadata,
-            },
-        }
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller._create_backup, self.req, fakes.FAKE_UUID,
-            body=body)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
 
 
 class CreateBackupTestsV239(test.NoDBTestCase):

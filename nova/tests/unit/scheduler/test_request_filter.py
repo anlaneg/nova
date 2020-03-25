@@ -11,6 +11,7 @@
 #    under the License.
 
 import mock
+import os_traits as ot
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
@@ -19,6 +20,7 @@ from nova import exception
 from nova import objects
 from nova.scheduler import request_filter
 from nova import test
+from nova.tests.unit import utils
 
 
 class TestRequestFilter(test.NoDBTestCase):
@@ -130,15 +132,15 @@ class TestRequestFilter(test.NoDBTestCase):
         self.assertItemsEqual(
             set([uuids.agg1, uuids.agg2, uuids.agg4]),
             reqspec.requested_destination.forbidden_aggregates)
-        mock_getnotmd.assert_called_once_with(self.context, mock.ANY,
-                                              'trait:', value='required')
-        self.assertItemsEqual(agg4_traits, mock_getnotmd.call_args[0][1])
+        mock_getnotmd.assert_called_once_with(
+            self.context, utils.ItemsMatcher(agg4_traits), 'trait:',
+            value='required')
 
     @mock.patch('nova.objects.aggregate.AggregateList.'
                 'get_non_matching_by_metadata_keys')
     def test_isolate_aggregates_union(self, mock_getnotmd):
         agg_traits = {'trait:HW_GPU_API_DXVA': 'required',
-                       'trait:CUSTOM_XYZ_TRAIT': 'required'}
+                      'trait:CUSTOM_XYZ_TRAIT': 'required'}
         mock_getnotmd.return_value = [
             objects.Aggregate(
                 uuid=uuids.agg2,
@@ -164,9 +166,9 @@ class TestRequestFilter(test.NoDBTestCase):
             ','.join(sorted([uuids.agg1, uuids.agg2, uuids.agg4])),
             ','.join(sorted(
                 reqspec.requested_destination.forbidden_aggregates)))
-        mock_getnotmd.assert_called_once_with(self.context, mock.ANY,
-                                              'trait:', value='required')
-        self.assertItemsEqual(agg_traits, mock_getnotmd.call_args[0][1])
+        mock_getnotmd.assert_called_once_with(
+            self.context, utils.ItemsMatcher(agg_traits), 'trait:',
+            value='required')
 
     @mock.patch('nova.objects.aggregate.AggregateList.'
                 'get_non_matching_by_metadata_keys')
@@ -185,9 +187,8 @@ class TestRequestFilter(test.NoDBTestCase):
         self.assertTrue(result)
         self.assertNotIn('requested_destination', reqspec)
         keys = ['trait:%s' % trait for trait in traits]
-        mock_getnotmd.assert_called_once_with(self.context, mock.ANY,
-                                              'trait:', value='required')
-        self.assertItemsEqual(keys, mock_getnotmd.call_args[0][1])
+        mock_getnotmd.assert_called_once_with(
+            self.context, utils.ItemsMatcher(keys), 'trait:', value='required')
 
     @mock.patch('nova.objects.aggregate.AggregateList.'
                 'get_non_matching_by_metadata_keys')
@@ -209,9 +210,8 @@ class TestRequestFilter(test.NoDBTestCase):
         self.assertNotIn('requested_destination', reqspec)
         keys = ['trait:%s' % trait for trait in flavor_traits.union(
             image_traits)]
-        mock_getnotmd.assert_called_once_with(self.context, mock.ANY,
-                                              'trait:', value='required')
-        self.assertItemsEqual(keys, mock_getnotmd.call_args[0][1])
+        mock_getnotmd.assert_called_once_with(
+            self.context, utils.ItemsMatcher(keys), 'trait:', value='required')
 
     @mock.patch('nova.objects.AggregateList.get_by_metadata')
     def test_require_tenant_aggregate_no_match(self, getmd):
@@ -330,9 +330,8 @@ class TestRequestFilter(test.NoDBTestCase):
                       value='myaz')])
 
         keys = ['trait:%s' % trait for trait in traits]
-        mock_getnotmd.assert_called_once_with(self.context, mock.ANY,
-                'trait:', value='required')
-        self.assertItemsEqual(keys, mock_getnotmd.call_args[0][1])
+        mock_getnotmd.assert_called_once_with(
+            self.context, utils.ItemsMatcher(keys), 'trait:', value='required')
 
     def test_require_image_type_support_disabled(self):
         self.flags(query_placement_for_image_type_support=False,
@@ -341,7 +340,8 @@ class TestRequestFilter(test.NoDBTestCase):
                                       is_bfv=False)
         # Assert that we completely skip the filter if disabled
         request_filter.require_image_type_support(self.context, reqspec)
-        self.assertEqual({}, reqspec.flavor.extra_specs)
+        self.assertEqual(0, len(reqspec.root_required))
+        self.assertEqual(0, len(reqspec.root_forbidden))
 
     def test_require_image_type_support_volume_backed(self):
         self.flags(query_placement_for_image_type_support=True,
@@ -350,7 +350,8 @@ class TestRequestFilter(test.NoDBTestCase):
                                       is_bfv=True)
         # Assert that we completely skip the filter if no image
         request_filter.require_image_type_support(self.context, reqspec)
-        self.assertEqual({}, reqspec.flavor.extra_specs)
+        self.assertEqual(0, len(reqspec.root_required))
+        self.assertEqual(0, len(reqspec.root_forbidden))
 
     def test_require_image_type_support_unknown(self):
         self.flags(query_placement_for_image_type_support=True,
@@ -361,7 +362,8 @@ class TestRequestFilter(test.NoDBTestCase):
             is_bfv=False)
         # Assert that we completely skip the filter if no matching trait
         request_filter.require_image_type_support(self.context, reqspec)
-        self.assertEqual({}, reqspec.flavor.extra_specs)
+        self.assertEqual(0, len(reqspec.root_required))
+        self.assertEqual(0, len(reqspec.root_forbidden))
 
     @mock.patch.object(request_filter, 'LOG')
     def test_require_image_type_support_adds_trait(self, mock_log):
@@ -371,11 +373,13 @@ class TestRequestFilter(test.NoDBTestCase):
             image=objects.ImageMeta(disk_format='raw'),
             flavor=objects.Flavor(extra_specs={}),
             is_bfv=False)
-        # Assert that we add the trait to the flavor as required
+        self.assertEqual(0, len(reqspec.root_required))
+        self.assertEqual(0, len(reqspec.root_forbidden))
+
+        # Request filter puts the trait into the request spec
         request_filter.require_image_type_support(self.context, reqspec)
-        self.assertEqual({'trait:COMPUTE_IMAGE_TYPE_RAW': 'required'},
-                         reqspec.flavor.extra_specs)
-        self.assertEqual(set(), reqspec.flavor.obj_what_changed())
+        self.assertEqual({ot.COMPUTE_IMAGE_TYPE_RAW}, reqspec.root_required)
+        self.assertEqual(0, len(reqspec.root_forbidden))
 
         log_lines = [c[0][0] for c in mock_log.debug.call_args_list]
         self.assertIn('added required trait', log_lines[0])
@@ -384,13 +388,14 @@ class TestRequestFilter(test.NoDBTestCase):
     @mock.patch.object(request_filter, 'LOG')
     def test_compute_status_filter(self, mock_log):
         reqspec = objects.RequestSpec(flavor=objects.Flavor(extra_specs={}))
+        self.assertEqual(0, len(reqspec.root_required))
+        self.assertEqual(0, len(reqspec.root_forbidden))
+
+        # Request filter puts the trait into the request spec
         request_filter.compute_status_filter(self.context, reqspec)
-        # The forbidden trait should be added to the RequestSpec.flavor.
-        self.assertEqual({'trait:COMPUTE_STATUS_DISABLED': 'forbidden'},
-                         reqspec.flavor.extra_specs)
-        # The RequestSpec.flavor changes should be reset so they are not
-        # persisted.
-        self.assertEqual(set(), reqspec.flavor.obj_what_changed())
+        self.assertEqual(0, len(reqspec.root_required))
+        self.assertEqual({ot.COMPUTE_STATUS_DISABLED}, reqspec.root_forbidden)
+
         # Assert both the in-method logging and trace decorator.
         log_lines = [c[0][0] for c in mock_log.debug.call_args_list]
         self.assertIn('added forbidden trait', log_lines[0])

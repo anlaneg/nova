@@ -86,17 +86,13 @@ _man_pages = [
     ('nova-api-os-compute', u'Cloud controller fabric'),
     ('nova-compute', u'Cloud controller fabric'),
     ('nova-conductor', u'Cloud controller fabric'),
-    ('nova-console', u'Cloud controller fabric'),
-    ('nova-dhcpbridge', u'Cloud controller fabric'),
     ('nova-manage', u'Cloud controller fabric'),
-    ('nova-network', u'Cloud controller fabric'),
     ('nova-novncproxy', u'Cloud controller fabric'),
     ('nova-rootwrap', u'Cloud controller fabric'),
     ('nova-scheduler', u'Cloud controller fabric'),
     ('nova-serialproxy', u'Cloud controller fabric'),
     ('nova-spicehtml5proxy', u'Cloud controller fabric'),
     ('nova-status', u'Cloud controller fabric'),
-    ('nova-xvpvncproxy', u'Cloud controller fabric'),
 ]
 
 man_pages = [
@@ -201,6 +197,7 @@ def monkey_patch_blockdiag():
     from codecs import getreader
 
     from blockdiag.imagedraw import textfolder
+    from blockdiag.utils import compat  # noqa
 
     # oh, blockdiag. Let's undo the mess you made.
     codecs.getreader = getreader

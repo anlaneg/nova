@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
 import contextlib
 import copy
 import datetime
@@ -27,6 +28,7 @@ from oslo_versionedobjects import fixture
 import six
 
 from nova import context
+from nova import exception
 from nova import objects
 from nova.objects import base
 from nova.objects import fields
@@ -974,7 +976,7 @@ class TestArgsSerializer(test.NoDBTestCase):
         super(TestArgsSerializer, self).setUp()
         self.now = timeutils.utcnow()
         self.str_now = utils.strtime(self.now)
-        self.unicode_str = u'\xF0\x9F\x92\xA9'
+        self.exc = exception.NotFound()
 
     @base.serialize_args
     def _test_serialize_args(self, *args, **kwargs):
@@ -983,14 +985,26 @@ class TestArgsSerializer(test.NoDBTestCase):
             self.assertEqual(expected_args[index], val)
 
         expected_kwargs = {'a': 'untouched', 'b': self.str_now,
-                           'c': self.str_now, 'exc_val': self.unicode_str}
+                           'c': self.str_now}
+
+        nonnova = kwargs.pop('nonnova', None)
+        if nonnova:
+            expected_kwargs['exc_val'] = 'TestingException'
+        else:
+            expected_kwargs['exc_val'] = self.exc.format_message()
         for key, val in kwargs.items():
             self.assertEqual(expected_kwargs[key], val)
 
     def test_serialize_args(self):
         self._test_serialize_args('untouched', self.now, self.now,
                                   a='untouched', b=self.now, c=self.now,
-                                  exc_val=self.unicode_str)
+                                  exc_val=self.exc)
+
+    def test_serialize_args_non_nova_exception(self):
+        self._test_serialize_args('untouched', self.now, self.now,
+                                  a='untouched', b=self.now, c=self.now,
+                                  exc_val=test.TestingException('foo'),
+                                  nonnova=True)
 
 
 class TestRegistry(test.NoDBTestCase):
@@ -1047,8 +1061,6 @@ object_data = {
     'ComputeNodeList': '1.17-52f3b0962b1c86b98590144463ebb192',
     'ConsoleAuthToken': '1.1-8da320fb065080eb4d3c2e5c59f8bf52',
     'CpuDiagnostics': '1.0-d256f2e442d1b837735fd17dfe8e3d47',
-    'DNSDomain': '1.0-7b0b2dab778454b6a7b6c66afe163a1a',
-    'DNSDomainList': '1.0-4ee0d9efdfd681fed822da88376e04d2',
     'Destination': '1.4-3b440d29459e2c98987ad5b25ad1cb2c',
     'DeviceBus': '1.0-77509ea1ea0dd750d5864b9bd87d3f9d',
     'DeviceMetadata': '1.0-04eb8fd218a49cbc3b1e54b774d179f7',
@@ -1057,26 +1069,22 @@ object_data = {
     'DiskMetadata': '1.0-e7a0f1ccccf10d26a76b28e7492f3788',
     'EC2Ids': '1.0-474ee1094c7ec16f8ce657595d8c49d9',
     'EC2InstanceMapping': '1.0-a4556eb5c5e94c045fe84f49cf71644f',
-    'FixedIP': '1.14-53e1c10b539f1a82fe83b1af4720efae',
-    'FixedIPList': '1.15-07b6261cef836cb09d2d8673f68ece15',
     'Flavor': '1.2-4ce99b41327bb230262e5a8f45ff0ce3',
     'FlavorList': '1.1-52b5928600e7ca973aa4fc1e46f3934c',
-    'FloatingIP': '1.10-52a67d52d85eb8b3f324a5b7935a335b',
-    'FloatingIPList': '1.12-e4debd21fddb12cf40d36f737225fa9d',
     'HVSpec': '1.2-de06bcec472a2f04966b855a49c46b41',
     'HostMapping': '1.0-1a3390a696792a552ab7bd31a77ba9ac',
     'HostMappingList': '1.1-18ac2bfb8c1eb5545bed856da58a79bc',
     'HyperVLiveMigrateData': '1.4-e265780e6acfa631476c8170e8d6fce0',
     'IDEDeviceBus': '1.0-29d4c9f27ac44197f01b6ac1b7e16502',
     'ImageMeta': '1.8-642d1b2eb3e880a367f37d72dd76162d',
-    'ImageMetaProps': '1.24-f92fa09d54185499da98f5430524964e',
+    'ImageMetaProps': '1.25-66fc973af215eb5701ed4034bb6f0685',
     'Instance': '2.7-d187aec68cad2e4d8b8a03a68e4739ce',
     'InstanceAction': '1.2-9a5abc87fdd3af46f45731960651efb5',
-    'InstanceActionEvent': '1.3-c749e1b3589e7117c81cb2aa6ac438d5',
+    'InstanceActionEvent': '1.4-5b1f361bd81989f8bb2c20bb7e8a4cb4',
     'InstanceActionEventList': '1.1-13d92fb953030cdbfee56481756e02be',
     'InstanceActionList': '1.1-a2b2fb6006b47c27076d3a1d48baa759',
     'InstanceDeviceMetadata': '1.0-74d78dd36aa32d26d2769a1b57caf186',
-    'InstanceExternalEvent': '1.3-e47782874cca95bb96e566286e9d1e23',
+    'InstanceExternalEvent': '1.4-06c2dfcf2d2813c24cd37ee728524f1a',
     'InstanceFault': '1.2-7ef01f16f1084ad1304a513d6d410a38',
     'InstanceFaultList': '1.2-6bb72de2872fe49ded5eb937a93f2451',
     'InstanceGroup': '1.11-852ac511d30913ee88f3c3a869a8f30a',
@@ -1085,7 +1093,7 @@ object_data = {
     'InstanceList': '2.6-238f125650c25d6d12722340d726f723',
     'InstanceMapping': '1.2-3bd375e65c8eb9c45498d2f87b882e03',
     'InstanceMappingList': '1.3-d34b6ebb076d542ae0f8b440534118da',
-    'InstanceNUMACell': '1.4-7c1eb9a198dee076b4de0840e45f4f55',
+    'InstanceNUMACell': '1.4-b68e13eacba363ae8f196abf0ffffb5b',
     'InstanceNUMATopology': '1.3-ec0030cb0402a49c96da7051c037082a',
     'InstancePCIRequest': '1.3-f6d324f1c337fad4f34892ed5f484c9a',
     'InstancePCIRequests': '1.1-65e38083177726d806684cb1cc0136d2',
@@ -1104,23 +1112,22 @@ object_data = {
     'NUMAPagesTopology': '1.1-edab9fa2dc43c117a38d600be54b4542',
     'NUMATopology': '1.2-c63fad38be73b6afd04715c9c1b29220',
     'NUMATopologyLimits': '1.1-4235c5da7a76c7e36075f0cd2f5cf922',
-    'Network': '1.2-a977ab383aa462a479b2fae8211a5dde',
     'NetworkInterfaceMetadata': '1.2-6f3d480b40fe339067b1c0dd4d656716',
-    'NetworkList': '1.2-69eca910d8fa035dfecd8ba10877ee59',
     'NetworkMetadata': '1.0-2cb8d21b34f87b0261d3e1d1ae5cf218',
     'NetworkRequest': '1.2-af1ff2d986999fbb79377712794d82aa',
     'NetworkRequestList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'NicDiagnostics': '1.0-895e9ad50e0f56d5258585e3e066aea5',
     'PCIDeviceBus': '1.0-2b891cb77e42961044689f3dc2718995',
-    'PciDevice': '1.6-2a2612baaa1786679e52084e82ca7e66',
+    'PciDevice': '1.6-25ca0542a22bc25386a72c0065a79c01',
     'PciDeviceList': '1.3-52ff14355491c8c580bdc0ba34c26210',
     'PciDevicePool': '1.1-3f5ddc3ff7bfa14da7f6c7e9904cc000',
     'PciDevicePoolList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'PowerVMLiveMigrateData': '1.4-a745f4eda16b45e1bc5686a0c498f27e',
-    'Quotas': '1.3-40fcefe522111dddd3e5e6155702cf4e',
-    'QuotasNoOp': '1.3-347a039fc7cfee7b225b68b5181e0733',
+    'Quotas': '1.3-3b2b91371f60e788035778fc5f87797d',
+    'QuotasNoOp': '1.3-d1593cf969c81846bc8192255ea95cce',
     'RequestGroup': '1.3-0458d350a8ec9d0673f9be5640a990ce',
-    'RequestSpec': '1.12-25010470f219af9b6163f2a457a513f5',
+    'RequestLevelParams': '1.0-1e5c8c18bd44cd233c8b32509c99d06f',
+    'RequestSpec': '1.13-e1aa38b2bf3f8547474ee9e4c0aa2745',
     'Resource': '1.0-d8a2abbb380da583b995fd118f6a8953',
     'ResourceList': '1.0-4a53826625cc280e15fae64a575e0879',
     'ResourceMetadata': '1.0-77509ea1ea0dd750d5864b9bd87d3f9d',
@@ -1130,8 +1137,6 @@ object_data = {
     'SchedulerRetries': '1.1-3c9c8b16143ebbb6ad7030e999d14cc0',
     'SecurityGroup': '1.2-86d67d8d3ab0c971e1dc86e02f9524a8',
     'SecurityGroupList': '1.1-c655ed13298e630f4d398152f7d08d71',
-    'SecurityGroupRule': '1.1-ae1da17b79970012e8536f88cb3c6b29',
-    'SecurityGroupRuleList': '1.2-0005c47fcd0fb78dd6d7fd32a1409f5b',
     'Selection': '1.1-548e3c2f04da2a61ceaf9c4e1589f264',
     'Service': '1.22-8a740459ab9bf258a19c8fcb875c2d9a',
     'ServiceList': '1.19-5325bce13eebcbf22edc9678285270cc',
@@ -1170,10 +1175,16 @@ def get_nova_objects():
     nova_classes = {}
     for name in all_classes:
         objclasses = all_classes[name]
-        if (objclasses[0].OBJ_PROJECT_NAMESPACE !=
-            base.NovaObject.OBJ_PROJECT_NAMESPACE):
-            continue
-        nova_classes[name] = objclasses
+        # NOTE(danms): All object registries that inherit from the
+        # base VersionedObjectRegistry share a common list of classes.
+        # That means even things like os_vif objects will be in our
+        # registry, and for any of them that share the same name
+        # (i.e. Network), we need to keep ours and exclude theirs.
+        our_ns = [cls for cls in objclasses
+                  if (cls.OBJ_PROJECT_NAMESPACE ==
+                      base.NovaObject.OBJ_PROJECT_NAMESPACE)]
+        if our_ns:
+            nova_classes[name] = our_ns
     return nova_classes
 
 
@@ -1215,8 +1226,7 @@ class TestObjectVersions(test.NoDBTestCase):
         init_args = {}
         init_kwargs = {}
 
-        checker = fixture.ObjectVersionChecker(
-            base.NovaObjectRegistry.obj_classes())
+        checker = fixture.ObjectVersionChecker(get_nova_objects())
         checker.test_compatibility_routines(use_manifest=True,
                                             init_args=init_args,
                                             init_kwargs=init_kwargs)
@@ -1318,3 +1328,40 @@ class TestObjMethodOverrides(test.NoDBTestCase):
             obj_class = obj_classes[obj_name][0]
             self.assertEqual(args,
                 utils.getargspec(obj_class.obj_reset_changes))
+
+
+class TestObjectsDefaultingOnInit(test.NoDBTestCase):
+    def test_init_behavior_policy(self):
+        all_objects = get_nova_objects()
+
+        violations = collections.defaultdict(list)
+
+        # NOTE(danms): Do not add things to this list!
+        #
+        # There is one known exception to this init policy, and that
+        # is the Service object because of the special behavior of the
+        # version field. We *want* to counteract the usual non-clobber
+        # behavior of that field specifically. See the comments in
+        # Service.__init__ for more details. This will likely never
+        # apply to any other non-ephemeral object, so this list should
+        # never grow.
+        exceptions = [objects.Service]
+
+        for name, objclasses in all_objects.items():
+            for objcls in objclasses:
+                if objcls in exceptions:
+                    continue
+
+                key = '%s-%s' % (name, objcls.VERSION)
+                obj = objcls()
+                if isinstance(obj, base.NovaEphemeralObject):
+                    # Skip ephemeral objects, which are allowed to
+                    # set fields at init time
+                    continue
+                for field in objcls.fields:
+                    if field in obj:
+                        violations[key].append(field)
+
+        self.assertEqual({}, violations,
+                         'Some non-ephemeral objects set fields during '
+                         'initialization; This is not allowed.')

@@ -42,7 +42,6 @@ from nova import test
 from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
 from nova.tests.unit.virt.xenapi import stubs
-from nova import utils
 from nova.virt import fake
 from nova.virt.xenapi import agent as xenapi_agent
 from nova.virt.xenapi import fake as xenapi_fake
@@ -447,12 +446,6 @@ class SpawnTestCase(VMOpsTestBase):
                 self.vmops, '_file_inject_vm_settings')).mock
         self.mock_create_vifs = self.useFixture(
             fixtures.MockPatchObject(self.vmops, '_create_vifs')).mock
-        self.mock_setup_basic_filtering = self.useFixture(
-            fixtures.MockPatchObject(
-                self.vmops.firewall_driver, 'setup_basic_filtering')).mock
-        self.mock_prepare_instance_filter = self.useFixture(
-            fixtures.MockPatchObject(
-                self.vmops.firewall_driver, 'prepare_instance_filter')).mock
         self.mock_start = self.useFixture(
             fixtures.MockPatchObject(self.vmops, '_start')).mock
         self.mock_wait_for_instance_to_start = self.useFixture(
@@ -463,9 +456,6 @@ class SpawnTestCase(VMOpsTestBase):
                 self.vmops, '_configure_new_instance_with_agent')).mock
         self.mock_remove_hostname = self.useFixture(
             fixtures.MockPatchObject(self.vmops, '_remove_hostname')).mock
-        self.mock_apply_instance_filter = self.useFixture(
-            fixtures.MockPatchObject(
-                self.vmops.firewall_driver, 'apply_instance_filter')).mock
         self.mock_update_last_dom_id = self.useFixture(
             fixtures.MockPatchObject(self.vmops, '_update_last_dom_id')).mock
         self.mock_call_xenapi = self.useFixture(
@@ -499,7 +489,7 @@ class SpawnTestCase(VMOpsTestBase):
         admin_password = "password"
         if network_info is None:
             network_info = []
-        steps = 10
+        steps = 9
         if rescue:
             steps += 1
 
@@ -565,10 +555,6 @@ class SpawnTestCase(VMOpsTestBase):
         expected_update_instance_progress_calls.append(
             mock.call(context, instance, step, steps))
 
-        step += 1
-        expected_update_instance_progress_calls.append(
-            mock.call(context, instance, step, steps))
-
         if neutron_exception:
             events = [('network-vif-plugged', 1)]
             self.stub_out('nova.virt.xenapi.vmops.VMOps.'
@@ -584,7 +570,6 @@ class SpawnTestCase(VMOpsTestBase):
                     side_effect=(
                         exception.VirtualInterfaceCreateException))).mock
         else:
-            self.mock_setup_basic_filtering.side_effect = NotImplementedError
             step += 1
             expected_update_instance_progress_calls.append(
                 mock.call(context, instance, step, steps))
@@ -606,7 +591,7 @@ class SpawnTestCase(VMOpsTestBase):
 
         if throw_exception:
             self.mock_update_instance_progress.side_effect = [
-                None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None,
                 throw_exception]
 
         self.vmops.spawn(context, instance, image_meta, injected_files,
@@ -670,18 +655,12 @@ class SpawnTestCase(VMOpsTestBase):
         else:
             self.mock_create_vifs.assert_called_once_with(instance, vm_ref,
                                                           network_info)
-            self.mock_setup_basic_filtering.assert_called_once_with(
-                instance, network_info)
-            self.mock_prepare_instance_filter.assert_called_once_with(
-                instance, network_info)
             self.mock_wait_for_instance_to_start.assert_called_once_with(
                 instance, vm_ref)
             self.mock_configure_new_instance_w_agent.assert_called_once_with(
                 instance, vm_ref, injected_files, admin_password)
             self.mock_remove_hostname.assert_called_once_with(
                 instance, vm_ref)
-            self.mock_apply_instance_filter.assert_called_once_with(
-                instance, network_info)
             self.mock_update_last_dom_id.assert_called_once_with(vm_ref)
             self.mock_call_xenapi.assert_called_once_with('VM.unpause', vm_ref)
 
@@ -712,10 +691,8 @@ class SpawnTestCase(VMOpsTestBase):
     @mock.patch.object(vmops.VMOps, '_get_neutron_events',
                        return_value=[('network-vif-plugged', 1)])
     def test_spawn_with_neutron(self, mock_get_neutron_events):
-        self.flags(use_neutron=True)
         network_info = [{'id': 1, 'active': True}]
-        self.stub_out('nova.virt.xenapi.vmops.VMOps.'
-                      '_neutron_failed_callback',
+        self.stub_out('nova.virt.xenapi.vmops.VMOps._neutron_failed_callback',
                       lambda event_name, instance: None)
 
         self._test_spawn(network_info=network_info)
@@ -901,7 +878,6 @@ class SpawnTestCase(VMOpsTestBase):
         rescue = False
         self.mock_create_vm_record.return_value = vm_ref
         self.mock_get_instance_pci_devs.return_value = []
-        self.mock_setup_basic_filtering.side_effect = NotImplementedError
 
         if power_on:
             expected_call_xenapi.append(mock.call('VM.unpause', vm_ref))
@@ -940,12 +916,6 @@ class SpawnTestCase(VMOpsTestBase):
             instance, vm_ref, vdis, network_info)
         self.mock_create_vifs.assert_called_once_with(
             instance, vm_ref, network_info)
-        self.mock_setup_basic_filtering.assert_called_once_with(instance,
-                                                                network_info)
-        self.mock_prepare_instance_filter.assert_called_once_with(
-            instance, network_info)
-        self.mock_apply_instance_filter.assert_called_once_with(
-            instance, network_info)
         self.mock_attach_vgpu.assert_called_once_with(vm_ref, vgpu_info,
                                                       instance)
         mock_import_all_migrated_disks.assert_called_once_with(
@@ -1115,8 +1085,7 @@ class SpawnTestCase(VMOpsTestBase):
         mock_resetnetwork.assert_called_once_with()
         mock_update_if_needed.assert_called_once_with('1.2.3')
 
-    @mock.patch.object(utils, 'is_neutron', return_value=True)
-    def test_get_neutron_event(self, mock_is_neutron):
+    def test_get_neutron_event(self):
         network_info = [{"active": False, "id": 1},
                         {"active": True, "id": 2},
                         {"active": False, "id": 3},
@@ -1131,21 +1100,7 @@ class SpawnTestCase(VMOpsTestBase):
         self.assertEqual("network-vif-plugged", events[1][0])
         self.assertEqual(3, events[1][1])
 
-    @mock.patch.object(utils, 'is_neutron', return_value=False)
-    def test_get_neutron_event_not_neutron_network(self, mock_is_neutron):
-        network_info = [{"active": False, "id": 1},
-                        {"active": True, "id": 2},
-                        {"active": False, "id": 3},
-                        {"id": 4}]
-        power_on = True
-        first_boot = True
-        rescue = False
-        events = self.vmops._get_neutron_events(network_info,
-                                                power_on, first_boot, rescue)
-        self.assertEqual([], events)
-
-    @mock.patch.object(utils, 'is_neutron', return_value=True)
-    def test_get_neutron_event_power_off(self, mock_is_neutron):
+    def test_get_neutron_event_power_off(self):
         network_info = [{"active": False, "id": 1},
                         {"active": True, "id": 2},
                         {"active": False, "id": 3},
@@ -1157,8 +1112,7 @@ class SpawnTestCase(VMOpsTestBase):
                                                 power_on, first_boot, rescue)
         self.assertEqual([], events)
 
-    @mock.patch.object(utils, 'is_neutron', return_value=True)
-    def test_get_neutron_event_not_first_boot(self, mock_is_neutron):
+    def test_get_neutron_event_not_first_boot(self):
         network_info = [{"active": False, "id": 1},
                         {"active": True, "id": 2},
                         {"active": False, "id": 3},
@@ -1170,8 +1124,7 @@ class SpawnTestCase(VMOpsTestBase):
                                                 power_on, first_boot, rescue)
         self.assertEqual([], events)
 
-    @mock.patch.object(utils, 'is_neutron', return_value=True)
-    def test_get_neutron_event_rescue(self, mock_is_neutron):
+    def test_get_neutron_event_rescue(self):
         network_info = [{"active": False, "id": 1},
                         {"active": True, "id": 2},
                         {"active": False, "id": 3},

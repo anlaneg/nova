@@ -17,11 +17,9 @@ import os
 import testscenarios
 
 import nova.conf
-from nova import test
 from nova.tests import fixtures
 from nova.tests.functional import api_paste_fixture
 from nova.tests.functional import api_samples_test_base
-from nova.tests.unit import fake_network
 
 CONF = nova.conf.CONF
 
@@ -55,13 +53,18 @@ CONF = nova.conf.CONF
 
 
 class ApiSampleTestBaseV21(testscenarios.WithScenarios,
-                          api_samples_test_base.ApiSampleTestBase):
+                           api_samples_test_base.ApiSampleTestBase):
     SUPPORTS_CELLS = False
 
     api_major_version = 'v2'
     # any additional fixtures needed for this scenario
     _additional_fixtures = []
     sample_dir = None
+    # Include the project ID in request URLs by default. This is overridden
+    # for certain `scenarios` and by certain subclasses.
+    # Note that API sample tests also use this in substitutions to validate
+    # that URLs in responses (e.g. location of a server just created) are
+    # correctly constructed.
     _use_project_id = True
     # Availability zones for the API samples tests. Can be overridden by
     # sub-classes. If set, the AvailabilityZoneFilter is not used.
@@ -83,7 +86,6 @@ class ApiSampleTestBaseV21(testscenarios.WithScenarios,
     ]
 
     def setUp(self):
-        self.flags(use_ipv6=False)
         self.flags(glance_link_prefix=self._get_glance_host(),
                    compute_link_prefix=self._get_host(),
                    group='api')
@@ -96,13 +98,6 @@ class ApiSampleTestBaseV21(testscenarios.WithScenarios,
             # NOTE(danms): Disable base automatic DB (and cells) config
             self.USES_DB = False
             self.USES_DB_SELF = True
-
-        if not self.USE_NEUTRON:
-            # This is to enable the network quota which is being registered
-            # based on CONF.enable_network_quota. Need this to test the
-            # network quota in quota sample tests.
-            self.flags(enable_network_quota=True)
-            self.useFixture(fixtures.RegisterNetworkQuota())
 
         # super class call is delayed here so that we have the right
         # paste and conf before loading all the services, as we can't
@@ -117,47 +112,9 @@ class ApiSampleTestBaseV21(testscenarios.WithScenarios,
 
         super(ApiSampleTestBaseV21, self)._setup_services()
 
-        if not self.USE_NEUTRON:
-            # self.network is only setup if USE_NEUTRON=False
-            self.useFixture(test.SampleNetworks(host=self.network.host))
-            fake_network.stub_compute_with_ips(self)
-
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
         # this is used to generate sample docs
         self.generate_samples = os.getenv('GENERATE_SAMPLES') is not None
-
-        # TODO(stephenfin): Remove once we remove the few remaining
-        # nova-network-only APIs
-        if not self.USE_NEUTRON:
-            # NOTE(mikal): this is used to stub away privsep helpers
-            def fake_noop(*args, **kwargs):
-                return '', ''
-
-            def fake_true(*args, **kwargs):
-                return True
-
-            self.stub_out('nova.privsep.linux_net.add_bridge', fake_noop)
-            self.stub_out('nova.privsep.linux_net.set_device_mtu', fake_noop)
-            self.stub_out('nova.privsep.linux_net.set_device_enabled',
-                          fake_noop)
-            self.stub_out('nova.privsep.linux_net.set_device_macaddr',
-                          fake_noop)
-            self.stub_out('nova.privsep.linux_net.routes_show', fake_noop)
-            self.stub_out('nova.privsep.linux_net.lookup_ip', fake_noop)
-            self.stub_out('nova.privsep.linux_net.change_ip', fake_noop)
-            self.stub_out('nova.privsep.linux_net.address_command_deprecated',
-                          fake_noop)
-            self.stub_out('nova.privsep.linux_net.ipv4_forwarding_check',
-                          fake_true)
-            self.stub_out('nova.privsep.linux_net.'
-                          '_enable_ipv4_forwarding_inner',
-                          fake_noop)
-            self.stub_out('nova.privsep.linux_net.add_vlan', fake_noop)
-            self.stub_out('nova.privsep.linux_net.bridge_setfd', fake_noop)
-            self.stub_out('nova.privsep.linux_net.bridge_disable_stp',
-                          fake_noop)
-            self.stub_out('nova.privsep.linux_net.bridge_add_interface',
-                          fake_noop)
 
         if self.availability_zones:
             self.useFixture(

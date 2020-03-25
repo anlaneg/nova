@@ -64,7 +64,6 @@ class ServiceController(wsgi.Controller):
         api_services = ('nova-osapi_compute', 'nova-metadata')
 
         context = req.environ['nova.context']
-        context.can(services_policies.BASE_POLICY_NAME)
 
         cell_down_support = api_version_request.is_supported(
             req, min_version=PARTIAL_CONSTRUCT_FOR_CELL_DOWN_MIN_VERSION)
@@ -218,7 +217,6 @@ class ServiceController(wsgi.Controller):
     def _perform_action(self, req, id, body, actions):
         """Calculate action dictionary dependent on provided fields"""
         context = req.environ['nova.context']
-        context.can(services_policies.BASE_POLICY_NAME)
 
         try:
             action = actions[id]
@@ -233,7 +231,7 @@ class ServiceController(wsgi.Controller):
     def delete(self, req, id):
         """Deletes the specified service."""
         context = req.environ['nova.context']
-        context.can(services_policies.BASE_POLICY_NAME)
+        context.can(services_policies.BASE_POLICY_NAME % 'delete')
 
         if api_version_request.is_supported(
                 req, min_version=UUID_FOR_ID_MIN_VERSION):
@@ -264,6 +262,16 @@ class ServiceController(wsgi.Controller):
                                       'is hosting instances. Migrate or '
                                       'delete the instances first.'))
 
+                # Similarly, check to see if the are any in-progress migrations
+                # involving this host because if there are we need to block the
+                # service delete since we could orphan resource providers and
+                # break the ability to do things like confirm/revert instances
+                # in VERIFY_RESIZE status.
+                compute_nodes = objects.ComputeNodeList.get_all_by_host(
+                    context, service.host)
+                self._assert_no_in_progress_migrations(
+                    context, id, compute_nodes)
+
                 aggrs = self.aggregate_api.get_aggregates_by_host(context,
                                                                   service.host)
                 for ag in aggrs:
@@ -274,8 +282,6 @@ class ServiceController(wsgi.Controller):
                 # placement for the compute nodes managed by this service;
                 # remember that an ironic compute service can manage multiple
                 # nodes
-                compute_nodes = objects.ComputeNodeList.get_all_by_host(
-                    context, service.host)
                 for compute_node in compute_nodes:
                     try:
                         self.placementclient.delete_resource_provider(
@@ -303,6 +309,36 @@ class ServiceController(wsgi.Controller):
             explanation = _("Service id %s refers to multiple services.") % id
             raise webob.exc.HTTPBadRequest(explanation=explanation)
 
+    @staticmethod
+    def _assert_no_in_progress_migrations(context, service_id, compute_nodes):
+        """Ensures there are no in-progress migrations on the given nodes.
+
+        :param context: nova auth RequestContext
+        :param service_id: id of the Service being deleted
+        :param compute_nodes: ComputeNodeList of nodes on a compute service
+        :raises: HTTPConflict if there are any in-progress migrations on the
+            nodes
+        """
+        for cn in compute_nodes:
+            migrations = (
+                objects.MigrationList.get_in_progress_by_host_and_node(
+                    context, cn.host, cn.hypervisor_hostname))
+            if migrations:
+                # Log the migrations for the operator and then raise
+                # a 409 error.
+                LOG.info('Unable to delete compute service with id %s '
+                         'for host %s. There are %i in-progress '
+                         'migrations involving the host. Migrations '
+                         '(uuid:status): %s',
+                         service_id, cn.host, len(migrations),
+                         ','.join(['%s:%s' % (mig.uuid, mig.status)
+                                   for mig in migrations]))
+                raise webob.exc.HTTPConflict(
+                    explanation=_(
+                        'Unable to delete compute service that has '
+                        'in-progress migrations. Complete the '
+                        'migrations or delete the instances first.'))
+
     @validation.query_schema(services.index_query_schema_275, '2.75')
     @validation.query_schema(services.index_query_schema, '2.0', '2.74')
     @wsgi.expected_errors(())
@@ -310,6 +346,8 @@ class ServiceController(wsgi.Controller):
         """Return a list of all running services. Filter by host & service
         name
         """
+        context = req.environ['nova.context']
+        context.can(services_policies.BASE_POLICY_NAME % 'list')
         if api_version_request.is_supported(req, min_version='2.11'):
             _services = self._get_services_list(req, ['forced_down'])
         else:
@@ -329,6 +367,8 @@ class ServiceController(wsgi.Controller):
         service ID passed on the path, just the action, for example
         PUT /os-services/disable.
         """
+        context = req.environ['nova.context']
+        context.can(services_policies.BASE_POLICY_NAME % 'update')
         if api_version_request.is_supported(req, min_version='2.11'):
             actions = self.actions.copy()
             actions["force-down"] = self._forced_down
@@ -355,7 +395,7 @@ class ServiceController(wsgi.Controller):
 
         # Validate the request context against the policy.
         context = req.environ['nova.context']
-        context.can(services_policies.BASE_POLICY_NAME)
+        context.can(services_policies.BASE_POLICY_NAME % 'update')
 
         # Get the service by uuid.
         try:

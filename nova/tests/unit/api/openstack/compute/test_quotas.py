@@ -22,16 +22,15 @@ from nova.db import api as db
 from nova import exception
 from nova import quota
 from nova import test
-from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit.api.openstack import fakes
 
 
 def quota_set(id, include_server_group_quotas=True):
     res = {'quota_set': {'id': id, 'metadata_items': 128,
-           'ram': 51200, 'floating_ips': 10, 'fixed_ips': -1,
+           'ram': 51200, 'floating_ips': -1, 'fixed_ips': -1,
            'instances': 10, 'injected_files': 5, 'cores': 20,
            'injected_file_content_bytes': 10240,
-           'security_groups': 10, 'security_group_rules': 20,
+           'security_groups': -1, 'security_group_rules': -1,
            'key_pairs': 100, 'injected_file_path_bytes': 255}}
     if include_server_group_quotas:
         res['quota_set']['server_groups'] = 10
@@ -67,14 +66,14 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
             'instances': 10,
             'cores': 20,
             'ram': 51200,
-            'floating_ips': 10,
+            'floating_ips': -1,
             'fixed_ips': -1,
             'metadata_items': 128,
             'injected_files': 5,
             'injected_file_path_bytes': 255,
             'injected_file_content_bytes': 10240,
-            'security_groups': 10,
-            'security_group_rules': 20,
+            'security_groups': -1,
+            'security_group_rules': -1,
             'key_pairs': 100,
         }
         if self.include_server_group_quotas:
@@ -97,14 +96,14 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
         self.assertEqual(qs['instances'], 10)
         self.assertEqual(qs['cores'], 20)
         self.assertEqual(qs['ram'], 51200)
-        self.assertEqual(qs['floating_ips'], 10)
+        self.assertEqual(qs['floating_ips'], -1)
         self.assertEqual(qs['fixed_ips'], -1)
         self.assertEqual(qs['metadata_items'], 128)
         self.assertEqual(qs['injected_files'], 5)
         self.assertEqual(qs['injected_file_path_bytes'], 255)
         self.assertEqual(qs['injected_file_content_bytes'], 10240)
-        self.assertEqual(qs['security_groups'], 10)
-        self.assertEqual(qs['security_group_rules'], 20)
+        self.assertEqual(qs['security_groups'], -1)
+        self.assertEqual(qs['security_group_rules'], -1)
         self.assertEqual(qs['key_pairs'], 100)
         if self.include_server_group_quotas:
             self.assertEqual(qs['server_groups'], 10)
@@ -213,13 +212,13 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
 
     def test_quotas_update_zero_value(self):
         body = {'quota_set': {'instances': 0, 'cores': 0,
-                              'ram': 0, 'floating_ips': 0,
+                              'ram': 0, 'floating_ips': -1,
                               'metadata_items': 0,
                               'injected_files': 0,
                               'injected_file_content_bytes': 0,
                               'injected_file_path_bytes': 0,
-                              'security_groups': 0,
-                              'security_group_rules': 0,
+                              'security_groups': -1,
+                              'security_group_rules': -1,
                               'key_pairs': 100, 'fixed_ips': -1}}
         if self.include_server_group_quotas:
             body['quota_set']['server_groups'] = 10
@@ -283,18 +282,6 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
         self.assertEqual(202, self.get_delete_status_int(res))
         mock_destroy_all_by_project.assert_called_once_with(
             req.environ['nova.context'], 1234)
-
-    def test_update_network_quota_disabled(self):
-        self.flags(enable_network_quota=False)
-        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
-                          self._get_http_request(),
-                          1234, body={'quota_set': {'networks': 1}})
-
-    def test_update_network_quota_enabled(self):
-        self.flags(enable_network_quota=True)
-        self.useFixture(nova_fixtures.RegisterNetworkQuota())
-        self.controller.update(self._get_http_request(),
-                               1234, body={'quota_set': {'networks': 1}})
 
     def test_duplicate_quota_filter(self):
         query_string = 'user_id=1&user_id=2'
@@ -450,13 +437,13 @@ class UserQuotasTestV21(BaseQuotaSetsTest):
 
     def test_user_quotas_update(self):
         body = {'quota_set': {'instances': 10, 'cores': 20,
-                              'ram': 51200, 'floating_ips': 10,
+                              'ram': 51200, 'floating_ips': -1,
                               'fixed_ips': -1, 'metadata_items': 128,
                               'injected_files': 5,
                               'injected_file_content_bytes': 10240,
                               'injected_file_path_bytes': 255,
-                              'security_groups': 10,
-                              'security_group_rules': 20,
+                              'security_groups': -1,
+                              'security_group_rules': -1,
                               'key_pairs': 100}}
         if self.include_server_group_quotas:
             body['quota_set']['server_groups'] = 10
@@ -585,42 +572,38 @@ class QuotaSetsTestV236(test.NoDBTestCase):
         self.stub_out('nova.api.openstack.identity.verify_project_id',
                       lambda ctx, project_id: True)
 
-        self.flags(enable_network_quota=True)
-        self.useFixture(nova_fixtures.RegisterNetworkQuota())
         self.old_req = fakes.HTTPRequest.blank('', version='2.1')
-        self.filtered_quotas = ['fixed_ips', 'floating_ips', 'networks',
+        self.filtered_quotas = ['fixed_ips', 'floating_ips',
             'security_group_rules', 'security_groups']
         self.quotas = {
             'cores': {'limit': 20},
             'fixed_ips': {'limit': -1},
-            'floating_ips': {'limit': 10},
+            'floating_ips': {'limit': -1},
             'injected_file_content_bytes': {'limit': 10240},
             'injected_file_path_bytes': {'limit': 255},
             'injected_files': {'limit': 5},
             'instances': {'limit': 10},
             'key_pairs': {'limit': 100},
             'metadata_items': {'limit': 128},
-            'networks': {'limit': 3},
             'ram': {'limit': 51200},
-            'security_group_rules': {'limit': 20},
-            'security_groups': {'limit': 10},
+            'security_group_rules': {'limit': -1},
+            'security_groups': {'limit': -1},
             'server_group_members': {'limit': 10},
             'server_groups': {'limit': 10}
         }
         self.defaults = {
             'cores': 20,
             'fixed_ips': -1,
-            'floating_ips': 10,
+            'floating_ips': -1,
             'injected_file_content_bytes': 10240,
             'injected_file_path_bytes': 255,
             'injected_files': 5,
             'instances': 10,
             'key_pairs': 100,
             'metadata_items': 128,
-            'networks': 3,
             'ram': 51200,
-            'security_group_rules': 20,
-            'security_groups': 10,
+            'security_group_rules': -1,
+            'security_groups': -1,
             'server_group_members': 10,
             'server_groups': 10
         }

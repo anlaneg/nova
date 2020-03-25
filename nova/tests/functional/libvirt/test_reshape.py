@@ -13,7 +13,6 @@
 
 import io
 import mock
-import time
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -30,17 +29,6 @@ LOG = logging.getLogger(__name__)
 
 
 class VGPUReshapeTests(base.ServersTestBase):
-    # the minimum libvirt version needed for vgpu
-    MIN_LIBVIRT_MDEV_SUPPORT = 3004000
-
-    def _wait_for_state_change(self, server, expected_status):
-        for i in range(0, 50):
-            server = self.api.get_server(server['id'])
-            if server['status'] == expected_status:
-                return server
-            time.sleep(.1)
-        self.assertEqual(expected_status, server['status'])
-        return server
 
     @mock.patch('nova.virt.libvirt.LibvirtDriver._get_local_gb_info',
                 return_value={'total': 128,
@@ -74,7 +62,6 @@ class VGPUReshapeTests(base.ServersTestBase):
         fake_connection = self._get_connection(
             # We need more RAM or the 3rd server won't be created
             host_info=fakelibvirt.HostInfo(kB_mem=8192),
-            libvirt_version=self.MIN_LIBVIRT_MDEV_SUPPORT,
             mdev_info=fakelibvirt.HostMdevDevicesInfo())
         self.mock_conn.return_value = fake_connection
 
@@ -104,7 +91,7 @@ class VGPUReshapeTests(base.ServersTestBase):
         extra_spec = {"resources:VGPU": 1}
         flavor_id = self._create_flavor(extra_spec=extra_spec)
 
-        server_req = self._build_server(flavor_id)
+        server_req = self._build_server(flavor_id=flavor_id)
 
         # NOTE(gibi): during instance_claim() there is a
         # driver.update_provider_tree() call that would detect the old tree and

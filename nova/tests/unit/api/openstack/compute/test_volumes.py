@@ -62,7 +62,8 @@ IMAGE_UUID = 'c905cedb-7281-47e4-8a62-f26bc5fc4c77'
 
 def fake_get_instance(self, context, instance_id, expected_attrs=None,
                       cell_down_support=False):
-    return fake_instance.fake_instance_obj(context, **{'uuid': instance_id})
+    return fake_instance.fake_instance_obj(
+        context, id=1, uuid=instance_id, project_id=context.project_id)
 
 
 def fake_get_volume(self, context, id):
@@ -1092,6 +1093,61 @@ class VolumeAttachTestsV279(VolumeAttachTestsV2_75):
         self.assertIn("Invalid input for field/attribute "
                       "delete_on_termination.", six.text_type(ex))
 
+    @mock.patch('nova.compute.api.API.attach_volume', return_value=None)
+    def test_attach_volume_v279(self, mock_attach_volume):
+        body = {'volumeAttachment': {'volumeId': FAKE_UUID_A,
+                                     'delete_on_termination': True}}
+        req = self._get_req(body)
+        result = self.attachments.create(req, FAKE_UUID, body=body)
+        self.assertTrue(result['volumeAttachment']['delete_on_termination'])
+        mock_attach_volume.assert_called_once_with(
+            req.environ['nova.context'], test.MatchType(objects.Instance),
+            FAKE_UUID_A, None, tag=None, supports_multiattach=True,
+            delete_on_termination=True)
+
+    def test_show_pre_v279(self):
+        """Before microversion 2.79, show a detail of a volume attachment
+        does not contain the 'delete_on_termination' field in the response
+        body.
+        """
+        req = self._get_req(body={}, microversion='2.78')
+        req.method = 'GET'
+        result = self.attachments.show(req, FAKE_UUID, FAKE_UUID_A)
+
+        self.assertNotIn('delete_on_termination', result['volumeAttachment'])
+
+    @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid')
+    def test_list_pre_v279(self, mock_get_bdms):
+        """Before microversion 2.79, list of a volume attachment
+        does not contain the 'delete_on_termination' field in the response
+        body.
+        """
+        req = fakes.HTTPRequest.blank(
+            '/v2/servers/id/os-volume_attachments',
+            version="2.78")
+        req.body = jsonutils.dump_as_bytes({})
+        req.method = 'GET'
+        req.headers['content-type'] = 'application/json'
+
+        vol_bdm = objects.BlockDeviceMapping(
+            self.context,
+            id=1,
+            instance_uuid=FAKE_UUID,
+            volume_id=FAKE_UUID_A,
+            source_type='volume',
+            destination_type='volume',
+            delete_on_termination=True,
+            connection_info=None,
+            tag='fake-tag',
+            device_name='/dev/fake0',
+            attachment_id=uuids.attachment_id)
+        bdms = objects.BlockDeviceMappingList(objects=[vol_bdm])
+
+        mock_get_bdms.return_value = bdms
+        result = self.attachments.index(req, FAKE_UUID)
+
+        self.assertNotIn('delete_on_termination', result['volumeAttachments'])
+
 
 class SwapVolumeMultiattachTestCase(test.NoDBTestCase):
 
@@ -1399,10 +1455,10 @@ class AssistedSnapshotDeleteTestCaseV21(test.NoDBTestCase):
         self.controller.delete(req, '5')
 
     def test_delete_duplicate_query_parameters_validation(self):
-        params = {
-            'delete_info': jsonutils.dumps({'volume_id': '1'}),
-            'delete_info': jsonutils.dumps({'volume_id': '2'})
-        }
+        params = [
+            ('delete_info', jsonutils.dumps({'volume_id': '1'})),
+            ('delete_info', jsonutils.dumps({'volume_id': '2'}))
+        ]
         req = fakes.HTTPRequest.blank(
                 self.url + '?%s' %
                 urllib.parse.urlencode(params),
@@ -1448,90 +1504,6 @@ class AssistedSnapshotDeleteTestCaseV275(AssistedSnapshotDeleteTestCaseV21):
                 version=self.microversion)
         self.assertRaises(exception.ValidationError,
                           self.controller.delete, req, 1)
-
-
-class TestAssistedVolumeSnapshotsPolicyEnforcementV21(test.NoDBTestCase):
-
-    def setUp(self):
-        super(TestAssistedVolumeSnapshotsPolicyEnforcementV21, self).setUp()
-        self.controller = (
-            assisted_snaps_v21.AssistedVolumeSnapshotsController())
-        self.req = fakes.HTTPRequest.blank('')
-
-    def test_create_assisted_volumes_snapshots_policy_failed(self):
-        rule_name = "os_compute_api:os-assisted-volume-snapshots:create"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        body = {'snapshot':
-                   {'volume_id': '1',
-                    'create_info': {'type': 'qcow2',
-                                    'new_file': 'new_file',
-                                    'snapshot_id': 'snapshot_id'}}}
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.create, self.req, body=body)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_delete_assisted_volumes_snapshots_policy_failed(self):
-        rule_name = "os_compute_api:os-assisted-volume-snapshots:delete"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.delete, self.req, '5')
-
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-
-class TestVolumeAttachPolicyEnforcementV21(test.NoDBTestCase):
-
-    def setUp(self):
-        super(TestVolumeAttachPolicyEnforcementV21, self).setUp()
-        self.controller = volumes_v21.VolumeAttachmentController()
-        self.req = fakes.HTTPRequest.blank('')
-
-    def _common_policy_check(self, rules, rule_name, func, *arg, **kwarg):
-        self.policy.set_rules(rules)
-        exc = self.assertRaises(
-             exception.PolicyNotAuthorized, func, *arg, **kwarg)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_index_volume_attach_policy_failed(self):
-        rule_name = "os_compute_api:os-volumes-attachments:index"
-        rules = {rule_name: "project:non_fake"}
-        self._common_policy_check(rules, rule_name,
-                                  self.controller.index, self.req, FAKE_UUID)
-
-    def test_show_volume_attach_policy_failed(self):
-        rule_name = "os_compute_api:os-volumes-attachments:show"
-        rules = {rule_name: "project:non_fake"}
-        self._common_policy_check(rules, rule_name, self.controller.show,
-                                  self.req, FAKE_UUID, FAKE_UUID_A)
-
-    def test_create_volume_attach_policy_failed(self):
-        rule_name = "os_compute_api:os-volumes-attachments:create"
-        rules = {rule_name: "project:non_fake"}
-        body = {'volumeAttachment': {'volumeId': FAKE_UUID_A,
-                                     'device': '/dev/fake'}}
-        self._common_policy_check(rules, rule_name, self.controller.create,
-                                  self.req, FAKE_UUID, body=body)
-
-    def test_update_volume_attach_policy_failed(self):
-        rule_name = "os_compute_api:os-volumes-attachments:update"
-        rules = {rule_name: "project:non_fake"}
-        body = {'volumeAttachment': {'volumeId': FAKE_UUID_B}}
-        self._common_policy_check(rules, rule_name, self.controller.update,
-                                  self.req, FAKE_UUID, FAKE_UUID_A, body=body)
-
-    def test_delete_volume_attach_policy_failed(self):
-        rule_name = "os_compute_api:os-volumes-attachments:delete"
-        rules = {rule_name: "project:non_fake"}
-        self._common_policy_check(rules, rule_name, self.controller.delete,
-                                  self.req, FAKE_UUID, FAKE_UUID_A)
 
 
 class TestVolumesAPIDeprecation(test.NoDBTestCase):

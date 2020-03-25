@@ -104,8 +104,9 @@ class FakeDriver(driver.ComputeDriver):
     capabilities = {
         "has_imagecache": True,
         "supports_evacuate": True,
-        "supports_migrate_to_same_host": True,
+        "supports_migrate_to_same_host": False,
         "supports_attach_interface": True,
+        "supports_device_tagging": True,
         "supports_tagged_attach_interface": True,
         "supports_tagged_attach_volume": True,
         "supports_extend_volume": True,
@@ -208,7 +209,18 @@ class FakeDriver(driver.ComputeDriver):
 
     def reboot(self, context, instance, network_info, reboot_type,
                block_device_info=None, bad_volumes_callback=None):
-        pass
+        # If the guest is not on the hypervisor and we're doing a hard reboot
+        # then mimic the libvirt driver by spawning the guest.
+        if (instance.uuid not in self.instances and
+                reboot_type.lower() == 'hard'):
+            injected_files = admin_password = allocations = None
+            self.spawn(context, instance, instance.image_meta, injected_files,
+                       admin_password, allocations,
+                       block_device_info=block_device_info)
+        else:
+            # Just try to power on the guest.
+            self.power_on(context, instance, network_info,
+                          block_device_info=block_device_info)
 
     def get_host_ip_addr(self):
         return '192.168.0.1'
@@ -242,14 +254,19 @@ class FakeDriver(driver.ComputeDriver):
     def finish_revert_migration(self, context, instance, network_info,
                                 migration, block_device_info=None,
                                 power_on=True):
+        state = power_state.RUNNING if power_on else power_state.SHUTDOWN
         self.instances[instance.uuid] = FakeInstance(
-            instance.name, power_state.RUNNING, instance.uuid)
+            instance.name, state, instance.uuid)
 
     def post_live_migration_at_destination(self, context, instance,
                                            network_info,
                                            block_migration=False,
                                            block_device_info=None):
-        pass
+        # Called from the destination host after a successful live migration
+        # so spawn the instance on this host to track it properly.
+        image_meta = injected_files = admin_password = allocations = None
+        self.spawn(context, instance, image_meta, injected_files,
+                   admin_password, allocations)
 
     def power_off(self, instance, timeout=0, retry_interval=0):
         if instance.uuid in self.instances:
@@ -302,7 +319,10 @@ class FakeDriver(driver.ComputeDriver):
 
     def cleanup(self, context, instance, network_info, block_device_info=None,
                 destroy_disks=True, migrate_data=None, destroy_vifs=True):
-        pass
+        # cleanup() should not be called when the guest has not been destroyed.
+        if instance.uuid in self.instances:
+            raise exception.InstanceExists(
+                "Instance %s has not been destroyed." % instance.uuid)
 
     def attach_volume(self, context, connection_info, instance, mountpoint,
                       disk_bus=None, device_type=None, encryption=None):
@@ -328,7 +348,8 @@ class FakeDriver(driver.ComputeDriver):
             self._mounts[instance_name] = {}
         self._mounts[instance_name][mountpoint] = new_connection_info
 
-    def extend_volume(self, connection_info, instance, requested_size):
+    def extend_volume(self, context, connection_info, instance,
+                      requested_size):
         """Extend the disk attached to the instance."""
         pass
 
@@ -467,12 +488,6 @@ class FakeDriver(driver.ComputeDriver):
                 'username': 'fakeuser',
                 'password': 'fakepassword'}
 
-    def refresh_security_group_rules(self, security_group_id):
-        return True
-
-    def refresh_instance_security_rules(self, instance):
-        return True
-
     def get_available_resource(self, nodename):
         """Updates compute manager resource info on ComputeNode table.
 
@@ -535,9 +550,6 @@ class FakeDriver(driver.ComputeDriver):
             },
         }
         provider_tree.update_inventory(nodename, inventory)
-
-    def ensure_filtering_rules_for_instance(self, instance, network_info):
-        return
 
     def get_instance_disk_info(self, instance, block_device_info=None):
         return
@@ -614,9 +626,6 @@ class FakeDriver(driver.ComputeDriver):
                                                migrate_data=None):
         return
 
-    def unfilter_instance(self, instance, network_info):
-        return
-
     def _test_remove_vm(self, instance_uuid):
         """Removes the named VM, as if it crashed. For testing."""
         self.instances.pop(instance_uuid)
@@ -642,7 +651,7 @@ class FakeDriver(driver.ComputeDriver):
     def get_volume_connector(self, instance):
         return {'ip': CONF.my_block_storage_ip,
                 'initiator': 'fake',
-                'host': 'fakehost'}
+                'host': self._host}
 
     def get_available_nodes(self, refresh=False):
         return self._nodes
@@ -664,6 +673,10 @@ class FakeVirtAPI(virtapi.VirtAPI):
         # NOTE(danms): Don't actually wait for any events, just
         # fall through
         yield
+
+    def exit_wait_early(self, events):
+        # We never wait, so there is nothing to exit early
+        pass
 
     def update_compute_provider_status(self, context, rp_uuid, enabled):
         pass
@@ -688,6 +701,12 @@ class MediumFakeDriver(FakeDriver):
     vcpus = 10
     memory_mb = 8192
     local_gb = 1028
+
+
+class SameHostColdMigrateDriver(MediumFakeDriver):
+    """MediumFakeDriver variant that supports same-host cold migrate."""
+    capabilities = dict(FakeDriver.capabilities,
+                        supports_migrate_to_same_host=True)
 
 
 class PowerUpdateFakeDriver(SmallFakeDriver):
@@ -862,8 +881,11 @@ class FakeLiveMigrateDriver(FakeDriver):
 
     def post_live_migration(self, context, instance, block_device_info,
                             migrate_data=None):
-        if instance.uuid in self.instances:
-            del self.instances[instance.uuid]
+        # Runs on the source host, called from
+        # ComputeManager._post_live_migration so just delete the instance
+        # from being tracked on the source host.
+        self.destroy(context, instance, network_info=None,
+                     block_device_info=block_device_info)
 
 
 class FakeLiveMigrateDriverWithNestedCustomResources(
@@ -1013,6 +1035,17 @@ class FakeDriverWithPciResources(SmallFakeDriver):
             },
         ])
         return host_status
+
+
+class FakeLiveMigrateDriverWithPciResources(
+        FakeLiveMigrateDriver, FakeDriverWithPciResources):
+    """FakeDriver derivative to handle force_complete and abort calls.
+
+    This module serves those tests that need to abort or force-complete
+    the live migration, thus the live migration will never be finished
+    without the force_complete_migration or delete_migration API calls.
+
+    """
 
 
 class FakeDriverWithCaching(FakeDriver):

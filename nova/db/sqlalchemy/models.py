@@ -311,7 +311,7 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
     # locked is superseded by locked_by and locked is not really
     # necessary but still used in API code so it remains.
     locked = Column(Boolean)
-    locked_by = Column(Enum('owner', 'admin'))
+    locked_by = Column(Enum('owner', 'admin', name='instances0locked_by'))
 
     os_type = Column(String(255))
     architecture = Column(String(255))
@@ -692,6 +692,8 @@ class SecurityGroup(BASE, NovaBase, models.SoftDeleteMixin):
                              backref='security_groups')
 
 
+# TODO(stephenfin): Remove this in the V release or later, once we're sure we
+# won't want it back (it's for nova-network, so we won't)
 class SecurityGroupIngressRule(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents a rule in a security group."""
     __tablename__ = 'security_group_rules'
@@ -720,6 +722,8 @@ class SecurityGroupIngressRule(BASE, NovaBase, models.SoftDeleteMixin):
         'SecurityGroupIngressRule.deleted == 0)')
 
 
+# TODO(stephenfin): Remove this in the V release or later, once we're sure we
+# won't want it back (it's for nova-network, so we won't)
 class SecurityGroupIngressDefaultRule(BASE, NovaBase, models.SoftDeleteMixin):
     __tablename__ = 'security_group_default_rules'
     __table_args__ = ()
@@ -730,6 +734,8 @@ class SecurityGroupIngressDefaultRule(BASE, NovaBase, models.SoftDeleteMixin):
     cidr = Column(types.CIDR())
 
 
+# TODO(stephenfin): Remove this in the V release or later, once we're sure we
+# won't want it back (it's for nova-network, so we won't)
 class ProviderFirewallRule(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents a rule in a security group."""
     __tablename__ = 'provider_fw_rules'
@@ -791,7 +797,7 @@ class Migration(BASE, NovaBase, models.SoftDeleteMixin):
     # TODO(_cerberus_): enum
     status = Column(String(255))
     migration_type = Column(Enum('migration', 'resize', 'live-migration',
-                                 'evacuation'),
+                                 'evacuation', name='migration_type'),
                             nullable=True)
     hidden = Column(Boolean, default=False)
     memory_total = Column(BigInteger, nullable=True)
@@ -811,6 +817,8 @@ class Migration(BASE, NovaBase, models.SoftDeleteMixin):
                                         '0)')
 
 
+# TODO(stephenfin): Remove this in the V release or later, once we're sure we
+# won't want it back (it's for nova-network, so we won't)
 class Network(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents a network."""
     __tablename__ = 'networks'
@@ -881,7 +889,8 @@ class VirtualInterface(BASE, NovaBase, models.SoftDeleteMixin):
     tag = Column(String(255))
 
 
-# TODO(vish): can these both come from the same baseclass?
+# TODO(stephenfin): Remove this in the V release or later, once we're sure we
+# won't want it back (it's for nova-network, so we won't)
 class FixedIp(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents a fixed IP for an instance."""
     __tablename__ = 'fixed_ips'
@@ -940,6 +949,8 @@ class FixedIp(BASE, NovaBase, models.SoftDeleteMixin):
                                 'VirtualInterface.deleted == 0)')
 
 
+# TODO(stephenfin): Remove this in the V release or later, once we're sure we
+# won't want it back (it's for nova-network, so we won't)
 class FloatingIp(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents a floating IP that dynamically forwards to a fixed IP."""
     __tablename__ = 'floating_ips'
@@ -970,6 +981,7 @@ class FloatingIp(BASE, NovaBase, models.SoftDeleteMixin):
                                 'FixedIp.deleted == 0)')
 
 
+# TODO(stephenfin): Remove in V or later
 class DNSDomain(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents a DNS domain with availability zone or project info."""
     __tablename__ = 'dns_domains'
@@ -984,6 +996,7 @@ class DNSDomain(BASE, NovaBase, models.SoftDeleteMixin):
     project_id = Column(String(255))
 
 
+# TODO(stephenfin): Remove in V or later
 class ConsolePool(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents pool of consoles on the same physical node."""
     __tablename__ = 'console_pools'
@@ -1002,6 +1015,7 @@ class ConsolePool(BASE, NovaBase, models.SoftDeleteMixin):
     compute_host = Column(String(255))
 
 
+# TODO(stephenfin): Remove in V or later
 class Console(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents a console session for an instance."""
     __tablename__ = 'consoles'

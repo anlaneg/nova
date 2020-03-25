@@ -19,7 +19,6 @@ from nova import exception
 from nova import objects
 from nova.tests.functional.api import client as api_client
 from nova.tests.functional import integrated_helpers
-from nova.tests.unit.image import fake as fake_image
 from nova import utils
 
 
@@ -147,9 +146,9 @@ class TestServicesAPI(integrated_helpers.ProviderUsageBaseTestCase):
         self.admin_api.post_server_action(server['id'], {'evacuate': {}})
         # The host does not change until after the status is changed to ACTIVE
         # so wait for both parameters.
-        self._wait_for_server_parameter(
-            self.admin_api, server, {'status': 'ACTIVE',
-                                     'OS-EXT-SRV-ATTR:host': 'host2'})
+        self._wait_for_server_parameter(server, {
+            'status': 'ACTIVE',
+            'OS-EXT-SRV-ATTR:host': 'host2'})
         # Delete the compute service for host1 and check the related
         # placement resources for that host.
         self.admin_api.api_delete('/os-services/%s' % service['id'])
@@ -174,6 +173,99 @@ class TestServicesAPI(integrated_helpers.ProviderUsageBaseTestCase):
         log_output = self.stdlog.logger.output
         self.assertIn('Error updating resources for node host1.', log_output)
         self.assertIn('Failed to create resource provider host1', log_output)
+
+    def test_migrate_confirm_after_deleted_source_compute(self):
+        """Tests a scenario where a server is cold migrated and while in
+        VERIFY_RESIZE status the admin attempts to delete the source compute
+        and then the user tries to confirm the resize.
+        """
+        # Start a compute service and create a server there.
+        self._start_compute('host1')
+        host1_rp_uuid = self._get_provider_uuid_by_host('host1')
+        flavor = self.api.get_flavors()[0]
+        server = self._boot_and_check_allocations(flavor, 'host1')
+        # Start a second compute service so we can cold migrate there.
+        self._start_compute('host2')
+        host2_rp_uuid = self._get_provider_uuid_by_host('host2')
+        # Cold migrate the server to host2.
+        self._migrate_and_check_allocations(
+            server, flavor, host1_rp_uuid, host2_rp_uuid)
+        # Delete the source compute service.
+        service = self.admin_api.get_services(
+            binary='nova-compute', host='host1')[0]
+        # We expect the delete request to fail with a 409 error because of the
+        # instance in VERIFY_RESIZE status even though that instance is marked
+        # as being on host2 now.
+        ex = self.assertRaises(api_client.OpenStackApiException,
+                               self.admin_api.api_delete,
+                               '/os-services/%s' % service['id'])
+        self.assertEqual(409, ex.response.status_code)
+        self.assertIn('Unable to delete compute service that has in-progress '
+                      'migrations', six.text_type(ex))
+        self.assertIn('There are 1 in-progress migrations involving the host',
+                      self.stdlog.logger.output)
+        # The provider is still around because we did not delete the service.
+        resp = self.placement_api.get('/resource_providers/%s' % host1_rp_uuid)
+        self.assertEqual(200, resp.status)
+        self.assertFlavorMatchesUsage(host1_rp_uuid, flavor)
+        # Now try to confirm the migration.
+        self._confirm_resize(server)
+        # Delete the host1 service since the migration is confirmed and the
+        # server is on host2.
+        self.admin_api.api_delete('/os-services/%s' % service['id'])
+        # The host1 resource provider should be gone.
+        resp = self.placement_api.get('/resource_providers/%s' % host1_rp_uuid)
+        self.assertEqual(404, resp.status)
+
+    def test_resize_revert_after_deleted_source_compute(self):
+        """Tests a scenario where a server is resized and while in
+        VERIFY_RESIZE status the admin attempts to delete the source compute
+        and then the user tries to revert the resize.
+        """
+        # Start a compute service and create a server there.
+        self._start_compute('host1')
+        host1_rp_uuid = self._get_provider_uuid_by_host('host1')
+        flavors = self.api.get_flavors()
+        flavor1 = flavors[0]
+        flavor2 = flavors[1]
+        server = self._boot_and_check_allocations(flavor1, 'host1')
+        # Start a second compute service so we can resize there.
+        self._start_compute('host2')
+        host2_rp_uuid = self._get_provider_uuid_by_host('host2')
+        # Resize the server to host2.
+        self._resize_and_check_allocations(
+            server, flavor1, flavor2, host1_rp_uuid, host2_rp_uuid)
+        # Delete the source compute service.
+        service = self.admin_api.get_services(
+            binary='nova-compute', host='host1')[0]
+        # We expect the delete request to fail with a 409 error because of the
+        # instance in VERIFY_RESIZE status even though that instance is marked
+        # as being on host2 now.
+        ex = self.assertRaises(api_client.OpenStackApiException,
+                               self.admin_api.api_delete,
+                               '/os-services/%s' % service['id'])
+        self.assertEqual(409, ex.response.status_code)
+        self.assertIn('Unable to delete compute service that has in-progress '
+                      'migrations', six.text_type(ex))
+        self.assertIn('There are 1 in-progress migrations involving the host',
+                      self.stdlog.logger.output)
+        # The provider is still around because we did not delete the service.
+        resp = self.placement_api.get('/resource_providers/%s' % host1_rp_uuid)
+        self.assertEqual(200, resp.status)
+        self.assertFlavorMatchesUsage(host1_rp_uuid, flavor1)
+        # Now revert the resize.
+        self._revert_resize(server)
+        self.assertFlavorMatchesUsage(host1_rp_uuid, flavor1)
+        zero_flavor = {'vcpus': 0, 'ram': 0, 'disk': 0, 'extra_specs': {}}
+        self.assertFlavorMatchesUsage(host2_rp_uuid, zero_flavor)
+        # Delete the host2 service since the migration is reverted and the
+        # server is on host1 again.
+        service2 = self.admin_api.get_services(
+            binary='nova-compute', host='host2')[0]
+        self.admin_api.api_delete('/os-services/%s' % service2['id'])
+        # The host2 resource provider should be gone.
+        resp = self.placement_api.get('/resource_providers/%s' % host2_rp_uuid)
+        self.assertEqual(404, resp.status)
 
 
 class ComputeStatusFilterTest(integrated_helpers.ProviderUsageBaseTestCase):
@@ -230,11 +322,9 @@ class ComputeStatusFilterTest(integrated_helpers.ProviderUsageBaseTestCase):
 
         # Try creating a server which should fail because nothing is available.
         networks = [{'port': self.neutron.port_1['id']}]
-        server_req = self._build_minimal_create_server_request(
-            self.api, 'test_compute_status_filter',
-            image_uuid=fake_image.get_valid_image_id(), networks=networks)
+        server_req = self._build_server(networks=networks)
         server = self.api.post_server({'server': server_req})
-        server = self._wait_for_state_change(self.api, server, 'ERROR')
+        server = self._wait_for_state_change(server, 'ERROR')
         # There should be a NoValidHost fault recorded.
         self.assertIn('fault', server)
         self.assertIn('No valid host', server['fault']['message'])
@@ -246,7 +336,7 @@ class ComputeStatusFilterTest(integrated_helpers.ProviderUsageBaseTestCase):
 
         # Try creating another server and it should be OK.
         server = self.api.post_server({'server': server_req})
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._wait_for_state_change(server, 'ACTIVE')
 
         # Stop, force-down and disable the service so the API cannot call
         # the compute service to sync the trait.

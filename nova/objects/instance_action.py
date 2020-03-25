@@ -14,7 +14,9 @@
 
 from oslo_utils import timeutils
 from oslo_utils import versionutils
+import six
 
+from nova.compute import utils as compute_utils
 from nova.db import api as db
 from nova import exception
 from nova import objects
@@ -138,7 +140,8 @@ class InstanceActionEvent(base.NovaPersistentObject, base.NovaObject,
     # Version 1.1: event_finish_with_failure decorated with serialize_args
     # Version 1.2: Add 'host' field
     # Version 1.3: Add create() method.
-    VERSION = '1.3'
+    # Version 1.4: Added 'details' field.
+    VERSION = '1.4'
     fields = {
         'id': fields.IntegerField(),
         'event': fields.StringField(nullable=True),
@@ -148,10 +151,13 @@ class InstanceActionEvent(base.NovaPersistentObject, base.NovaObject,
         'result': fields.StringField(nullable=True),
         'traceback': fields.StringField(nullable=True),
         'host': fields.StringField(nullable=True),
+        'details': fields.StringField(nullable=True)
         }
 
     def obj_make_compatible(self, primitive, target_version):
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 4) and 'details' in primitive:
+            del primitive['details']
         if target_version < (1, 2) and 'host' in primitive:
             del primitive['host']
 
@@ -184,7 +190,18 @@ class InstanceActionEvent(base.NovaPersistentObject, base.NovaObject,
             values['result'] = 'Success'
         else:
             values['result'] = 'Error'
-            values['message'] = exc_val
+            # Store the details using the same logic as storing an instance
+            # fault message.
+            if exc_val:
+                # If we got a string for exc_val it's probably because of
+                # the serialize_args decorator on event_finish_with_failure
+                # so pass that as the message to exception_to_dict otherwise
+                # the details will just the exception class name since it
+                # cannot format the message as a NovaException.
+                message = (
+                    exc_val if isinstance(exc_val, six.string_types) else None)
+                values['details'] = compute_utils.exception_to_dict(
+                    exc_val, message=message)['message']
             values['traceback'] = exc_tb
         return values
 

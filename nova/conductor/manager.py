@@ -38,15 +38,16 @@ from nova.compute import task_states
 from nova.compute import utils as compute_utils
 from nova.compute.utils import wrap_instance_event
 from nova.compute import vm_states
+from nova.conductor.tasks import cross_cell_migrate
 from nova.conductor.tasks import live_migrate
 from nova.conductor.tasks import migrate
 from nova import context as nova_context
 from nova.db import base
 from nova import exception
 from nova.i18n import _
-from nova import image
+from nova.image import glance
 from nova import manager
-from nova import network
+from nova.network import neutron
 from nova import notifications
 from nova import objects
 from nova.objects import base as nova_object
@@ -232,15 +233,15 @@ class ComputeTaskManager(base.Base):
     may involve coordinating activities on multiple compute nodes.
     """
 
-    target = messaging.Target(namespace='compute_task', version='1.21')
+    target = messaging.Target(namespace='compute_task', version='1.23')
 
     def __init__(self):
         super(ComputeTaskManager, self).__init__()
         #与各个compute节点通信时，需要的rpc接口
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
         self.volume_api = cinder.API()
-        self.image_api = image.API()
-        self.network_api = network.API()
+        self.image_api = glance.API()
+        self.network_api = neutron.API()
         self.servicegroup_api = servicegroup.API()
         self.query_client = query.SchedulerQueryClient()
         self.report_client = report.SchedulerReportClient()
@@ -483,7 +484,6 @@ class ComputeTaskManager(base.Base):
                 exception.MigrationPreCheckError,
                 exception.MigrationSchedulerRPCError) as ex:
             with excutils.save_and_reraise_exception():
-                # TODO(johngarbutt) - eventually need instance actions here
                 _set_vm_state(context, instance, ex, instance.vm_state)
                 migration.status = 'error'
                 migration.save()
@@ -598,8 +598,8 @@ class ComputeTaskManager(base.Base):
 
     #conductor收到build_instances消息,选出某个主机，向其发送消息，要求其创建vm
     # NOTE(danms): This is never cell-targeted because it is only used for
-    # cellsv1 (which does not target cells directly) and n-cpu reschedules
-    # (which go to the cell conductor and thus are always cell-specific).
+    # n-cpu reschedules which go to the cell conductor and thus are always
+    # cell-specific.
     def build_instances(self, context, instances, image, filter_properties,
             admin_password, injected_files, requested_networks,
             security_groups, block_device_mapping=None, legacy_bdm=True,
@@ -621,9 +621,8 @@ class ComputeTaskManager(base.Base):
             flavor = objects.Flavor.get_by_id(context, flavor['id'])
             filter_properties = dict(filter_properties, instance_type=flavor)
 
-        # Older computes will not send a request_spec during reschedules, nor
-        # will the API send the request_spec if using cells v1, so we need
-        # to check and build our own if one is not provided.
+        # Older computes will not send a request_spec during reschedules so we
+        # need to check and build our own if one is not provided.
         if request_spec is None:
             legacy_request_spec = scheduler_utils.build_request_spec(
                 image, instances)
@@ -639,10 +638,10 @@ class ComputeTaskManager(base.Base):
             # during the below legacy conversion
             legacy_request_spec = request_spec.to_legacy_request_spec_dict()
 
-        # 'host_lists' will be None in one of two cases: when running cellsv1,
-        # or during a reschedule from a pre-Queens compute. In all other cases,
-        # it will be a list of lists, though the lists may be empty if there
-        # are no more hosts left in a rescheduling situation.
+        # 'host_lists' will be None during a reschedule from a pre-Queens
+        # compute. In all other cases, it will be a list of lists, though the
+        # lists may be empty if there are no more hosts left in a rescheduling
+        # situation.
         #如果给定host列表，则不需要重新调度
         is_reschedule = host_lists is not None
         try:
@@ -671,11 +670,10 @@ class ComputeTaskManager(base.Base):
             else:
                 # This is not a reschedule, so we need to call the scheduler to
                 # get appropriate hosts for the request.
-                # NOTE(gibi): We only call the scheduler if using cells v1 or
-                # we are rescheduling from a really old compute. In
-                # either case we do not support externally-defined resource
-                # requests, like port QoS. So no requested_resources are set
-                # on the RequestSpec here.
+                # NOTE(gibi): We only call the scheduler if we are rescheduling
+                # from a really old compute. In that case we do not support
+                # externally-defined resource requests, like port QoS. So no
+                # requested_resources are set on the RequestSpec here.
                 # 为需要创建的instances查找合适的host列表
                 host_lists = self._schedule_instances(context, spec_obj,
                         instance_uuids, return_alternates=True)
@@ -738,8 +736,7 @@ class ComputeTaskManager(base.Base):
                                 # moves the allocation of the instance to
                                 # another host
                                 scheduler_utils.fill_provider_mapping(
-                                    context, self.report_client, request_spec,
-                                    host)
+                                    request_spec, host)
                         except Exception as exc:
                             self._cleanup_when_reschedule_fails(
                                 context, instance, exc, legacy_request_spec,
@@ -870,6 +867,32 @@ class ComputeTaskManager(base.Base):
                   'instance(s).', timer.elapsed(), len(instance_uuids))
         return host_lists
 
+    @staticmethod
+    def _restrict_request_spec_to_cell(context, instance, request_spec):
+        """Sets RequestSpec.requested_destination.cell for the move operation
+
+        Move operations, e.g. evacuate and unshelve, must be restricted to the
+        cell in which the instance already exists, so this method is used to
+        target the RequestSpec, which is sent to the scheduler via the
+        _schedule_instances method, to the instance's current cell.
+
+        :param context: nova auth RequestContext
+        """
+        instance_mapping = \
+            objects.InstanceMapping.get_by_instance_uuid(
+                context, instance.uuid)
+        LOG.debug('Requesting cell %(cell)s during scheduling',
+                  {'cell': instance_mapping.cell_mapping.identity},
+                  instance=instance)
+        if ('requested_destination' in request_spec and
+                request_spec.requested_destination):
+            request_spec.requested_destination.cell = (
+                instance_mapping.cell_mapping)
+        else:
+            request_spec.requested_destination = (
+                objects.Destination(
+                    cell=instance_mapping.cell_mapping))
+
     # TODO(mriedem): Make request_spec required in ComputeTaskAPI RPC v2.0.
     @targets_cell
     def unshelve_instance(self, context, instance, request_spec=None):
@@ -922,26 +945,19 @@ class ComputeTaskManager(base.Base):
                     filter_properties = request_spec.\
                         to_legacy_filter_properties_dict()
 
-                    # TODO(gibi): We need to make sure that the
-                    # requested_resources field is re calculated based on
-                    # neutron ports.
+                    port_res_req = (
+                        self.network_api.get_requested_resource_for_instance(
+                            context, instance.uuid))
+                    # NOTE(gibi): When cyborg or other module wants to handle
+                    # similar non-nova resources then here we have to collect
+                    # all the external resource requests in a single list and
+                    # add them to the RequestSpec.
+                    request_spec.requested_resources = port_res_req
 
                     # NOTE(cfriesen): Ensure that we restrict the scheduler to
                     # the cell specified by the instance mapping.
-                    instance_mapping = \
-                        objects.InstanceMapping.get_by_instance_uuid(
-                            context, instance.uuid)
-                    LOG.debug('Requesting cell %(cell)s while unshelving',
-                              {'cell': instance_mapping.cell_mapping.identity},
-                              instance=instance)
-                    if ('requested_destination' in request_spec and
-                            request_spec.requested_destination):
-                        request_spec.requested_destination.cell = (
-                            instance_mapping.cell_mapping)
-                    else:
-                        request_spec.requested_destination = (
-                            objects.Destination(
-                                cell=instance_mapping.cell_mapping))
+                    self._restrict_request_spec_to_cell(
+                        context, instance, request_spec)
 
                     request_spec.ensure_project_and_user_id(instance)
                     request_spec.ensure_network_metadata(instance)
@@ -958,6 +974,10 @@ class ComputeTaskManager(base.Base):
                     instance.availability_zone = (
                         availability_zones.get_host_availability_zone(
                             context, host))
+
+                    scheduler_utils.fill_provider_mapping(
+                        request_spec, selection)
+
                     self.compute_rpcapi.unshelve_instance(
                         context, instance, host, request_spec, image=image,
                         filter_properties=filter_properties, node=node)
@@ -1010,11 +1030,6 @@ class ComputeTaskManager(base.Base):
                                 'not found.', instance.host, instance.node,
                                 instance=instance)
 
-        # TODO(mriedem): Call select_destinations() with a
-        # skip_filters=True flag so the scheduler does the work of
-        # claiming resources on the destination in Placement but still
-        # bypass the scheduler filters, which honors the 'force' flag
-        # in the API.
         try:
             scheduler_utils.claim_resources_on_destination(
                 context, self.report_client, instance, source_node, dest_node)
@@ -1034,7 +1049,15 @@ class ComputeTaskManager(base.Base):
                          bdms, recreate, on_shared_storage,
                          preserve_ephemeral=False, host=None,
                          request_spec=None):
+        # recreate=True means the instance is being evacuated from a failed
+        # host to a new destination host. The 'recreate' variable name is
+        # confusing, so rename it to evacuate here at the top, which is simpler
+        # than renaming a parameter in an RPC versioned method.
+        evacuate = recreate
 
+        # NOTE(efried): It would be nice if this were two separate events, one
+        # for 'rebuild' and one for 'evacuate', but this is part of the API
+        # now, so it would be nontrivial to change.
         with compute_utils.EventReporter(context, 'rebuild_server',
                                          self.host, instance.uuid):
             node = limits = None
@@ -1069,6 +1092,10 @@ class ComputeTaskManager(base.Base):
                             if migration:
                                 migration.status = 'error'
                                 migration.save()
+                            # NOTE(efried): It would be nice if this were two
+                            # separate events, one for 'rebuild' and one for
+                            # 'evacuate', but this is part of the API now, so
+                            # it would be nontrivial to change.
                             self._set_vm_state_and_notify(
                                 context,
                                 instance.uuid,
@@ -1092,7 +1119,7 @@ class ComputeTaskManager(base.Base):
                 # In either case, the API passes host=None but sets up the
                 # RequestSpec.requested_destination field for the specified
                 # host.
-                if recreate:
+                if evacuate:
                     # NOTE(sbauza): Augment the RequestSpec object by excluding
                     # the source host for avoiding the scheduler to pick it
                     request_spec.ignore_hosts = [instance.host]
@@ -1113,10 +1140,12 @@ class ComputeTaskManager(base.Base):
                 try:
                     # if this is a rebuild of instance on the same host with
                     # new image.
-                    if not recreate and orig_image_ref != image_ref:
+                    if not evacuate and orig_image_ref != image_ref:
                         self._validate_image_traits_for_rebuild(context,
                                                                 instance,
                                                                 image_ref)
+                    self._restrict_request_spec_to_cell(
+                        context, instance, request_spec)
                     request_spec.ensure_project_and_user_id(instance)
                     request_spec.ensure_network_metadata(instance)
                     compute_utils.heal_reqspec_is_bfv(
@@ -1132,8 +1161,7 @@ class ComputeTaskManager(base.Base):
 
                     if recreate:
                         scheduler_utils.fill_provider_mapping(
-                            context, self.report_client, request_spec,
-                            selection)
+                            request_spec, selection)
 
                 except (exception.NoValidHost,
                         exception.UnsupportedPolicyException,
@@ -1151,6 +1179,10 @@ class ComputeTaskManager(base.Base):
                         instance.image_ref = orig_image_ref
                         instance.save()
                     with excutils.save_and_reraise_exception():
+                        # NOTE(efried): It would be nice if this were two
+                        # separate events, one for 'rebuild' and one for
+                        # 'evacuate', but this is part of the API now, so it
+                        # would be nontrivial to change.
                         self._set_vm_state_and_notify(context, instance.uuid,
                                 'rebuild_server',
                                 {'vm_state': vm_states.ERROR,
@@ -1177,7 +1209,7 @@ class ComputeTaskManager(base.Base):
                     orig_image_ref=orig_image_ref,
                     orig_sys_metadata=orig_sys_metadata,
                     bdms=bdms,
-                    recreate=recreate,
+                    recreate=evacuate,
                     on_shared_storage=on_shared_storage,
                     preserve_ephemeral=preserve_ephemeral,
                     migration=migration,
@@ -1294,6 +1326,29 @@ class ComputeTaskManager(base.Base):
         else:
             return tags
 
+    def _create_instance_action_for_cell0(self, context, instance, exc):
+        """Create a failed "create" instance action for the instance in cell0.
+
+        :param context: nova auth RequestContext targeted at cell0
+        :param instance: Instance object being buried in cell0
+        :param exc: Exception that occurred which resulted in burial
+        """
+        # First create the action record.
+        objects.InstanceAction.action_start(
+            context, instance.uuid, instance_actions.CREATE, want_result=False)
+        # Now create an event for that action record.
+        event_name = 'conductor_schedule_and_build_instances'
+        objects.InstanceActionEvent.event_start(
+            context, instance.uuid, event_name, want_result=False,
+            host=self.host)
+        # And finish the event with the exception. Note that we expect this
+        # method to be called from _bury_in_cell0 which is called from within
+        # an exception handler so sys.exc_info should return values but if not
+        # it's not the end of the world - this is best effort.
+        objects.InstanceActionEvent.event_finish_with_failure(
+            context, instance.uuid, event_name, exc_val=exc,
+            exc_tb=sys.exc_info()[2], want_result=False)
+
     def _bury_in_cell0(self, context, request_spec, exc,
                        build_requests=None, instances=None,
                        block_device_mapping=None,
@@ -1331,8 +1386,41 @@ class ComputeTaskManager(base.Base):
 
         updates = {'vm_state': vm_states.ERROR, 'task_state': None}
         for instance in instances_by_uuid.values():
+
+            inst_mapping = None
+            try:
+                # We don't need the cell0-targeted context here because the
+                # instance mapping is in the API DB.
+                inst_mapping = \
+                    objects.InstanceMapping.get_by_instance_uuid(
+                        context, instance.uuid)
+            except exception.InstanceMappingNotFound:
+                # The API created the instance mapping record so it should
+                # definitely be here. Log an error but continue to create the
+                # instance in the cell0 database.
+                LOG.error('While burying instance in cell0, no instance '
+                          'mapping was found.', instance=instance)
+
+            # Perform a final sanity check that the instance is not mapped
+            # to some other cell already because of maybe some crazy
+            # clustered message queue weirdness.
+            if inst_mapping and inst_mapping.cell_mapping is not None:
+                LOG.error('When attempting to bury instance in cell0, the '
+                          'instance is already mapped to cell %s. Ignoring '
+                          'bury in cell0 attempt.',
+                          inst_mapping.cell_mapping.identity,
+                          instance=instance)
+                continue
+
             with obj_target_cell(instance, cell0) as cctxt:
                 instance.create()
+                if inst_mapping:
+                    inst_mapping.cell_mapping = cell0
+                    inst_mapping.save()
+
+                # Record an instance action with a failed event.
+                self._create_instance_action_for_cell0(
+                    cctxt, instance, exc)
 
                 # NOTE(mnaser): In order to properly clean-up volumes after
                 #               being buried in cell0, we need to store BDMs.
@@ -1348,16 +1436,6 @@ class ComputeTaskManager(base.Base):
                 self._set_vm_state_and_notify(
                     cctxt, instance.uuid, 'build_instances', updates,
                     exc, request_spec)
-                try:
-                    # We don't need the cell0-targeted context here because the
-                    # instance mapping is in the API DB.
-                    inst_mapping = \
-                        objects.InstanceMapping.get_by_instance_uuid(
-                            context, instance.uuid)
-                    inst_mapping.cell_mapping = cell0
-                    inst_mapping.save()
-                except exception.InstanceMappingNotFound:
-                    pass
 
         for build_request in build_requests:
             try:
@@ -1497,8 +1575,7 @@ class ComputeTaskManager(base.Base):
             # allocations in the scheduler) for this instance, we may need to
             # map allocations to resource providers in the request spec.
             try:
-                scheduler_utils.fill_provider_mapping(
-                    context, self.report_client, request_spec, host)
+                scheduler_utils.fill_provider_mapping(request_spec, host)
             except Exception as exc:
                 # If anything failed here we need to cleanup and bail out.
                 with excutils.save_and_reraise_exception():
@@ -1527,13 +1604,8 @@ class ComputeTaskManager(base.Base):
             instance.tags = instance_tags if instance_tags \
                 else objects.TagList()
 
-            # Update mapping for instance. Normally this check is guarded by
-            # a try/except but if we're here we know that a newer nova-api
-            # handled the build process and would have created the mapping
-            inst_mapping = objects.InstanceMapping.get_by_instance_uuid(
-                context, instance.uuid)
-            inst_mapping.cell_mapping = cell
-            inst_mapping.save()
+            # Update mapping for instance.
+            self._map_instance_to_cell(context, instance, cell)
 
             if not self._delete_build_request(
                     context, build_request, instance, cell, instance_bdms,
@@ -1561,6 +1633,37 @@ class ComputeTaskManager(base.Base):
                     block_device_mapping=instance_bdms,
                     host=host.service_host, node=host.nodename,
                     limits=host.limits, host_list=host_list)
+
+    @staticmethod
+    def _map_instance_to_cell(context, instance, cell):
+        """Update the instance mapping to point at the given cell.
+
+        During initial scheduling once a host and cell is selected in which
+        to build the instance this method is used to update the instance
+        mapping to point at that cell.
+
+        :param context: nova auth RequestContext
+        :param instance: Instance object being built
+        :param cell: CellMapping representing the cell in which the instance
+            was created and is being built.
+        :returns: InstanceMapping object that was updated.
+        """
+        inst_mapping = objects.InstanceMapping.get_by_instance_uuid(
+            context, instance.uuid)
+        # Perform a final sanity check that the instance is not mapped
+        # to some other cell already because of maybe some crazy
+        # clustered message queue weirdness.
+        if inst_mapping.cell_mapping is not None:
+            LOG.error('During scheduling instance is already mapped to '
+                      'another cell: %s. This should not happen and is an '
+                      'indication of bigger problems. If you see this you '
+                      'should report it to the nova team. Overwriting '
+                      'the mapping to point at cell %s.',
+                      inst_mapping.cell_mapping.identity, cell.identity,
+                      instance=instance)
+        inst_mapping.cell_mapping = cell
+        inst_mapping.save()
+        return inst_mapping
 
     def _cleanup_build_artifacts(self, context, exc, instances, build_requests,
                                  request_specs, block_device_mappings, tags,
@@ -1803,3 +1906,37 @@ class ComputeTaskManager(base.Base):
             context, aggregate,
             fields.NotificationAction.IMAGE_CACHE,
             fields.NotificationPhase.END)
+
+    @targets_cell
+    @wrap_instance_event(prefix='conductor')
+    def confirm_snapshot_based_resize(self, context, instance, migration):
+        """Executes the ConfirmResizeTask
+
+        :param context: nova auth request context targeted at the target cell
+        :param instance: Instance object in "resized" status from the target
+            cell
+        :param migration: Migration object from the target cell for the resize
+            operation expected to have status "confirming"
+        """
+        task = cross_cell_migrate.ConfirmResizeTask(
+            context, instance, migration, self.notifier, self.compute_rpcapi)
+        task.execute()
+
+    @targets_cell
+    # NOTE(mriedem): Upon successful completion of RevertResizeTask the
+    # instance is hard-deleted, along with its instance action record(s), from
+    # the target cell database so EventReporter hits InstanceActionNotFound on
+    # __exit__. Pass graceful_exit=True to avoid an ugly traceback.
+    @wrap_instance_event(prefix='conductor', graceful_exit=True)
+    def revert_snapshot_based_resize(self, context, instance, migration):
+        """Executes the RevertResizeTask
+
+        :param context: nova auth request context targeted at the target cell
+        :param instance: Instance object in "resized" status from the target
+            cell
+        :param migration: Migration object from the target cell for the resize
+            operation expected to have status "reverting"
+        """
+        task = cross_cell_migrate.RevertResizeTask(
+            context, instance, migration, self.notifier, self.compute_rpcapi)
+        task.execute()

@@ -48,8 +48,7 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
                       'MigrateServerController',
                       lambda *a, **kw: self.controller)
         self.mock_list_port = self.useFixture(
-            fixtures.MockPatch(
-                'nova.network.neutronv2.api.API.list_ports')).mock
+            fixtures.MockPatch('nova.network.neutron.API.list_ports')).mock
         self.mock_list_port.return_value = {'ports': []}
 
     def _get_migration_body(self, **kwargs):
@@ -131,9 +130,9 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
                               body={'migrate': None})
             mock_resize.assert_called_once_with(
                 self.context, instance, host_name=self.host_name)
-        self.mock_get.assert_called_once_with(self.context, instance.uuid,
-                                              expected_attrs=['flavor'],
-                                              cell_down_support=False)
+        self.mock_get.assert_called_once_with(
+            self.context, instance.uuid, expected_attrs=['flavor', 'services'],
+            cell_down_support=False)
 
     def test_migrate_too_many_instances(self):
         exc_info = exception.TooManyInstances(overs='', req='', used=0,
@@ -296,14 +295,11 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
             expected_exc=webob.exc.HTTPInternalServerError,
             check_response=False)
 
-    @mock.patch('nova.api.openstack.common.'
-                'supports_port_resource_request_during_move',
-                return_value=True)
     @mock.patch('nova.objects.Service.get_by_host_and_binary')
     @mock.patch('nova.api.openstack.common.'
                 'instance_has_port_with_resource_request', return_value=True)
     def test_migrate_with_bandwidth_from_old_compute_not_supported(
-            self, mock_has_res_req, mock_get_service, mock_support):
+            self, mock_has_res_req, mock_get_service):
         instance = self._stub_instance_get()
 
         mock_get_service.return_value = objects.Service(host=instance['host'])
@@ -580,10 +576,6 @@ class MigrateServerTestsV256(MigrateServerTestsV234):
     def test_migrate_nonexistent_host(self):
         exc_info = exception.ComputeHostNotFound(host='nonexistent_host')
         self._test_migrate_exception(exc_info, webob.exc.HTTPBadRequest)
-
-    def test_migrate_no_request_spec(self):
-        exc_info = exception.CannotMigrateWithTargetHost()
-        self._test_migrate_exception(exc_info, webob.exc.HTTPConflict)
 
     def test_migrate_to_same_host(self):
         exc_info = exception.CannotMigrateToSameHost()

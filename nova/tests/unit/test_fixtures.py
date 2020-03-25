@@ -15,7 +15,6 @@
 # under the License.
 
 import copy
-import sys
 
 import fixtures as fx
 import futurist
@@ -26,6 +25,7 @@ from oslo_log import log as logging
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
+from oslotest import output
 import sqlalchemy
 import testtools
 
@@ -34,6 +34,7 @@ from nova import conductor
 from nova import context
 from nova.db.sqlalchemy import api as session
 from nova import exception
+from nova.network import neutron as neutron_api
 from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import service as service_obj
@@ -44,67 +45,6 @@ from nova.tests.unit import fake_instance
 from nova import utils
 
 CONF = cfg.CONF
-
-
-class TestConfFixture(testtools.TestCase):
-    """Test the Conf fixtures in Nova.
-
-    This is a basic test that this fixture works like we expect.
-
-    Expectations:
-
-    1. before using the fixture, a default value (api_paste_config)
-       comes through untouched.
-
-    2. before using the fixture, a known default value that we
-       override is correct.
-
-    3. after using the fixture a known value that we override is the
-       new value.
-
-    4. after using the fixture we can set a default value to something
-       random, and it will be reset once we are done.
-
-    There are 2 copies of this test so that you can verify they do the
-    right thing with:
-
-       tox -e py27 test_fixtures -- --concurrency=1
-
-    As regardless of run order, their initial asserts would be
-    impacted if the reset behavior isn't working correctly.
-
-    """
-    def _test_override(self):
-        self.assertEqual('api-paste.ini', CONF.wsgi.api_paste_config)
-        self.assertFalse(CONF.fake_network)
-        self.useFixture(conf_fixture.ConfFixture())
-        CONF.set_default('api_paste_config', 'foo', group='wsgi')
-        self.assertTrue(CONF.fake_network)
-
-    def test_override1(self):
-        self._test_override()
-
-    def test_override2(self):
-        self._test_override()
-
-
-class TestOutputStream(testtools.TestCase):
-    """Ensure Output Stream capture works as expected.
-
-    This has the added benefit of providing a code example of how you
-    can manipulate the output stream in your own tests.
-    """
-    def test_output(self):
-        self.useFixture(fx.EnvironmentVariable('OS_STDOUT_CAPTURE', '1'))
-        self.useFixture(fx.EnvironmentVariable('OS_STDERR_CAPTURE', '1'))
-
-        out = self.useFixture(fixtures.OutputStreamCapture())
-        sys.stdout.write("foo")
-        sys.stderr.write("bar")
-        self.assertEqual("foo", out.stdout)
-        self.assertEqual("bar", out.stderr)
-        # TODO(sdague): nuke the out and err buffers so it doesn't
-        # make it to testr
 
 
 class TestLogging(testtools.TestCase):
@@ -145,33 +85,12 @@ class TestLogging(testtools.TestCase):
         self.assertIn("at debug", stdlog.logger.output)
 
 
-class TestTimeout(testtools.TestCase):
-    """Tests for our timeout fixture.
-
-    Testing the actual timeout mechanism is beyond the scope of this
-    test, because it's a pretty clear pass through to fixtures'
-    timeout fixture, which tested in their tree.
-
-    """
-    def test_scaling(self):
-        # a bad scaling factor
-        self.assertRaises(ValueError, fixtures.Timeout, 1, 0.5)
-
-        # various things that should work.
-        timeout = fixtures.Timeout(10)
-        self.assertEqual(10, timeout.test_timeout)
-        timeout = fixtures.Timeout("10")
-        self.assertEqual(10, timeout.test_timeout)
-        timeout = fixtures.Timeout("10", 2)
-        self.assertEqual(20, timeout.test_timeout)
-
-
 class TestOSAPIFixture(testtools.TestCase):
     @mock.patch('nova.objects.Service.get_by_host_and_binary')
     @mock.patch('nova.objects.Service.create')
     def test_responds_to_version(self, mock_service_create, mock_get):
         """Ensure the OSAPI server responds to calls sensibly."""
-        self.useFixture(fixtures.OutputStreamCapture())
+        self.useFixture(output.CaptureOutput())
         self.useFixture(fixtures.StandardLogging())
         self.useFixture(conf_fixture.ConfFixture())
         self.useFixture(fixtures.RPCFixture('nova.test'))
@@ -624,3 +543,26 @@ class TestDownCellFixture(test.TestCase):
             # when targeted.
             result = dummy_tester(ctxt, cell1, inst2.uuid)
             self.assertEqual(inst2.uuid, result.uuid)
+
+
+class TestNeutronFixture(test.NoDBTestCase):
+
+    def setUp(self):
+        super(TestNeutronFixture, self).setUp()
+        self.neutron = self.useFixture(fixtures.NeutronFixture(self))
+
+    def test_list_ports_with_resource_request_non_admin_client(self):
+        ctxt = context.get_context()
+        client = neutron_api.get_client(ctxt)
+        ports = client.list_ports(ctxt)['ports']
+        port_id = self.neutron.port_with_resource_request['id']
+        ports = [port for port in ports if port_id == port['id']]
+        self.assertIsNone(ports[0]['resource_request'])
+
+    def test_list_ports_with_resource_request_admin_client(self):
+        ctxt = context.get_admin_context()
+        client = neutron_api.get_client(ctxt)
+        ports = client.list_ports(ctxt)['ports']
+        port_id = self.neutron.port_with_resource_request['id']
+        ports = [port for port in ports if port_id == port['id']]
+        self.assertIsNotNone(ports[0]['resource_request'])

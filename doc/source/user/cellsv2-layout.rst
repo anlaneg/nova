@@ -331,6 +331,8 @@ containing the instances for which it is proxying console access.
 .. __: https://specs.openstack.org/openstack/nova-specs/specs/rocky/implemented/convert-consoles-to-objects.html
 
 
+.. _upcall:
+
 Operations Requiring upcalls
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -389,10 +391,11 @@ Since the aggregates are in the API database and the cell conductor cannot
 access that information, so this will fail. In the future this check could be
 moved to the *nova-api* service such that the availability zone between the
 instance and the volume is checked before we reach the cell, except in the
-case of boot from volume where the *nova-compute* service itself creates the
-volume and must tell Cinder in which availability zone to create the volume.
-Long-term, volume creation during boot from volume should be moved to the
-top-level superconductor which would eliminate this AZ up-call check problem.
+case of :term:`boot from volume <Boot From Volume>` where the *nova-compute*
+service itself creates the volume and must tell Cinder in which availability
+zone to create the volume. Long-term, volume creation during boot from volume
+should be moved to the top-level superconductor which would eliminate this AZ
+up-call check problem.
 
 The sixth is detailed in `bug 1781286`_ and similar to the first issue.
 The issue is that servers created without a specific availability zone

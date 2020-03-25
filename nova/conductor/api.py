@@ -20,7 +20,7 @@ import oslo_messaging as messaging
 from nova import baserpc
 from nova.conductor import rpcapi
 import nova.conf
-from nova import image
+from nova.image import glance
 
 CONF = nova.conf.CONF
 
@@ -84,18 +84,19 @@ class ComputeTaskAPI(object):
     def __init__(self):
         #用于向Conductor发送rcp消息
         self.conductor_compute_rpcapi = rpcapi.ComputeTaskAPI()
-        self.image_api = image.API()
+        self.image_api = glance.API()
 
     # TODO(stephenfin): Remove the 'reservations' parameter since we don't use
     # reservations anymore
     def resize_instance(self, context, instance, scheduler_hint, flavor,
                         reservations=None, clean_shutdown=True,
-                        request_spec=None, host_list=None):
+                        request_spec=None, host_list=None, do_cast=False):
         self.conductor_compute_rpcapi.migrate_server(
             context, instance, scheduler_hint, live=False, rebuild=False,
             flavor=flavor, block_migration=None, disk_over_commit=None,
             reservations=reservations, clean_shutdown=clean_shutdown,
-            request_spec=request_spec, host_list=host_list)
+            request_spec=request_spec, host_list=host_list,
+            do_cast=do_cast)
 
     def live_migrate_instance(self, context, instance, host_name,
                               block_migration, disk_over_commit,
@@ -175,3 +176,13 @@ class ComputeTaskAPI(object):
             self.image_api.get(context, image_id)
         self.conductor_compute_rpcapi.cache_images(context, aggregate,
                                                    image_ids)
+
+    def confirm_snapshot_based_resize(
+            self, ctxt, instance, migration, do_cast=True):
+        self.conductor_compute_rpcapi.confirm_snapshot_based_resize(
+            ctxt, instance, migration, do_cast=do_cast)
+
+    def revert_snapshot_based_resize(
+            self, ctxt, instance, migration):
+        self.conductor_compute_rpcapi.revert_snapshot_based_resize(
+            ctxt, instance, migration)

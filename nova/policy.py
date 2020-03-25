@@ -49,7 +49,8 @@ def reset():
         _ENFORCER = None
 
 
-def init(policy_file=None, rules=None, default_rule=None, use_conf=True):
+def init(policy_file=None, rules=None, default_rule=None, use_conf=True,
+         suppress_deprecation_warnings=False):
     """Init an Enforcer class.
 
        :param policy_file: Custom policy file to use, if none is specified,
@@ -59,6 +60,8 @@ def init(policy_file=None, rules=None, default_rule=None, use_conf=True):
        :param default_rule: Default rule to use, CONF.default_rule will
                             be used if none is specified.
        :param use_conf: Whether to load rules from config file.
+       :param suppress_deprecation_warnings: Whether to suppress the
+                                             deprecation warnings.
     """
 
     global _ENFORCER
@@ -70,6 +73,8 @@ def init(policy_file=None, rules=None, default_rule=None, use_conf=True):
                                     rules=rules,
                                     default_rule=default_rule,
                                     use_conf=use_conf)
+        if suppress_deprecation_warnings:
+            _ENFORCER.suppress_deprecation_warnings = True
         register_rules(_ENFORCER)
         _ENFORCER.load_rules()
 
@@ -153,7 +158,6 @@ def authorize(context, action, target=None, do_raise=True, exc=None):
            do_raise is False.
     """
     init()
-    credentials = context.to_policy_values()
     if not exc:
         exc = exception.PolicyNotAuthorized
 
@@ -163,16 +167,23 @@ def authorize(context, action, target=None, do_raise=True, exc=None):
         target = default_target(context)
 
     try:
-        result = _ENFORCER.authorize(action, target, credentials,
+        result = _ENFORCER.authorize(action, target, context,
                                      do_raise=do_raise, exc=exc, action=action)
     except policy.PolicyNotRegistered:
         with excutils.save_and_reraise_exception():
             LOG.exception(_LE('Policy not registered'))
+    except policy.InvalidScope:
+        LOG.debug('Policy check for %(action)s failed with scope check '
+                  '%(credentials)s',
+                  {'action': action,
+                   'credentials': context.to_policy_values()})
+        raise exc(action=action)
     except Exception:
         with excutils.save_and_reraise_exception():
             LOG.debug('Policy check for %(action)s failed with credentials '
                       '%(credentials)s',
-                      {'action': action, 'credentials': credentials})
+                      {'action': action,
+                       'credentials': context.to_policy_values()})
     return result
 
 
@@ -187,9 +198,8 @@ def check_is_admin(context):
 
     init()
     # the target is user-self
-    credentials = context.to_policy_values()
     target = default_target(context)
-    return _ENFORCER.authorize('context_is_admin', target, credentials)
+    return _ENFORCER.authorize('context_is_admin', target, context)
 
 
 @policy.register('is_admin')

@@ -36,9 +36,7 @@ from nova import exception
 from nova import objects
 from nova import test
 from nova.tests import fixtures as nova_fixtures
-from nova.tests.unit.db import fakes as db_fakes
 from nova.tests.unit import fake_requests
-from nova.tests.unit.objects import test_network
 
 
 CONF = conf.CONF
@@ -78,303 +76,6 @@ class UtilitiesTestCase(test.NoDBTestCase):
         self.assertEqual(
             url4_safe,
             manage.mask_passwd_in_url(url4))
-
-
-class FloatingIpCommandsTestCase(test.NoDBTestCase):
-    def setUp(self):
-        super(FloatingIpCommandsTestCase, self).setUp()
-        self.output = StringIO()
-        self.useFixture(fixtures.MonkeyPatch('sys.stdout', self.output))
-        db_fakes.stub_out_db_network_api(self)
-        self.commands = manage.FloatingIpCommands()
-
-    def test_address_to_hosts(self):
-        def assert_loop(result, expected):
-            for ip in result:
-                self.assertIn(str(ip), expected)
-
-        address_to_hosts = self.commands.address_to_hosts
-        # /32 and /31
-        self.assertRaises(exception.InvalidInput, address_to_hosts,
-                          '192.168.100.1/32')
-        self.assertRaises(exception.InvalidInput, address_to_hosts,
-                          '192.168.100.1/31')
-        # /30
-        expected = ["192.168.100.%s" % i for i in range(1, 3)]
-        result = address_to_hosts('192.168.100.0/30')
-        self.assertEqual(2, len(list(result)))
-        assert_loop(result, expected)
-        # /29
-        expected = ["192.168.100.%s" % i for i in range(1, 7)]
-        result = address_to_hosts('192.168.100.0/29')
-        self.assertEqual(6, len(list(result)))
-        assert_loop(result, expected)
-        # /28
-        expected = ["192.168.100.%s" % i for i in range(1, 15)]
-        result = address_to_hosts('192.168.100.0/28')
-        self.assertEqual(14, len(list(result)))
-        assert_loop(result, expected)
-        # /16
-        result = address_to_hosts('192.168.100.0/16')
-        self.assertEqual(65534, len(list(result)))
-        # NOTE(dripton): I don't test /13 because it makes the test take 3s.
-        # /12 gives over a million IPs, which is ridiculous.
-        self.assertRaises(exception.InvalidInput, address_to_hosts,
-                          '192.168.100.1/12')
-
-
-class NetworkCommandsTestCase(test.NoDBTestCase):
-    def setUp(self):
-        super(NetworkCommandsTestCase, self).setUp()
-        # These are all tests that assume nova-network and using the nova DB.
-        self.flags(use_neutron=False)
-        self.output = StringIO()
-        self.useFixture(fixtures.MonkeyPatch('sys.stdout', self.output))
-        self.commands = manage.NetworkCommands()
-        self.net = {'id': 0,
-                    'label': 'fake',
-                    'injected': False,
-                    'cidr': '192.168.0.0/24',
-                    'cidr_v6': 'dead:beef::/64',
-                    'multi_host': False,
-                    'gateway_v6': 'dead:beef::1',
-                    'netmask_v6': '64',
-                    'netmask': '255.255.255.0',
-                    'bridge': 'fa0',
-                    'bridge_interface': 'fake_fa0',
-                    'gateway': '192.168.0.1',
-                    'broadcast': '192.168.0.255',
-                    'dns1': '8.8.8.8',
-                    'dns2': '8.8.4.4',
-                    'vlan': 200,
-                    'vlan_start': 201,
-                    'vpn_public_address': '10.0.0.2',
-                    'vpn_public_port': '2222',
-                    'vpn_private_address': '192.168.0.2',
-                    'dhcp_start': '192.168.0.3',
-                    'project_id': 'fake_project',
-                    'host': 'fake_host',
-                    'uuid': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'}
-
-        def fake_network_get_by_cidr(context, cidr):
-            self.assertTrue(context.to_dict()['is_admin'])
-            self.assertEqual(cidr, self.fake_net['cidr'])
-            return db_fakes.FakeModel(dict(test_network.fake_network,
-                                           **self.fake_net))
-
-        def fake_network_get_by_uuid(context, uuid):
-            self.assertTrue(context.to_dict()['is_admin'])
-            self.assertEqual(uuid, self.fake_net['uuid'])
-            return db_fakes.FakeModel(dict(test_network.fake_network,
-                                           **self.fake_net))
-
-        def fake_network_update(context, network_id, values):
-            self.assertTrue(context.to_dict()['is_admin'])
-            self.assertEqual(network_id, self.fake_net['id'])
-            self.assertEqual(values, self.fake_update_value)
-        self.fake_network_get_by_cidr = fake_network_get_by_cidr
-        self.fake_network_get_by_uuid = fake_network_get_by_uuid
-        self.fake_network_update = fake_network_update
-
-    def test_create(self):
-
-        def fake_create_networks(obj, context, **kwargs):
-            self.assertTrue(context.to_dict()['is_admin'])
-            self.assertEqual(kwargs['label'], 'Test')
-            self.assertEqual(kwargs['cidr'], '10.2.0.0/24')
-            self.assertFalse(kwargs['multi_host'])
-            self.assertEqual(kwargs['num_networks'], 1)
-            self.assertEqual(kwargs['network_size'], 256)
-            self.assertEqual(kwargs['vlan'], 200)
-            self.assertEqual(kwargs['vlan_start'], 201)
-            self.assertEqual(kwargs['vpn_start'], 2000)
-            self.assertEqual(kwargs['cidr_v6'], 'fd00:2::/120')
-            self.assertEqual(kwargs['gateway'], '10.2.0.1')
-            self.assertEqual(kwargs['gateway_v6'], 'fd00:2::22')
-            self.assertEqual(kwargs['bridge'], 'br200')
-            self.assertEqual(kwargs['bridge_interface'], 'eth0')
-            self.assertEqual(kwargs['dns1'], '8.8.8.8')
-            self.assertEqual(kwargs['dns2'], '8.8.4.4')
-        self.flags(network_manager='nova.network.manager.VlanManager')
-        self.stub_out('nova.network.manager.VlanManager.create_networks',
-                      fake_create_networks)
-        self.commands.create(
-                            label='Test',
-                            cidr='10.2.0.0/24',
-                            num_networks=1,
-                            network_size=256,
-                            multi_host='F',
-                            vlan=200,
-                            vlan_start=201,
-                            vpn_start=2000,
-                            cidr_v6='fd00:2::/120',
-                            gateway='10.2.0.1',
-                            gateway_v6='fd00:2::22',
-                            bridge='br200',
-                            bridge_interface='eth0',
-                            dns1='8.8.8.8',
-                            dns2='8.8.4.4',
-                            uuid='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
-
-    def test_create_without_lable(self):
-        self.assertRaises(exception.NetworkNotCreated,
-                          self.commands.create,
-                          cidr='10.2.0.0/24',
-                          num_networks=1,
-                          network_size=256,
-                          multi_host='F',
-                          vlan=200,
-                          vlan_start=201,
-                          vpn_start=2000,
-                          cidr_v6='fd00:2::/120',
-                          gateway='10.2.0.1',
-                          gateway_v6='fd00:2::22',
-                          bridge='br200',
-                          bridge_interface='eth0',
-                          dns1='8.8.8.8',
-                          dns2='8.8.4.4',
-                          uuid='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
-
-    def test_create_with_lable_too_long(self):
-        self.assertRaises(exception.LabelTooLong,
-                          self.commands.create,
-                          label='x' * 256,
-                          cidr='10.2.0.0/24',
-                          num_networks=1,
-                          network_size=256,
-                          multi_host='F',
-                          vlan=200,
-                          vlan_start=201,
-                          vpn_start=2000,
-                          cidr_v6='fd00:2::/120',
-                          gateway='10.2.0.1',
-                          gateway_v6='fd00:2::22',
-                          bridge='br200',
-                          bridge_interface='eth0',
-                          dns1='8.8.8.8',
-                          dns2='8.8.4.4',
-                          uuid='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
-
-    def test_create_without_cidr(self):
-        self.assertRaises(exception.NetworkNotCreated,
-                          self.commands.create,
-                          label='Test',
-                          num_networks=1,
-                          network_size=256,
-                          multi_host='F',
-                          vlan=200,
-                          vlan_start=201,
-                          vpn_start=2000,
-                          gateway='10.2.0.1',
-                          gateway_v6='fd00:2::22',
-                          bridge='br200',
-                          bridge_interface='eth0',
-                          dns1='8.8.8.8',
-                          dns2='8.8.4.4',
-                          uuid='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
-
-    def test_list(self):
-
-        def fake_network_get_all(context):
-            return [db_fakes.FakeModel(self.net)]
-        self.stub_out('nova.db.api.network_get_all', fake_network_get_all)
-        self.commands.list()
-        result = self.output.getvalue()
-        _fmt = "\t".join(["%(id)-5s", "%(cidr)-18s", "%(cidr_v6)-15s",
-                          "%(dhcp_start)-15s", "%(dns1)-15s", "%(dns2)-15s",
-                          "%(vlan)-15s", "%(project_id)-15s", "%(uuid)-15s"])
-        head = _fmt % {'id': 'id',
-                       'cidr': 'IPv4',
-                       'cidr_v6': 'IPv6',
-                       'dhcp_start': 'start address',
-                       'dns1': 'DNS1',
-                       'dns2': 'DNS2',
-                       'vlan': 'VlanID',
-                       'project_id': 'project',
-                       'uuid': "uuid"}
-        body = _fmt % {'id': self.net['id'],
-                       'cidr': self.net['cidr'],
-                       'cidr_v6': self.net['cidr_v6'],
-                       'dhcp_start': self.net['dhcp_start'],
-                       'dns1': self.net['dns1'],
-                       'dns2': self.net['dns2'],
-                       'vlan': self.net['vlan'],
-                       'project_id': self.net['project_id'],
-                       'uuid': self.net['uuid']}
-        answer = '%s\n%s\n' % (head, body)
-        self.assertEqual(result, answer)
-
-    def test_delete(self):
-        self.fake_net = self.net
-        self.fake_net['project_id'] = None
-        self.fake_net['host'] = None
-        self.stub_out('nova.db.api.network_get_by_uuid',
-                      self.fake_network_get_by_uuid)
-
-        def fake_network_delete_safe(context, network_id):
-            self.assertTrue(context.to_dict()['is_admin'])
-            self.assertEqual(network_id, self.fake_net['id'])
-        self.stub_out('nova.db.api.network_delete_safe',
-                      fake_network_delete_safe)
-        self.commands.delete(uuid=self.fake_net['uuid'])
-
-    def test_delete_by_cidr(self):
-        self.fake_net = self.net
-        self.fake_net['project_id'] = None
-        self.fake_net['host'] = None
-        self.stub_out('nova.db.api.network_get_by_cidr',
-                      self.fake_network_get_by_cidr)
-
-        def fake_network_delete_safe(context, network_id):
-            self.assertTrue(context.to_dict()['is_admin'])
-            self.assertEqual(network_id, self.fake_net['id'])
-        self.stub_out('nova.db.api.network_delete_safe',
-                      fake_network_delete_safe)
-        self.commands.delete(fixed_range=self.fake_net['cidr'])
-
-    def _test_modify_base(self, update_value, project, host, dis_project=None,
-                          dis_host=None):
-        self.fake_net = self.net
-        self.fake_update_value = update_value
-        self.stub_out('nova.db.api.network_get_by_cidr',
-                      self.fake_network_get_by_cidr)
-        self.stub_out('nova.db.api.network_update', self.fake_network_update)
-        self.commands.modify(self.fake_net['cidr'], project=project, host=host,
-                             dis_project=dis_project, dis_host=dis_host)
-
-    def test_modify_associate(self):
-        self._test_modify_base(update_value={'project_id': 'test_project',
-                                             'host': 'test_host'},
-                               project='test_project', host='test_host')
-
-    def test_modify_unchanged(self):
-        self._test_modify_base(update_value={}, project=None, host=None)
-
-    def test_modify_disassociate(self):
-        self._test_modify_base(update_value={'project_id': None, 'host': None},
-                               project=None, host=None, dis_project=True,
-                               dis_host=True)
-
-
-class NeutronV2NetworkCommandsTestCase(test.NoDBTestCase):
-    def setUp(self):
-        super(NeutronV2NetworkCommandsTestCase, self).setUp()
-        self.output = StringIO()
-        self.useFixture(fixtures.MonkeyPatch('sys.stdout', self.output))
-        self.flags(use_neutron=True)
-        self.commands = manage.NetworkCommands()
-
-    def test_create(self):
-        self.assertEqual(2, self.commands.create())
-
-    def test_list(self):
-        self.assertEqual(2, self.commands.list())
-
-    def test_delete(self):
-        self.assertEqual(2, self.commands.delete())
-
-    def test_modify(self):
-        self.assertEqual(2, self.commands.modify('192.168.0.1'))
 
 
 class DbCommandsTestCase(test.NoDBTestCase):
@@ -939,8 +640,8 @@ Cell %s: 456
             mock_target_cell.assert_called_once_with(ctxt, 'map')
 
             db_sync_calls = [
-                    mock.call(4, context=cell_ctxt),
-                    mock.call(4)
+                mock.call(4, context=cell_ctxt),
+                mock.call(4)
             ]
             mock_db_sync.assert_has_calls(db_sync_calls)
 
@@ -1988,7 +1689,7 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
 
         status = self.commands.create_cell(verbose=True)
         self.assertEqual(0, status)
-        cell1_uuid = self.output.getvalue().strip()
+        cell1_uuid = self.output.getvalue().split('\n')[-2].strip()
         cell1 = objects.CellMapping.get_by_uuid(ctxt, cell1_uuid)
         self.assertIsNone(cell1.name)
         self.assertEqual(settings['database_connection'],
@@ -2332,7 +2033,10 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
         expected_db_connection = CONF.database.connection or 'fake:///db'
         self.assertEqual(expected_db_connection, cm.database_connection)
         output = self.output.getvalue().strip()
-        self.assertEqual('', output)
+        lines = output.split('\n')
+        self.assertIn('using the value [DEFAULT]/transport_url', lines[0])
+        self.assertIn('using the value [database]/connection', lines[1])
+        self.assertEqual(2, len(lines))
 
     def test_update_cell_disable_and_enable(self):
         ctxt = context.get_admin_context()
@@ -2344,8 +2048,8 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
                                                       disable=True,
                                                       enable=True))
         output = self.output.getvalue().strip()
-        self.assertEqual('Cell cannot be disabled and enabled at the same '
-                         'time.', output)
+        self.assertIn('Cell cannot be disabled and enabled at the same '
+                      'time.', output)
 
     def test_update_cell_disable_cell0(self):
         ctxt = context.get_admin_context()
@@ -2355,7 +2059,7 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
                             database_connection='fake:///db').create()
         self.assertEqual(5, self.commands.update_cell(uuid0, disable=True))
         output = self.output.getvalue().strip()
-        self.assertEqual('Cell0 cannot be disabled.', output)
+        self.assertIn('Cell0 cannot be disabled.', output)
 
     def test_update_cell_disable_success(self):
         ctxt = context.get_admin_context()
@@ -2370,7 +2074,10 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
         cm = objects.CellMapping.get_by_uuid(ctxt, uuid)
         self.assertTrue(cm.disabled)
         output = self.output.getvalue().strip()
-        self.assertEqual('', output)
+        lines = output.split('\n')
+        self.assertIn('using the value [DEFAULT]/transport_url', lines[0])
+        self.assertIn('using the value [database]/connection', lines[1])
+        self.assertEqual(2, len(lines))
 
     def test_update_cell_enable_success(self):
         ctxt = context.get_admin_context()
@@ -2386,7 +2093,10 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
         cm = objects.CellMapping.get_by_uuid(ctxt, uuid)
         self.assertFalse(cm.disabled)
         output = self.output.getvalue().strip()
-        self.assertEqual('', output)
+        lines = output.split('\n')
+        self.assertIn('using the value [DEFAULT]/transport_url', lines[0])
+        self.assertIn('using the value [database]/connection', lines[1])
+        self.assertEqual(2, len(lines))
 
     def test_update_cell_disable_already_disabled(self):
         ctxt = context.get_admin_context()
@@ -2634,8 +2344,7 @@ class TestNovaManagePlacement(test.NoDBTestCase):
         self.output = StringIO()
         self.useFixture(fixtures.MonkeyPatch('sys.stdout', self.output))
         self.cli = manage.PlacementCommands()
-        self.useFixture(
-            fixtures.MockPatch('nova.network.neutronv2.api.get_client'))
+        self.useFixture(fixtures.MockPatch('nova.network.neutron.get_client'))
 
     @ddt.data(-1, 0, "one")
     def test_heal_allocations_invalid_max_count(self, max_count):

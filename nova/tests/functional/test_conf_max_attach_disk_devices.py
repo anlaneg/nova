@@ -16,12 +16,10 @@ import six
 
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api import client
-from nova.tests.functional import integrated_helpers
 from nova.tests.functional import test_servers
 
 
-class ConfigurableMaxDiskDevicesTest(integrated_helpers.InstanceHelperMixin,
-                                     test_servers.ServersTestBase):
+class ConfigurableMaxDiskDevicesTest(test_servers.ServersTestBase):
     def setUp(self):
         super(ConfigurableMaxDiskDevicesTest, self).setUp()
         self.cinder = self.useFixture(
@@ -51,7 +49,7 @@ class ConfigurableMaxDiskDevicesTest(integrated_helpers.InstanceHelperMixin,
                'destination_type': 'volume'}
         server['block_device_mapping_v2'] = [bdm]
         created_server = self.api.post_server({"server": server})
-        self._wait_for_state_change(self.api, created_server, 'ACTIVE')
+        self._wait_for_state_change(created_server, 'ACTIVE')
 
     def test_boot_from_volume_plus_attach_max_exceeded(self):
         # Set the maximum to 1, boot from 1 volume, and attach one volume.
@@ -72,7 +70,7 @@ class ConfigurableMaxDiskDevicesTest(integrated_helpers.InstanceHelperMixin,
         created_server = self.api.post_server({"server": server})
         server_id = created_server['id']
         # Server should go into ERROR state
-        self._wait_for_state_change(self.api, created_server, 'ERROR')
+        self._wait_for_state_change(created_server, 'ERROR')
         # Verify the instance fault
         server = self.api.get_server(server_id)
         # If anything fails during _prep_block_device, a 500 internal server
@@ -95,7 +93,7 @@ class ConfigurableMaxDiskDevicesTest(integrated_helpers.InstanceHelperMixin,
         server = self._build_server(flavor_id='1')
         created_server = self.api.post_server({"server": server})
         server_id = created_server['id']
-        self._wait_for_state_change(self.api, created_server, 'ACTIVE')
+        self._wait_for_state_change(created_server, 'ACTIVE')
         # Attach one volume, should pass.
         vol_id = '9a695496-44aa-4404-b2cc-ccab2501f87e'
         self.api.post_server_volume(

@@ -11,7 +11,6 @@
 #    under the License.
 
 from nova.tests import fixtures
-from nova.tests.functional.api import client as api_client
 from nova.tests.functional.notification_sample_tests \
     import notification_sample_base
 from nova.tests.unit import fake_notifier
@@ -21,7 +20,6 @@ class TestComputeTaskNotificationSample(
         notification_sample_base.NotificationSampleTestBase):
 
     def setUp(self):
-        self.flags(use_neutron=True)
         super(TestComputeTaskNotificationSample, self).setUp()
         self.neutron = fixtures.NeutronFixture(self)
         self.useFixture(self.neutron)
@@ -101,15 +99,15 @@ class TestComputeTaskNotificationSample(
                                     'hw:numa_cpus.0': '0',
                                     'hw:numa_mem.0': 512})
         self._wait_for_notification('instance.create.end')
-        # Force down the compute node
+        # Disable the compute node
         service_id = self.api.get_service_id('nova-compute')
-        self.admin_api.put_service_force_down(service_id, True)
+        self.admin_api.put_service(service_id, {'status': 'disabled'})
 
         fake_notifier.reset()
 
-        self.assertRaises(api_client.OpenStackApiException,
-                          self.admin_api.post_server_action,
-                          server['id'], {'migrate': None})
+        # Note that the operation will return a 202 response but fail with
+        # NoValidHost asynchronously.
+        self.admin_api.post_server_action(server['id'], {'migrate': None})
         self._wait_for_notification('compute_task.migrate_server.error')
         # 0. scheduler.select_destinations.start
         # 1. compute_task.migrate_server.error

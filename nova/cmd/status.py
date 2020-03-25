@@ -46,12 +46,12 @@ from nova.volume import cinder
 
 CONF = nova.conf.CONF
 
-# NOTE(vrushali): 1.32 is required by nova-scheduler to use member_of
-# queryparam to prepare a list of forbidden aggregates that should be
-# ignored by placement service in the allocation candidates API.
+# NOTE(efried): 1.35 is required by nova-scheduler to support the root_required
+# queryparam to make GET /allocation_candidates require that a trait be present
+# on the root provider, irrespective of how the request groups are specified.
 # NOTE: If you bump this version, remember to update the history
 # section in the nova-status man page (doc/source/cli/nova-status).
-MIN_PLACEMENT_MICROVERSION = "1.32"
+MIN_PLACEMENT_MICROVERSION = "1.35"
 
 # NOTE(mriedem): 3.44 is needed to work with volume attachment records which
 # are required for supporting multi-attach capable volumes.

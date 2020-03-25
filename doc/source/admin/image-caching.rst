@@ -3,8 +3,9 @@ Image Caching
 =============
 
 Nova supports caching base images on compute nodes when using a
-supported virt driver. As of the Ussuri release, that list includes
-``hyperv``, ``libvirt``, and ``vmwareapi``.
+`supported virt driver`_.
+
+.. _supported virt driver: https://docs.openstack.org/nova/latest/user/support-matrix.html#operation_cache_images
 
 What is Image Caching?
 ----------------------
@@ -38,13 +39,8 @@ default). Those unused images are deleted from the cache directory
 until they are needed again.
 
 For more information about configuring image cache behavior, see the
-documentation for the following configuration options:
-
-- :oslo.config:option:`image_cache_subdirectory_name`
-- :oslo.config:option:`image_cache_manager_interval`
-- :oslo.config:option:`remove_unused_base_images`
-- :oslo.config:option:`remove_unused_original_minimum_age_seconds`
-- :oslo.config:option:`image_cache.precache_concurrency`
+documentation for the configuration options in the
+:oslo.config:group:`image_cache` group.
 
 .. note::
 

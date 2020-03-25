@@ -15,6 +15,7 @@
 import copy
 import itertools
 
+import os_resource_classes as orc
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import versionutils
@@ -33,7 +34,8 @@ LOG = logging.getLogger(__name__)
 REQUEST_SPEC_OPTIONAL_ATTRS = ['requested_destination',
                                'security_groups',
                                'network_metadata',
-                               'requested_resources']
+                               'requested_resources',
+                               'request_level_params']
 
 
 @base.NovaObjectRegistry.register
@@ -51,7 +53,8 @@ class RequestSpec(base.NovaObject):
     # Version 1.10: Added network_metadata
     # Version 1.11: Added is_bfv
     # Version 1.12: Added requested_resources
-    VERSION = '1.12'
+    # Version 1.13: Added request_level_params
+    VERSION = '1.13'
 
     fields = {
         'id': fields.IntegerField(),
@@ -90,6 +93,7 @@ class RequestSpec(base.NovaObject):
         # just provide to the RequestSpec object a free-form dictionary
         'scheduler_hints': fields.DictOfListOfStringsField(nullable=True),
         'instance_uuid': fields.UUIDField(),
+        # TODO(stephenfin): Remove this as it's related to nova-network
         'security_groups': fields.ObjectField('SecurityGroupList'),
         # NOTE(alex_xu): This field won't be persisted.
         'network_metadata': fields.ObjectField('NetworkMetadata'),
@@ -102,12 +106,16 @@ class RequestSpec(base.NovaObject):
         # NOTE(alex_xu): This field won't be persisted.
         'requested_resources': fields.ListOfObjectsField('RequestGroup',
                                                          nullable=True,
-                                                         default=None)
+                                                         default=None),
+        # NOTE(efried): This field won't be persisted.
+        'request_level_params': fields.ObjectField('RequestLevelParams'),
     }
 
     def obj_make_compatible(self, primitive, target_version):
         super(RequestSpec, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 13) and 'request_level_params' in primitive:
+            del primitive['request_level_params']
         if target_version < (1, 12):
             if 'requested_resources' in primitive:
                 del primitive['requested_resources']
@@ -141,6 +149,10 @@ class RequestSpec(base.NovaObject):
                 physnets=set(), tunneled=False)
             return
 
+        if attrname == 'request_level_params':
+            self.request_level_params = RequestLevelParams()
+            return
+
         # NOTE(sbauza): In case the primitive was not providing that field
         # because of a previous RequestSpec version, we want to default
         # that field in order to have the same behaviour.
@@ -165,6 +177,18 @@ class RequestSpec(base.NovaObject):
     @property
     def swap(self):
         return self.flavor.swap
+
+    @property
+    def root_required(self):
+        # self.request_level_params and .root_required lazy-default via their
+        # respective obj_load_attr methods.
+        return self.request_level_params.root_required
+
+    @property
+    def root_forbidden(self):
+        # self.request_level_params and .root_forbidden lazy-default via their
+        # respective obj_load_attr methods.
+        return self.request_level_params.root_forbidden
 
     def _image_meta_from_image(self, image):
         if isinstance(image, objects.ImageMeta):
@@ -496,6 +520,10 @@ class RequestSpec(base.NovaObject):
         if port_resource_requests:
             spec_obj.requested_resources.extend(port_resource_requests)
 
+        # NOTE(efried): We don't need to handle request_level_params here yet
+        #  because they're set dynamically by the scheduler. That could change
+        #  in the future.
+
         # NOTE(sbauza): Default the other fields that are not part of the
         # original contract
         spec_obj.obj_set_defaults()
@@ -536,11 +564,10 @@ class RequestSpec(base.NovaObject):
             if key in ['id', 'instance_uuid']:
                 setattr(spec, key, db_spec[key])
             elif key in ('requested_destination', 'requested_resources',
-                         'network_metadata'):
+                         'network_metadata', 'request_level_params'):
                 # Do not override what we already have in the object as this
                 # field is not persisted. If save() is called after
-                # requested_resources, requested_destination or
-                # network_metadata is populated, it will reset the field to
+                # one of these fields is populated, it will reset the field to
                 # None and we'll lose what is set (but not persisted) on the
                 # object.
                 continue
@@ -617,10 +644,10 @@ class RequestSpec(base.NovaObject):
             if 'instance_group' in spec and spec.instance_group:
                 spec.instance_group.members = None
                 spec.instance_group.hosts = None
-            # NOTE(mriedem): Don't persist retries, requested_destination,
-            # requested_resources or ignored hosts since those are per-request
+            # NOTE(mriedem): Don't persist these since they are per-request
             for excluded in ('retry', 'requested_destination',
-                             'requested_resources', 'ignore_hosts'):
+                             'requested_resources', 'ignore_hosts',
+                             'request_level_params'):
                 if excluded in spec and getattr(spec, excluded):
                     setattr(spec, excluded, None)
             # NOTE(stephenfin): Don't persist network metadata since we have
@@ -872,6 +899,23 @@ class RequestSpec(base.NovaObject):
                          (self.requested_resources, placement_allocations,
                           provider_traits))
 
+    def get_request_group_mapping(self):
+        """Return request group resource - provider mapping. This is currently
+        used for Neutron ports that have resource request due to the port
+        having QoS minimum bandwidth policy rule attached.
+
+        :returns: A dict keyed by RequestGroup requester_id, currently Neutron
+        port_id, to a list of resource provider UUIDs which provide resource
+        for that RequestGroup.
+        """
+
+        if ('requested_resources' in self and
+                self.requested_resources is not None):
+            return {
+                group.requester_id: group.provider_uuids
+                for group in self.requested_resources
+            }
+
 
 @base.NovaObjectRegistry.register
 class Destination(base.NovaObject):
@@ -1029,7 +1073,7 @@ class SchedulerLimits(base.NovaObject):
 
 
 @base.NovaObjectRegistry.register
-class RequestGroup(base.NovaObject):
+class RequestGroup(base.NovaEphemeralObject):
     """Versioned object based on the unversioned
     nova.api.openstack.placement.lib.RequestGroup object.
     """
@@ -1065,10 +1109,6 @@ class RequestGroup(base.NovaObject):
         'provider_uuids': fields.ListOfUUIDField(default=[]),
         'in_tree': fields.UUIDField(nullable=True, default=None),
     }
-
-    def __init__(self, context=None, **kwargs):
-        super(RequestGroup, self).__init__(context=context, **kwargs)
-        self.obj_set_defaults()
 
     @classmethod
     def from_port_request(cls, context, port_uuid, port_resource_request):
@@ -1119,3 +1159,70 @@ class RequestGroup(base.NovaObject):
                 del primitive['requester_id']
             if 'provider_uuids' in primitive:
                 del primitive['provider_uuids']
+
+    def add_resource(self, rclass, amount):
+        # Validate the class.
+        if not (rclass.startswith(orc.CUSTOM_NAMESPACE) or
+                        rclass in orc.STANDARDS):
+            LOG.warning(
+                "Received an invalid ResourceClass '%(key)s' in extra_specs.",
+                {"key": rclass})
+            return
+        # val represents the amount.  Convert to int, or warn and skip.
+        try:
+            amount = int(amount)
+            if amount < 0:
+                raise ValueError()
+        except ValueError:
+            LOG.warning(
+                "Resource amounts must be nonnegative integers. Received '%s'",
+                amount)
+            return
+        self.resources[rclass] = amount
+
+    def add_trait(self, trait_name, trait_type):
+        # Currently the only valid values for a trait entry are 'required'
+        # and 'forbidden'
+        trait_vals = ('required', 'forbidden')
+        if trait_type == 'required':
+            self.required_traits.add(trait_name)
+        elif trait_type == 'forbidden':
+            self.forbidden_traits.add(trait_name)
+        else:
+            LOG.warning(
+                "Only (%(tvals)s) traits are supported. Received '%(val)s'.",
+                {"tvals": ', '.join(trait_vals), "val": trait_type})
+
+    def is_empty(self):
+        return not any((
+            self.resources,
+            self.required_traits, self.forbidden_traits,
+            self.aggregates, self.forbidden_aggregates))
+
+    def strip_zeros(self):
+        """Remove any resources whose amount is zero."""
+        for rclass in list(self.resources):
+            if self.resources[rclass] == 0:
+                self.resources.pop(rclass)
+
+
+@base.NovaObjectRegistry.register
+class RequestLevelParams(base.NovaObject):
+    """Options destined for the "top level" of the placement allocation
+    candidates query (parallel to, but not including, the list of
+    RequestGroup).
+    """
+    # Version 1.0: Initial version
+    VERSION = '1.0'
+
+    fields = {
+        # Traits required on the root provider
+        'root_required': fields.SetOfStringsField(default=set()),
+        # Traits forbidden on the root provider
+        'root_forbidden': fields.SetOfStringsField(default=set()),
+        # NOTE(efried): group_policy would be appropriate to include here, once
+        # we have a use case for it.
+    }
+
+    def obj_load_attr(self, attrname):
+        self.obj_set_defaults(attrname)

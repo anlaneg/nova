@@ -23,35 +23,38 @@ POLICY_ROOT = 'os_compute_api:os-admin-actions:%s'
 
 admin_actions_policies = [
     policy.DocumentedRuleDefault(
-        POLICY_ROOT % 'reset_state',
-        base.RULE_ADMIN_API,
-        "Reset the state of a given server",
-        [
+        name=POLICY_ROOT % 'reset_state',
+        check_str=base.SYSTEM_ADMIN,
+        description="Reset the state of a given server",
+        operations=[
             {
                 'method': 'POST',
                 'path': '/servers/{server_id}/action (os-resetState)'
             }
-        ]),
+        ],
+        scope_types=['system']),
     policy.DocumentedRuleDefault(
-        POLICY_ROOT % 'inject_network_info',
-        base.RULE_ADMIN_API,
-        "Inject network information into the server",
-        [
+        name=POLICY_ROOT % 'inject_network_info',
+        check_str=base.SYSTEM_ADMIN,
+        description="Inject network information into the server",
+        operations=[
             {
                 'method': 'POST',
                 'path': '/servers/{server_id}/action (injectNetworkInfo)'
             }
-        ]),
+        ],
+        scope_types=['system']),
     policy.DocumentedRuleDefault(
-        POLICY_ROOT % 'reset_network',
-        base.RULE_ADMIN_API,
-        "Reset networking on a server",
-        [
+        name=POLICY_ROOT % 'reset_network',
+        check_str=base.SYSTEM_ADMIN,
+        description="Reset networking on a server",
+        operations=[
             {
                 'method': 'POST',
                 'path': '/servers/{server_id}/action (resetNetwork)'
             }
-        ])
+        ],
+        scope_types=['system'])
 ]
 
 

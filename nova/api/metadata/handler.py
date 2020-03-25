@@ -34,10 +34,16 @@ import nova.conf
 from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
-from nova.network.neutronv2 import api as neutronapi
+from nova.network import neutron as neutronapi
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
+
+# 160 networks is large enough to satisfy most cases.
+# Yet while reaching 182 networks Neutron server will break as URL length
+# exceeds the maximum. Left this at 160 to allow additional parameters when
+# they're needed.
+MAX_QUERY_NETWORKS = 160
 
 
 class MetadataRequestHandler(wsgi.Application):
@@ -209,16 +215,24 @@ class MetadataRequestHandler(wsgi.Application):
             advanced_service_providers=[provider_id],
             fields=['network_id'])
 
+        if not md_subnets or not md_subnets.get('subnets'):
+            msg = _('Could not find any subnets for provider %s') % provider_id
+            LOG.error(msg)
+            raise webob.exc.HTTPBadRequest(explanation=msg)
+
         md_networks = [subnet['network_id']
                        for subnet in md_subnets['subnets']]
 
         try:
             # Retrieve the instance data from the instance's port
-            instance_data = neutron.list_ports(
-                context,
-                fixed_ips='ip_address=' + instance_address,
-                network_id=md_networks,
-                fields=['device_id', 'tenant_id'])['ports'][0]
+            ports = []
+            while md_networks:
+                ports.extend(neutron.list_ports(
+                    context,
+                    fixed_ips='ip_address=' + instance_address,
+                    network_id=md_networks[:MAX_QUERY_NETWORKS],
+                    fields=['device_id', 'tenant_id'])['ports'])
+                md_networks = md_networks[MAX_QUERY_NETWORKS:]
         except Exception as e:
             LOG.error('Failed to get instance id for metadata '
                       'request, provider %(provider)s '
@@ -232,6 +246,17 @@ class MetadataRequestHandler(wsgi.Application):
                     'Please try your request again.')
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
+        if len(ports) != 1:
+            msg = _('Expected a single port matching provider %(pr)s '
+                    'and IP %(ip)s. Found %(count)d.') % {
+                        'pr': provider_id,
+                        'ip': instance_address,
+                        'count': len(ports)}
+
+            LOG.error(msg)
+            raise webob.exc.HTTPBadRequest(explanation=msg)
+
+        instance_data = ports[0]
         instance_id = instance_data['device_id']
         tenant_id = instance_data['tenant_id']
 

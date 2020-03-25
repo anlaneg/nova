@@ -18,6 +18,7 @@ Websocket proxy that is compatible with OpenStack Nova.
 Leverages websockify.py by Joel Martin
 '''
 
+import copy
 import socket
 import sys
 
@@ -92,12 +93,20 @@ class TenantSock(object):
         self.reqhandler.send_close()
 
 
-class NovaProxyRequestHandlerBase(object):
-    def address_string(self):
-        # NOTE(rpodolyaka): override the superclass implementation here and
-        # explicitly disable the reverse DNS lookup, which might fail on some
-        # deployments due to DNS configuration and break VNC access completely
-        return str(self.client_address[0])
+class NovaProxyRequestHandler(websockify.ProxyRequestHandler):
+
+    def __init__(self, *args, **kwargs):
+        self._compute_rpcapi = None
+        websockify.ProxyRequestHandler.__init__(self, *args, **kwargs)
+
+    @property
+    def compute_rpcapi(self):
+        # Lazy load the rpcapi/ComputeAPI upon first use for this connection.
+        # This way, if we receive a TCP RST, we will not create a ComputeAPI
+        # object we won't use.
+        if not self._compute_rpcapi:
+            self._compute_rpcapi = compute_rpcapi.ComputeAPI()
+        return self._compute_rpcapi
 
     def verify_origin_proto(self, connect_info, origin_proto):
         if 'access_url_base' not in connect_info:
@@ -220,7 +229,10 @@ class NovaProxyRequestHandlerBase(object):
                 detail = _("Origin header protocol does not match this host.")
                 raise exception.ValidationError(detail=detail)
 
-        self.msg(_('connect info: %s'), str(connect_info))
+        sanitized_info = copy.copy(connect_info)
+        sanitized_info.token = '***'
+        self.msg(_('connect info: %s'), sanitized_info)
+
         host = connect_info.host
         port = connect_info.port
 
@@ -273,33 +285,8 @@ class NovaProxyRequestHandlerBase(object):
                           {'host': host, 'port': port})
             raise
 
-
-class NovaProxyRequestHandler(NovaProxyRequestHandlerBase,
-                              websockify.ProxyRequestHandler):
-    def __init__(self, *args, **kwargs):
-        self._compute_rpcapi = None
-        websockify.ProxyRequestHandler.__init__(self, *args, **kwargs)
-
-    @property
-    def compute_rpcapi(self):
-        # Lazy load the rpcapi/ComputeAPI upon first use for this connection.
-        # This way, if we receive a TCP RST, we will not create a ComputeAPI
-        # object we won't use.
-        if not self._compute_rpcapi:
-            self._compute_rpcapi = compute_rpcapi.ComputeAPI()
-        return self._compute_rpcapi
-
     def socket(self, *args, **kwargs):
-        # TODO(melwitt): The try_import and if-else condition can be removed
-        # when we get to the point where we're requiring at least websockify
-        # v.0.9.0 in our lower-constraints.
-        if websockifyserver is not None:
-            # In websockify v0.9.0, the 'socket' method moved to the
-            # websockify.websockifyserver.WebSockifyServer class.
-            return websockifyserver.WebSockifyServer.socket(*args, **kwargs)
-        else:
-            # Fall back to the websockify <= v0.8.0 'socket' method location.
-            return websockify.WebSocketServer.socket(*args, **kwargs)
+        return websockifyserver.WebSockifyServer.socket(*args, **kwargs)
 
 
 class NovaWebSocketProxy(websockify.WebSocketProxy):
@@ -312,6 +299,17 @@ class NovaWebSocketProxy(websockify.WebSocketProxy):
         with the compute node.
         """
         self.security_proxy = kwargs.pop('security_proxy', None)
+
+        # If 'default' was specified as the ssl_minimum_version, we leave
+        # ssl_options unset to default to the underlying system defaults.
+        # We do this to avoid using websockify's behaviour for 'default'
+        # in select_ssl_version(), which hardcodes the versions to be
+        # quite relaxed and prevents us from using sytem crypto policies.
+        ssl_min_version = kwargs.pop('ssl_minimum_version', None)
+        if ssl_min_version and ssl_min_version != 'default':
+            kwargs['ssl_options'] = websockify.websocketproxy. \
+                                    select_ssl_version(ssl_min_version)
+
         super(NovaWebSocketProxy, self).__init__(*args, **kwargs)
 
     @staticmethod

@@ -34,7 +34,7 @@ Run without arguments to see a list of available command categories::
 
     nova-manage
 
-You can also run with a category argument such as user to see a list of all
+You can also run with a category argument such as ``db`` to see a list of all
 commands in that category::
 
     nova-manage db
@@ -279,7 +279,6 @@ Nova Database
      |     populate_missing_availability_zones     |      0       |     0     |
      |          populate_queued_for_delete         |      2       |     2     |
      |                populate_uuids               |      0       |     0     |
-     |     service_uuids_online_data_migration     |      0       |     0     |
      +---------------------------------------------+--------------+-----------+
 
    In the above example, the ``migrate_instances_add_request_spec`` migration
@@ -545,6 +544,8 @@ Nova Cells v2
 Placement
 ~~~~~~~~~
 
+.. _heal_allocations_cli:
+
 ``nova-manage placement heal_allocations [--max-count <max_count>] [--verbose] [--skip-port-allocations] [--dry-run] [--instance <instance_uuid>]``
     Iterates over non-cell0 cells looking for instances which do not have
     allocations in the Placement service and which are not undergoing a task
@@ -641,6 +642,8 @@ Placement
          - Invalid input.
        * - 255
          - An unexpected error occurred.
+
+.. _sync_aggregates_cli:
 
 ``nova-manage placement sync_aggregates [--verbose]``
     Mirrors compute host aggregates to resource provider aggregates

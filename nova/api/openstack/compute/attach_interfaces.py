@@ -26,7 +26,7 @@ from nova.api import validation
 from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
-from nova import network
+from nova.network import neutron
 from nova import objects
 from nova.policies import attach_interfaces as ai_policies
 
@@ -61,15 +61,16 @@ class InterfaceAttachmentController(wsgi.Controller):
     def __init__(self):
         super(InterfaceAttachmentController, self).__init__()
         self.compute_api = compute.API()
-        self.network_api = network.API()
+        self.network_api = neutron.API()
 
     @wsgi.expected_errors((404, 501))
     def index(self, req, server_id):
         """Returns the list of interface attachments for a given instance."""
         context = req.environ['nova.context']
-        context.can(ai_policies.BASE_POLICY_NAME)
-
         instance = common.get_instance(self.compute_api, context, server_id)
+        context.can(ai_policies.POLICY_ROOT % 'list',
+                    target={'project_id': instance.project_id})
+
         search_opts = {'device_id': instance.uuid}
 
         try:
@@ -109,13 +110,11 @@ class InterfaceAttachmentController(wsgi.Controller):
     def show(self, req, server_id, id):
         """Return data about the given interface attachment."""
         context = req.environ['nova.context']
-        context.can(ai_policies.BASE_POLICY_NAME)
+        instance = common.get_instance(self.compute_api, context, server_id)
+        context.can(ai_policies.POLICY_ROOT % 'show',
+                    target={'project_id': instance.project_id})
 
         port_id = id
-        # NOTE(mriedem): We need to verify the instance actually exists from
-        # the server_id even though we're not using the instance for anything,
-        # just the port id.
-        common.get_instance(self.compute_api, context, server_id)
 
         try:
             port_info = self.network_api.show_port(context, port_id)
@@ -140,8 +139,10 @@ class InterfaceAttachmentController(wsgi.Controller):
     def create(self, req, server_id, body):
         """Attach an interface to an instance."""
         context = req.environ['nova.context']
-        context.can(ai_policies.BASE_POLICY_NAME)
-        context.can(ai_policies.POLICY_ROOT % 'create')
+        instance = common.get_instance(self.compute_api, context, server_id)
+
+        context.can(ai_policies.POLICY_ROOT % 'create',
+                    target={'project_id': instance.project_id})
 
         network_id = None
         port_id = None
@@ -164,7 +165,6 @@ class InterfaceAttachmentController(wsgi.Controller):
             msg = _("Must input network_id when request IP address")
             raise exc.HTTPBadRequest(explanation=msg)
 
-        instance = common.get_instance(self.compute_api, context, server_id)
         try:
             vif = self.compute_api.attach_interface(context,
                 instance, network_id, port_id, req_ip, tag=tag)
@@ -200,12 +200,14 @@ class InterfaceAttachmentController(wsgi.Controller):
     def delete(self, req, server_id, id):
         """Detach an interface from an instance."""
         context = req.environ['nova.context']
-        context.can(ai_policies.BASE_POLICY_NAME)
-        context.can(ai_policies.POLICY_ROOT % 'delete')
-        port_id = id
 
         instance = common.get_instance(self.compute_api, context, server_id,
                                        expected_attrs=['device_metadata'])
+
+        context.can(ai_policies.POLICY_ROOT % 'delete',
+                    target={'project_id': instance.project_id})
+        port_id = id
+
         try:
             self.compute_api.detach_interface(context,
                 instance, port_id=port_id)

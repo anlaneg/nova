@@ -10,6 +10,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from nova.compute import instance_actions
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import fixtures as func_fixtures
@@ -49,21 +50,12 @@ class MultiCellSchedulerTestCase(test.TestCase,
         self.addCleanup(fake_image.FakeImageService_reset)
 
     def _test_create_and_migrate(self, expected_status, az=None):
-        server = self._build_minimal_create_server_request(self.api,
-                                                           'some-server',
-                                                           az=az)
-        post = {'server': server}
-        # If forcing the server onto a host we have to use the admin API.
-        api = self.admin_api if az else self.api
-        created_server = api.post_server(post)
+        server = self._create_server(az=az)
 
-        # Wait for it to finish being created
-        found_server = self._wait_for_state_change(
-            self.admin_api, created_server, 'ACTIVE')
         return self.admin_api.api_post(
-            '/servers/%s/action' % found_server['id'],
+            '/servers/%s/action' % server['id'],
             {'migrate': None},
-            check_response_status=[expected_status])
+            check_response_status=[expected_status]), server
 
     def test_migrate_between_cells(self):
         """Verify that migrating between cells is not allowed.
@@ -75,8 +67,10 @@ class MultiCellSchedulerTestCase(test.TestCase,
         self.start_service('compute', host='compute1', cell=CELL1_NAME)
         self.start_service('compute', host='compute2', cell=CELL2_NAME)
 
-        result = self._test_create_and_migrate(expected_status=400)
-        self.assertIn('No valid host', result.body['badRequest']['message'])
+        _, server = self._test_create_and_migrate(expected_status=202)
+        # The instance action should have failed with details.
+        self._assert_resize_migrate_action_fail(
+            server, instance_actions.MIGRATE, 'NoValidHost')
 
     def test_migrate_within_cell(self):
         """Verify that migrating within cells is allowed.
@@ -93,5 +87,6 @@ class MultiCellSchedulerTestCase(test.TestCase,
 
         # Force the server onto compute1 in cell1 so we do not accidentally
         # land on compute3 in cell2 and fail to migrate.
-        self._test_create_and_migrate(expected_status=202,
+        _, server = self._test_create_and_migrate(expected_status=202,
                                       az='nova:compute1')
+        self._wait_for_state_change(server, 'VERIFY_RESIZE')

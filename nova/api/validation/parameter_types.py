@@ -119,7 +119,7 @@ def _build_regex_range(ws=True, invert=False, exclude=None):
 
     The inversion is useful when we want to generate a set of ranges
     which is everything that's not a certain class. For instance,
-    produce all all the non printable characters as a set of ranges.
+    produce all the non printable characters as a set of ranges.
     """
     if exclude is None:
         exclude = []
@@ -207,9 +207,6 @@ valid_name_leading_trailing_spaces_regex = ValidationRegex(
     _("printable characters with at least one non space character"))
 
 
-valid_name_regex_obj = re.compile(valid_name_regex.regex, re.UNICODE)
-
-
 valid_description_regex_base = '^[%s]*$'
 
 
@@ -248,13 +245,6 @@ positive_integer = {
 non_negative_integer = {
     'type': ['integer', 'string'],
     'pattern': '^[0-9]*$', 'minimum': 0, 'minLength': 1
-}
-
-# This only be used by nova-network specific APIs. It will be removed when
-# those API removed.
-positive_integer_with_empty_str = {
-    'type': ['integer', 'string'],
-    'pattern': '^[0-9]*$', 'minimum': 1,
 }
 
 hostname = {

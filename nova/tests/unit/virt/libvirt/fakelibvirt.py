@@ -75,6 +75,7 @@ VIR_DOMAIN_EVENT_STOPPED = 5
 VIR_DOMAIN_EVENT_SHUTDOWN = 6
 VIR_DOMAIN_EVENT_PMSUSPENDED = 7
 
+VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED = 1
 VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY = 7
 
 VIR_DOMAIN_UNDEFINE_MANAGED_SAVE = 1
@@ -168,9 +169,9 @@ VIR_SECRET_USAGE_TYPE_CEPH = 2
 VIR_SECRET_USAGE_TYPE_ISCSI = 3
 
 # Libvirt version to match MIN_LIBVIRT_VERSION in driver.py
-FAKE_LIBVIRT_VERSION = 3000000
+FAKE_LIBVIRT_VERSION = 4000000
 # Libvirt version to match MIN_QEMU_VERSION in driver.py
-FAKE_QEMU_VERSION = 2008000
+FAKE_QEMU_VERSION = 2011000
 
 PCI_VEND_ID = '8086'
 PCI_VEND_NAME = 'Intel Corporation'
@@ -304,6 +305,11 @@ class FakePCIDevice(object):
             'iommu_group': iommu_group,
             'numa_node': numa_node,
         }
+        # -1 is the sentinel set in /sys/bus/pci/devices/*/numa_node
+        # for no NUMA affinity. When the numa_node is set to -1 on a device
+        # Libvirt omits the NUMA element so we remove it.
+        if numa_node == -1:
+            self.pci_device = self.pci_device.replace("<numa node='-1'/>", "")
 
     def XMLDesc(self, flags):
         return self.pci_device
@@ -1669,7 +1675,7 @@ class FakeLibvirtFixture(fixtures.Fixture):
         super(FakeLibvirtFixture, self).setUp()
 
         # Some modules load the libvirt library in a strange way
-        for module in ('driver', 'host', 'guest', 'firewall', 'migration'):
+        for module in ('driver', 'host', 'guest', 'migration'):
             i = 'nova.virt.libvirt.{module}.libvirt'.format(module=module)
             # NOTE(mdbooth): The strange incantation below means 'this module'
             self.useFixture(fixtures.MonkeyPatch(i, sys.modules[__name__]))

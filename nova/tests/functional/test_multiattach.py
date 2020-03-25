@@ -15,8 +15,7 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import integrated_helpers
 
 
-class TestMultiattachVolumes(integrated_helpers._IntegratedTestBase,
-                             integrated_helpers.InstanceHelperMixin):
+class TestMultiattachVolumes(integrated_helpers._IntegratedTestBase):
     """Functional tests for creating a server from a multiattach volume
     and attaching a multiattach volume to a server.
 
@@ -41,8 +40,8 @@ class TestMultiattachVolumes(integrated_helpers._IntegratedTestBase,
         for it to be ACTIVE, and then attaches the volume to another server.
         """
         volume_id = nova_fixtures.CinderFixture.MULTIATTACH_VOL
-        create_req = self._build_server(flavor_id='1', image='')
-        create_req['networks'] = 'none'
+        create_req = self._build_server(
+            image_uuid='', flavor_id='1', networks='none')
         create_req['block_device_mapping_v2'] = [{
             'uuid': volume_id,
             'source_type': 'volume',
@@ -51,7 +50,7 @@ class TestMultiattachVolumes(integrated_helpers._IntegratedTestBase,
             'boot_index': 0
         }]
         server = self.api.post_server({'server': create_req})
-        self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._wait_for_state_change(server, 'ACTIVE')
         # Make sure the volume is attached to the first server.
         attachments = self.api.api_get(
             '/servers/%s/os-volume_attachments' % server['id']).body[
@@ -61,11 +60,10 @@ class TestMultiattachVolumes(integrated_helpers._IntegratedTestBase,
         self.assertEqual(volume_id, attachments[0]['volumeId'])
 
         # Now create a second server and attach the same volume to that.
-        create_req = self._build_server(
-            flavor_id='1', image='155d900f-4e14-4e4c-a73d-069cbf4541e6')
-        create_req['networks'] = 'none'
-        server2 = self.api.post_server({'server': create_req})
-        self._wait_for_state_change(self.api, server2, 'ACTIVE')
+        server2 = self._create_server(
+            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
+            flavor_id='1',
+            networks='none')
         # Attach the volume to the second server.
         self.api.api_post('/servers/%s/os-volume_attachments' % server2['id'],
                           {'volumeAttachment': {'volumeId': volume_id}})

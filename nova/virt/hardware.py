@@ -17,6 +17,7 @@ import fractions
 import itertools
 import math
 import re
+from typing import List, Optional, Set, Tuple
 
 import os_resource_classes as orc
 import os_traits
@@ -1059,7 +1060,8 @@ def _numa_fit_instance_cell(host_cell, instance_cell, limit_cell=None,
         pagesize = _numa_cell_supports_pagesize_request(
             host_cell, instance_cell)
         if not pagesize:
-            LOG.debug('Host does not support requested memory pagesize. '
+            LOG.debug('Host does not support requested memory pagesize, '
+                      'or not enough free pages of the requested size. '
                       'Requested: %d kB', instance_cell.pagesize)
             return
         LOG.debug('Selected memory pagesize: %(selected_mem_pagesize)d kB. '
@@ -1512,7 +1514,7 @@ def get_cpu_policy_constraint(flavor, image_meta):
         if image_policy == fields.CPUAllocationPolicy.DEDICATED:
             raise exception.ImageCPUPinningForbidden()
         cpu_policy = flavor_policy
-    elif image_policy == fields.CPUAllocationPolicy.DEDICATED:
+    elif image_policy in fields.CPUAllocationPolicy.ALL:
         cpu_policy = image_policy
     else:
         cpu_policy = None
@@ -1713,6 +1715,28 @@ def get_emulator_thread_policy_constraint(flavor):
             available=str(fields.CPUEmulatorThreadsPolicy.ALL))
 
     return emu_threads_policy
+
+
+def get_pci_numa_policy_constraint(flavor, image_meta):
+    """Return pci numa affinity policy or None.
+
+    :param flavor: a flavor object to read extra specs from
+    :param image_meta: nova.objects.ImageMeta object instance
+    :raises: nova.exception.ImagePCINUMAPolicyForbidden
+    :raises: nova.exception.InvalidPCINUMAAffinity
+    """
+    flavor_policy, image_policy = _get_flavor_image_meta(
+        'pci_numa_affinity_policy', flavor, image_meta)
+
+    if flavor_policy and image_policy and flavor_policy != image_policy:
+        raise exception.ImagePCINUMAPolicyForbidden()
+
+    policy = flavor_policy or image_policy
+
+    if policy and policy not in fields.PCINUMAAffinityPolicy.ALL:
+        raise exception.InvalidPCINUMAAffinity(policy=policy)
+
+    return policy
 
 
 # TODO(sahid): Move numa related to hardware/numa.py

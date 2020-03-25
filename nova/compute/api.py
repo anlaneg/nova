@@ -25,6 +25,7 @@ import re
 import string
 
 from castellan import key_manager
+import os_traits
 from oslo_log import log as logging
 from oslo_messaging import exceptions as oslo_exceptions
 from oslo_serialization import base64 as base64utils
@@ -58,14 +59,12 @@ from nova import exception
 from nova import exception_wrapper
 from nova import hooks
 from nova.i18n import _
-from nova import image
-from nova import network
+from nova.image import glance
+from nova.network import constants
 from nova.network import model as network_model
-from nova.network.neutronv2 import constants
-from nova.network.security_group import openstack_driver
-from nova.network.security_group import security_group_base
+from nova.network import neutron
+from nova.network import security_group_api
 from nova import objects
-from nova.objects import base as obj_base
 from nova.objects import block_device as block_device_obj
 from nova.objects import external_event as external_event_obj
 from nova.objects import fields as fields_obj
@@ -97,14 +96,14 @@ wrap_exception = functools.partial(exception_wrapper.wrap_exception,
                                    binary='nova-api')
 CONF = nova.conf.CONF
 
-RO_SECURITY_GROUPS = ['default']
-
 AGGREGATE_ACTION_UPDATE = 'Update'
 AGGREGATE_ACTION_UPDATE_META = 'UpdateMeta'
 AGGREGATE_ACTION_DELETE = 'Delete'
 AGGREGATE_ACTION_ADD = 'Add'
 
 MIN_COMPUTE_SYNC_COMPUTE_STATUS_DISABLED = 38
+MIN_COMPUTE_CROSS_CELL_RESIZE = 47
+MIN_COMPUTE_SAME_HOST_COLD_MIGRATE = 48
 
 # FIXME(danms): Keep a global cache of the cells we find the
 # first time we look. This needs to be refreshed on a timer or
@@ -186,13 +185,34 @@ def reject_instance_state(vm_state=None, task_state=None):
     return outer
 
 
-def check_instance_host(function):
-    @six.wraps(function)
-    def wrapped(self, context, instance, *args, **kwargs):
-        if not instance.host:
-            raise exception.InstanceNotReady(instance_id=instance.uuid)
-        return function(self, context, instance, *args, **kwargs)
-    return wrapped
+def check_instance_host(check_is_up=False):
+    """Validate the instance.host before performing the operation.
+
+    At a minimum this method will check that the instance.host is set.
+
+    :param check_is_up: If True, check that the instance.host status is UP
+        or MAINTENANCE (disabled but not down).
+    :raises: InstanceNotReady if the instance.host is not set
+    :raises: ServiceUnavailable if check_is_up=True and the instance.host
+        compute service status is not UP or MAINTENANCE
+    """
+    def outer(function):
+        @six.wraps(function)
+        def wrapped(self, context, instance, *args, **kwargs):
+            if not instance.host:
+                raise exception.InstanceNotReady(instance_id=instance.uuid)
+            if check_is_up:
+                # Make sure the source compute service is not down otherwise we
+                # cannot proceed.
+                host_status = self.get_instance_host_status(instance)
+                if host_status not in (fields_obj.HostStatus.UP,
+                                       fields_obj.HostStatus.MAINTENANCE):
+                    # ComputeServiceUnavailable would make more sense here but
+                    # we do not want to leak hostnames to end users.
+                    raise exception.ServiceUnavailable()
+            return function(self, context, instance, *args, **kwargs)
+        return wrapped
+    return outer
 
 
 def check_instance_lock(function):
@@ -270,13 +290,11 @@ class API(base.Base):
     """API for interacting with the compute manager."""
 
     def __init__(self, image_api=None, network_api=None, volume_api=None,
-                 security_group_api=None, **kwargs):
-        self.image_api = image_api or image.API()
-        self.network_api = network_api or network.API()
+                 **kwargs):
+        self.image_api = image_api or glance.API()
+        self.network_api = network_api or neutron.API()
         self.volume_api = volume_api or cinder.API()
         self._placementclient = None  # Lazy-load on first access.
-        self.security_group_api = (security_group_api or
-            openstack_driver.get_openstack_security_group_driver())
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
         self.compute_task_api = conductor.ComputeTaskAPI()
         self.servicegroup_api = servicegroup.API()
@@ -297,7 +315,7 @@ class API(base.Base):
 
         Raises a QuotaError if any limit is exceeded.
         """
-        if injected_files is None:
+        if not injected_files:
             return
 
         # Check number of files first
@@ -332,7 +350,7 @@ class API(base.Base):
     def _check_metadata_properties_quota(self, context, metadata=None):
         """Enforce quota limits on metadata properties."""
         if not metadata:
-            metadata = {}
+            return
         if not isinstance(metadata, dict):
             msg = (_("Metadata type should be dict."))
             raise exception.InvalidMetadata(reason=msg)
@@ -382,18 +400,12 @@ class API(base.Base):
             if secgroup == "default":
                 security_groups.append(secgroup)
                 continue
-            secgroup_dict = self.security_group_api.get(context, secgroup)
+            secgroup_dict = security_group_api.get(context, secgroup)
             if not secgroup_dict:
                 raise exception.SecurityGroupNotFoundForProject(
                     project_id=context.project_id, security_group_id=secgroup)
 
-            # Check to see if it's a nova-network or neutron type.
-            if isinstance(secgroup_dict['id'], int):
-                # This is nova-network so just return the requested name.
-                security_groups.append(secgroup)
-            else:
-                # The id for neutron is a uuid, so we return the id (uuid).
-                security_groups.append(secgroup_dict['id'])
+            security_groups.append(secgroup_dict['id'])
 
         return security_groups
 
@@ -452,7 +464,7 @@ class API(base.Base):
             # image (below) and not any image URIs that might have been
             # supplied.
             # TODO(jaypipes): Get rid of this silliness once we move to a real
-            # Image object and hide all of that stuff within nova.image.api.
+            # Image object and hide all of that stuff within nova.image.glance
             kernel_id = kernel_image['id']
 
         if ramdisk_id is not None:
@@ -555,6 +567,31 @@ class API(base.Base):
             raise exception.ImageNotActive(image_id=image_id)
         self._validate_flavor_image_nostatus(context, image, instance_type,
                                              root_bdm, validate_numa)
+
+    @staticmethod
+    def _detect_nonbootable_image_from_properties(image_id, image):
+        """Check image for a property indicating it's nonbootable.
+
+        This is called from the API service to ensure that there are
+        no known image properties indicating that this image is of a
+        type that we do not support booting from.
+
+        Currently the only such property is 'cinder_encryption_key_id'.
+
+        :param image_id: UUID of the image
+        :param image: a dict representation of the image including properties
+        :raises: ImageUnacceptable if the image properties indicate
+                 that booting this image is not supported
+        """
+        if not image:
+            return
+
+        image_properties = image.get('properties', {})
+        if image_properties.get('cinder_encryption_key_id'):
+            reason = _('Direct booting of an image uploaded from an '
+                       'encrypted volume is unsupported.')
+            raise exception.ImageUnacceptable(image_id=image_id,
+                                              reason=reason)
 
     @staticmethod
     def _validate_flavor_image_nostatus(context, image, instance_type,
@@ -856,6 +893,7 @@ class API(base.Base):
                                        validate_numa=True):
         self._check_metadata_properties_quota(context, metadata)
         self._check_injected_file_quota(context, files_to_inject)
+        self._detect_nonbootable_image_from_properties(image_id, image)
         self._validate_flavor_image(context, image_id, image,
                                     instance_type, root_bdm,
                                     validate_numa=validate_numa)
@@ -918,6 +956,9 @@ class API(base.Base):
 
         system_metadata = {}
 
+        pci_numa_affinity_policy = hardware.get_pci_numa_policy_constraint(
+            instance_type, image_meta)
+
         # PCI requests come from two sources: instance flavor and
         # requested_networks. The first call in below returns an
         # InstancePCIRequests object which is a list of InstancePCIRequest
@@ -925,9 +966,10 @@ class API(base.Base):
         # object for each SR-IOV port, and append it to the list in the
         # InstancePCIRequests object
         pci_request_info = pci_request.get_pci_requests_from_flavor(
-            instance_type)
+            instance_type, affinity_policy=pci_numa_affinity_policy)
         result = self.network_api.create_resource_requests(
-            context, requested_networks, pci_request_info)
+            context, requested_networks, pci_request_info,
+            affinity_policy=pci_numa_affinity_policy)
         network_metadata, port_resource_requests = result
 
         # Creating servers with ports that have resource requests, like QoS
@@ -1153,9 +1195,8 @@ class API(base.Base):
         # Check quotas
         num_instances = compute_utils.check_num_instances_quota(
                 context, instance_type, min_count, max_count)
-        security_groups = self.security_group_api.populate_security_groups(
+        security_groups = security_group_api.populate_security_groups(
                 security_groups)
-        self.security_group_api.ensure_default(context)
         port_resource_requests = base_options.pop('port_resource_requests')
         instances_to_build = []
         # We could be iterating over several instances with several BDMs per
@@ -1846,13 +1887,10 @@ class API(base.Base):
 
         instance.system_metadata.update(system_meta)
 
-        if CONF.use_neutron:
-            # For Neutron we don't actually store anything in the database, we
-            # proxy the security groups on the instance from the ports
-            # attached to the instance.
-            instance.security_groups = objects.SecurityGroupList()
-        else:
-            instance.security_groups = security_groups
+        # Since the removal of nova-network, we don't actually store anything
+        # in the database. Instead, we proxy the security groups on the
+        # instance from the ports attached to the instance.
+        instance.security_groups = objects.SecurityGroupList()
 
         self._populate_instance_names(instance, num_instances, index)
         instance.shutdown_terminate = shutdown_terminate
@@ -1960,10 +1998,9 @@ class API(base.Base):
         if requested_networks and max_count is not None and max_count > 1:
             self._check_multiple_instances_with_specified_ip(
                 requested_networks)
-            if utils.is_neutron():
-                #如果采用neutron网络，检查是否指定了port_id
-                self._check_multiple_instances_with_neutron_ports(
-                    requested_networks)
+            #如果采用neutron网络，检查是否指定了port_id
+            self._check_multiple_instances_with_neutron_ports(
+                requested_networks)
 
         if availability_zone:
             available_zones = availability_zones.\
@@ -2000,8 +2037,7 @@ class API(base.Base):
             requested_hypervisor_hostname=requested_hypervisor_hostname)
 
     def _check_auto_disk_config(self, instance=None, image=None,
-                                **extra_instance_updates):
-        auto_disk_config = extra_instance_updates.get("auto_disk_config")
+                                auto_disk_config=None):
         if auto_disk_config is None:
             return
         if not image and not instance:
@@ -2115,6 +2151,23 @@ class API(base.Base):
             return True
         return False
 
+    def _local_delete_cleanup(self, context, instance):
+        # NOTE(aarents) Ensure instance allocation is cleared and instance
+        # mapping queued as deleted before _delete() return
+        try:
+            self.placementclient.delete_allocation_for_instance(
+                context, instance.uuid)
+        except exception.AllocationDeleteFailed:
+            LOG.info("Allocation delete failed during local delete cleanup.",
+                     instance=instance)
+
+        try:
+            self._update_queued_for_deletion(context, instance, True)
+        except exception.InstanceMappingNotFound:
+            LOG.info("Instance Mapping does not exist while attempting"
+                     "local delete cleanup.",
+                     instance=instance)
+
     def _attempt_delete_of_buildrequest(self, context, instance):
         # If there is a BuildRequest then the instance may not have been
         # written to a cell db yet. Delete the BuildRequest here, which
@@ -2150,6 +2203,7 @@ class API(base.Base):
         if not instance.host and not may_have_ports_or_volumes:
             try:
                 if self._delete_while_booting(context, instance):
+                    self._local_delete_cleanup(context, instance)
                     return
                 # If instance.host was not set it's possible that the Instance
                 # object here was pulled from a BuildRequest object and is not
@@ -2168,9 +2222,11 @@ class API(base.Base):
                     except exception.InstanceNotFound:
                         pass
                     # The instance was deleted or is already gone.
+                    self._local_delete_cleanup(context, instance)
                     return
                 if not instance:
                     # Instance is already deleted.
+                    self._local_delete_cleanup(context, instance)
                     return
             except exception.ObjectActionError:
                 # NOTE(melwitt): This means the instance.host changed
@@ -2183,6 +2239,7 @@ class API(base.Base):
                 cell, instance = self._lookup_instance(context, instance.uuid)
                 if not instance:
                     # Instance is already deleted
+                    self._local_delete_cleanup(context, instance)
                     return
 
         bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
@@ -2226,6 +2283,7 @@ class API(base.Base):
                              'field, its vm_state is %(state)s.',
                              {'state': instance.vm_state},
                               instance=instance)
+                    self._local_delete_cleanup(context, instance)
                     return
                 except exception.ObjectActionError as ex:
                     # The instance's host likely changed under us as
@@ -2323,13 +2381,17 @@ class API(base.Base):
                      instance=instance)
             return
 
-        src_host = migration.source_compute
-
         self._record_action_start(context, instance,
                                   instance_actions.CONFIRM_RESIZE)
 
-        self.compute_rpcapi.confirm_resize(context,
-                instance, migration, src_host, cast=False)
+        # If migration.cross_cell_move, we need to also cleanup the instance
+        # data from the source cell database.
+        if migration.cross_cell_move:
+            self.compute_task_api.confirm_snapshot_based_resize(
+                context, instance, migration, do_cast=False)
+        else:
+            self.compute_rpcapi.confirm_resize(context,
+                    instance, migration, migration.source_compute, cast=False)
 
     def _local_cleanup_bdm_volumes(self, bdms, instance, context):
         """The method deletes the bdm records and, if a bdm is a volume, call
@@ -2390,26 +2452,7 @@ class API(base.Base):
                 delete_type if delete_type != 'soft_delete' else 'delete'):
 
             elevated = context.elevated()
-            # NOTE(liusheng): In nova-network multi_host scenario,deleting
-            # network info of the instance may need instance['host'] as
-            # destination host of RPC call. If instance in
-            # SHELVED_OFFLOADED state, instance['host'] is None, here, use
-            # shelved_host as host to deallocate network info and reset
-            # instance['host'] after that. Here we shouldn't use
-            # instance.save(), because this will mislead user who may think
-            # the instance's host has been changed, and actually, the
-            # instance.host is always None.
-            orig_host = instance.host
-            try:
-                if instance.vm_state == vm_states.SHELVED_OFFLOADED:
-                    sysmeta = getattr(instance,
-                                      obj_base.get_attrname(
-                                          'system_metadata'))
-                    instance.host = sysmeta.get('shelved_host')
-                self.network_api.deallocate_for_instance(elevated,
-                                                         instance)
-            finally:
-                instance.host = orig_host
+            self.network_api.deallocate_for_instance(elevated, instance)
 
             # cleanup volumes
             self._local_cleanup_bdm_volumes(bdms, instance, context)
@@ -2528,14 +2571,14 @@ class API(base.Base):
                                           clean_shutdown=clean_shutdown)
 
     @check_instance_lock
-    @check_instance_host
+    @check_instance_host()
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.ERROR])
     def stop(self, context, instance, do_cast=True, clean_shutdown=True):
         """Stop an instance."""
         self.force_stop(context, instance, do_cast, clean_shutdown)
 
     @check_instance_lock
-    @check_instance_host
+    @check_instance_host()
     @check_instance_state(vm_state=[vm_states.STOPPED])
     def start(self, context, instance):
         """Start an instance."""
@@ -2548,7 +2591,7 @@ class API(base.Base):
         self.compute_rpcapi.start_instance(context, instance)
 
     @check_instance_lock
-    @check_instance_host
+    @check_instance_host()
     @check_instance_state(vm_state=vm_states.ALLOW_TRIGGER_CRASH_DUMP)
     def trigger_crash_dump(self, context, instance):
         """Trigger crash dump in an instance."""
@@ -3331,6 +3374,12 @@ class API(base.Base):
                                             block_device_info=None,
                                             reboot_type='HARD')
 
+    def _check_image_arch(self, image=None):
+        if image:
+            img_arch = image.get("properties", {}).get('hw_architecture')
+            if img_arch:
+                fields_obj.Architecture.canonicalize(img_arch)
+
     # TODO(stephenfin): We should expand kwargs out to named args
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED,
@@ -3375,7 +3424,9 @@ class API(base.Base):
                 context, trusted_certs, rebuild=True)
 
         image_id, image = self._get_image(context, image_href)
-        self._check_auto_disk_config(image=image, **kwargs)
+        self._check_auto_disk_config(image=image,
+                                     auto_disk_config=auto_disk_config)
+        self._check_image_arch(image=image)
 
         flavor = instance.get_flavor()
         bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
@@ -3429,6 +3480,14 @@ class API(base.Base):
 
         self._checks_for_create_and_rebuild(context, image_id, image,
                 flavor, metadata, files_to_inject, root_bdm)
+
+        # NOTE(sean-k-mooney): When we rebuild with a new image we need to
+        # validate that the NUMA topology does not change as we do a NOOP claim
+        # in resource tracker. As such we cannot allow the resource usage or
+        # assignment to change as a result of a new image altering the
+        # numa constraints.
+        if orig_image_ref != image_href:
+            self._validate_numa_rebuild(instance, image, flavor)
 
         kernel_id, ramdisk_id = self._handle_kernel_and_ramdisk(
                 context, None, None, image)
@@ -3522,6 +3581,49 @@ class API(base.Base):
                 request_spec=request_spec)
 
     @staticmethod
+    def _validate_numa_rebuild(instance, image, flavor):
+        """validates that the NUMA constraints do not change on rebuild.
+
+        :param instance: nova.objects.instance.Instance object
+        :param image: the new image the instance will be rebuilt with.
+        :param flavor: the flavor of the current instance.
+        :raises: nova.exception.ImageNUMATopologyRebuildConflict
+        """
+
+        # NOTE(sean-k-mooney): currently it is not possible to express
+        # a PCI NUMA affinity policy via flavor or image but that will
+        # change in the future. we pull out the image metadata into
+        # separate variable to make future testing of this easier.
+        old_image_meta = instance.image_meta
+        new_image_meta = objects.ImageMeta.from_dict(image)
+        old_constraints = hardware.numa_get_constraints(flavor, old_image_meta)
+        new_constraints = hardware.numa_get_constraints(flavor, new_image_meta)
+
+        # early out for non NUMA instances
+        if old_constraints is None and new_constraints is None:
+            return
+
+        # if only one of the constraints are non-None (or 'set') then the
+        # constraints changed so raise an exception.
+        if old_constraints is None or new_constraints is None:
+            action = "removing" if old_constraints else "introducing"
+            LOG.debug("NUMA rebuild validation failed. The requested image "
+                      "would alter the NUMA constraints by %s a NUMA "
+                      "topology.", action, instance=instance)
+            raise exception.ImageNUMATopologyRebuildConflict()
+
+        # otherwise since both the old a new constraints are non none compare
+        # them as dictionaries.
+        old = old_constraints.obj_to_primitive()
+        new = new_constraints.obj_to_primitive()
+        if old != new:
+            LOG.debug("NUMA rebuild validation failed. The requested image "
+                      "conflicts with the existing NUMA constraints.",
+                      instance=instance)
+            raise exception.ImageNUMATopologyRebuildConflict()
+        # TODO(sean-k-mooney): add PCI NUMA affinity policy check.
+
+    @staticmethod
     def _check_quota_for_upsize(context, instance, current_flavor, new_flavor):
         project_id, user_id = quotas_obj.ids_from_instance(context,
                                                            instance)
@@ -3582,15 +3684,22 @@ class API(base.Base):
             availability_zones.get_host_availability_zone(
                 context, migration.source_compute))
 
-        # Conductor updated the RequestSpec.flavor during the initial resize
-        # operation to point at the new flavor, so we need to update the
-        # RequestSpec to point back at the original flavor, otherwise
-        # subsequent move operations through the scheduler will be using the
-        # wrong flavor.
+        # If this was a resize, the conductor may have updated the
+        # RequestSpec.flavor field (to point at the new flavor) and the
+        # RequestSpec.numa_topology field (to reflect the new flavor's extra
+        # specs) during the initial resize operation, so we need to update the
+        # RequestSpec to point back at the original flavor and reflect the NUMA
+        # settings of this flavor, otherwise subsequent move operations through
+        # the scheduler will be using the wrong values. There's no need to do
+        # this if the flavor hasn't changed though and we're migrating rather
+        # than resizing.
         reqspec = objects.RequestSpec.get_by_instance_uuid(
             context, instance.uuid)
-        reqspec.flavor = instance.old_flavor
-        reqspec.save()
+        if reqspec.flavor['id'] != instance.old_flavor['id']:
+            reqspec.flavor = instance.old_flavor
+            reqspec.numa_topology = hardware.numa_get_constraints(
+                instance.old_flavor, instance.image_meta)
+            reqspec.save()
 
         # NOTE(gibi): This is a performance optimization. If the network info
         # cache does not have ports with allocations in the binding profile
@@ -3620,14 +3729,20 @@ class API(base.Base):
         self._record_action_start(context, instance,
                                   instance_actions.REVERT_RESIZE)
 
-        # TODO(melwitt): We're not rechecking for strict quota here to guard
-        # against going over quota during a race at this time because the
-        # resource consumption for this operation is written to the database
-        # by compute.
-        self.compute_rpcapi.revert_resize(context, instance,
-                                          migration,
-                                          migration.dest_compute,
-                                          reqspec)
+        if migration.cross_cell_move:
+            # RPC cast to conductor to orchestrate the revert of the cross-cell
+            # resize.
+            self.compute_task_api.revert_snapshot_based_resize(
+                context, instance, migration)
+        else:
+            # TODO(melwitt): We're not rechecking for strict quota here to
+            # guard against going over quota during a race at this time because
+            # the resource consumption for this operation is written to the
+            # database by compute.
+            self.compute_rpcapi.revert_resize(context, instance,
+                                              migration,
+                                              migration.dest_compute,
+                                              reqspec)
 
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.RESIZED])
@@ -3649,18 +3764,105 @@ class API(base.Base):
         self._record_action_start(context, instance,
                                   instance_actions.CONFIRM_RESIZE)
 
-        self.compute_rpcapi.confirm_resize(context,
-                                           instance,
-                                           migration,
-                                           migration.source_compute)
+        # Check to see if this was a cross-cell resize, in which case the
+        # resized instance is in the target cell (the migration and instance
+        # came from the target cell DB in this case), and we need to cleanup
+        # the source host and source cell database records.
+        if migration.cross_cell_move:
+            self.compute_task_api.confirm_snapshot_based_resize(
+                context, instance, migration)
+        else:
+            # It's a traditional resize within a single cell, so RPC cast to
+            # the source compute host to cleanup the host since the instance
+            # is already on the target host.
+            self.compute_rpcapi.confirm_resize(context,
+                                               instance,
+                                               migration,
+                                               migration.source_compute)
 
-    # TODO(mriedem): It looks like for resize (not cold migrate) the only
-    # possible kwarg here is auto_disk_config. Drop this dumb **kwargs and make
-    # it explicitly an auto_disk_config param
+    @staticmethod
+    def _allow_cross_cell_resize(context, instance):
+        """Determine if the request can perform a cross-cell resize on this
+        instance.
+
+        :param context: nova auth request context for the resize operation
+        :param instance: Instance object being resized
+        :returns: True if cross-cell resize is allowed, False otherwise
+        """
+        # First check to see if the requesting project/user is allowed by
+        # policy to perform cross-cell resize.
+        allowed = context.can(
+            servers_policies.CROSS_CELL_RESIZE,
+            target={'user_id': instance.user_id,
+                    'project_id': instance.project_id},
+            fatal=False)
+        # If the user is allowed by policy, check to make sure the deployment
+        # is upgraded to the point of supporting cross-cell resize on all
+        # compute services.
+        if allowed:
+            # TODO(mriedem): We can remove this minimum compute version check
+            # in the 22.0.0 "V" release.
+            min_compute_version = (
+                objects.service.get_minimum_version_all_cells(
+                    context, ['nova-compute']))
+            if min_compute_version < MIN_COMPUTE_CROSS_CELL_RESIZE:
+                LOG.debug('Request is allowed by policy to perform cross-cell '
+                          'resize but the minimum nova-compute service '
+                          'version in the deployment %s is less than %s so '
+                          'cross-cell resize is not allowed at this time.',
+                          min_compute_version, MIN_COMPUTE_CROSS_CELL_RESIZE)
+                allowed = False
+        return allowed
+
+    @staticmethod
+    def _validate_host_for_cold_migrate(
+            context, instance, host_name, allow_cross_cell_resize):
+        """Validates a host specified for cold migration.
+
+        :param context: nova auth request context for the cold migration
+        :param instance: Instance object being cold migrated
+        :param host_name: User-specified compute service hostname for the
+            desired destination of the instance during the cold migration
+        :param allow_cross_cell_resize: If True, cross-cell resize is allowed
+            for this operation and the host could be in a different cell from
+            the one that the instance is currently in. If False, the speciifed
+            host must be in the same cell as the instance.
+        :returns: ComputeNode object of the requested host
+        :raises: CannotMigrateToSameHost if the host is the same as the
+            current instance.host
+        :raises: ComputeHostNotFound if the specified host cannot be found
+        """
+        # Cannot migrate to the host where the instance exists
+        # because it is useless.
+        if host_name == instance.host:
+            raise exception.CannotMigrateToSameHost()
+
+        # Check whether host exists or not. If a cross-cell resize is
+        # allowed, the host could be in another cell from the one the
+        # instance is currently in, so we need to lookup the HostMapping
+        # to get the cell and lookup the ComputeNode in that cell.
+        if allow_cross_cell_resize:
+            try:
+                hm = objects.HostMapping.get_by_host(context, host_name)
+            except exception.HostMappingNotFound:
+                LOG.info('HostMapping not found for host: %s', host_name)
+                raise exception.ComputeHostNotFound(host=host_name)
+
+            with nova_context.target_cell(context, hm.cell_mapping) as cctxt:
+                node = objects.ComputeNode.\
+                    get_first_node_by_host_for_old_compat(
+                        cctxt, host_name, use_slave=True)
+        else:
+            node = objects.ComputeNode.get_first_node_by_host_for_old_compat(
+                context, host_name, use_slave=True)
+
+        return node
+
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED])
+    @check_instance_host(check_is_up=True)
     def resize(self, context, instance, flavor_id=None, clean_shutdown=True,
-               host_name=None, **extra_instance_updates):
+               host_name=None, auto_disk_config=None):
         """Resize (ie, migrate) a running instance.
 
         If flavor_id is None, the process is considered a migration, keeping
@@ -3669,17 +3871,15 @@ class API(base.Base):
         host_name is always None in the resize case.
         host_name can be set in the cold migration case only.
         """
+        allow_cross_cell_resize = self._allow_cross_cell_resize(
+            context, instance)
+
         if host_name is not None:
-            # Cannot migrate to the host where the instance exists
-            # because it is useless.
-            if host_name == instance.host:
-                raise exception.CannotMigrateToSameHost()
+            node = self._validate_host_for_cold_migrate(
+                context, instance, host_name, allow_cross_cell_resize)
 
-            # Check whether host exists or not.
-            node = objects.ComputeNode.get_first_node_by_host_for_old_compat(
-                context, host_name, use_slave=True)
-
-        self._check_auto_disk_config(instance, **extra_instance_updates)
+        self._check_auto_disk_config(
+            instance, auto_disk_config=auto_disk_config)
 
         current_instance_type = instance.get_flavor()
 
@@ -3749,17 +3949,21 @@ class API(base.Base):
                     validate_pci=True)
 
         filter_properties = {'ignore_hosts': []}
-
-        if not CONF.allow_resize_to_same_host:
+        if not self._allow_resize_to_same_host(same_instance_type, instance):
             filter_properties['ignore_hosts'].append(instance.host)
 
         request_spec = objects.RequestSpec.get_by_instance_uuid(
             context, instance.uuid)
         request_spec.ignore_hosts = filter_properties['ignore_hosts']
 
+        # don't recalculate the NUMA topology unless the flavor has changed
+        if not same_instance_type:
+            request_spec.numa_topology = hardware.numa_get_constraints(
+                new_instance_type, instance.image_meta)
+
         instance.task_state = task_states.RESIZE_PREP
         instance.progress = 0
-        instance.update(extra_instance_updates)
+        instance.auto_disk_config = auto_disk_config or False
         instance.save(expected_task_state=[None])
 
         if not flavor_id:
@@ -3777,19 +3981,78 @@ class API(base.Base):
 
         if host_name is None:
             # If 'host_name' is not specified,
-            # clear the 'requested_destination' field of the RequestSpec.
-            request_spec.requested_destination = None
+            # clear the 'requested_destination' field of the RequestSpec
+            # except set the allow_cross_cell_move flag since conductor uses
+            # it prior to scheduling.
+            request_spec.requested_destination = objects.Destination(
+                allow_cross_cell_move=allow_cross_cell_resize)
         else:
             # Set the host and the node so that the scheduler will
             # validate them.
             request_spec.requested_destination = objects.Destination(
-                host=node.host, node=node.hypervisor_hostname)
+                host=node.host, node=node.hypervisor_hostname,
+                allow_cross_cell_move=allow_cross_cell_resize)
 
+        # Asynchronously RPC cast to conductor so the response is not blocked
+        # during scheduling. If something fails the user can find out via
+        # instance actions.
         self.compute_task_api.resize_instance(context, instance,
             scheduler_hint=scheduler_hint,
             flavor=new_instance_type,
             clean_shutdown=clean_shutdown,
-            request_spec=request_spec)
+            request_spec=request_spec,
+            do_cast=True)
+
+    def _allow_resize_to_same_host(self, cold_migrate, instance):
+        """Contains logic for excluding the instance.host on resize/migrate.
+
+        If performing a cold migration and the compute node resource provider
+        reports the COMPUTE_SAME_HOST_COLD_MIGRATE trait then same-host cold
+        migration is allowed otherwise it is not and the current instance.host
+        should be excluded as a scheduling candidate.
+
+        :param cold_migrate: true if performing a cold migration, false
+            for resize
+        :param instance: Instance object being resized or cold migrated
+        :returns: True if same-host resize/cold migrate is allowed, False
+            otherwise
+        """
+        if cold_migrate:
+            # Check to see if the compute node resource provider on which the
+            # instance is running has the COMPUTE_SAME_HOST_COLD_MIGRATE
+            # trait.
+            # Note that we check this here in the API since we cannot
+            # pre-filter allocation candidates in the scheduler using this
+            # trait as it would not work. For example, libvirt nodes will not
+            # report the trait but using it as a forbidden trait filter when
+            # getting allocation candidates would still return libvirt nodes
+            # which means we could attempt to cold migrate to the same libvirt
+            # node, which would fail.
+            ctxt = instance._context
+            cn = objects.ComputeNode.get_by_host_and_nodename(
+                ctxt, instance.host, instance.node)
+            traits = self.placementclient.get_provider_traits(
+                ctxt, cn.uuid).traits
+            # If the provider has the trait it is (1) new enough to report that
+            # trait and (2) supports cold migration on the same host.
+            if os_traits.COMPUTE_SAME_HOST_COLD_MIGRATE in traits:
+                allow_same_host = True
+            else:
+                # TODO(mriedem): Remove this compatibility code after one
+                # release. If the compute is old we will not know if it
+                # supports same-host cold migration so we fallback to config.
+                service = objects.Service.get_by_compute_host(ctxt, cn.host)
+                if service.version >= MIN_COMPUTE_SAME_HOST_COLD_MIGRATE:
+                    # The compute is new enough to report the trait but does
+                    # not so same-host cold migration is not allowed.
+                    allow_same_host = False
+                else:
+                    # The compute is not new enough to report the trait so we
+                    # fallback to config.
+                    allow_same_host = CONF.allow_resize_to_same_host
+        else:
+            allow_same_host = CONF.allow_resize_to_same_host
+        return allow_same_host
 
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED,
@@ -3944,12 +4207,12 @@ class API(base.Base):
         self._record_action_start(context, instance, instance_actions.UNPAUSE)
         self.compute_rpcapi.unpause_instance(context, instance)
 
-    @check_instance_host
+    @check_instance_host()
     def get_diagnostics(self, context, instance):
         """Retrieve diagnostics for the given instance."""
         return self.compute_rpcapi.get_diagnostics(context, instance=instance)
 
-    @check_instance_host
+    @check_instance_host()
     def get_instance_diagnostics(self, context, instance):
         """Retrieve diagnostics for the given instance."""
         return self.compute_rpcapi.get_instance_diagnostics(context,
@@ -4014,7 +4277,7 @@ class API(base.Base):
 
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE])
-    def set_admin_password(self, context, instance, password=None):
+    def set_admin_password(self, context, instance, password):
         """Set the root/admin password for the given instance.
 
         @param context: Nova auth context.
@@ -4031,7 +4294,7 @@ class API(base.Base):
                                                instance=instance,
                                                new_pass=password)
 
-    @check_instance_host
+    @check_instance_host()
     @reject_instance_state(
         task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_vnc_console(self, context, instance, console_type):
@@ -4040,7 +4303,7 @@ class API(base.Base):
                 instance=instance, console_type=console_type)
         return {'url': connect_info['access_url']}
 
-    @check_instance_host
+    @check_instance_host()
     @reject_instance_state(
         task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_spice_console(self, context, instance, console_type):
@@ -4049,7 +4312,7 @@ class API(base.Base):
                 instance=instance, console_type=console_type)
         return {'url': connect_info['access_url']}
 
-    @check_instance_host
+    @check_instance_host()
     @reject_instance_state(
         task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_rdp_console(self, context, instance, console_type):
@@ -4058,7 +4321,7 @@ class API(base.Base):
                 instance=instance, console_type=console_type)
         return {'url': connect_info['access_url']}
 
-    @check_instance_host
+    @check_instance_host()
     @reject_instance_state(
         task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_serial_console(self, context, instance, console_type):
@@ -4067,7 +4330,7 @@ class API(base.Base):
                 instance=instance, console_type=console_type)
         return {'url': connect_info['access_url']}
 
-    @check_instance_host
+    @check_instance_host()
     @reject_instance_state(
         task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_mks_console(self, context, instance, console_type):
@@ -4076,7 +4339,7 @@ class API(base.Base):
                 instance=instance, console_type=console_type)
         return {'url': connect_info['access_url']}
 
-    @check_instance_host
+    @check_instance_host()
     def get_console_output(self, context, instance, tail_length=None):
         """Get console output for an instance."""
         return self.compute_rpcapi.get_console_output(context,
@@ -4863,7 +5126,54 @@ class API(base.Base):
         """Get all migrations for the given parameters."""
         mig_objs = migration_list.get_migration_objects_sorted(
             context, filters, limit, marker, sort_keys, sort_dirs)
-        return mig_objs
+        # Due to cross-cell resize, we could have duplicate migration records
+        # while the instance is in VERIFY_RESIZE state in the destination cell
+        # but the original migration record still exists in the source cell.
+        # Filter out duplicate migration records here based on which record
+        # is newer (last updated).
+
+        def _get_newer_obj(obj1, obj2):
+            # created_at will always be set.
+            created_at1 = obj1.created_at
+            created_at2 = obj2.created_at
+            # updated_at might be None
+            updated_at1 = obj1.updated_at
+            updated_at2 = obj2.updated_at
+            # If both have updated_at, compare using that field.
+            if updated_at1 and updated_at2:
+                if updated_at1 > updated_at2:
+                    return obj1
+                return obj2
+            # Compare created_at versus updated_at.
+            if updated_at1:
+                if updated_at1 > created_at2:
+                    return obj1
+                return obj2
+            if updated_at2:
+                if updated_at2 > created_at1:
+                    return obj2
+                return obj1
+            # Compare created_at only.
+            if created_at1 > created_at2:
+                return obj1
+            return obj2
+
+        # TODO(mriedem): This could be easier if we leveraged the "hidden"
+        # field on the Migration record and then just did like
+        # _get_unique_filter_method in the get_all() method for instances.
+        migrations_by_uuid = collections.OrderedDict()  # maintain sort order
+        for migration in mig_objs:
+            if migration.uuid not in migrations_by_uuid:
+                migrations_by_uuid[migration.uuid] = migration
+            else:
+                # We have a collision, keep the newer record.
+                # Note that using updated_at could be wrong if changes-since or
+                # changes-before filters are being used but we have the same
+                # issue in _get_unique_filter_method for instances.
+                doppelganger = migrations_by_uuid[migration.uuid]
+                newer = _get_newer_obj(doppelganger, migration)
+                migrations_by_uuid[migration.uuid] = newer
+        return objects.MigrationList(objects=list(migrations_by_uuid.values()))
 
     def get_migrations_in_progress_by_instance(self, context, instance_uuid,
                                                migration_type=None):
@@ -4905,7 +5215,7 @@ class API(base.Base):
 
         # We allow creating the snapshot in any vm_state as long as there is
         # no task being performed on the instance and it has a host.
-        @check_instance_host
+        @check_instance_host()
         @check_instance_state(vm_state=None)
         def do_volume_snapshot_create(self, context, instance):
             self.compute_rpcapi.volume_snapshot_create(context, instance,
@@ -4927,7 +5237,7 @@ class API(base.Base):
 
         # We allow deleting the snapshot in any vm_state as long as there is
         # no task being performed on the instance and it has a host.
-        @check_instance_host
+        @check_instance_host()
         @check_instance_state(vm_state=None)
         def do_volume_snapshot_delete(self, context, instance):
             self.compute_rpcapi.volume_snapshot_delete(context, instance,
@@ -4948,17 +5258,25 @@ class API(base.Base):
             # instance._context is used here since it's already targeted to
             # the cell that the instance lives in, and we need to use that
             # cell context to lookup any migrations associated to the instance.
-            for host in self._get_relevant_hosts(instance._context, instance):
+            hosts, cross_cell_move = self._get_relevant_hosts(
+                instance._context, instance)
+            for host in hosts:
                 # NOTE(danms): All instances on a host must have the same
                 # mapping, so just use that
-                # NOTE(mdbooth): We don't currently support migrations between
-                # cells, and given that the Migration record is hosted in the
-                # cell _get_relevant_hosts will likely have to change before we
-                # do. Consequently we can currently assume that the context for
-                # both the source and destination hosts of a migration is the
-                # same.
                 if host not in cell_contexts_by_host:
-                    cell_contexts_by_host[host] = instance._context
+                    # NOTE(mriedem): If the instance is being migrated across
+                    # cells then we have to get the host mapping to determine
+                    # which cell a given host is in.
+                    if cross_cell_move:
+                        hm = objects.HostMapping.get_by_host(api_context, host)
+                        ctxt = nova_context.get_admin_context()
+                        nova_context.set_target_cell(ctxt, hm.cell_mapping)
+                        cell_contexts_by_host[host] = ctxt
+                    else:
+                        # The instance is not migrating across cells so just
+                        # use the cell-targeted context already in the
+                        # instance since the host has to be in that same cell.
+                        cell_contexts_by_host[host] = instance._context
 
                 instances_by_host[host].append(instance)
                 hosts_by_instance[instance.uuid].append(host)
@@ -5004,18 +5322,35 @@ class API(base.Base):
                 host=host)
 
     def _get_relevant_hosts(self, context, instance):
+        """Get the relevant hosts for an external server event on an instance.
+
+        :param context: nova auth request context targeted at the same cell
+            that the instance lives in
+        :param instance: Instance object which is the target of an external
+            server event
+        :returns: 2-item tuple of:
+            - set of at least one host (the host where the instance lives); if
+              the instance is being migrated the source and dest compute
+              hostnames are in the returned set
+            - boolean indicating if the instance is being migrated across cells
+        """
         hosts = set()
         hosts.add(instance.host)
+        cross_cell_move = False
         if instance.migration_context is not None:
             migration_id = instance.migration_context.migration_id
             migration = objects.Migration.get_by_id(context, migration_id)
+            cross_cell_move = migration.cross_cell_move
             hosts.add(migration.dest_compute)
             hosts.add(migration.source_compute)
-            LOG.debug('Instance %(instance)s is migrating, '
+            cells_msg = (
+                'across cells' if cross_cell_move else 'within the same cell')
+            LOG.debug('Instance %(instance)s is migrating %(cells_msg)s, '
                       'copying events to all relevant hosts: '
-                      '%(hosts)s', {'instance': instance.uuid,
+                      '%(hosts)s', {'cells_msg': cells_msg,
+                                    'instance': instance.uuid,
                                     'hosts': hosts})
-        return hosts
+        return hosts, cross_cell_move
 
     def get_instance_host_status(self, instance):
         if instance.host:
@@ -5066,6 +5401,21 @@ def target_host_cell(fn):
         nova_context.set_target_cell(context, mapping.cell_mapping)
         return fn(self, context, host, *args, **kwargs)
     return targeted
+
+
+def _get_service_in_cell_by_host(context, host_name):
+    # validates the host; ComputeHostNotFound is raised if invalid
+    try:
+        mapping = objects.HostMapping.get_by_host(context, host_name)
+        nova_context.set_target_cell(context, mapping.cell_mapping)
+        service = objects.Service.get_by_compute_host(context, host_name)
+    except exception.HostMappingNotFound:
+        try:
+            # NOTE(danms): This targets our cell
+            service = _find_service_in_cell(context, service_host=host_name)
+        except exception.NotFound:
+            raise exception.ComputeHostNotFound(host=host_name)
+    return service
 
 
 def _find_service_in_cell(context, service_id=None, service_host=None):
@@ -5366,20 +5716,6 @@ class HostAPI(base.Base):
         service = objects.Service.get_by_args(context, host_name, binary)
         service.update(params_to_update)
         return self.service_update(context, service)
-
-    def _service_delete(self, context, service_id):
-        """Performs the actual Service deletion operation."""
-        try:
-            service = _find_service_in_cell(context, service_id=service_id)
-        except exception.NotFound:
-            raise exception.ServiceNotFound(service_id=service_id)
-        service.destroy()
-
-    # TODO(mriedem): Nothing outside of tests is using this now so we should
-    # be able to remove it.
-    def service_delete(self, context, service_id):
-        """Deletes the specified service found via id or uuid."""
-        self._service_delete(context, service_id)
 
     @target_host_cell
     def instance_get_all_by_host(self, context, host_name):
@@ -5697,20 +6033,8 @@ class AggregateAPI(base.Base):
         compute_utils.notify_about_aggregate_update(context,
                                                     "addhost.start",
                                                     aggregate_payload)
-        # validates the host; HostMappingNotFound or ComputeHostNotFound
-        # is raised if invalid
-        try:
-            mapping = objects.HostMapping.get_by_host(context, host_name)
-            nova_context.set_target_cell(context, mapping.cell_mapping)
-            service = objects.Service.get_by_compute_host(context, host_name)
-        except exception.HostMappingNotFound:
-            try:
-                # NOTE(danms): This targets our cell
-                service = _find_service_in_cell(context,
-                                                service_host=host_name)
-            except exception.NotFound:
-                raise exception.ComputeHostNotFound(host=host_name)
 
+        service = _get_service_in_cell_by_host(context, host_name)
         if service.host != host_name:
             # NOTE(danms): If we found a service but it is not an
             # exact match, we may have a case-insensitive backend
@@ -5735,16 +6059,6 @@ class AggregateAPI(base.Base):
         try:
             self.placement_client.aggregate_add_host(
                 context, aggregate.uuid, host_name=host_name)
-        except exception.PlacementAPIConnectFailure:
-            # NOTE(jaypipes): Rocky should be able to tolerate the nova-api
-            # service not communicating with the Placement API, so just log a
-            # warning here.
-            # TODO(jaypipes): Remove this in Stein, when placement must be able
-            # to be contacted from the nova-api service.
-            LOG.warning("Failed to associate %s with a placement "
-                        "aggregate: %s. There was a failure to communicate "
-                        "with the placement service.",
-                        host_name, aggregate.uuid)
         except (exception.ResourceProviderNotFound,
                 exception.ResourceProviderAggregateRetrievalFailed,
                 exception.ResourceProviderUpdateFailed,
@@ -5783,11 +6097,7 @@ class AggregateAPI(base.Base):
         compute_utils.notify_about_aggregate_update(context,
                                                     "removehost.start",
                                                     aggregate_payload)
-        # validates the host; HostMappingNotFound or ComputeHostNotFound
-        # is raised if invalid
-        mapping = objects.HostMapping.get_by_host(context, host_name)
-        nova_context.set_target_cell(context, mapping.cell_mapping)
-        objects.Service.get_by_compute_host(context, host_name)
+        _get_service_in_cell_by_host(context, host_name)
         aggregate = objects.Aggregate.get_by_id(context, aggregate_id)
 
         compute_utils.notify_about_aggregate_action(
@@ -5796,35 +6106,26 @@ class AggregateAPI(base.Base):
             action=fields_obj.NotificationAction.REMOVE_HOST,
             phase=fields_obj.NotificationPhase.START)
 
-        aggregate.delete_host(host_name)
-        self.query_client.update_aggregates(context, [aggregate])
+        # Remove the resource provider from the provider aggregate first before
+        # we change anything on the nova side because if we did the nova stuff
+        # first we can't re-attempt this from the compute API if cleaning up
+        # placement fails.
         try:
+            # Anything else this raises is handled in the route handler as
+            # either a 409 (ResourceProviderUpdateConflict) or 500.
             self.placement_client.aggregate_remove_host(
                 context, aggregate.uuid, host_name)
-        except exception.PlacementAPIConnectFailure:
-            # NOTE(jaypipes): Rocky should be able to tolerate the nova-api
-            # service not communicating with the Placement API, so just log a
-            # warning here.
-            # TODO(jaypipes): Remove this in Stein, when placement must be able
-            # to be contacted from the nova-api service.
+        except exception.ResourceProviderNotFound as err:
+            # If the resource provider is not found then it's likely not part
+            # of the aggregate anymore anyway since provider aggregates are
+            # not resources themselves with metadata like nova aggregates, they
+            # are just a grouping concept around resource providers. Log and
+            # continue.
             LOG.warning("Failed to remove association of %s with a placement "
-                        "aggregate: %s. There was a failure to communicate "
-                        "with the placement service.",
-                        host_name, aggregate.uuid)
-        except (exception.ResourceProviderNotFound,
-                exception.ResourceProviderAggregateRetrievalFailed,
-                exception.ResourceProviderUpdateFailed,
-                exception.ResourceProviderUpdateConflict) as err:
-            # NOTE(jaypipes): We don't want a failure perform the mirroring
-            # action in the placement service to be returned to the user (they
-            # probably don't know anything about the placement service and
-            # would just be confused). So, we just log a warning here, noting
-            # that on the next run of nova-manage placement sync_aggregates
-            # things will go back to normal
-            LOG.warning("Failed to remove association of %s with a placement "
-                        "aggregate: %s. This may be corrected after running "
-                        "nova-manage placement sync_aggregates.",
-                        host_name, err)
+                        "aggregate: %s.", host_name, err)
+
+        aggregate.delete_host(host_name)
+        self.query_client.update_aggregates(context, [aggregate])
         self._update_az_cache_for_host(context, host_name, aggregate.metadata)
         self.compute_rpcapi.remove_aggregate_host(context,
                 aggregate=aggregate, host_param=host_name, host=host_name)
@@ -5995,368 +6296,3 @@ class KeypairAPI(base.Base):
     def get_key_pair(self, context, user_id, key_name):
         """Get a keypair by name."""
         return objects.KeyPair.get_by_name(context, user_id, key_name)
-
-
-class SecurityGroupAPI(base.Base, security_group_base.SecurityGroupBase):
-    """Sub-set of the Compute API related to managing security groups
-    and security group rules
-    """
-
-    # The nova security group api does not use a uuid for the id.
-    id_is_uuid = False
-
-    def __init__(self, **kwargs):
-        super(SecurityGroupAPI, self).__init__(**kwargs)
-        self.compute_rpcapi = compute_rpcapi.ComputeAPI()
-
-    def validate_property(self, value, property, allowed):
-        """Validate given security group property.
-
-        :param value:          the value to validate, as a string or unicode
-        :param property:       the property, either 'name' or 'description'
-        :param allowed:        the range of characters allowed
-        """
-
-        try:
-            val = value.strip()
-        except AttributeError:
-            msg = _("Security group %s is not a string or unicode") % property
-            self.raise_invalid_property(msg)
-        utils.check_string_length(val, name=property, min_length=1,
-                                  max_length=255)
-
-        if allowed and not re.match(allowed, val):
-            # Some validation to ensure that values match API spec.
-            # - Alphanumeric characters, spaces, dashes, and underscores.
-            # TODO(Daviey): LP: #813685 extend beyond group_name checking, and
-            #  probably create a param validator that can be used elsewhere.
-            msg = (_("Value (%(value)s) for parameter Group%(property)s is "
-                     "invalid. Content limited to '%(allowed)s'.") %
-                   {'value': value, 'allowed': allowed,
-                    'property': property.capitalize()})
-            self.raise_invalid_property(msg)
-
-    def ensure_default(self, context):
-        """Ensure that a context has a security group.
-
-        Creates a security group for the security context if it does not
-        already exist.
-
-        :param context: the security context
-        """
-        self.db.security_group_ensure_default(context)
-
-    def create_security_group(self, context, name, description):
-        try:
-            objects.Quotas.check_deltas(context, {'security_groups': 1},
-                                        context.project_id,
-                                        user_id=context.user_id)
-        except exception.OverQuota:
-            msg = _("Quota exceeded, too many security groups.")
-            self.raise_over_quota(msg)
-
-        LOG.info("Create Security Group %s", name)
-
-        self.ensure_default(context)
-
-        group = {'user_id': context.user_id,
-                 'project_id': context.project_id,
-                 'name': name,
-                 'description': description}
-        try:
-            group_ref = self.db.security_group_create(context, group)
-        except exception.SecurityGroupExists:
-            msg = _('Security group %s already exists') % name
-            self.raise_group_already_exists(msg)
-
-        # NOTE(melwitt): We recheck the quota after creating the object to
-        # prevent users from allocating more resources than their allowed quota
-        # in the event of a race. This is configurable because it can be
-        # expensive if strict quota limits are not required in a deployment.
-        if CONF.quota.recheck_quota:
-            try:
-                objects.Quotas.check_deltas(context, {'security_groups': 0},
-                                            context.project_id,
-                                            user_id=context.user_id)
-            except exception.OverQuota:
-                self.db.security_group_destroy(context, group_ref['id'])
-                msg = _("Quota exceeded, too many security groups.")
-                self.raise_over_quota(msg)
-
-        return group_ref
-
-    def update_security_group(self, context, security_group,
-                                name, description):
-        if security_group['name'] in RO_SECURITY_GROUPS:
-            msg = (_("Unable to update system group '%s'") %
-                    security_group['name'])
-            self.raise_invalid_group(msg)
-
-        group = {'name': name,
-                 'description': description}
-
-        columns_to_join = ['rules.grantee_group']
-        group_ref = self.db.security_group_update(context,
-                security_group['id'],
-                group,
-                columns_to_join=columns_to_join)
-        return group_ref
-
-    def get(self, context, name=None, id=None, map_exception=False):
-        self.ensure_default(context)
-        cols = ['rules']
-        try:
-            if name:
-                return self.db.security_group_get_by_name(context,
-                                                          context.project_id,
-                                                          name,
-                                                          columns_to_join=cols)
-            elif id:
-                return self.db.security_group_get(context, id,
-                                                  columns_to_join=cols)
-        except exception.NotFound as exp:
-            if map_exception:
-                msg = exp.format_message()
-                self.raise_not_found(msg)
-            else:
-                raise
-
-    def list(self, context, names=None, ids=None, project=None,
-             search_opts=None):
-        self.ensure_default(context)
-
-        groups = []
-        if names or ids:
-            if names:
-                for name in names:
-                    groups.append(self.db.security_group_get_by_name(context,
-                                                                     project,
-                                                                     name))
-            if ids:
-                for id in ids:
-                    groups.append(self.db.security_group_get(context, id))
-
-        elif context.is_admin:
-            # TODO(eglynn): support a wider set of search options than just
-            # all_tenants, at least include the standard filters defined for
-            # the EC2 DescribeSecurityGroups API for the non-admin case also
-            if (search_opts and 'all_tenants' in search_opts):
-                groups = self.db.security_group_get_all(context)
-            else:
-                groups = self.db.security_group_get_by_project(context,
-                                                               project)
-
-        elif project:
-            groups = self.db.security_group_get_by_project(context, project)
-
-        return groups
-
-    def destroy(self, context, security_group):
-        if security_group['name'] in RO_SECURITY_GROUPS:
-            msg = _("Unable to delete system group '%s'") % \
-                    security_group['name']
-            self.raise_invalid_group(msg)
-
-        if self.db.security_group_in_use(context, security_group['id']):
-            msg = _("Security group is still in use")
-            self.raise_invalid_group(msg)
-
-        LOG.info("Delete security group %s", security_group['name'])
-        self.db.security_group_destroy(context, security_group['id'])
-
-    def is_associated_with_server(self, security_group, instance_uuid):
-        """Check if the security group is already associated
-           with the instance. If Yes, return True.
-        """
-
-        if not security_group:
-            return False
-
-        instances = security_group.get('instances')
-        if not instances:
-            return False
-
-        for inst in instances:
-            if (instance_uuid == inst['uuid']):
-                return True
-
-        return False
-
-    def add_to_instance(self, context, instance, security_group_name):
-        """Add security group to the instance."""
-        security_group = self.db.security_group_get_by_name(context,
-                context.project_id,
-                security_group_name)
-
-        instance_uuid = instance.uuid
-
-        # check if the security group is associated with the server
-        if self.is_associated_with_server(security_group, instance_uuid):
-            raise exception.SecurityGroupExistsForInstance(
-                                        security_group_id=security_group['id'],
-                                        instance_id=instance_uuid)
-
-        self.db.instance_add_security_group(context.elevated(),
-                                            instance_uuid,
-                                            security_group['id'])
-        if instance.host:
-            self.compute_rpcapi.refresh_instance_security_rules(
-                    context, instance, instance.host)
-
-    def remove_from_instance(self, context, instance, security_group_name):
-        """Remove the security group associated with the instance."""
-        security_group = self.db.security_group_get_by_name(context,
-                context.project_id,
-                security_group_name)
-
-        instance_uuid = instance.uuid
-
-        # check if the security group is associated with the server
-        if not self.is_associated_with_server(security_group, instance_uuid):
-            raise exception.SecurityGroupNotExistsForInstance(
-                                    security_group_id=security_group['id'],
-                                    instance_id=instance_uuid)
-
-        self.db.instance_remove_security_group(context.elevated(),
-                                               instance_uuid,
-                                               security_group['id'])
-        if instance.host:
-            self.compute_rpcapi.refresh_instance_security_rules(
-                    context, instance, instance.host)
-
-    def get_rule(self, context, id):
-        self.ensure_default(context)
-        try:
-            return self.db.security_group_rule_get(context, id)
-        except exception.NotFound:
-            msg = _("Rule (%s) not found") % id
-            self.raise_not_found(msg)
-
-    def add_rules(self, context, id, name, vals):
-        """Add security group rule(s) to security group.
-
-        Note: the Nova security group API doesn't support adding multiple
-        security group rules at once but the EC2 one does. Therefore,
-        this function is written to support both.
-        """
-
-        try:
-            objects.Quotas.check_deltas(context,
-                                        {'security_group_rules': len(vals)},
-                                        id)
-        except exception.OverQuota:
-            msg = _("Quota exceeded, too many security group rules.")
-            self.raise_over_quota(msg)
-
-        msg = ("Security group %(name)s added %(protocol)s ingress "
-               "(%(from_port)s:%(to_port)s)")
-        rules = []
-        for v in vals:
-            rule = self.db.security_group_rule_create(context, v)
-
-            # NOTE(melwitt): We recheck the quota after creating the object to
-            # prevent users from allocating more resources than their allowed
-            # quota in the event of a race. This is configurable because it can
-            # be expensive if strict quota limits are not required in a
-            # deployment.
-            if CONF.quota.recheck_quota:
-                try:
-                    objects.Quotas.check_deltas(context,
-                                                {'security_group_rules': 0},
-                                                id)
-                except exception.OverQuota:
-                    self.db.security_group_rule_destroy(context, rule['id'])
-                    msg = _("Quota exceeded, too many security group rules.")
-                    self.raise_over_quota(msg)
-
-            rules.append(rule)
-            LOG.info(msg, {'name': name,
-                           'protocol': rule.protocol,
-                           'from_port': rule.from_port,
-                           'to_port': rule.to_port})
-
-        self.trigger_rules_refresh(context, id=id)
-        return rules
-
-    def remove_rules(self, context, security_group, rule_ids):
-        msg = ("Security group %(name)s removed %(protocol)s ingress "
-               "(%(from_port)s:%(to_port)s)")
-        for rule_id in rule_ids:
-            rule = self.get_rule(context, rule_id)
-            LOG.info(msg, {'name': security_group['name'],
-                           'protocol': rule.protocol,
-                           'from_port': rule.from_port,
-                           'to_port': rule.to_port})
-
-            self.db.security_group_rule_destroy(context, rule_id)
-
-        # NOTE(vish): we removed some rules, so refresh
-        self.trigger_rules_refresh(context, id=security_group['id'])
-
-    def remove_default_rules(self, context, rule_ids):
-        for rule_id in rule_ids:
-            self.db.security_group_default_rule_destroy(context, rule_id)
-
-    def add_default_rules(self, context, vals):
-        rules = [self.db.security_group_default_rule_create(context, v)
-                 for v in vals]
-        return rules
-
-    def default_rule_exists(self, context, values):
-        """Indicates whether the specified rule values are already
-           defined in the default security group rules.
-        """
-        for rule in self.db.security_group_default_rule_list(context):
-            keys = ('cidr', 'from_port', 'to_port', 'protocol')
-            for key in keys:
-                if rule.get(key) != values.get(key):
-                    break
-            else:
-                return rule.get('id') or True
-        return False
-
-    def get_all_default_rules(self, context):
-        try:
-            rules = self.db.security_group_default_rule_list(context)
-        except Exception:
-            msg = 'cannot get default security group rules'
-            raise exception.SecurityGroupDefaultRuleNotFound(msg)
-
-        return rules
-
-    def get_default_rule(self, context, id):
-        return self.db.security_group_default_rule_get(context, id)
-
-    def validate_id(self, id):
-        try:
-            return int(id)
-        except ValueError:
-            msg = _("Security group id should be integer")
-            self.raise_invalid_property(msg)
-
-    def _refresh_instance_security_rules(self, context, instances):
-        for instance in instances:
-            if instance.host is not None:
-                self.compute_rpcapi.refresh_instance_security_rules(
-                        context, instance, instance.host)
-
-    def trigger_rules_refresh(self, context, id):
-        """Called when a rule is added to or removed from a security_group."""
-        instances = objects.InstanceList.get_by_security_group_id(context, id)
-        self._refresh_instance_security_rules(context, instances)
-
-    def trigger_members_refresh(self, context, group_ids):
-        """Called when a security group gains a new or loses a member.
-
-        Sends an update request to each compute node for each instance for
-        which this is relevant.
-        """
-        instances = objects.InstanceList.get_by_grantee_security_group_ids(
-            context, group_ids)
-        self._refresh_instance_security_rules(context, instances)
-
-    def get_instance_security_groups(self, context, instance, detailed=False):
-        if detailed:
-            return self.db.security_group_get_by_instance(context,
-                                                          instance.uuid)
-        return [{'name': group.name} for group in instance.security_groups]

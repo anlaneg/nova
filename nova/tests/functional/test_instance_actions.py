@@ -19,30 +19,6 @@ from nova.tests.functional import test_servers
 class InstanceActionsTestV2(test_servers.ServersTestBase):
     """Tests Instance Actions API"""
 
-    def _create_server(self):
-        """Creates a minimal test server via the compute API
-
-        Ensures the server is created and can be retrieved from the compute API
-        and waits for it to be ACTIVE.
-
-        :returns: created server (dict)
-        """
-
-        # Create a server
-        server = self._build_minimal_create_server_request()
-        created_server = self.api.post_server({'server': server})
-        self.assertTrue(created_server['id'])
-        created_server_id = created_server['id']
-
-        # Check it's there
-        found_server = self.api.get_server(created_server_id)
-        self.assertEqual(created_server_id, found_server['id'])
-
-        found_server = self._wait_for_state_change(found_server, 'BUILD')
-        # It should be available...
-        self.assertEqual('ACTIVE', found_server['status'])
-        return found_server
-
     def test_get_instance_actions(self):
         server = self._create_server()
         actions = self.api.get_instance_actions(server['id'])
@@ -50,7 +26,7 @@ class InstanceActionsTestV2(test_servers.ServersTestBase):
 
     def test_get_instance_actions_deleted(self):
         server = self._create_server()
-        self._delete_server(server['id'])
+        self._delete_server(server)
         self.assertRaises(client.OpenStackApiNotFoundException,
                           self.api.get_instance_actions,
                           server['id'])
@@ -69,7 +45,7 @@ class InstanceActionsTestV221(InstanceActionsTestV21):
 
     def test_get_instance_actions_deleted(self):
         server = self._create_server()
-        self._delete_server(server['id'])
+        self._delete_server(server)
         actions = self.api.get_instance_actions(server['id'])
         self.assertEqual('delete', actions[0]['action'])
         self.assertEqual('create', actions[1]['action'])

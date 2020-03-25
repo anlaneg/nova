@@ -64,18 +64,23 @@ class Quotas(base.NovaObject):
 
     fields = {
         # TODO(melwitt): Remove this field in version 2.0 of the object.
-        'reservations': fields.ListOfStringsField(nullable=True),
-        'project_id': fields.StringField(nullable=True),
-        'user_id': fields.StringField(nullable=True),
+        'reservations': fields.ListOfStringsField(nullable=True,
+                                                  default=[]),
+        'project_id': fields.StringField(nullable=True,
+                                         default=None),
+        'user_id': fields.StringField(nullable=True,
+                                      default=None),
     }
 
-    def __init__(self, *args, **kwargs):
-        super(Quotas, self).__init__(*args, **kwargs)
-        # Set up defaults.
-        self.reservations = []
-        self.project_id = None
-        self.user_id = None
-        self.obj_reset_changes()
+    def obj_load_attr(self, attr):
+        self.obj_set_defaults(attr)
+        # NOTE(danms): This is strange because resetting these would cause
+        # them not to be saved to the database. I would imagine this is
+        # from overzealous defaulting and that all three fields ultimately
+        # get set all the time. However, quotas are weird, so replicate the
+        # longstanding behavior of setting defaults and clearing their
+        # dirty bit.
+        self.obj_reset_changes(fields=[attr])
 
     @staticmethod
     @db_api.api_context_manager.reader
@@ -182,6 +187,7 @@ class Quotas(base.NovaObject):
                             user_id=None):
         # TODO(melwitt): We won't have per project resources after nova-network
         # is removed.
+        # TODO(stephenfin): We need to do something here now...but what?
         per_user = (user_id and
                     resource not in db_api.quota_get_per_project_resources())
         quota_ref = (api_models.ProjectUserQuota() if per_user
@@ -204,6 +210,7 @@ class Quotas(base.NovaObject):
                             user_id=None):
         # TODO(melwitt): We won't have per project resources after nova-network
         # is removed.
+        # TODO(stephenfin): We need to do something here now...but what?
         per_user = (user_id and
                     resource not in db_api.quota_get_per_project_resources())
         model = api_models.ProjectUserQuota if per_user else api_models.Quota

@@ -15,11 +15,9 @@
 
 from nova.tests import fixtures
 from nova.tests.functional.api_sample_tests import api_sample_base
-from nova.tests.functional import integrated_helpers
 
 
-class MultinicSampleJsonTest(integrated_helpers.InstanceHelperMixin,
-                             api_sample_base.ApiSampleTestBaseV21):
+class MultinicSampleJsonTest(api_sample_base.ApiSampleTestBaseV21):
     ADMIN_API = True
     sample_dir = "os-multinic"
 
@@ -31,15 +29,14 @@ class MultinicSampleJsonTest(integrated_helpers.InstanceHelperMixin,
         self.uuid = server['id']
 
     def _boot_a_server(self, expected_status='ACTIVE', extra_params=None):
-        server = self._build_minimal_create_server_request(
-            self.api, 'MultinicSampleJsonTestServer')
+        server = self._build_server()
         if extra_params:
             server.update(extra_params)
 
         created_server = self.api.post_server({'server': server})
 
         # Wait for it to finish being created
-        found_server = self._wait_for_state_change(self.api, created_server,
+        found_server = self._wait_for_state_change(created_server,
                                                    expected_status)
         return found_server
 

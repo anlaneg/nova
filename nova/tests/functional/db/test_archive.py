@@ -50,29 +50,6 @@ class TestDatabaseArchive(test_servers.ServersTestBase):
                     'sqlite version too old for reliable SQLA foreign_keys')
             engine.connect().execute("PRAGMA foreign_keys = ON")
 
-    def _create_server(self):
-        """Creates a minimal test server via the compute API
-
-        Ensures the server is created and can be retrieved from the compute API
-        and waits for it to be ACTIVE.
-
-        :returns: created server (dict)
-        """
-        # Create a server
-        server = self._build_minimal_create_server_request()
-        created_server = self.api.post_server({'server': server})
-        self.assertTrue(created_server['id'])
-        created_server_id = created_server['id']
-
-        # Check it's there
-        found_server = self.api.get_server(created_server_id)
-        self.assertEqual(created_server_id, found_server['id'])
-
-        found_server = self._wait_for_state_change(found_server, 'BUILD')
-        # It should be available...
-        self.assertEqual('ACTIVE', found_server['status'])
-        return found_server
-
     def test_archive_deleted_rows(self):
         # Boots a server, deletes it, and then tries to archive it.
         server = self._create_server()
@@ -83,7 +60,7 @@ class TestDatabaseArchive(test_servers.ServersTestBase):
         actions = self.api.get_instance_actions(server_id)
         self.assertTrue(len(actions),
                         'No instance actions for server: %s' % server_id)
-        self._delete_server(server_id)
+        self._delete_server(server)
         # Verify we have the soft deleted instance in the database.
         admin_context = context.get_admin_context(read_deleted='yes')
         # This will raise InstanceNotFound if it's not found.
@@ -118,7 +95,7 @@ class TestDatabaseArchive(test_servers.ServersTestBase):
         actions = self.api.get_instance_actions(server_id)
         self.assertTrue(len(actions),
                         'No instance actions for server: %s' % server_id)
-        self._delete_server(server_id)
+        self._delete_server(server)
         # Verify we have the soft deleted instance in the database.
         admin_context = context.get_admin_context(read_deleted='yes')
         # This will raise InstanceNotFound if it's not found.
@@ -168,7 +145,7 @@ class TestDatabaseArchive(test_servers.ServersTestBase):
     def test_archive_then_purge_all(self):
         server = self._create_server()
         server_id = server['id']
-        self._delete_server(server_id)
+        self._delete_server(server)
         results, deleted_ids, archived = db.archive_deleted_rows(max_rows=1000)
         self.assertEqual([server_id], deleted_ids)
 
@@ -194,7 +171,7 @@ class TestDatabaseArchive(test_servers.ServersTestBase):
     def test_archive_then_purge_by_date(self):
         server = self._create_server()
         server_id = server['id']
-        self._delete_server(server_id)
+        self._delete_server(server)
         results, deleted_ids, archived = db.archive_deleted_rows(max_rows=1000)
         self.assertEqual([server_id], deleted_ids)
         self.assertEqual(sum(results.values()), archived)
@@ -229,7 +206,7 @@ class TestDatabaseArchive(test_servers.ServersTestBase):
         """
         server = self._create_server()
         server_id = server['id']
-        self._delete_server(server_id)
+        self._delete_server(server)
         results, deleted_ids, archived = db.archive_deleted_rows(max_rows=1000)
         self.assertEqual([server_id], deleted_ids)
         date = dateutil_parser.parse('oct 21 2015', fuzzy=True)

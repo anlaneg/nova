@@ -17,6 +17,7 @@ import os
 import six
 import time
 
+import os_resource_classes as orc
 from oslo_concurrency import lockutils
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
@@ -28,7 +29,6 @@ from nova import exception
 from nova.i18n import _
 from nova.image import glance
 from nova.objects import fields as obj_fields
-from nova import utils
 from nova.virt import driver
 from nova.virt import images
 from nova.virt.zvm import guest
@@ -59,6 +59,7 @@ class ZVMDriver(driver.ComputeDriver):
         "supports_image_type_vhd": False,
         "supports_image_type_vhdx": False,
         "supports_image_type_vmdk": False,
+        "supports_image_type_ploop": False,
     }
 
     def __init__(self, virtapi):
@@ -118,7 +119,7 @@ class ZVMDriver(driver.ComputeDriver):
             'local_gb_used': host_stats.get('disk_used', 0),
             'hypervisor_type': host_stats.get('hypervisor_type',
                                               obj_fields.HVType.ZVM),
-            'hypervisor_version': host_stats.get('hypervisor_version', ''),
+            'hypervisor_version': host_stats.get('hypervisor_version', 0),
             'hypervisor_hostname': host_stats.get('hypervisor_hostname',
                                                   hypervisor_hostname),
             'cpu_info': jsonutils.dumps(host_stats.get('cpu_info', {})),
@@ -199,7 +200,7 @@ class ZVMDriver(driver.ComputeDriver):
                 try:
                     self.destroy(context, instance, network_info,
                                  block_device_info)
-                except Exception as err:
+                except Exception:
                     LOG.exception("Failed to destroy instance",
                                   instance=instance)
 
@@ -261,11 +262,11 @@ class ZVMDriver(driver.ComputeDriver):
 
     @staticmethod
     def _get_neutron_event(network_info):
-        if utils.is_neutron() and CONF.vif_plugging_timeout:
+        if CONF.vif_plugging_timeout:
             return [('network-vif-plugged', vif['id'])
                     for vif in network_info if vif.get('active') is False]
-        else:
-            return []
+
+        return []
 
     @staticmethod
     def _neutron_failed_callback(self, event_name, instance):
@@ -413,3 +414,38 @@ class ZVMDriver(driver.ComputeDriver):
 
     def get_console_output(self, context, instance):
         return self._hypervisor.guest_get_console_output(instance.name)
+
+    def update_provider_tree(self, provider_tree, nodename, allocations=None):
+        resources = self._hypervisor.get_available_resource()
+
+        inventory = provider_tree.data(nodename).inventory
+        allocation_ratios = self._get_allocation_ratios(inventory)
+
+        inventory = {
+            orc.VCPU: {
+                'total': resources['vcpus'],
+                'min_unit': 1,
+                'max_unit': resources['vcpus'],
+                'step_size': 1,
+                'allocation_ratio': allocation_ratios[orc.VCPU],
+                'reserved': CONF.reserved_host_cpus,
+            },
+            orc.MEMORY_MB: {
+                'total': resources['memory_mb'],
+                'min_unit': 1,
+                'max_unit': resources['memory_mb'],
+                'step_size': 1,
+                'allocation_ratio': allocation_ratios[orc.MEMORY_MB],
+                'reserved': CONF.reserved_host_memory_mb,
+            },
+            orc.DISK_GB: {
+                'total': resources['disk_total'],
+                'min_unit': 1,
+                'max_unit': resources['disk_total'],
+                'step_size': 1,
+                'allocation_ratio': allocation_ratios[orc.DISK_GB],
+                'reserved': self._get_reserved_host_disk_gb_from_config(),
+            },
+        }
+
+        provider_tree.update_inventory(nodename, inventory)

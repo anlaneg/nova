@@ -13,12 +13,10 @@
 import mock
 import time
 
-
 from nova import context as nova_context
 from nova import objects
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import fake_notifier
-from nova.tests.unit.image import fake as fake_image
 
 
 class ComputeManagerInitHostTestCase(
@@ -32,18 +30,15 @@ class ComputeManagerInitHostTestCase(
         driver's migrate_disk_and_power_off method is running (we could be
         slow transferring disks or something when it crashed) and on restart
         of the compute service the driver's finish_revert_migration method
-        is called to cleanup the source host and reset the instnace task_state.
+        is called to cleanup the source host and reset the instance task_state.
         """
         # Start two compute service so we migrate across hosts.
         for x in range(2):
             self._start_compute('host%d' % x)
         # Create a server, it does not matter on which host it lands.
-        name = 'test_migrate_disk_and_power_off_crash_finish_revert_migration'
-        server = self._build_minimal_create_server_request(
-            self.api, name, image_uuid=fake_image.get_valid_image_id(),
-            networks='auto')
+        server = self._build_server(networks='auto')
         server = self.api.post_server({'server': server})
-        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        server = self._wait_for_state_change(server, 'ACTIVE')
         # Save the source hostname for assertions later.
         source_host = server['OS-EXT-SRV-ATTR:host']
 
@@ -66,8 +61,7 @@ class ComputeManagerInitHostTestCase(
             self.admin_api.post_server_action(server['id'], {'migrate': None})
             # Now wait for the task_state to be reset to None during
             # _init_instance.
-            server = self._wait_for_server_parameter(
-                self.admin_api, server, {
+            server = self._wait_for_server_parameter(server, {
                     'status': 'ACTIVE',
                     'OS-EXT-STS:task_state': None,
                     'OS-EXT-SRV-ATTR:host': source_host
@@ -133,9 +127,6 @@ class TestComputeRestartInstanceStuckInBuild(
         super(TestComputeRestartInstanceStuckInBuild, self).setUp()
         self.compute1 = self._start_compute(host='host1')
 
-        flavors = self.api.get_flavors()
-        self.flavor1 = flavors[0]
-
     def test_restart_compute_while_instance_waiting_for_resource_claim(self):
         """Test for bug 1833581 where an instance is stuck in
         BUILD state forever due to compute service is restarted before the
@@ -157,8 +148,7 @@ class TestComputeRestartInstanceStuckInBuild(
         # There is another way to trigger the issue. We can inject a sleep into
         # instance_claim() to stop it. This is less realistic but it works in
         # the test env.
-        server_req = self._build_minimal_create_server_request(
-            self.api, 'interrupted-server', flavor_id=self.flavor1['id'],
+        server_req = self._build_server(
             image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
             networks='none')
 
@@ -170,7 +160,7 @@ class TestComputeRestartInstanceStuckInBuild(
             mock_instance_claim.side_effect = sleep_forever
 
             server = self.api.post_server({'server': server_req})
-            self._wait_for_state_change(self.admin_api, server, 'BUILD')
+            self._wait_for_state_change(server, 'BUILD')
 
             # the instance.create.start is the closest thing to the
             # instance_claim call we can wait for in the test
@@ -182,7 +172,7 @@ class TestComputeRestartInstanceStuckInBuild(
 
         # We expect that the instance is pushed to ERROR state during the
         # compute restart.
-        self._wait_for_state_change(self.admin_api, server, 'ERROR')
+        self._wait_for_state_change(server, 'ERROR')
         mock_log.assert_called_with(
             'Instance spawn was interrupted before instance_claim, setting '
             'instance to ERROR state',

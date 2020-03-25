@@ -1,6 +1,7 @@
 redirectmatch 301 ^/nova/([^/]+)/addmethod.openstackapi.html$ /nova/$1/contributor/api-2.html
 redirectmatch 301 ^/nova/([^/]+)/admin/flavors2.html$ /nova/$1/admin/flavors.html
 redirectmatch 301 ^/nova/([^/]+)/admin/numa.html$ /nova/$1/admin/cpu-topologies.html
+redirectmatch 301 ^/nova/([^/]+)/admin/quotas2.html$ /nova/$1/admin/quotas.html
 redirectmatch 301 ^/nova/([^/]+)/aggregates.html$ /nova/$1/user/aggregates.html
 redirectmatch 301 ^/nova/([^/]+)/api_microversion_dev.html$ /nova/$1/contributor/microversions.html
 redirectmatch 301 ^/nova/([^/]+)/api_microversion_history.html$ /nova/$1/reference/api-microversion-history.html
@@ -31,7 +32,6 @@ redirectmatch 301 ^/nova/([^/]+)/man/nova-cells.html$ /nova/$1/cli/nova-cells.ht
 # this is gone and never coming back, indicate that to the end users
 redirectmatch 301 ^/nova/([^/]+)/man/nova-compute.html$ /nova/$1/cli/nova-compute.html
 redirectmatch 301 ^/nova/([^/]+)/man/nova-conductor.html$ /nova/$1/cli/nova-conductor.html
-redirectmatch 301 ^/nova/([^/]+)/man/nova-console.html$ /nova/$1/cli/nova-console.html
 redirectmatch 301 ^/nova/([^/]+)/man/nova-dhcpbridge.html$ /nova/$1/cli/nova-dhcpbridge.html
 redirectmatch 301 ^/nova/([^/]+)/man/nova-manage.html$ /nova/$1/cli/nova-manage.html
 redirectmatch 301 ^/nova/([^/]+)/man/nova-network.html$ /nova/$1/cli/nova-network.html
@@ -41,7 +41,6 @@ redirectmatch 301 ^/nova/([^/]+)/man/nova-scheduler.html$ /nova/$1/cli/nova-sche
 redirectmatch 301 ^/nova/([^/]+)/man/nova-serialproxy.html$ /nova/$1/cli/nova-serialproxy.html
 redirectmatch 301 ^/nova/([^/]+)/man/nova-spicehtml5proxy.html$ /nova/$1/cli/nova-spicehtml5proxy.html
 redirectmatch 301 ^/nova/([^/]+)/man/nova-status.html$ /nova/$1/cli/nova-status.html
-redirectmatch 301 ^/nova/([^/]+)/man/nova-xvpvncproxy.html$ /nova/$1/cli/nova-xvpvncproxy.html
 redirectmatch 301 ^/nova/([^/]+)/notifications.html$ /nova/$1/reference/notifications.html
 redirectmatch 301 ^/nova/([^/]+)/placement.html$ /nova/$1/user/placement.html
 redirectmatch 301 ^/nova/([^/]+)/placement_dev.html$ /nova/$1/contributor/placement.html
@@ -74,3 +73,7 @@ redirectmatch 301 ^/nova/([^/]+)/user/vendordata.html$ /nova/$1/user/metadata.ht
 redirectmatch 301 ^/nova/([^/]+)/vendordata.html$ /nova/$1/user/metadata.html
 redirectmatch 301 ^/nova/([^/]+)/vmstates.html$ /nova/$1/reference/vm-states.html
 redirectmatch 301 ^/nova/([^/]+)/wsgi.html$ /nova/$1/user/wsgi.html
+redirectmatch 301 ^/nova/([^/]+)/admin/adv-config.html$ /nova/$1/admin/index.html
+redirectmatch 301 ^/nova/([^/]+)/admin/system-admin.html$ /nova/$1/admin/index.html
+redirectmatch 301 ^/nova/([^/]+)/admin/port_with_resource_request.html$ /nova/$1/admin/ports-with-resource-requests.html
+redirectmatch 301 ^/nova/([^/]+)/admin/manage-users.html$ /nova/$1/admin/arch.html

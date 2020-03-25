@@ -307,7 +307,8 @@ class _TestRequestSpecObject(object):
         spec = objects.RequestSpec.from_primitives(ctxt, spec_dict, filt_props)
         mock_limits.assert_called_once_with({})
         # Make sure that all fields are set using that helper method
-        skip = ['id', 'security_groups', 'network_metadata', 'is_bfv']
+        skip = ['id', 'security_groups', 'network_metadata', 'is_bfv',
+                'request_level_params']
         for field in [f for f in spec.obj_fields if f not in skip]:
             self.assertTrue(spec.obj_attr_is_set(field),
                              'Field: %s is not set' % field)
@@ -338,7 +339,7 @@ class _TestRequestSpecObject(object):
                 filter_properties, instance_group, instance.availability_zone,
                 objects.SecurityGroupList())
         # Make sure that all fields are set using that helper method
-        skip = ['id', 'network_metadata', 'is_bfv']
+        skip = ['id', 'network_metadata', 'is_bfv', 'request_level_params']
         for field in [f for f in spec.obj_fields if f not in skip]:
             self.assertTrue(spec.obj_attr_is_set(field),
                             'Field: %s is not set' % field)
@@ -897,6 +898,25 @@ class _TestRequestSpecObject(object):
         req_obj = fake_request_spec.fake_spec_obj(remove_id=True)
         req_obj.create()
         req_obj.save()
+
+    def test_get_request_group_mapping_no_request(self):
+        req_obj = request_spec.RequestSpec()
+        self.assertIsNone(req_obj.get_request_group_mapping())
+
+    def test_get_request_group_mapping(self):
+        req_obj = request_spec.RequestSpec(
+            requested_resources=[
+                request_spec.RequestGroup(
+                    requester_id='requester1',
+                    provider_uuids=[uuids.pr1, uuids.pr2]),
+                request_spec.RequestGroup(
+                    requester_id='requester2',
+                    provider_uuids=[]),
+            ])
+        self.assertEqual(
+            {'requester1': [uuids.pr1, uuids.pr2],
+             'requester2': []},
+            req_obj.get_request_group_mapping())
 
 
 class TestRequestSpecObject(test_objects._LocalTest,

@@ -10,7 +10,7 @@ user documentation.
 ---
 
 This is the initial version of the v2.1 API which supports
-microversions. The V2.1 API is from the REST API users's point of
+microversions. The V2.1 API is from the REST API users' point of
 view exactly the same as v2.0 except with strong input validation.
 
 A user can specify a header in the API request::
@@ -415,11 +415,37 @@ API endpoints as below::
   '/os-baremetal-nodes'
   '/os-fping'
 
-.. note:: A `regression`_ was introduced in this microversion which broke the
+.. note::
+
+    A `regression`__ was introduced in this microversion which broke the
     ``force`` parameter in the ``PUT /os-quota-sets`` API. The fix will have
     to be applied to restore this functionality.
 
-.. _regression: https://bugs.launchpad.net/nova/+bug/1733886
+    __ https://bugs.launchpad.net/nova/+bug/1733886
+
+.. versionchanged:: 18.0.0
+
+    The ``os-fping`` API was completely removed in the 18.0.0 (Rocky) release.
+    On deployments newer than this, the API will return HTTP 410 (Gone)
+    regardless of the requested microversion.
+
+.. versionchanged:: 21.0.0
+
+    The ``os-security-group-default-rules`` API was completely removed in the
+    21.0.0 (Ussuri) release. On deployments newer than this, the APIs will
+    return HTTP 410 (Gone) regardless of the requested microversion.
+
+.. versionchanged:: 21.0.0
+
+    The ``os-networks`` API was partially removed in the 21.0.0 (Ussuri)
+    release. On deployments newer than this, some endpoints of the API will
+    return HTTP 410 (Gone) regardless of the requested microversion.
+
+.. versionchanged:: 21.0.0
+
+    The ``os-tenant-networks`` API was partially removed in the 21.0.0 (Ussuri)
+    release. On deployments newer than this, some endpoints of the API will
+    return HTTP 410 (Gone) regardless of the requested microversion.
 
 2.37
 ----
@@ -1021,7 +1047,8 @@ API microversion 2.79 adds support for specifying the ``delete_on_termination``
 field in the request body when attaching a volume to a server, to support
 configuring whether to delete the data volume when the server is destroyed.
 Also, ``delete_on_termination`` is added to the GET responses when showing
-attached volumes.
+attached volumes, and the ``delete_on_termination`` field is contained
+in the POST API response body when attaching a volume.
 
 The affected APIs are as follows:
 
@@ -1053,3 +1080,10 @@ project, for example:
 
 Adds support for image cache management by aggregate by adding
 ``POST /os-aggregates/{aggregate_id}/images``.
+
+2.82
+----
+
+Adds ``accelerator-request-bound`` event to ``os-server-external-events``
+API. This event is sent by Cyborg to indicate completion of the binding
+event for one accelerator request (ARQ) associated with an instance.

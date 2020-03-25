@@ -41,7 +41,7 @@ from nova import utils
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 WARN_EVERY = 10
-NEGATIVE_MEMBER_OF_VERSION = '1.32'
+ROOT_REQUIRED_VERSION = '1.35'
 RESHAPER_VERSION = '1.30'
 CONSUMER_GENERATION_VERSION = '1.28'
 ALLOW_RESERVED_EQUAL_TOTAL_INVENTORY_VERSION = '1.26'
@@ -291,7 +291,7 @@ class SchedulerReportClient(object):
         """
         # Note that claim_resources() will use this version as well to
         # make allocations by `PUT /allocations/{consumer_uuid}`
-        version = NEGATIVE_MEMBER_OF_VERSION
+        version = ROOT_REQUIRED_VERSION
         qparams = resources.to_querystring()
         url = "/allocation_candidates?%s" % qparams
         resp = self.get(url, version=version,
@@ -590,8 +590,8 @@ class SchedulerReportClient(object):
         cache of resource provider information contains a record of:
         - The specified provider
         - All providers in its tree
-        - All providers associated via aggregate with all providers in said
-          tree
+        - All sharing providers associated via aggregate with all providers in
+          said tree
         and for each of those providers:
         - The UUIDs of its aggregates
         - The trait strings associated with the provider

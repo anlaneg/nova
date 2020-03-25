@@ -26,26 +26,30 @@ scheduler_opts = [
         default="filter_scheduler",
         deprecated_name="scheduler_driver",
         deprecated_group="DEFAULT",
+        deprecated_for_removal=True,
+        deprecated_since='21.0.0',
+        deprecated_reason="""
+nova no longer provides any in-tree filters except for the 'filter_scheduler'
+scheduler. This filter is considered flexible and pluggable enough for all use
+cases and can be extended through the use of custom, out-of-tree filters and
+weighers along with powerful, in-tree filters like the
+'AggregateInstanceExtraSpecsFilter' and 'ComputeCapabilitiesFilter' filters.
+""",
         help="""
 The class of the driver used by the scheduler. This should be chosen from one
 of the entrypoints under the namespace 'nova.scheduler.driver' of file
 'setup.cfg'. If nothing is specified in this option, the 'filter_scheduler' is
 used.
 
-Other options are:
-
-* 'fake_scheduler' which is used for testing.
-
 Possible values:
 
 * Any of the drivers included in Nova:
 
   * filter_scheduler
-  * fake_scheduler
 
 * You may also set this to the entry point name of a custom scheduler driver,
-  but you will be responsible for creating and maintaining it in your setup.cfg
-  file.
+  but you will be responsible for creating and maintaining it in your
+  ``setup.cfg`` file.
 
 Related options:
 
@@ -533,6 +537,35 @@ Related options:
 
 * [compute]/consecutive_build_service_disable_threshold - Must be nonzero
   for a compute to report data considered by this weigher.
+"""),
+    cfg.FloatOpt(
+        "cross_cell_move_weight_multiplier",
+        default=1000000.0,
+        help="""
+Multiplier used for weighing hosts during a cross-cell move.
+
+This option determines how much weight is placed on a host which is within the
+same source cell when moving a server, for example during cross-cell resize.
+By default, when moving an instance, the scheduler will prefer hosts within
+the same cell since cross-cell move operations can be slower and riskier due to
+the complicated nature of cross-cell migrations.
+
+This option is only used by the FilterScheduler and its subclasses; if you use
+a different scheduler, this option has no effect. Similarly, if your cloud is
+not configured to support cross-cell migrations, then this option has no
+effect.
+
+The value of this configuration option can be overridden per host aggregate
+by setting the aggregate metadata key with the same name
+(cross_cell_move_weight_multiplier).
+
+Possible values:
+
+* An integer or float value, where the value corresponds to the multiplier
+  ratio for this weigher. Positive values mean the weigher will prefer
+  hosts within the same cell in which the instance is currently running.
+  Negative values mean the weigher will prefer hosts in *other* cells from
+  which the instance is currently running.
 """),
     cfg.BoolOpt(
         "shuffle_best_same_weighed_hosts",

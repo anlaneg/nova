@@ -34,7 +34,7 @@ from nova import conf as cfg
 from nova.console import type as console_type
 from nova import exception as exc
 from nova.i18n import _
-from nova import image
+from nova.image import glance
 from nova.virt import configdrive
 from nova.virt import driver
 from nova.virt.powervm import host as pvm_host
@@ -90,6 +90,7 @@ class PowerVMDriver(driver.ComputeDriver):
             "supports_image_type_vhd": False,
             "supports_image_type_vhdx": False,
             "supports_image_type_vmdk": False,
+            "supports_image_type_ploop": False,
         }
         super(PowerVMDriver, self).__init__(virtapi)
 
@@ -117,7 +118,7 @@ class PowerVMDriver(driver.ComputeDriver):
         self.disk_dvr = importutils.import_object_ns(
             DISK_ADPT_NS, DISK_ADPT_MAPPINGS[CONF.powervm.disk_driver.lower()],
             self.adapter, self.host_wrapper.uuid)
-        self.image_api = image.API()
+        self.image_api = glance.API()
 
         LOG.info("The PowerVM compute driver has been initialized.")
 
@@ -167,8 +168,6 @@ class PowerVMDriver(driver.ComputeDriver):
                          this.
         :return: Dictionary describing resources.
         """
-        # TODO(efried): Switch to get_inventory, per blueprint
-        #               custom-resource-classes-pike
         # Do this here so it refreshes each time this method is called.
         self.host_wrapper = pvm_ms.System.get(self.adapter)[0]
         return self._get_available_resource()
@@ -484,8 +483,8 @@ class PowerVMDriver(driver.ComputeDriver):
         is paused or halted/stopped.
 
         :param instance: nova.objects.instance.Instance
-        :param network_info:
-           :py:meth:`~nova.network.manager.NetworkManager.get_instance_nw_info`
+        :param network_info: `nova.network.models.NetworkInfo` object
+            describing the network metadata.
         :param reboot_type: Either a HARD or SOFT reboot
         :param block_device_info: Info pertaining to attached volumes
         :param bad_volumes_callback: Function to handle any bad volumes
@@ -581,14 +580,6 @@ class PowerVMDriver(driver.ComputeDriver):
                     sare.reraise = False
                     raise exc.InstanceNotFound(instance_id=instance.uuid)
 
-    def deallocate_networks_on_reschedule(self, instance):
-        """Does the driver want networks deallocated on reschedule?
-
-        :param instance: the instance object.
-        :returns: Boolean value. If True deallocate networks on reschedule.
-        """
-        return True
-
     def attach_volume(self, context, connection_info, instance, mountpoint,
                       disk_bus=None, device_type=None, encryption=None):
         """Attach the volume to the instance using the connection_info.
@@ -650,9 +641,11 @@ class PowerVMDriver(driver.ComputeDriver):
         # Run the flow
         tf_base.run(flow, instance=instance)
 
-    def extend_volume(self, connection_info, instance, requested_size):
+    def extend_volume(self, context, connection_info, instance,
+                      requested_size):
         """Extend the disk attached to the instance.
 
+        :param context: security context
         :param dict connection_info: The connection for the extended volume.
         :param nova.objects.instance.Instance instance:
             The instance whose volume gets extended.

@@ -2648,6 +2648,7 @@ event_name:
     - ``network-vif-deleted``
     - ``volume-extended`` (since microversion ``2.51``)
     - ``power-update`` (since microversion ``2.76``)
+    - ``accelerator-request-bound`` (since microversion ``2.82``)
 
   in: body
   required: true
@@ -2685,6 +2686,8 @@ event_tag:
     A string value that identifies the event. Certain types of events require
     specific tags:
 
+    - For the ``accelerator-request-bound`` event, the tag must be
+      the accelerator request UUID.
     - For the ``power-update`` event the tag must be either be ``POWER_ON``
       or ``POWER_OFF``.
     - For the ``volume-extended`` event the tag must be the volume id.
@@ -3213,15 +3216,21 @@ floating_ip_obj:
   type: object
 floating_ip_pool_name:
   description: |
-    The name of the floating ip pool.
+    The name of the floating IP pool.
   in: body
   required: true
   type: string
 floating_ip_pool_name_optional:
   description: |
-    The name of the floating ip pool
+    The name of the floating IP pool
   in: body
   required: false
+  type: string
+floating_ip_pool_name_or_id:
+  description: |
+    The name or ID of the floating IP pool.
+  in: body
+  required: true
   type: string
 floating_ip_pools:
   description: |
@@ -3832,7 +3841,7 @@ hypervisors:
 image:
   description: |
     The UUID and links for the image for your server instance. The ``image`` object
-    might be an empty string when you boot the server from a volume.
+    will be an empty string when you boot the server from a volume.
   in: body
   required: true
   type: object
@@ -4033,8 +4042,8 @@ instance_actions_next_links:
   description: |
     Links pertaining to the instance action.
     This parameter is returned when paging and more data is available.
-    See `API Guide / Links and References
-    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
+    See `Paginated collections
+    <https://docs.openstack.org/api-guide/compute/paginated_collections.html>`__
     for more info.
   in: body
   required: false
@@ -4731,8 +4740,8 @@ migration_links_2_23:
     Links to the migration.
     This parameter is returned if the migration type is ``live-migration`` and
     the migration status is one of ``queued``, ``preparing``, ``running``
-    and ``post-migrating``. See `API Guide / Links and References
-    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
+    and ``post-migrating``. See `Paginated collections
+    <https://docs.openstack.org/api-guide/compute/paginated_collections.html>`__
     for more info.
   in: body
   required: false
@@ -4754,8 +4763,8 @@ migration_next_links_2_59:
   description: |
     Links pertaining to the migration.
     This parameter is returned when paging and more data is available.
-    See `API Guide / Links and References
-    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
+    See `Paginated collections
+    <https://docs.openstack.org/api-guide/compute/paginated_collections.html>`__
     for more info.
   in: body
   required: false
@@ -5284,7 +5293,7 @@ os-getVNCConsole:
   type: object
 os-getVNCConsole-type:
   description: |
-    The type of VNC console. The valid values are ``novnc`` and ``xvpvnc``.
+    The type of VNC console. The only valid value is ``novnc``.
   in: body
   required: true
   type: string
@@ -5833,7 +5842,7 @@ remote_console_protocol:
   type: string
 remote_console_type:
   description: |
-    The type of remote console. The valid values are ``novnc``, ``xvpvnc``,
+    The type of remote console. The valid values are ``novnc``,
     ``rdp-html5``, ``spice-html5``, ``serial``, and ``webmks``. The type
     ``webmks`` is added since Microversion ``2.8``.
   in: body
@@ -6551,8 +6560,8 @@ servers_links:
   description: |
     Links to the next server. It is available when the number of servers exceeds
     ``limit`` parameter or ``[api]/max_limit`` in the configuration file.
-    See `API Guide / Links and References
-    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
+    See `Paginated collections
+    <https://docs.openstack.org/api-guide/compute/paginated_collections.html>`__
     for more info.
   in: body
   type: array

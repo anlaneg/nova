@@ -10,8 +10,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import time
-
 from oslo_utils.fixture import uuidsentinel as uuids
 
 import nova.conf
@@ -212,25 +210,17 @@ class AggregateRequestFiltersTest(
         agg = self.aggregates[agg]
         self.admin_api.add_host_to_aggregate(agg['id'], host)
 
-    def _wait_for_state_change(self, server, from_status):
-        for i in range(0, 50):
-            server = self.api.get_server(server['id'])
-            if server['status'] != from_status:
-                break
-            time.sleep(.1)
-
-        return server
-
-    def _boot_server(self, az=None, flavor_id=None, image_id=None):
+    def _boot_server(self, az=None, flavor_id=None, image_id=None,
+                     end_status='ACTIVE'):
         flavor_id = flavor_id or self.flavors[0]['id']
         image_uuid = image_id or '155d900f-4e14-4e4c-a73d-069cbf4541e6'
-        server_req = self._build_minimal_create_server_request(
-            self.api, 'test-instance', flavor_id=flavor_id,
+        server_req = self._build_server(
             image_uuid=image_uuid,
+            flavor_id=flavor_id,
             networks='none', az=az)
 
         created_server = self.api.post_server({'server': server_req})
-        server = self._wait_for_state_change(created_server, 'BUILD')
+        server = self._wait_for_state_change(created_server, end_status)
 
         return server
 
@@ -339,8 +329,7 @@ class AggregatePostTest(AggregateRequestFiltersTest):
         # Configure for the SOFT_DELETED scenario.
         self.flags(reclaim_instance_interval=300)
         self.api.delete_server(server['id'])
-        server = self._wait_for_state_change(server, from_status='ACTIVE')
-        self.assertEqual('SOFT_DELETED', server['status'])
+        server = self._wait_for_state_change(server, 'SOFT_DELETED')
         self.assertRaisesRegex(
             client.OpenStackApiException,
             'One or more hosts contain instances in this zone.',
@@ -397,18 +386,16 @@ class TenantAggregateFilterTest(AggregateRequestFiltersTest):
                    group='scheduler')
 
     def test_tenant_id_required_fails_if_no_aggregate(self):
-        server = self._boot_server()
         # Without granting our tenant permission to an aggregate, instance
         # creates should fail since aggregates are required
-        self.assertEqual('ERROR', server['status'])
+        self._boot_server(end_status='ERROR')
 
     def test_tenant_id_not_required_succeeds_if_no_aggregate(self):
         self.flags(placement_aggregate_required_for_tenants=False,
                    group='scheduler')
-        server = self._boot_server()
         # Without granting our tenant permission to an aggregate, instance
         # creates should still succeed since aggregates are not required
-        self.assertEqual('ACTIVE', server['status'])
+        self._boot_server(end_status='ACTIVE')
 
     def test_filter_honors_tenant_id(self):
         tenant = self.api.project_id
@@ -417,10 +404,8 @@ class TenantAggregateFilterTest(AggregateRequestFiltersTest):
         # and boot some servers. They should all stack up on host1.
         self._grant_tenant_aggregate('only-host1',
                                      ['foo', tenant, 'bar'])
-        server1 = self._boot_server()
-        server2 = self._boot_server()
-        self.assertEqual('ACTIVE', server1['status'])
-        self.assertEqual('ACTIVE', server2['status'])
+        server1 = self._boot_server(end_status='ACTIVE')
+        server2 = self._boot_server(end_status='ACTIVE')
 
         # Grant our tenant access to the aggregate with only host2 in it
         # and boot some servers. They should all stack up on host2.
@@ -428,10 +413,8 @@ class TenantAggregateFilterTest(AggregateRequestFiltersTest):
                                      ['foo', 'bar'])
         self._grant_tenant_aggregate('only-host2',
                                      ['foo', tenant, 'bar'])
-        server3 = self._boot_server()
-        server4 = self._boot_server()
-        self.assertEqual('ACTIVE', server3['status'])
-        self.assertEqual('ACTIVE', server4['status'])
+        server3 = self._boot_server(end_status='ACTIVE')
+        server4 = self._boot_server(end_status='ACTIVE')
 
         # Make sure the servers landed on the hosts we had access to at
         # the time we booted them.
@@ -446,8 +429,7 @@ class TenantAggregateFilterTest(AggregateRequestFiltersTest):
         # Grant our tenant access to the aggregate with no hosts in it
         self._grant_tenant_aggregate('no-hosts',
                                      ['foo', tenant, 'bar'])
-        server = self._boot_server()
-        self.assertEqual('ERROR', server['status'])
+        self._boot_server(end_status='ERROR')
 
     def test_filter_with_multiple_aggregates_for_tenant(self):
         tenant = self.api.project_id
@@ -462,8 +444,7 @@ class TenantAggregateFilterTest(AggregateRequestFiltersTest):
         # Boot several servers and make sure they all land on the
         # only host we have access to.
         for i in range(0, 4):
-            server = self._boot_server()
-            self.assertEqual('ACTIVE', server['status'])
+            server = self._boot_server(end_status='ACTIVE')
             self.assertEqual('host2', self._get_instance_host(server))
 
 
@@ -549,10 +530,9 @@ class IsolateAggregateFilterTest(AggregateRequestFiltersTest):
 
         server = self._boot_server(
             flavor_id=self.flavor_without_trait['id'],
-            image_id=self.image_id_without_trait)
+            image_id=self.image_id_without_trait,
+            end_status='ERROR')
         self.assertIsNone(self._get_instance_host(server))
-        server = self.api.get_server(server['id'])
-        self.assertEqual('ERROR', server['status'])
         self.assertIn('No valid host', server['fault']['message'])
 
     def test_filter_without_trait(self):
@@ -680,11 +660,10 @@ class IsolateAggregateFilterTest(AggregateRequestFiltersTest):
                                  'trait:HW_CPU_X86_VMX': 'required'}})
         server = self._boot_server(
             flavor_id=self.flavor_with_trait_sgx['id'],
-            image_id=image_id_with_trait)
+            image_id=image_id_with_trait,
+            end_status='ERROR')
 
         self.assertIsNone(self._get_instance_host(server))
-        server = self.api.get_server(server['id'])
-        self.assertEqual('ERROR', server['status'])
         self.assertIn('No valid host', server['fault']['message'])
 
     def test_filter_with_traits_image_flavor_disjoint_of_aggregates(self):
@@ -715,11 +694,10 @@ class IsolateAggregateFilterTest(AggregateRequestFiltersTest):
                                  'trait:HW_CPU_X86_VMX': 'required'}})
         server = self._boot_server(
             flavor_id=self.flavor_with_trait_sgx['id'],
-            image_id=image_id_with_trait)
+            image_id=image_id_with_trait,
+            end_status='ERROR')
 
         self.assertIsNone(self._get_instance_host(server))
-        server = self.api.get_server(server['id'])
-        self.assertEqual('ERROR', server['status'])
         self.assertIn('No valid host', server['fault']['message'])
 
 
@@ -820,10 +798,8 @@ class TestAggregateFiltersTogether(AggregateRequestFiltersTest):
         self._set_az_aggregate('only-host2', 'myaz')
 
         # Boot the server into that az and make sure we fail
-        server = self._boot_server(az='myaz')
+        server = self._boot_server(az='myaz', end_status='ERROR')
         self.assertIsNone(self._get_instance_host(server))
-        server = self.api.get_server(server['id'])
-        self.assertEqual('ERROR', server['status'])
 
     def test_tenant_with_az_and_traits_match(self):
         # Grant our tenant access to the aggregate with host2
@@ -854,15 +830,15 @@ class TestAggregateFiltersTogether(AggregateRequestFiltersTest):
         self._set_traits_on_aggregate('only-host2', ['HW_CPU_X86_VMX'])
         # Boot the server into that az and make sure we fail
         server = self._boot_server(
-            flavor_id=self.flavor_with_trait_dxva['id'], az='myaz')
+            flavor_id=self.flavor_with_trait_dxva['id'],
+            az='myaz',
+            end_status='ERROR')
         self.assertIsNone(self._get_instance_host(server))
-        server = self.api.get_server(server['id'])
-        self.assertEqual('ERROR', server['status'])
         self.assertIn('No valid host', server['fault']['message'])
 
 
 class TestAggregateMultiTenancyIsolationFilter(
-    test.TestCase, integrated_helpers.InstanceHelperMixin):
+        test.TestCase, integrated_helpers.InstanceHelperMixin):
 
     def _start_compute(self, host):
         self.start_service('compute', host=host)
@@ -878,6 +854,9 @@ class TestAggregateMultiTenancyIsolationFilter(
         self.start_service('conductor')
         self.admin_api = self.useFixture(
             nova_fixtures.OSAPIFixture(api_version='v2.1')).admin_api
+        self.api = self.useFixture(
+            nova_fixtures.OSAPIFixture(api_version='v2.1',
+                                       project_id=uuids.non_admin)).api
         # Add the AggregateMultiTenancyIsolation to the list of enabled
         # filters since it is not enabled by default.
         enabled_filters = CONF.filter_scheduler.enabled_filters
@@ -898,9 +877,6 @@ class TestAggregateMultiTenancyIsolationFilter(
           aggregate
         """
         # Create a tenant-isolated aggregate for the non-admin user.
-        user_api = self.useFixture(
-            nova_fixtures.OSAPIFixture(api_version='v2.1',
-                                       project_id=uuids.non_admin)).api
         agg_id = self.admin_api.post_aggregate(
             {'aggregate': {'name': 'non_admin_agg'}})['id']
         meta_req = {'set_metadata': {
@@ -921,15 +897,12 @@ class TestAggregateMultiTenancyIsolationFilter(
         self.stub_out(
             'nova.scheduler.host_manager.HostManager.get_filtered_hosts',
             spy_get_filtered_hosts)
+
         # Create a server for the admin - should only have one host candidate.
-        server_req = self._build_minimal_create_server_request(
-            self.admin_api,
-            'test_aggregate_multitenancy_isolation_filter-admin',
-            networks='none')  # requires microversion 2.37
-        server_req = {'server': server_req}
+        server_req = {'server': self._build_server(networks='none')}
         with utils.temporary_mutation(self.admin_api, microversion='2.37'):
             server = self.admin_api.post_server(server_req)
-        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        server = self._wait_for_state_change(server, 'ACTIVE')
         # Assert it's not on host2 which is isolated to the non-admin tenant.
         self.assertNotEqual('host2', server['OS-EXT-SRV-ATTR:host'])
         self.assertEqual(1, len(self.filtered_hosts))
@@ -938,14 +911,10 @@ class TestAggregateMultiTenancyIsolationFilter(
         # candidate. We don't assert that the non-admin tenant server shows
         # up on host2 because the other host, which is not isolated to the
         # aggregate, is still a candidate.
-        server_req = self._build_minimal_create_server_request(
-            user_api,
-            'test_aggregate_multitenancy_isolation_filter-user',
-            networks='none')  # requires microversion 2.37
-        server_req = {'server': server_req}
-        with utils.temporary_mutation(user_api, microversion='2.37'):
-            server = user_api.post_server(server_req)
-        self._wait_for_state_change(user_api, server, 'ACTIVE')
+        server_req = {'server': self._build_server(networks='none')}
+        with utils.temporary_mutation(self.api, microversion='2.37'):
+            server = self.api.post_server(server_req)
+        self._wait_for_state_change(server, 'ACTIVE')
         self.assertEqual(2, len(self.filtered_hosts))
 
 
@@ -1049,11 +1018,11 @@ class AggregateMultiTenancyIsolationColdMigrateTest(
         isolated host aggregate via the AggregateMultiTenancyIsolation filter.
         """
         img = nova.tests.unit.image.fake.AUTO_DISK_CONFIG_ENABLED_IMAGE_UUID
-        server_req_body = self._build_minimal_create_server_request(
-            self.api, 'test_cold_migrate_server', image_uuid=img,
+        server_req_body = self._build_server(
+            image_uuid=img,
             networks='none')
         server = self.api.post_server({'server': server_req_body})
-        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        server = self._wait_for_state_change(server, 'ACTIVE')
         # Ensure the server ended up in host2 or host3
         original_host = server['OS-EXT-SRV-ATTR:host']
         self.assertNotEqual('host1', original_host)
@@ -1061,8 +1030,7 @@ class AggregateMultiTenancyIsolationColdMigrateTest(
         # in the same tenant-isolated aggregate.
         self.admin_api.api_post(
             '/servers/%s/action' % server['id'], {'migrate': None})
-        server = self._wait_for_state_change(
-            self.admin_api, server, 'VERIFY_RESIZE')
+        server = self._wait_for_state_change(server, 'VERIFY_RESIZE')
         # Ensure the server is on the other host in the same aggregate.
         expected_host = 'host3' if original_host == 'host2' else 'host2'
         self.assertEqual(expected_host, server['OS-EXT-SRV-ATTR:host'])

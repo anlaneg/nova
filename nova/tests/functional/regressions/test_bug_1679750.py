@@ -43,9 +43,6 @@ class TestLocalDeleteAllocations(test.TestCase,
 
         self.start_service('scheduler')
 
-        self.image_id = self.api.get_images()[0]['id']
-        self.flavor_id = self.api.get_flavors()[0]['id']
-
     @staticmethod
     def _get_usages(placement_api, rp_uuid):
         fmt = '/resource_providers/%(uuid)s/usages'
@@ -81,10 +78,9 @@ class TestLocalDeleteAllocations(test.TestCase,
                 self.assertEqual(0, usage)
 
             # Create a server.
-            server = self._build_minimal_create_server_request(self.api,
-                'local-delete-test', self.image_id, self.flavor_id, 'none')
+            server = self._build_server(networks='none')
             server = self.admin_api.post_server({'server': server})
-            server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+            server = self._wait_for_state_change(server, 'ACTIVE')
 
             # Assert usages are non zero now.
             usages_during = self._get_usages(placement_api, rp_uuid)
@@ -99,8 +95,7 @@ class TestLocalDeleteAllocations(test.TestCase,
                                        {'forced_down': True})
 
         # Delete the server (will be a local delete because compute is down).
-        self.api.delete_server(server['id'])
-        self._wait_until_deleted(server)
+        self._delete_server(server)
 
         with func_fixtures.PlacementFixture(
                 conf_fixture=placement_config, db=False,
@@ -136,10 +131,9 @@ class TestLocalDeleteAllocations(test.TestCase,
             self.assertEqual(0, usage)
 
         # Create a server.
-        server = self._build_minimal_create_server_request(self.api,
-            'local-delete-test', self.image_id, self.flavor_id, 'none')
+        server = self._build_server(networks='none')
         server = self.admin_api.post_server({'server': server})
-        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        server = self._wait_for_state_change(server, 'ACTIVE')
 
         # Assert usages are non zero now.
         usages_during = self._get_usages(placement_api, rp_uuid)
@@ -153,8 +147,7 @@ class TestLocalDeleteAllocations(test.TestCase,
         self.admin_api.put_service(compute_service_id, {'forced_down': True})
 
         # Delete the server (will be a local delete because compute is down).
-        self.api.delete_server(server['id'])
-        self._wait_until_deleted(server)
+        self._delete_server(server)
 
         # Get the allocations again to make sure they were deleted.
         usages_after = self._get_usages(placement_api, rp_uuid)

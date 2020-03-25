@@ -21,17 +21,16 @@ class ImagesTest(test_servers.ServersTestBase):
 
     def test_create_images_negative_invalid_state(self):
         # Create server
-        server = self._build_minimal_create_server_request()
+        server = self._build_server()
         created_server = self.api.post_server({"server": server})
         server_id = created_server['id']
-        found_server = self._wait_for_state_change(created_server, 'BUILD')
-        self.assertEqual('ACTIVE', found_server['status'])
+        found_server = self._wait_for_state_change(created_server, 'ACTIVE')
 
         # Create image
         name = 'Snapshot 1'
         self.api.post_server_action(
             server_id, {'createImage': {'name': name}})
-        self.assertEqual('ACTIVE', found_server['status'])
+
         # Confirm that the image was created
         images = self.api.get_images(detail=False)
         image_map = {image['name']: image for image in images}
@@ -41,8 +40,7 @@ class ImagesTest(test_servers.ServersTestBase):
         # Change server status from ACTIVE to SHELVED for negative test
         self.flags(shelved_offload_time = -1)
         self.api.post_server_action(server_id, {'shelve': {}})
-        found_server = self._wait_for_state_change(found_server, 'ACTIVE')
-        self.assertEqual('SHELVED', found_server['status'])
+        found_server = self._wait_for_state_change(found_server, 'SHELVED')
 
         # Create image in SHELVED (not ACTIVE, etc.)
         name = 'Snapshot 2'
@@ -51,7 +49,6 @@ class ImagesTest(test_servers.ServersTestBase):
                                server_id,
                                {'createImage': {'name': name}})
         self.assertEqual(409, ex.response.status_code)
-        self.assertEqual('SHELVED', found_server['status'])
 
         # Confirm that the image was not created
         images = self.api.get_images(detail=False)
@@ -60,7 +57,7 @@ class ImagesTest(test_servers.ServersTestBase):
         self.assertFalse(found_image)
 
         # Cleanup
-        self._delete_server(server_id)
+        self._delete_server(found_server)
 
     def test_admin_snapshot_user_image_access_member(self):
         """Tests a scenario where a user in project A creates a server and
@@ -69,10 +66,9 @@ class ImagesTest(test_servers.ServersTestBase):
         project B is the owner of the image.
         """
         # Create a server using the tenant user project.
-        server = self._build_minimal_create_server_request()
+        server = self._build_server()
         server = self.api.post_server({"server": server})
-        server = self._wait_for_state_change(server, 'BUILD')
-        self.assertEqual('ACTIVE', server['status'])
+        server = self._wait_for_state_change(server, 'ACTIVE')
 
         # Create an admin API fixture with a unique project ID.
         admin_api = self.useFixture(

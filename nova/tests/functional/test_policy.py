@@ -68,11 +68,7 @@ class HostStatusPolicyTestCase(test.TestCase,
         if networks:
             # Starting with microversion 2.37 the networks field is required.
             kwargs['networks'] = networks
-        server = self._build_minimal_create_server_request(
-            self.api, 'test_host_status_unknown_only', **kwargs)
-        server = self.api.post_server({'server': server})
-        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
-        return server
+        return self._create_server(**kwargs)
 
     @staticmethod
     def _get_server(resp):
@@ -94,12 +90,12 @@ class HostStatusPolicyTestCase(test.TestCase,
         server = self._get_server(admin_func())
         # We need to wait for ACTIVE if this was a post rebuild server action,
         # else a subsequent rebuild request will fail with a 409 in the API.
-        self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        self._wait_for_state_change(server, 'ACTIVE')
         # Verify admin can see the host status UP.
         self.assertEqual('UP', server['host_status'])
         # Get server as normal non-admin user.
         server = self._get_server(func())
-        self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        self._wait_for_state_change(server, 'ACTIVE')
         # Verify non-admin do not receive the host_status field because it is
         # not UNKNOWN.
         self.assertNotIn('host_status', server)

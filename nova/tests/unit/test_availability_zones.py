@@ -78,7 +78,7 @@ class AvailabilityZoneTestCases(test.TestCase):
         aggregate.delete_host(service['host'])
 
     def test_rest_availability_zone_reset_cache(self):
-        az._get_cache().add('cache', 'fake_value')
+        az._get_cache().region.get_or_create('cache', lambda: 'fake_value')
         az.reset_cache()
         self.assertIsNone(az._get_cache().get('cache'))
 
@@ -215,7 +215,7 @@ class AvailabilityZoneTestCases(test.TestCase):
         zones, not_zones = az.get_availability_zones(self.context, host_api)
 
         self.assertEqual(['nova-test', 'nova-test2'], zones)
-        self.assertEqual(['nova-test3', 'nova'], not_zones)
+        self.assertEqual(['nova', 'nova-test3'], not_zones)
 
         zones = az.get_availability_zones(self.context, host_api,
                                           get_only_available=True)

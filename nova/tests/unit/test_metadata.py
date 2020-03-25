@@ -22,10 +22,10 @@ import hmac
 import os
 import re
 
-try:
-    import cPickle as pickle
-except ImportError:
+try:  # python 2
     import pickle
+except ImportError:  # python 3
+    import cPickle as pickle
 
 from keystoneauth1 import exceptions as ks_exceptions
 from keystoneauth1 import session
@@ -47,7 +47,7 @@ from nova import block_device
 from nova import context
 from nova import exception
 from nova.network import model as network_model
-from nova.network.neutronv2 import api as neutronapi
+from nova.network import neutron as neutronapi
 from nova import objects
 from nova.objects import virt_device_metadata as metadata_obj
 from nova import test
@@ -268,7 +268,6 @@ class MetadataTestCase(test.TestCase):
         self.instance = fake_inst_obj(self.context)
         self.keypair = fake_keypair_obj(self.instance.key_name,
                                         self.instance.key_data)
-        fake_network.stub_out_nw_api_get_instance_nw_info(self)
         fakes.stub_out_secgroup_api(self)
 
     def test_can_pickle_metadata(self):
@@ -293,7 +292,7 @@ class MetadataTestCase(test.TestCase):
             md.get_ec2_metadata(version='2009-04-04').get('user-data', obj),
             obj)
 
-    def _test_security_groups(self):
+    def test_security_groups(self):
         inst = self.instance.obj_clone()
         sgroups = [{'name': name} for name in ('default', 'other')]
         expected = ['default', 'other']
@@ -301,13 +300,6 @@ class MetadataTestCase(test.TestCase):
         md = fake_InstanceMetadata(self, inst, sgroups=sgroups)
         data = md.get_ec2_metadata(version='2009-04-04')
         self.assertEqual(data['meta-data']['security-groups'], expected)
-
-    def test_security_groups(self):
-        self._test_security_groups()
-
-    def test_neutron_security_groups(self):
-        self.flags(use_neutron=True)
-        self._test_security_groups()
 
     def test_local_hostname(self):
         self.flags(dhcp_domain=None, group='api')
@@ -531,8 +523,7 @@ class MetadataTestCase(test.TestCase):
         mock_get.assert_called_once_with(network_info_from_api)
 
     def test_local_ipv4(self):
-        nw_info = fake_network.fake_get_instance_nw_info(self,
-                                                          num_networks=2)
+        nw_info = fake_network.fake_get_instance_nw_info(self)
         expected_local = "192.168.1.100"
         md = fake_InstanceMetadata(self, self.instance,
                                    network_info=nw_info, address="fake")
@@ -540,8 +531,7 @@ class MetadataTestCase(test.TestCase):
         self.assertEqual(expected_local, data['meta-data']['local-ipv4'])
 
     def test_local_ipv4_from_nw_info(self):
-        nw_info = fake_network.fake_get_instance_nw_info(self,
-                                                         num_networks=2)
+        nw_info = fake_network.fake_get_instance_nw_info(self)
         expected_local = "192.168.1.100"
         md = fake_InstanceMetadata(self, self.instance,
                                    network_info=nw_info)
@@ -627,7 +617,6 @@ class OpenStackMetadataTestCase(test.TestCase):
         super(OpenStackMetadataTestCase, self).setUp()
         self.context = context.RequestContext('fake', 'fake')
         self.instance = fake_inst_obj(self.context)
-        fake_network.stub_out_nw_api_get_instance_nw_info(self)
 
     def test_empty_device_metadata(self):
         fakes.stub_out_key_pair_funcs(self)
@@ -1050,7 +1039,6 @@ class MetadataHandlerTestCase(test.TestCase):
     def setUp(self):
         super(MetadataHandlerTestCase, self).setUp()
 
-        fake_network.stub_out_nw_api_get_instance_nw_info(self)
         self.context = context.RequestContext('fake', 'fake')
         self.instance = fake_inst_obj(self.context)
         self.mdinst = fake_InstanceMetadata(self, self.instance,
@@ -1110,7 +1098,7 @@ class MetadataHandlerTestCase(test.TestCase):
         response_ctype = response.headers['Content-Type']
         self.assertTrue(response_ctype.startswith("application/json"))
 
-    @mock.patch('nova.network.API')
+    @mock.patch('nova.network.neutron.API')
     def test_user_data_non_existing_fixed_address(self, mock_network_api):
         mock_network_api.return_value.get_fixed_ip_by_address.side_effect = (
             exception.NotFound())
@@ -1413,6 +1401,45 @@ class MetadataHandlerTestCase(test.TestCase):
         self.assertEqual(200, response.status_int)
 
     @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_metadata_lb_proxy_many_networks(self, mock_get_client):
+
+        def fake_list_ports(context, fixed_ips, network_id, fields):
+            if 'f-f-f-f' in network_id:
+                return {'ports':
+                            [{'device_id': 'a-b-c-d', 'tenant_id': 'test'}]}
+            return {'ports': []}
+
+        self.flags(service_metadata_proxy=True, group='neutron')
+        handler.MAX_QUERY_NETWORKS = 10
+
+        self.expected_instance_id = b'a-b-c-d'
+
+        # with X-Metadata-Provider
+        proxy_lb_id = 'edge-x'
+
+        mock_client = mock_get_client.return_value
+        subnet_list = [{'network_id': 'f-f-f-' + chr(c)}
+                       for c in range(ord('a'), ord('z'))]
+        mock_client.list_subnets.return_value = {
+            'subnets': subnet_list}
+
+        with mock.patch.object(
+                mock_client, 'list_ports',
+                side_effect=fake_list_ports) as mock_list_ports:
+
+            response = fake_request(
+                self, self.mdinst,
+                relpath="/2009-04-04/user-data",
+                address="192.192.192.2",
+                fake_get_metadata_by_instance_id=self._fake_x_get_metadata,
+                headers={'X-Forwarded-For': '192.192.192.2',
+                         'X-Metadata-Provider': proxy_lb_id})
+
+            self.assertEqual(3, mock_list_ports.call_count)
+
+        self.assertEqual(200, response.status_int)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
     def _metadata_handler_with_provider_id(self, hnd, mock_get_client):
         # with X-Metadata-Provider
         proxy_lb_id = 'edge-x'
@@ -1591,22 +1618,74 @@ class MetadataHandlerTestCase(test.TestCase):
                      'X-Metadata-Provider-Signature': signature})
         self.assertEqual(403, response.status_int)
 
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_metadata_lb_net_not_found(self, mock_get_client):
+
+        self.flags(service_metadata_proxy=True, group='neutron')
+
+        # with X-Metadata-Provider
+        proxy_lb_id = 'edge-x'
+        mock_client = mock_get_client.return_value
+        mock_client.list_ports.return_value = {
+            'ports': [{'device_id': 'a-b-c-d', 'tenant_id': 'test'}]}
+        mock_client.list_subnets.return_value = {
+            'subnets': []}
+
+        response = fake_request(
+            self, self.mdinst,
+            relpath="/2009-04-04/user-data",
+            address="192.192.192.2",
+            fake_get_metadata_by_instance_id=self._fake_x_get_metadata,
+            headers={'X-Forwarded-For': '192.192.192.2',
+                     'X-Metadata-Provider': proxy_lb_id})
+        self.assertEqual(400, response.status_int)
+
+    def _test_metadata_lb_incorrect_port_count(self, mock_get_client, ports):
+
+        self.flags(service_metadata_proxy=True, group='neutron')
+
+        # with X-Metadata-Provider
+        proxy_lb_id = 'edge-x'
+        mock_client = mock_get_client.return_value
+        mock_client.list_ports.return_value = {'ports': ports}
+        mock_client.list_ports.return_value = {
+            'ports': [{'device_id': 'a-b-c-d', 'tenant_id': 'test'},
+                      {'device_id': 'x-y-z', 'tenant_id': 'test'}]}
+        mock_client.list_subnets.return_value = {
+            'subnets': [{'network_id': 'f-f-f-f'}]}
+
+        response = fake_request(
+            self, self.mdinst,
+            relpath="/2009-04-04/user-data",
+            address="192.192.192.2",
+            fake_get_metadata_by_instance_id=self._fake_x_get_metadata,
+            headers={'X-Forwarded-For': '192.192.192.2',
+                     'X-Metadata-Provider': proxy_lb_id})
+        self.assertEqual(400, response.status_int)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_metadata_lb_too_many_ports(self, mock_get_client):
+        self._test_metadata_lb_incorrect_port_count(
+            mock_get_client,
+            [{'device_id': 'a-b-c-d', 'tenant_id': 'test'},
+             {'device_id': 'x-y-z', 'tenant_id': 'test'}])
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_metadata_no_ports_found(self, mock_get_client):
+        self._test_metadata_lb_incorrect_port_count(
+            mock_get_client, [])
+
     @mock.patch.object(context, 'get_admin_context')
-    @mock.patch('nova.network.API')
-    def test_get_metadata_by_address(self, mock_net_api, mock_get_context):
+    @mock.patch('nova.network.neutron.API.get_fixed_ip_by_address')
+    def test_get_metadata_by_address(self, mock_get_fip, mock_get_context):
         mock_get_context.return_value = 'CONTEXT'
-        api = mock.Mock()
-        fixed_ip = objects.FixedIP(
-            instance_uuid='2bfd8d71-6b69-410c-a2f5-dbca18d02966')
-        api.get_fixed_ip_by_address.return_value = fixed_ip
-        mock_net_api.return_value = api
+        mock_get_fip.return_value = {'instance_uuid': 'bar'}
 
         with mock.patch.object(base, 'get_metadata_by_instance_id') as gmd:
             base.get_metadata_by_address('foo')
 
-        api.get_fixed_ip_by_address.assert_called_once_with(
-            'CONTEXT', 'foo')
-        gmd.assert_called_once_with(fixed_ip.instance_uuid, 'foo', 'CONTEXT')
+        mock_get_fip.assert_called_once_with('CONTEXT', 'foo')
+        gmd.assert_called_once_with('bar', 'foo', 'CONTEXT')
 
     @mock.patch.object(context, 'get_admin_context')
     @mock.patch.object(objects.Instance, 'get_by_uuid')
@@ -1683,7 +1762,6 @@ class MetadataHandlerTestCase(test.TestCase):
 class MetadataPasswordTestCase(test.TestCase):
     def setUp(self):
         super(MetadataPasswordTestCase, self).setUp()
-        fake_network.stub_out_nw_api_get_instance_nw_info(self)
         self.context = context.RequestContext('fake', 'fake')
         self.instance = fake_inst_obj(self.context)
         self.mdinst = fake_InstanceMetadata(self, self.instance,

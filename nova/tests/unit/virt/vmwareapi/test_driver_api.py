@@ -213,8 +213,8 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
                    api_retry_count=1,
                    use_linked_clone=False, group='vmware')
         self.flags(enabled=False, group='vnc')
-        self.flags(image_cache_subdirectory_name='vmware_base',
-                   my_ip='')
+        self.flags(subdirectory_name='vmware_base', group='image_cache')
+        self.flags(my_ip='')
         self.user_id = 'fake'
         self.project_id = 'fake'
         self.context = context.RequestContext(self.user_id, self.project_id)
@@ -1944,11 +1944,6 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         self.assertEqual('iscsi-name', connector['initiator'])
         self.assertNotIn('instance', connector)
 
-    def test_refresh_instance_security_rules(self):
-        self.assertRaises(NotImplementedError,
-                          self.conn.refresh_instance_security_rules,
-                          instance=None)
-
     @mock.patch.object(objects.block_device.BlockDeviceMappingList,
                        'get_by_instance_uuids')
     def test_image_aging_image_used(self, mock_get_by_inst):
@@ -2021,7 +2016,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
 
     def test_image_aging_disabled(self):
         self._override_time()
-        self.flags(remove_unused_base_images=False)
+        self.flags(remove_unused_base_images=False, group='image_cache')
         self._create_vm()
         self._cached_files_exist()
         all_instances = []
@@ -2032,7 +2027,8 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
     def _image_aging_aged(self, aging_time=100):
         self._override_time()
         cur_time = datetime.datetime(2012, 11, 22, 12, 00, 10)
-        self.flags(remove_unused_original_minimum_age_seconds=aging_time)
+        self.flags(remove_unused_original_minimum_age_seconds=aging_time,
+                   group='image_cache')
         self._image_aging_image_marked_for_deletion()
         all_instances = []
         self.useFixture(utils_fixture.TimeFixture(cur_time))

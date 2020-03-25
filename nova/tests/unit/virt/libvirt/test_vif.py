@@ -25,7 +25,6 @@ from oslo_utils.fixture import uuidsentinel as uuids
 import six
 
 from nova import exception
-from nova.network import linux_net
 from nova.network import model as network_model
 from nova import objects
 from nova.pci import utils as pci_utils
@@ -501,7 +500,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
     def setUp(self):
         super(LibvirtVifTestCase, self).setUp()
         self.useFixture(fakelibvirt.FakeLibvirtFixture(stub_os_vif=False))
-        self.flags(firewall_driver=None)
         # os_vif.initialize is typically done in nova-compute startup
         os_vif.initialize()
         self.setup_os_vif_objects()
@@ -516,21 +514,14 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         mac = node.find("mac").get("address")
         self.assertEqual(mac, vif['address'])
 
-    def _assertTypeEquals(self, node, type, attr, source, br_want,
-                          prefix=None):
+    def _assertTypeEquals(self, node, type, attr, source, br_want):
         self.assertEqual(node.get("type"), type)
         br_name = node.find(attr).get(source)
-        if prefix is None:
-            self.assertEqual(br_name, br_want)
-        else:
-            self.assertTrue(br_name.startswith(prefix))
+        self.assertEqual(br_name, br_want)
 
     def _assertTypeAndMacEquals(self, node, type, attr, source, vif,
-                                br_want=None, size=0, prefix=None):
-        ret = node.findall("filterref")
-        self.assertEqual(len(ret), size)
-        self._assertTypeEquals(node, type, attr, source, br_want,
-                               prefix)
+                                br_want=None):
+        self._assertTypeEquals(node, type, attr, source, br_want)
         self._assertMacEquals(node, vif)
 
     def _assertModel(self, xml, model_want=None, driver_want=None):
@@ -568,7 +559,8 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
     def _assertXmlEqual(self, expectedXmlstr, actualXmlstr):
         if not isinstance(actualXmlstr, six.string_types):
-            actualXmlstr = etree.tostring(actualXmlstr, pretty_print=True)
+            actualXmlstr = etree.tostring(actualXmlstr, encoding='unicode',
+                                          pretty_print=True)
         self.assertXmlEqual(actualXmlstr, expectedXmlstr)
 
     def _get_conf(self):
@@ -656,6 +648,21 @@ class LibvirtVifTestCase(test.NoDBTestCase):
     @mock.patch('os.uname', return_value=('Linux', '', '4.2.0-35-generic'))
     def test_virtio_multiqueue_in_kernel_4(self, mock_uname):
         self._test_virtio_multiqueue(10, '10')
+
+    @mock.patch('os.uname', return_value=('Linux', '', '2.6.32-21-generic'))
+    def test_virtio_multiqueue_in_kernel_2_max_queues(self, mock_uname):
+        self.flags(max_queues=2, group='libvirt')
+        self._test_virtio_multiqueue(10, '2')
+
+    @mock.patch('os.uname', return_value=('Linux', '', '3.19.0-47-generic'))
+    def test_virtio_multiqueue_in_kernel_3_max_queues(self, mock_uname):
+        self.flags(max_queues=2, group='libvirt')
+        self._test_virtio_multiqueue(10, '2')
+
+    @mock.patch('os.uname', return_value=('Linux', '', '4.2.0-35-generic'))
+    def test_virtio_multiqueue_in_kernel_4_max_queues(self, mock_uname):
+        self.flags(max_queues=2, group='libvirt')
+        self._test_virtio_multiqueue(10, '2')
 
     def test_vhostuser_os_vif_multiqueue(self):
         d = vif.LibvirtGenericVIFDriver()
@@ -886,16 +893,20 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self.assertIsNone(conf.driver_name)
         self.assertIsNone(conf.model)
 
-    def _test_model_qemu(self, *vif_objs, **kw):
-        libvirt_version = kw.get('libvirt_version')
+    def test_model_qemu(self):
+        vif_objs = [
+            self.vif_bridge,
+            self.vif_8021qbg,
+            self.vif_iovisor,
+            self.vif_ovs,
+        ]
+
         self.flags(use_virtio_for_bridges=True,
                    virt_type='qemu',
                    group='libvirt')
 
         for vif_obj in vif_objs:
             d = vif.LibvirtGenericVIFDriver()
-            if libvirt_version is not None:
-                d.libvirt_version = libvirt_version
 
             xml = self._get_instance_xml(d, vif_obj)
 
@@ -922,24 +933,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
             self._assertModel(xml, network_model.VIF_MODEL_VIRTIO, "qemu")
 
-    def test_model_qemu_no_firewall(self):
-        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
-        self._test_model_qemu(
-            self.vif_bridge,
-            self.vif_8021qbg,
-            self.vif_iovisor,
-            self.vif_ovs,
-        )
-
-    def test_model_qemu_iptables(self):
-        self.flags(firewall_driver="nova.virt.firewall.IptablesFirewallDriver")
-        self._test_model_qemu(
-            self.vif_bridge,
-            self.vif_ovs,
-            self.vif_8021qbg,
-            self.vif_iovisor
-        )
-
     def test_model_xen(self):
         self.flags(use_virtio_for_bridges=True,
                    virt_type='xen',
@@ -960,7 +953,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         xml = self._get_instance_xml(d, vif)
         node = self._get_node(xml)
         self._assertTypeAndMacEquals(node, "bridge", "source", "bridge",
-                                     self.vif_bridge, br_want, 1)
+                                     self.vif_bridge, br_want)
 
     def test_generic_driver_bridge(self):
         d = vif.LibvirtGenericVIFDriver()
@@ -1006,13 +999,13 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         d = vif.LibvirtGenericVIFDriver()
         self._test_hw_veb_op(d.unplug, 0)
 
-    @mock.patch('nova.network.linux_net.set_vf_trusted')
+    @mock.patch('nova.virt.libvirt.vif.set_vf_trusted')
     def test_plug_hw_veb_trusted(self, mset_vf_trusted):
         d = vif.LibvirtGenericVIFDriver()
         d.plug(self.instance, self.vif_hw_veb_trusted)
         mset_vf_trusted.assert_called_once_with('0000:0a:00.1', True)
 
-    @mock.patch('nova.network.linux_net.set_vf_trusted')
+    @mock.patch('nova.virt.libvirt.vif.set_vf_trusted')
     def test_unplug_hw_veb_trusted(self, mset_vf_trusted):
         d = vif.LibvirtGenericVIFDriver()
         d.unplug(self.instance, self.vif_hw_veb_trusted)
@@ -1039,7 +1032,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                        self.instance.project_id)])
 
     def _check_ovs_virtualport_driver(self, d, vif, want_iface_id):
-        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
         xml = self._get_instance_xml(d, vif)
         node = self._get_node(xml)
         self._assertTypeAndMacEquals(node, "bridge", "source", "bridge",
@@ -1070,29 +1062,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self._assertTypeAndMacEquals(node, "bridge", "target", "dev",
                                      self.vif_ovs_filter_cap, br_want)
 
-    def _check_neutron_hybrid_driver(self, d, vif, br_want):
-        self.flags(firewall_driver="nova.virt.firewall.IptablesFirewallDriver")
-        xml = self._get_instance_xml(d, vif)
-        node = self._get_node(xml)
-        self._assertTypeAndMacEquals(node, "bridge", "source", "bridge",
-                                     vif, br_want, 1)
-
-    def test_ivs_hybrid_driver(self):
-        d = vif.LibvirtGenericVIFDriver()
-        br_want = "qbr" + self.vif_ivs['id']
-        br_want = br_want[:network_model.NIC_NAME_LEN]
-        self._check_neutron_hybrid_driver(d,
-                                          self.vif_ivs,
-                                          br_want)
-
-    def test_generic_hybrid_driver(self):
-        d = vif.LibvirtGenericVIFDriver()
-        br_want = "qbr" + self.vif_ovs['id']
-        br_want = br_want[:network_model.NIC_NAME_LEN]
-        self._check_neutron_hybrid_driver(d,
-                                          self.vif_ovs,
-                                          br_want)
-
     def test_ib_hostdev_driver(self):
         d = vif.LibvirtGenericVIFDriver()
         xml = self._get_instance_xml(d, self.vif_ib_hostdev)
@@ -1103,7 +1072,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
     def test_midonet_ethernet_vif_driver(self):
         d = vif.LibvirtGenericVIFDriver()
-        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
         br_want = self.vif_midonet['devname']
         xml = self._get_instance_xml(d, self.vif_midonet)
         node = self._get_node(xml)
@@ -1217,13 +1185,13 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self.assertIn('macvtap_mode', six.text_type(e))
         self.assertIn('physical_interface', six.text_type(e))
 
-    @mock.patch.object(linux_net.LinuxBridgeInterfaceDriver, 'ensure_vlan')
+    @mock.patch('nova.virt.libvirt.vif.ensure_vlan')
     def test_macvtap_plug_vlan(self, ensure_vlan_mock):
         d = vif.LibvirtGenericVIFDriver()
         d.plug(self.instance, self.vif_macvtap_vlan)
         ensure_vlan_mock.assert_called_once_with(1, 'eth0', interface='eth0.1')
 
-    @mock.patch.object(linux_net.LinuxBridgeInterfaceDriver, 'ensure_vlan')
+    @mock.patch('nova.virt.libvirt.vif.ensure_vlan')
     def test_macvtap_plug_flat(self, ensure_vlan_mock):
         d = vif.LibvirtGenericVIFDriver()
         d.plug(self.instance, self.vif_macvtap_flat)
@@ -1231,7 +1199,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
     def test_generic_iovisor_driver(self):
         d = vif.LibvirtGenericVIFDriver()
-        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
         br_want = self.vif_iovisor['devname']
         xml = self._get_instance_xml(d, self.vif_iovisor)
         node = self._get_node(xml)
@@ -1381,7 +1348,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self._assertModel(xml, network_model.VIF_MODEL_VIRTIO)
 
     def test_ivs_ethernet_driver(self):
-        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
         d = vif.LibvirtGenericVIFDriver()
         xml = self._get_instance_xml(d, self.vif_ivs)
         node = self._get_node(xml)
@@ -1525,7 +1491,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
              <source bridge="br100"/>
              <mtu size="9000"/>
              <target dev="nicdc065497-3c"/>
-             <filterref filter="nova-instance-instance-00000001-22522562e2aa"/>
              <bandwidth>
               <inbound average="100" peak="200" burst="300"/>
               <outbound average="10" peak="20" burst="30"/>
@@ -1546,7 +1511,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
              <model type="virtio"/>
              <source bridge="br100"/>
              <target dev="nicdc065497-3c"/>
-             <filterref filter="nova-instance-instance-00000001-22522562e2aa"/>
              <bandwidth>
               <inbound average="100" peak="200" burst="300"/>
               <outbound average="10" peak="20" burst="30"/>
@@ -1557,8 +1521,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
             os_vif_type, vif_type, libvirt_supports_mtu, expected_xml)
 
     def test_config_os_vif_bridge_nofw(self):
-        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
-
         os_vif_type = self.os_vif_bridge
         vif_type = self.vif_bridge
         libvirt_supports_mtu = True
@@ -1580,8 +1542,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
             os_vif_type, vif_type, libvirt_supports_mtu, expected_xml)
 
     def test_config_os_vif_bridge_nofw_no_mtu(self):
-        self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
-
         os_vif_type = self.os_vif_bridge
         vif_type = self.vif_bridge
         libvirt_supports_mtu = False
@@ -1758,7 +1718,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
              <source bridge="br0"/>
              <mtu size="9000"/>
              <target dev="nicdc065497-3c"/>
-             <filterref filter="nova-instance-instance-00000001-22522562e2aa"/>
              <bandwidth>
               <inbound average="100" peak="200" burst="300"/>
               <outbound average="10" peak="20" burst="30"/>
@@ -1779,7 +1738,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
              <model type="virtio"/>
              <source bridge="br0"/>
              <target dev="nicdc065497-3c"/>
-             <filterref filter="nova-instance-instance-00000001-22522562e2aa"/>
              <bandwidth>
               <inbound average="100" peak="200" burst="300"/>
               <outbound average="10" peak="20" burst="30"/>

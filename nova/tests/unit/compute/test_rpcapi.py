@@ -601,6 +601,90 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
             request_spec=objects.RequestSpec())
         self.assertIn('Compute too old', six.text_type(ex))
 
+    def test_confirm_snapshot_based_resize_at_source(self):
+        """Tests happy path for confirm_snapshot_based_resize_at_source."""
+        self.flags(long_rpc_timeout=1234)
+        self._test_compute_api(
+            'confirm_snapshot_based_resize_at_source', 'call',
+            # compute method kwargs
+            instance=self.fake_instance_obj,
+            migration=migration_obj.Migration(source_compute='source'),
+            # client.prepare kwargs
+            version='5.8', prepare_server='source',
+            call_monitor_timeout=60, timeout=1234)
+
+    @mock.patch('nova.rpc.ClientRouter.client')
+    def test_confirm_snapshot_based_resize_at_source_old_compute(self, client):
+        """Tests when the source compute service is too old to call
+        confirm_snapshot_based_resize_at_source so MigrationError is raised.
+        """
+        client.return_value.can_send_version.return_value = False
+        rpcapi = compute_rpcapi.ComputeAPI()
+        ex = self.assertRaises(
+            exception.MigrationError,
+            rpcapi.confirm_snapshot_based_resize_at_source,
+            self.context,
+            instance=self.fake_instance_obj,
+            migration=migration_obj.Migration(source_compute='source'))
+        self.assertIn('Compute too old', six.text_type(ex))
+
+    def test_revert_snapshot_based_resize_at_dest(self):
+        """Tests happy path for revert_snapshot_based_resize_at_dest."""
+        self.flags(long_rpc_timeout=1234)
+        self._test_compute_api(
+            'revert_snapshot_based_resize_at_dest', 'call',
+            # compute method kwargs
+            instance=self.fake_instance_obj,
+            migration=migration_obj.Migration(dest_compute='dest'),
+            # client.prepare kwargs
+            version='5.9', prepare_server='dest',
+            call_monitor_timeout=60, timeout=1234)
+
+    @mock.patch('nova.rpc.ClientRouter.client')
+    def test_revert_snapshot_based_resize_at_dest_old_compute(self, client):
+        """Tests when the dest compute service is too old to call
+        revert_snapshot_based_resize_at_dest so MigrationError is raised.
+        """
+        client.return_value.can_send_version.return_value = False
+        rpcapi = compute_rpcapi.ComputeAPI()
+        ex = self.assertRaises(
+            exception.MigrationError,
+            rpcapi.revert_snapshot_based_resize_at_dest,
+            self.context,
+            instance=self.fake_instance_obj,
+            migration=migration_obj.Migration(dest_compute='dest'))
+        self.assertIn('Compute too old', six.text_type(ex))
+
+    def test_finish_revert_snapshot_based_resize_at_source(self):
+        """Tests happy path for finish_revert_snapshot_based_resize_at_source.
+        """
+        self.flags(long_rpc_timeout=1234)
+        self._test_compute_api(
+            'finish_revert_snapshot_based_resize_at_source', 'call',
+            # compute method kwargs
+            instance=self.fake_instance_obj,
+            migration=migration_obj.Migration(source_compute='source'),
+            # client.prepare kwargs
+            version='5.10', prepare_server='source',
+            call_monitor_timeout=60, timeout=1234)
+
+    @mock.patch('nova.rpc.ClientRouter.client')
+    def test_finish_revert_snapshot_based_resize_at_source_old_compute(
+            self, client):
+        """Tests when the source compute service is too old to call
+        finish_revert_snapshot_based_resize_at_source so MigrationError is
+        raised.
+        """
+        client.return_value.can_send_version.return_value = False
+        rpcapi = compute_rpcapi.ComputeAPI()
+        ex = self.assertRaises(
+            exception.MigrationError,
+            rpcapi.finish_revert_snapshot_based_resize_at_source,
+            self.context,
+            instance=self.fake_instance_obj,
+            migration=migration_obj.Migration(source_compute='source'))
+        self.assertIn('Compute too old', six.text_type(ex))
+
     def test_reboot_instance(self):
         self.maxDiff = None
         self._test_compute_api('reboot_instance', 'cast',
@@ -617,12 +701,15 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
                 limits=None, request_spec=None, version='5.0')
 
     def test_reserve_block_device_name(self):
+        self.flags(long_rpc_timeout=1234)
         self._test_compute_api('reserve_block_device_name', 'call',
                 instance=self.fake_instance_obj, device='device',
                 volume_id='id', disk_bus='ide', device_type='cdrom',
                 tag='foo', multiattach=True, version='5.0',
+                timeout=1234, call_monitor_timeout=60,
                 _return_value=objects_block_dev.BlockDeviceMapping())
 
+    # TODO(stephenfin): Remove this since it's nova-network only
     def test_refresh_instance_security_rules(self):
         expected_args = {'instance': self.fake_instance_obj}
         self._test_compute_api('refresh_instance_security_rules', 'cast',

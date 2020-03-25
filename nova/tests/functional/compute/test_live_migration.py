@@ -38,8 +38,7 @@ class FakeCinderError(object):
             raise exception.CinderConnectionFailed(reason='Fake Cinder error')
 
 
-class LiveMigrationCinderFailure(integrated_helpers._IntegratedTestBase,
-                                 integrated_helpers.InstanceHelperMixin):
+class LiveMigrationCinderFailure(integrated_helpers._IntegratedTestBase):
     api_major_version = 'v2.1'
     microversion = 'latest'
 
@@ -47,7 +46,7 @@ class LiveMigrationCinderFailure(integrated_helpers._IntegratedTestBase,
         super(LiveMigrationCinderFailure, self).setUp()
         fake_notifier.stub_notifier(self)
         self.addCleanup(fake_notifier.reset)
-        # Start a second compte node (the first one was started for us by
+        # Start a second compute node (the first one was started for us by
         # _IntegratedTestBase. set_nodes() is needed to avoid duplicate
         # nodenames. See comments in test_bug_1702454.py.
         self.compute2 = self.start_service('compute', host='host2')
@@ -69,7 +68,7 @@ class LiveMigrationCinderFailure(integrated_helpers._IntegratedTestBase,
                      'uuid': uuids.working_volume,
                      'source_type': 'volume',
                      'destination_type': 'volume'}]}})
-        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        server = self._wait_for_state_change(server, 'ACTIVE')
 
         source = server['OS-EXT-SRV-ATTR:host']
         if source == self.compute.host:
@@ -87,7 +86,7 @@ class LiveMigrationCinderFailure(integrated_helpers._IntegratedTestBase,
         self.stub_out('nova.volume.cinder.API.attachment_delete',
                       stub_attachment_delete)
         self.api.post_server_action(server['id'], post)
-        self._wait_for_server_parameter(self.api, server,
+        self._wait_for_server_parameter(server,
                                         {'OS-EXT-SRV-ATTR:host': dest,
                                          'status': 'ACTIVE'})
         self.assertEqual(2, stub_attachment_delete.call_count)

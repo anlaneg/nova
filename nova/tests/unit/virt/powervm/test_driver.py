@@ -82,7 +82,7 @@ class TestPowerVMDriver(test.NoDBTestCase):
         self.assertTrue(self.drv.capabilities['supports_extend_volume'])
         self.assertFalse(self.drv.capabilities['supports_multiattach'])
 
-    @mock.patch('nova.image.API')
+    @mock.patch('nova.image.glance.API')
     @mock.patch('pypowervm.tasks.storage.ComprehensiveScrub', autospec=True)
     @mock.patch('oslo_utils.importutils.import_object_ns', autospec=True)
     @mock.patch('pypowervm.wrappers.managed_system.System', autospec=True)
@@ -559,10 +559,6 @@ class TestPowerVMDriver(test.NoDBTestCase):
         self.assertRaises(exception.InstanceNotFound, self.drv.get_vnc_console,
                           mock.ANY, self.inst)
 
-    def test_deallocate_networks_on_reschedule(self):
-        candeallocate = self.drv.deallocate_networks_on_reschedule(mock.Mock())
-        self.assertTrue(candeallocate)
-
     @mock.patch('nova.virt.powervm.volume.fcvscsi.FCVscsiVolumeAdapter')
     def test_attach_volume(self, mock_vscsi_adpt):
         """Validates the basic PowerVM attach volume."""
@@ -593,7 +589,8 @@ class TestPowerVMDriver(test.NoDBTestCase):
     @mock.patch('nova.virt.powervm.volume.fcvscsi.FCVscsiVolumeAdapter')
     def test_extend_volume(self, mock_vscsi_adpt):
         mock_bdm = self._fake_bdms()['block_device_mapping'][0]
-        self.drv.extend_volume(mock_bdm.get('connection_info'), self.inst, 0)
+        self.drv.extend_volume(
+            'context', mock_bdm.get('connection_info'), self.inst, 0)
         mock_vscsi_adpt.return_value.extend_volume.assert_called_once_with()
 
     def test_vol_drv_iter(self):

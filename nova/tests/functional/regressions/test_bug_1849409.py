@@ -41,14 +41,11 @@ class ListDeletedServersWithMarker(test.TestCase,
 
     def test_list_deleted_servers_with_marker(self):
         # Create a server.
-        server = self._build_minimal_create_server_request(
-            self.api, 'test_list_deleted_servers_with_marker',
-            image_uuid=fake_image.get_valid_image_id())
+        server = self._build_server()
         server = self.api.post_server({'server': server})
-        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        server = self._wait_for_state_change(server, 'ACTIVE')
         # Now delete the server and wait for it to be gone.
-        self.api.delete_server(server['id'])
-        self._wait_until_deleted(server)
+        self._delete_server(server)
         # List deleted servers, we should get the one back.
         servers = self.api.get_servers(detail=False,
                                        search_opts={'deleted': True})

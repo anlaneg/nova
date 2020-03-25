@@ -174,12 +174,17 @@ class ImageMetaProps(base.NovaObject):
     # Version 1.22: Added 'gop', 'virtio' and 'none' to hw_video_model field
     # Version 1.23: Added 'hw_pmu' field
     # Version 1.24: Added 'hw_mem_encryption' field
-    VERSION = '1.24'
+    # Version 1.25: Added 'hw_pci_numa_affinity_policy' field
+    # NOTE(efried): When bumping this version, the version of
+    # ImageMetaPropsPayload must also be bumped. See its docstring for details.
+    VERSION = '1.25'
 
     def obj_make_compatible(self, primitive, target_version):
         super(ImageMetaProps, self).obj_make_compatible(primitive,
                                                         target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 25):
+            primitive.pop('hw_pci_numa_affinity_policy', None)
         if target_version < (1, 24):
             primitive.pop('hw_mem_encryption', None)
         if target_version < (1, 23):
@@ -334,6 +339,9 @@ class ImageMetaProps(base.NovaObject):
         # list value indicates the memory size of that node.
         'hw_numa_mem': fields.ListOfIntegersField(),
 
+        # Enum field to specify pci device NUMA affinity.
+        'hw_pci_numa_affinity_policy': fields.PCINUMAAffinityPolicyField(),
+
         # Generic property to specify the pointer model type.
         'hw_pointer_model': fields.PointerModelField(),
 
@@ -351,6 +359,12 @@ class ImageMetaProps(base.NovaObject):
         'hw_rescue_device': fields.BlockDeviceTypeField(),
 
         # name of the RNG device type eg virtio
+        # NOTE(kchamart): Although this is currently not used anymore,
+        # we should not remove / deprecate it yet, as we are likely to
+        # extend this field to allow two more values to support "VirtIO
+        # transitional/non-transitional devices" (refer to the note in
+        # RNGModel() class in nova/objects/fields.py), and thus expose
+        # to the user again.
         'hw_rng_model': fields.RNGModelField(),
 
         # boolean 'true' or 'false' to enable HPET

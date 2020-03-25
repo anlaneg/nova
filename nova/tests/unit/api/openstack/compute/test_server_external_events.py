@@ -16,7 +16,6 @@ import fixtures as fx
 import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 import six
-import webob
 
 from nova.api.openstack.compute import server_external_events \
                                                  as server_external_events_v21
@@ -108,12 +107,17 @@ class ServerExternalEventsTestV21(test.NoDBTestCase):
         result = response.obj
         code = response._code
 
-        self.assertEqual(1, api_method.call_count)
-        call = api_method.call_args_list[0]
-        args = call[0]
+        if expected_events:
+            self.assertEqual(1, api_method.call_count)
+            call = api_method.call_args_list[0]
+            args = call[0]
 
-        call_instances = args[1]
-        call_events = args[2]
+            call_instances = args[1]
+            call_events = args[2]
+        else:
+            self.assertEqual(0, api_method.call_count)
+            call_instances = []
+            call_events = []
 
         self.assertEqual(set(expected_uuids),
                          set([instance.uuid for instance in call_instances]))
@@ -157,11 +161,14 @@ class ServerExternalEventsTestV21(test.NoDBTestCase):
         self.assertEqual(207, code)
 
     def test_create_no_good_instances(self):
+        """Always 207 with granular codes even if all fail; see bug 1855752."""
         body = self.default_body
         body['events'][0]['server_uuid'] = MISSING_UUID
-        body['events'][1]['server_uuid'] = MISSING_UUID
-        self.assertRaises(webob.exc.HTTPNotFound,
-                          self.api.create, self.req, body=body)
+        body['events'][1]['server_uuid'] = fake_instance_uuids[-1]
+        result, code = self._assert_call(body, [], [])
+        self.assertEqual(404, result['events'][0]['code'])
+        self.assertEqual(422, result['events'][1]['code'])
+        self.assertEqual(207, code)
 
     def test_create_bad_status(self):
         body = self.default_body
@@ -255,3 +262,34 @@ class ServerExternalEventsTestV276(ServerExternalEventsTestV21):
                 body=body)
         self.assertIn('Invalid input for field/attribute name.',
                       six.text_type(exp))
+
+
+@mock.patch('nova.objects.InstanceMappingList.get_by_instance_uuids',
+            fake_get_by_instance_uuids)
+@mock.patch('nova.objects.InstanceList.get_by_filters',
+            fake_get_by_filters)
+class ServerExternalEventsTestV282(ServerExternalEventsTestV21):
+    wsgi_api_version = '2.82'
+
+    def setUp(self):
+        super(ServerExternalEventsTestV282, self).setUp()
+        self.useFixture(fx.EnvironmentVariable('OS_DEBUG', '1'))
+        self.stdlog = self.useFixture(fixtures.StandardLogging())
+
+    def test_accelerator_request_bound_event(self):
+        body = self.default_body
+        event_name = 'accelerator-request-bound'
+        body['events'][0]['name'] = event_name  # event 0 has a tag
+        body['events'][1]['name'] = event_name  # event 1 has no tag
+
+        result, code = self._assert_call(
+            body, [fake_instance_uuids[0]], [event_name])
+
+        self.assertEqual(200, result['events'][0]['code'])
+        self.assertEqual('completed', result['events'][0]['status'])
+
+        msg = "Event tag is missing for instance"
+        self.assertIn(msg, self.stdlog.logger.output)
+        self.assertEqual(400, result['events'][1]['code'])
+        self.assertEqual('failed', result['events'][1]['status'])
+        self.assertEqual(207, code)

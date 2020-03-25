@@ -47,6 +47,7 @@ DictOfStringsField = fields.DictOfStringsField
 DictOfNullableStringsField = fields.DictOfNullableStringsField
 DictOfIntegersField = fields.DictOfIntegersField
 ListOfStringsField = fields.ListOfStringsField
+ListOfUUIDField = fields.ListOfUUIDField
 SetOfIntegersField = fields.SetOfIntegersField
 ListOfSetsOfIntegersField = fields.ListOfSetsOfIntegersField
 ListOfDictOfNullableStringsField = fields.ListOfDictOfNullableStringsField
@@ -479,6 +480,20 @@ class OSType(BaseNovaEnum):
 
 class RNGModel(BaseNovaEnum):
 
+    # NOTE(kchamart): Along with "virtio", we may need to extend this (if a
+    # good reason shows up) to allow two more values for VirtIO
+    # transitional and non-transitional devices (available since libvirt
+    # 5.2.0):
+    #
+    #   - virtio-transitional
+    #   - virtio-nontransitional
+    #
+    # This allows one to choose whether you want to have compatibility
+    # with older guest operating systems.  The value you select will in
+    # turn decide the kind of PCI topology the guest will get.
+    #
+    # Details:
+    # https://libvirt.org/formatdomain.html#elementsVirtioTransitional
     VIRTIO = "virtio"
 
     ALL = (VIRTIO,)
@@ -790,6 +805,8 @@ class NotificationSource(BaseNovaEnum):
     API = 'nova-api'
     CONDUCTOR = 'nova-conductor'
     SCHEDULER = 'nova-scheduler'
+    # TODO(stephenfin): Remove 'NETWORK' when 'NotificationPublisher' is
+    # updated to version 3.0
     NETWORK = 'nova-network'
     # TODO(stephenfin): Remove 'CONSOLEAUTH' when 'NotificationPublisher' is
     # updated to version 3.0
@@ -797,6 +814,8 @@ class NotificationSource(BaseNovaEnum):
     # TODO(stephenfin): Remove when 'NotificationPublisher' object version is
     # bumped to 3.0
     CELLS = 'nova-cells'
+    # TODO(stephenfin): Remove when 'NotificationPublisher' object version is
+    # bumped to 3.0
     CONSOLE = 'nova-console'
     METADATA = 'nova-metadata'
 
@@ -1280,12 +1299,6 @@ class InstancePowerStateField(BaseEnumField):
 
 class ListOfListsOfStringsField(AutoTypedField):
     AUTO_TYPE = List(List(fields.String()))
-
-
-# TODO(mriedem): Replace this with the version from oslo.versiondobjects
-# when https://review.opendev.org/#/c/634700/ is released.
-class ListOfUUIDField(AutoTypedField):
-    AUTO_TYPE = List(fields.UUID())
 
 
 class DictOfSetOfIntegersField(AutoTypedField):

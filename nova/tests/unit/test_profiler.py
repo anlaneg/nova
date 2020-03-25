@@ -47,7 +47,6 @@ class TestProfiler(test.NoDBTestCase):
         six.reload_module(importutils.import_module('nova.manager'))
 
         classes = [
-            'nova.api.manager.MetadataManager',
             'nova.compute.api.API',
             'nova.compute.manager.ComputeManager',
             'nova.compute.rpcapi.ComputeAPI',
@@ -55,15 +54,8 @@ class TestProfiler(test.NoDBTestCase):
             'nova.conductor.manager.ConductorManager',
             'nova.conductor.rpcapi.ComputeTaskAPI',
             'nova.conductor.rpcapi.ConductorAPI',
-            'nova.console.manager.ConsoleProxyManager',
-            'nova.console.rpcapi.ConsoleAPI',
-            'nova.image.api.API',
-            'nova.network.api.API',
-            'nova.network.manager.FlatDHCPManager',
-            'nova.network.manager.FlatManager',
-            'nova.network.manager.VlanManager',
-            'nova.network.neutronv2.api.ClientWrapper',
-            'nova.network.rpcapi.NetworkAPI',
+            'nova.image.glance.API',
+            'nova.network.neutron.ClientWrapper',
             'nova.scheduler.manager.SchedulerManager',
             'nova.scheduler.rpcapi.SchedulerAPI',
             'nova.virt.libvirt.vif.LibvirtGenericVIFDriver',

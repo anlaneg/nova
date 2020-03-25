@@ -26,14 +26,11 @@ class ServerExternalEventsTestV276(
         super(ServerExternalEventsTestV276, self).setUp()
         self.compute = self.start_service('compute', host='compute')
 
-        flavors = self.api.get_flavors()
-        server_req = self._build_minimal_create_server_request(
-            self.api, "some-server", flavor_id=flavors[0]["id"],
-            image_uuid="155d900f-4e14-4e4c-a73d-069cbf4541e6",
+        server_req = self._build_server(
+            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
             networks='none')
         created_server = self.api.post_server({'server': server_req})
-        self.server = self._wait_for_state_change(
-            self.api, created_server, 'ACTIVE')
+        self.server = self._wait_for_state_change(created_server, 'ACTIVE')
         self.power_off = {'name': 'power-update',
                           'tag': 'POWER_OFF',
                           'server_uuid': self.server["id"]}
@@ -50,7 +47,7 @@ class ServerExternalEventsTestV276(
         expected_params = {'OS-EXT-STS:task_state': None,
                            'OS-EXT-STS:vm_state': vm_states.STOPPED,
                            'OS-EXT-STS:power_state': power_state.SHUTDOWN}
-        server = self._wait_for_server_parameter(self.api, self.server,
+        server = self._wait_for_server_parameter(self.server,
                                                  expected_params)
         msg = ' with target power state POWER_OFF.'
         self.assertIn(msg, self.stdlog.logger.output)
@@ -60,10 +57,8 @@ class ServerExternalEventsTestV276(
         acts = {action['action']: action for action in actions}
         self.assertEqual(['create', 'stop'], sorted(acts))
         stop_action = acts[instance_actions.STOP]
-        detail = self.api.api_get(
-            '/servers/%s/os-instance-actions/%s' % (
-                server['id'], stop_action['request_id'])
-        ).body['instanceAction']
+        detail = self.api.get_instance_action_details(server['id'],
+                stop_action['request_id'])
         events_by_name = {event['event']: event for event in detail['events']}
         self.assertEqual(1, len(detail['events']), detail)
         self.assertIn('compute_power_update', events_by_name)
@@ -79,8 +74,7 @@ class ServerExternalEventsTestV276(
         expected_params = {'OS-EXT-STS:task_state': None,
                            'OS-EXT-STS:vm_state': vm_states.ACTIVE,
                            'OS-EXT-STS:power_state': power_state.RUNNING}
-        server = self._wait_for_server_parameter(self.api, self.server,
-                                                 expected_params)
+        server = self._wait_for_server_parameter(self.server, expected_params)
         msg = ' with target power state POWER_ON.'
         self.assertIn(msg, self.stdlog.logger.output)
         # Test if this is logged in the instance action list.
@@ -89,10 +83,8 @@ class ServerExternalEventsTestV276(
         acts = {action['action']: action for action in actions}
         self.assertEqual(['create', 'start', 'stop'], sorted(acts))
         start_action = acts[instance_actions.START]
-        detail = self.api.api_get(
-            '/servers/%s/os-instance-actions/%s' % (
-                server['id'], start_action['request_id'])
-        ).body['instanceAction']
+        detail = self.api.get_instance_action_details(server['id'],
+                start_action['request_id'])
         events_by_name = {event['event']: event for event in detail['events']}
         self.assertEqual(1, len(detail['events']), detail)
         self.assertIn('compute_power_update', events_by_name)

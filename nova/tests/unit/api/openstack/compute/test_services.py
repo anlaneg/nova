@@ -684,18 +684,22 @@ class ServicesTestV21(test.TestCase):
                 self.controller.update, self.req, "disable-log-reason",
                 body=body)
 
-    def test_services_delete(self):
-
-        compute = self.host_api.db.service_create(self.ctxt,
-            {'host': 'fake-compute-host',
-             'binary': 'nova-compute',
-             'topic': 'compute',
-             'report_count': 0})
+    @mock.patch('nova.objects.ComputeNodeList.get_all_by_host',
+                return_value=objects.ComputeNodeList(objects=[]))
+    def test_services_delete(self, mock_get_compute_nodes):
+        compute = objects.Service(self.ctxt,
+                                  **{'host': 'fake-compute-host',
+                                     'binary': 'nova-compute',
+                                     'topic': 'compute',
+                                     'report_count': 0})
+        compute.create()
 
         with mock.patch('nova.objects.Service.destroy') as service_delete:
             self.controller.delete(self.req, compute.id)
             service_delete.assert_called_once_with()
             self.assertEqual(self.controller.delete.wsgi_code, 204)
+        mock_get_compute_nodes.assert_called_once_with(
+            self.req.environ['nova.context'], compute.host)
 
     def test_services_delete_not_found(self):
 
@@ -1197,7 +1201,7 @@ class ServicesTestV253(test.TestCase):
 
     def test_update_policy_failed(self):
         """Tests that policy is checked with microversion 2.53."""
-        rule_name = "os_compute_api:os-services"
+        rule_name = "os_compute_api:os-services:update"
         self.policy.set_rules({rule_name: "project_id:non_fake"})
         exc = self.assertRaises(
             exception.PolicyNotAuthorized,
@@ -1365,43 +1369,3 @@ class ServicesTestV275(test.TestCase):
                                       version=self.wsgi_api_version)
         self.assertRaises(exception.ValidationError,
             self.controller.index, req)
-
-
-class ServicesPolicyEnforcementV21(test.NoDBTestCase):
-
-    def setUp(self):
-        super(ServicesPolicyEnforcementV21, self).setUp()
-        self.controller = services_v21.ServiceController()
-        self.req = fakes.HTTPRequest.blank('')
-
-    def test_update_policy_failed(self):
-        rule_name = "os_compute_api:os-services"
-        self.policy.set_rules({rule_name: "project_id:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.update, self.req, fakes.FAKE_UUID,
-            body={'host': 'host1',
-                  'binary': 'nova-compute'})
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_delete_policy_failed(self):
-        rule_name = "os_compute_api:os-services"
-        self.policy.set_rules({rule_name: "project_id:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.delete, self.req, fakes.FAKE_UUID)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_index_policy_failed(self):
-        rule_name = "os_compute_api:os-services"
-        self.policy.set_rules({rule_name: "project_id:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.index, self.req)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())

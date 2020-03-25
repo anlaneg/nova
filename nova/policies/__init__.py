@@ -24,7 +24,6 @@ from nova.policies import baremetal_nodes
 from nova.policies import base
 from nova.policies import console_auth_tokens
 from nova.policies import console_output
-from nova.policies import consoles
 from nova.policies import create_backup
 from nova.policies import deferred_delete
 from nova.policies import evacuate
@@ -47,13 +46,11 @@ from nova.policies import migrate_server
 from nova.policies import migrations
 from nova.policies import multinic
 from nova.policies import networks
-from nova.policies import networks_associate
 from nova.policies import pause_server
 from nova.policies import quota_class_sets
 from nova.policies import quota_sets
 from nova.policies import remote_consoles
 from nova.policies import rescue
-from nova.policies import security_group_default_rules
 from nova.policies import security_groups
 from nova.policies import server_diagnostics
 from nova.policies import server_external_events
@@ -87,7 +84,6 @@ def list_rules():
         baremetal_nodes.list_rules(),
         console_auth_tokens.list_rules(),
         console_output.list_rules(),
-        consoles.list_rules(),
         create_backup.list_rules(),
         deferred_delete.list_rules(),
         evacuate.list_rules(),
@@ -110,13 +106,11 @@ def list_rules():
         migrations.list_rules(),
         multinic.list_rules(),
         networks.list_rules(),
-        networks_associate.list_rules(),
         pause_server.list_rules(),
         quota_class_sets.list_rules(),
         quota_sets.list_rules(),
         remote_consoles.list_rules(),
         rescue.list_rules(),
-        security_group_default_rules.list_rules(),
         security_groups.list_rules(),
         server_diagnostics.list_rules(),
         server_external_events.list_rules(),

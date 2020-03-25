@@ -34,7 +34,7 @@ import six
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova import image
+from nova.image import glance
 import nova.privsep.libvirt
 import nova.privsep.path
 from nova import utils
@@ -50,7 +50,7 @@ from nova.virt.libvirt import utils as libvirt_utils
 CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
-IMAGE_API = image.API()
+IMAGE_API = glance.API()
 
 
 # NOTE(neiljerram): Don't worry if this fails. This sometimes happens, with
@@ -249,7 +249,7 @@ class Image(object):
         :size: Size of created image in bytes (optional)
         """
         base_dir = os.path.join(CONF.instances_path,
-                                CONF.image_cache_subdirectory_name)
+                                CONF.image_cache.subdirectory_name)
         if not os.path.exists(base_dir):
             fileutils.ensure_tree(base_dir)
         base = os.path.join(base_dir, filename)
@@ -980,7 +980,17 @@ class Rbd(Image):
                                           reason=reason)
 
     def flatten(self):
-        self.driver.flatten(self.rbd_name, pool=self.driver.pool)
+        # NOTE(vdrok): only flatten images if they are not already flattened,
+        # meaning that parent info is present
+        try:
+            self.driver.parent_info(self.rbd_name, pool=self.driver.pool)
+        except exception.ImageUnacceptable:
+            LOG.debug(
+                "Image %(img)s from pool %(pool)s has no parent info, "
+                "consider it already flat", {
+                    'img': self.rbd_name, 'pool': self.driver.pool})
+        else:
+            self.driver.flatten(self.rbd_name, pool=self.driver.pool)
 
     def get_model(self, connection):
         secret = None
